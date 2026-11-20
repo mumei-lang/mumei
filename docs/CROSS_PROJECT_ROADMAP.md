@@ -5978,9 +5978,20 @@ self-inconsistent, so the descriptor still reports `consistent: true`
 with zero conflicts. The emitted descriptor pins the input under
 `evidence_fingerprint` with `evidence_schema_version`
 `mumei.verification-evidence/v1` — the record pin is not relabelled as
-a list envelope. This is the
-requirement-list substrate a grade promotion gate would consume;
-promotion itself remains open (mumei#1168).
+a list envelope.
+
+The first consumer of that substrate is the Claim Book's opt-in gate
+`--require-evidence-acceptance <requirement-list> <evidence>
+<acceptance>`: fail-closed, the gate passes only when the declared
+`mumei.evidence-requirement-list-acceptance/v1` descriptor reports
+`accepted`, pins the exact declared requirement-list and evidence
+bytes (via `requirement_list_fingerprint` plus `evidence_fingerprint`
+or `list_fingerprint` with the matching evidence schema), and reports
+no unresolved conflicts — a mismatch, a different descriptor, a
+non-accepted verdict or a conflicting set is a rejection, never a
+silent pass. The gate trusts the descriptor's declared verdict without
+recomputing it; the pinned fingerprints are what bind the descriptor
+to the declared inputs (mumei#1168 slice 2).
 
 ### Scheduled-attempt evidence acceptance (mumei-agent #997)
 

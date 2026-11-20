@@ -16,6 +16,7 @@
 //! proof-level requirement.
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fmt;
 
@@ -358,6 +359,136 @@ pub fn evaluate(requirement: &Requirement, evidence: &Evidence) -> Evaluation {
         Verdict::Accepted
     };
     Evaluation { verdict, checks }
+}
+
+/// Schema identifier of the conjunctive requirement-list acceptance
+/// descriptor a promotable gate consumes.
+pub const REQUIREMENT_LIST_ACCEPTANCE_SCHEMA: &str =
+    "mumei.evidence-requirement-list-acceptance/v1";
+
+/// Size bound for the acceptance descriptor a promotable gate reads.
+/// The descriptor repeats per-requirement per-record check outcomes, so
+/// it is larger than a single input document — bounded at 4 MiB, far
+/// above the worst case for 16 requirements × 64 records.
+pub const MAX_ACCEPTANCE_DESCRIPTOR_BYTES: usize = 4 * 1024 * 1024;
+
+/// The fields a promotable gate pins on, out of a
+/// `mumei.evidence-requirement-list-acceptance/v1` descriptor. Unknown
+/// fields are ignored — the pinned surface is the declared schema,
+/// verdict, fingerprints and consistency, not the full body.
+#[derive(Deserialize)]
+struct AcceptanceDescriptor {
+    schema_version: String,
+    verdict: String,
+    requirement_schema_version: String,
+    requirement_list_fingerprint: String,
+    evidence_schema_version: String,
+    #[serde(default)]
+    evidence_fingerprint: Option<String>,
+    #[serde(default)]
+    list_fingerprint: Option<String>,
+    consistent: bool,
+    conflict_count: u64,
+}
+
+/// Fail-closed promotable gate over a declared acceptance triple:
+/// `requirement_list_bytes` is a `mumei.evidence-requirement-list/v1`
+/// document, `evidence_bytes` the record or record-list it was evaluated
+/// against, and `acceptance_bytes` the
+/// `mumei.evidence-requirement-list-acceptance/v1` descriptor an
+/// evaluator emitted. Every check must hold for the triple to be
+/// promotable; the returned strings are the reasons it is not (empty
+/// means the gate passes). A gate never recomputes the verdict — it
+/// trusts the descriptor only when the descriptor pins exactly these
+/// declared inputs.
+pub fn promotable_failures(
+    requirement_list_bytes: &[u8],
+    evidence_bytes: &[u8],
+    acceptance_bytes: &[u8],
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    if requirement_list_bytes.len() > MAX_INPUT_BYTES {
+        failures.push("requirement list exceeds the declared size bound".to_string());
+    } else if decode_requirement_list(requirement_list_bytes).is_err() {
+        failures.push(
+            "requirement list is not a valid mumei.evidence-requirement-list/v1 declaration"
+                .to_string(),
+        );
+    }
+    if evidence_bytes.len() > MAX_INPUT_BYTES {
+        failures.push("evidence input exceeds the declared size bound".to_string());
+    }
+    if acceptance_bytes.len() > MAX_ACCEPTANCE_DESCRIPTOR_BYTES {
+        failures.push("acceptance descriptor exceeds the declared size bound".to_string());
+        return failures;
+    }
+    let descriptor: AcceptanceDescriptor = match serde_json::from_slice(acceptance_bytes) {
+        Ok(descriptor) => descriptor,
+        Err(_) => {
+            failures.push(
+                "acceptance descriptor is not a valid mumei.evidence-requirement-list-acceptance/v1 document"
+                    .to_string(),
+            );
+            return failures;
+        }
+    };
+    if descriptor.schema_version != REQUIREMENT_LIST_ACCEPTANCE_SCHEMA {
+        failures.push("acceptance descriptor declares the wrong schema".to_string());
+    }
+    if descriptor.requirement_schema_version != REQUIREMENT_LIST_SCHEMA {
+        failures.push("acceptance descriptor declares the wrong requirement schema".to_string());
+    }
+    if descriptor.requirement_list_fingerprint
+        != format!("{:x}", Sha256::digest(requirement_list_bytes))
+    {
+        failures
+            .push("acceptance descriptor does not pin the declared requirement list".to_string());
+    }
+    match (
+        &descriptor.evidence_fingerprint,
+        &descriptor.list_fingerprint,
+    ) {
+        (Some(pin), None) => {
+            if descriptor.evidence_schema_version != verification_evidence::SCHEMA_VERSION {
+                failures
+                    .push("acceptance descriptor declares the wrong evidence schema".to_string());
+            }
+            if *pin != format!("{:x}", Sha256::digest(evidence_bytes)) {
+                failures.push(
+                    "acceptance descriptor does not pin the declared evidence record".to_string(),
+                );
+            } else if verification_evidence::decode(evidence_bytes).is_err() {
+                failures.push(
+                    "evidence input is not a valid mumei.verification-evidence/v1 record"
+                        .to_string(),
+                );
+            }
+        }
+        (None, Some(pin)) => {
+            if descriptor.evidence_schema_version != verification_evidence::LIST_SCHEMA_VERSION {
+                failures
+                    .push("acceptance descriptor declares the wrong evidence schema".to_string());
+            }
+            if *pin != format!("{:x}", Sha256::digest(evidence_bytes)) {
+                failures.push(
+                    "acceptance descriptor does not pin the declared evidence list".to_string(),
+                );
+            } else if verification_evidence::decode_list(evidence_bytes).is_err() {
+                failures.push(
+                    "evidence input is not a valid mumei.verification-evidence-list/v1 document"
+                        .to_string(),
+                );
+            }
+        }
+        _ => failures.push("acceptance descriptor must pin exactly one evidence input".to_string()),
+    }
+    if !descriptor.consistent || descriptor.conflict_count != 0 {
+        failures.push("acceptance descriptor reports unresolved conflicts".to_string());
+    }
+    if descriptor.verdict != "accepted" {
+        failures.push("acceptance descriptor verdict is not accepted".to_string());
+    }
+    failures
 }
 
 #[cfg(test)]

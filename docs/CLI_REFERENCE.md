@@ -57,7 +57,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei infer-effects` | 0 | Infer required effects for all atoms (JSON output, for MCP integration) |
 | `mumei infer-contracts` | 0 | Infer contracts (requires/ensures) for all atoms (JSON output, Plan 13) |
 | `mumei verify-cert` | 2 | Verify a proof certificate against current source |
-| `mumei claims` | 10 | Summarize atom evidence and its freshness in a Claim Book |
+| `mumei claims` | 11 | Summarize atom evidence and its freshness in a Claim Book |
 | `mumei controls` | 3 | Check whether atom contracts reject deterministic implementation mutations |
 | `mumei observe` | 2 | Check harvested examples, relations, rejections, and property tests against atom contracts |
 | `mumei charter` | 0 | Lock or check human-owned charter contracts |
@@ -1124,6 +1124,7 @@ Usage: mumei claims [OPTIONS] <INPUT>
 | `--require-discriminating` | false | — | Fail if any checked claim has weak or inconclusive controls |
 | `--require-complete` | false | — | Require non-empty claims with complete dependency coverage |
 | `--require-grade <REQUIRE_GRADE>` | — | G0, G1, G2, G3, G4, G5 | Require every claim to meet this Seal Grade |
+| `--require-evidence-acceptance <REQUIREMENT_LIST>` | — | — | Require a promotable acceptance triple: <requirement-list> <evidence> <acceptance> — the gate fails closed unless the mumei.evidence-requirement-list-acceptance/v1 descriptor pins these declared inputs with verdict accepted |
 
 ## `mumei controls`
 

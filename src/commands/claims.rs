@@ -20,6 +20,7 @@ pub(crate) struct ClaimsOptions<'a> {
     pub(crate) require_discriminating: bool,
     pub(crate) require_complete: bool,
     pub(crate) require_grade: Option<&'a str>,
+    pub(crate) require_evidence_acceptance: &'a [String],
 }
 
 pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
@@ -34,6 +35,7 @@ pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
         require_discriminating,
         require_complete,
         require_grade,
+        require_evidence_acceptance,
     } = options;
     let cert_path = cert_arg
         .map(PathBuf::from)
@@ -276,6 +278,54 @@ pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
                     discrimination.detail,
                     surviving
                 );
+            }
+        }
+    }
+    if !require_evidence_acceptance.is_empty() {
+        // Fail-closed promotable gate: every declared acceptance
+        // descriptor must pin exactly its declared inputs with verdict
+        // accepted — anything else (a mismatch, a different descriptor,
+        // a non-accepted verdict, unresolved conflicts) is a rejection,
+        // never a silent pass. Every declared triple gates, not just
+        // the first.
+        for triple in require_evidence_acceptance.chunks(3) {
+            let mut gate_inputs = Vec::new();
+            for (label, path, bound) in [
+                (
+                    "requirement list",
+                    &triple[0],
+                    mumei_core::verification_evidence::MAX_INPUT_BYTES as u64,
+                ),
+                (
+                    "evidence",
+                    &triple[1],
+                    mumei_core::verification_evidence::MAX_INPUT_BYTES as u64,
+                ),
+                (
+                    "acceptance",
+                    &triple[2],
+                    mumei_core::evidence_acceptance::MAX_ACCEPTANCE_DESCRIPTOR_BYTES as u64,
+                ),
+            ] {
+                match super::input::read_regular(Path::new(path), bound) {
+                    Ok(bytes) => gate_inputs.push(bytes),
+                    Err(reason) => {
+                        rejected = true;
+                        eprintln!(
+                            "--require-evidence-acceptance: could not read {label} '{path}': {reason}"
+                        );
+                    }
+                }
+            }
+            if gate_inputs.len() == 3 {
+                for failure in mumei_core::evidence_acceptance::promotable_failures(
+                    &gate_inputs[0],
+                    &gate_inputs[1],
+                    &gate_inputs[2],
+                ) {
+                    rejected = true;
+                    eprintln!("--require-evidence-acceptance: {failure}");
+                }
             }
         }
     }
