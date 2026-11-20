@@ -5810,6 +5810,27 @@ The binary-op check still rejects a `u64` operand — widened leaf or
 plain declaration — paired with a declared non-`u64` integer;
 `i32`/`u32` leaves keep the ordinary promotions.
 
+### Verification-plan route (mumei-agent #987)
+
+[mumei-agent#987](https://github.com/mumei-lang/mumei-agent/pull/987)
+adds the C04 `verify-plan` route: a collected unit's profiles are
+planned into a consumable `mumei.verification-plan/v1` document so the
+downstream dispatch lanes (`<route>-attempt`, `verify-schedule`) read
+one declarative plan instead of re-deriving per-route policy. The
+document pins the route, the plan inputs, and the attempt-order
+decisions the scheduler may execute, so a recorded plan can be
+replayed and audited.
+
+### Test-user-adapter E2E lane (mumei-agent #986)
+
+[mumei-agent#986](https://github.com/mumei-lang/mumei-agent/pull/986)
+lands the C11 test-adapter E2E lane: a stub test-user adapter is
+driven through `verify-schedule` end to end — plan, dispatch,
+observation and replan — proving the adapter contract carries a real
+attempt cycle without production effects. The lane is exercised by
+dedicated tests against the stub only; no adapter-facing semantics
+change.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
