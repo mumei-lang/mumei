@@ -62,6 +62,7 @@ pub(crate) fn field_leaf_types(
     let mut leaves = Vec::new();
     let mut visiting = std::collections::HashSet::new();
     let mut seen = std::collections::HashSet::new();
+    let mut work = 0usize;
     collect_field_leaves(
         field_type,
         module_env,
@@ -69,6 +70,7 @@ pub(crate) fn field_leaf_types(
         &mut leaves,
         &mut visiting,
         &mut seen,
+        &mut work,
     )?;
     Some(leaves)
 }
@@ -78,6 +80,14 @@ pub(crate) fn field_leaf_types(
 /// nested declarations is rejected as a whole rather than truncated.
 const MAX_PAYLOAD_LEAVES: usize = 16;
 
+/// Total nodes `collect_field_leaves` may visit per call. The leaf cap
+/// alone does not bound the walk: shared subtrees of empty structs produce
+/// no leaves, so a deep DAG re-visits them exponentially. A legitimate
+/// flattening visits one node per field on every path — 16 times the leaf
+/// cap leaves headroom for long linear nestings while rejecting a 2^n
+/// shared-subtree walk outright.
+const MAX_LEAF_FIELD_VISITS: usize = 16 * MAX_PAYLOAD_LEAVES;
+
 fn collect_field_leaves(
     field_type: &str,
     module_env: &ModuleEnv,
@@ -85,7 +95,12 @@ fn collect_field_leaves(
     leaves: &mut Vec<(String, String)>,
     visiting: &mut std::collections::HashSet<String>,
     seen: &mut std::collections::HashSet<String>,
+    work: &mut usize,
 ) -> Option<()> {
+    *work += 1;
+    if *work > MAX_LEAF_FIELD_VISITS {
+        return None;
+    }
     if field_is_scalar(field_type, module_env) {
         if !seen.insert(name.clone()) || leaves.len() >= MAX_PAYLOAD_LEAVES {
             return None;
@@ -114,6 +129,7 @@ fn collect_field_leaves(
             leaves,
             visiting,
             seen,
+            work,
         )?;
     }
     visiting.remove(&base);
