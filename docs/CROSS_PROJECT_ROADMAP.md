@@ -6074,6 +6074,31 @@ deleted. Export targets colliding with declared inputs or `--output`
 are declaration errors. Acceptance remains a recorded dispatch
 observation — the gate decides promotion, not the scheduler.
 
+### Audit scheduled-verification requirement-list (mumei-agent #1001)
+
+[mumei-agent#1001](https://github.com/mumei-lang/mumei-agent/pull/1001)
+mirrors the conjunctive check onto the audit surface:
+`audit --schedule-core-requirement-list PATH` (requires
+`--schedule-core`, conflicts with `--schedule-core-requirement`,
+absolute path to a regular file) validates the declared
+`mumei.evidence-requirement-list/v1` document and records the
+scheduled attempt's `evidence_check` as Core's declared verdict —
+accepted, rejected or inconclusive, with the emitted
+`requirement_fingerprint`. The path joins the declared-input set so
+error text redacts it; the promotable export stays CLI-only.
+
+### Promotable acceptance gate scenario (mumei-demo #160)
+
+[mumei-demo#160](https://github.com/mumei-lang/mumei-demo/pull/160)
+exercises the gate end-to-end as an optional scenario:
+`claimbook_acceptance_gate` produces an evidence record from real
+`mumei evidence verify-source`, builds a requirement list pinning
+that record, runs the conjunctive `evidence accept` into an
+`accepted` verdict, then shows `mumei claims
+--require-evidence-acceptance` emitting the claim book for the
+promoting triple and failing closed when the pinned subject sha is
+tampered — five steps, `claimbook-acceptance-gate-v1` budget policy.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
