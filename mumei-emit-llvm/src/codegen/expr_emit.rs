@@ -1134,6 +1134,74 @@ pub(crate) fn hir_int_type_name(
     }
 }
 
+/// The declared int type name of a statement's produced value —
+/// `HirStmt::Expr` delegates to `hir_int_type_name`, a `Block`'s
+/// `tail_expr` is its produced value; any other shape has no scalar
+/// name (`pure-i64-composite/v22` merge widening).
+fn stmt_int_type_name(
+    stmt: &HirStmt,
+    var_types: &HashMap<String, String>,
+    module_env: &ModuleEnv,
+) -> Option<String> {
+    match stmt {
+        HirStmt::Expr(expr) => hir_int_type_name(expr, var_types, module_env),
+        HirStmt::Block { tail_expr, .. } => tail_expr
+            .as_deref()
+            .and_then(|expr| hir_int_type_name(expr, var_types, module_env)),
+        _ => None,
+    }
+}
+
+/// The phi type and widened incomings for a branch merge whose arms
+/// disagree on integer width: the verifier's `Num` adaptation lets a
+/// literal arm join a declared-width arm (`pure-i64-composite/v22`), so
+/// a narrower LLVM incoming extends to the widest int type present —
+/// sign-extending unless a wide arm's declared type is unsigned
+/// (`u64`/`u128`). Non-int merges keep the first arm's type so
+/// aggregate/pointer phis behave exactly as before.
+fn widen_merge_incomings<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    incomings: &[(BasicValueEnum<'a>, BasicBlock<'a>)],
+    declared_names: &[Option<String>],
+) -> mumei_core::verification::MumeiResult<(
+    inkwell::types::BasicTypeEnum<'a>,
+    Vec<(BasicValueEnum<'a>, BasicBlock<'a>)>,
+)> {
+    let first_type = incomings
+        .first()
+        .map(|(v, _)| v.get_type())
+        .unwrap_or_else(|| context.i64_type().into());
+    if !incomings.iter().all(|(v, _)| v.get_type().is_int_type()) {
+        return Ok((first_type, incomings.to_vec()));
+    }
+    let width = incomings
+        .iter()
+        .map(|(v, _)| v.get_type().into_int_type().get_bit_width())
+        .max()
+        .unwrap_or(64);
+    let phi_type = context.custom_width_int_type(width).into();
+    // The merge's signedness comes from the arms whose LLVM type is
+    // already the widest — an unresolved name defaults to signed, which
+    // matches `i64`/`i128` adaptation; unsigned arms resolve their
+    // declared `u64`/`u128` name through `hir_int_type_name`.
+    let signed = incomings
+        .iter()
+        .zip(declared_names.iter().chain(std::iter::repeat(&None)))
+        .filter(|((v, _), _)| v.get_type() == phi_type)
+        .all(|(_, name)| !matches!(name.as_deref(), Some("u64" | "u128")));
+    let mut widened = Vec::with_capacity(incomings.len());
+    for (v, block) in incomings {
+        let v = if v.get_type() == phi_type {
+            *v
+        } else {
+            wide_int_cast(builder, *v, phi_type, signed)?
+        };
+        widened.push((v, *block));
+    }
+    Ok((phi_type, widened))
+}
+
 /// `u64` operand semantics for an int binop: `Some(true)` unsigned,
 /// `Some(false)` both signed or adaptive, `Err` on a declared u64/non-u64 mix.
 /// Integer-type name for an unsigned-semantics probe: a `Str` index
@@ -2509,8 +2577,23 @@ pub(crate) fn compile_hir_expr<'a>(
             llvm!(builder.build_unconditional_branch(merge_block));
 
             builder.position_at_end(merge_block);
-            let phi = llvm!(builder.build_phi(then_val.get_type(), "if_result"));
-            phi.add_incoming(&[(&then_val, then_end_block), (&else_val, else_end_block)]);
+            // A `Num` literal branch adapts to the other branch's
+            // declared width in the verifier's merge — widen the
+            // narrower LLVM value the same way before the phi
+            // (`pure-i64-composite/v22`).
+            let (phi_type, widened) = widen_merge_incomings(
+                context,
+                builder,
+                &[(then_val, then_end_block), (else_val, else_end_block)],
+                &[
+                    stmt_int_type_name(then_branch, &then_var_types, module_env),
+                    stmt_int_type_name(else_branch, &else_var_types, module_env),
+                ],
+            )?;
+            let phi = llvm!(builder.build_phi(phi_type, "if_result"));
+            for (val, block) in &widened {
+                phi.add_incoming(&[(val, *block)]);
+            }
             *variables = pre_vars.clone();
             for (name, pre_val) in &pre_vars {
                 let then_changed = then_assigned.contains(name);
@@ -2656,6 +2739,7 @@ pub(crate) fn compile_hir_expr<'a>(
 
             let mut incoming: Vec<(BasicValueEnum<'a>, inkwell::basic_block::BasicBlock<'a>)> =
                 Vec::new();
+            let mut arm_names: Vec<Option<String>> = Vec::new();
             let mut arm_states: Vec<ArrayMergeState<'a>> = Vec::new();
 
             let arm_count = arms.len();
@@ -2757,16 +2841,20 @@ pub(crate) fn compile_hir_expr<'a>(
                 let arm_arrays = array_ptrs.clone();
                 llvm!(builder.build_unconditional_branch(merge_block));
                 incoming.push((body_val, body_end));
+                arm_names.push(stmt_int_type_name(&arm.body, &arm_var_types, module_env));
                 let assigned = collect_assigned_outer_variables_match_arm(arm);
                 arm_states.push((arm_vars, arm_arrays, body_end, assigned));
             }
 
-            // Plan 18: Infer phi type from the first arm's body value type
-            // (must be determined before creating the unreachable block value)
-            let phi_type = incoming
-                .first()
-                .map(|(v, _)| v.get_type())
-                .unwrap_or_else(|| context.i64_type().into());
+            // The phi type is the widest int type any arm produced — a
+            // `Num` literal arm adapts to a declared-width arm in the
+            // verifier's merge, so narrower incomings extend the same
+            // way before the phi (`pure-i64-composite/v22`). For
+            // non-int results it stays the first arm's body type
+            // (Plan 18) and must be computed before creating the
+            // unreachable block value.
+            let (phi_type, mut incoming) =
+                widen_merge_incomings(context, builder, &incoming, &arm_names)?;
 
             builder.position_at_end(unreachable_block);
             // Create a zero/null value matching the inferred phi type
@@ -2782,6 +2870,8 @@ pub(crate) fn compile_hir_expr<'a>(
                 // keeps it poison-free so translation validation can
                 // model every slot (an `undef` leaf has no slot value).
                 phi_type.into_struct_type().const_zero().into()
+            } else if phi_type.is_int_type() {
+                phi_type.into_int_type().const_int(0, false).into()
             } else {
                 context.i64_type().const_int(0, false).into()
             };

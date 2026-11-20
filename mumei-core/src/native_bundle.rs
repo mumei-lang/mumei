@@ -146,6 +146,9 @@ pub const MODULE_PROFILE_V23: &str = "mumei.native-pure-i64-module-linux-x86_64/
 /// v23 plus two-slot `i128`/`u128` leaves — the record must pin
 /// `leaf_widths` (`pure-i64-composite/v21`).
 pub const MODULE_PROFILE_V24: &str = "mumei.native-pure-i64-module-linux-x86_64/v24";
+/// v24 plus two-slot `i128`/`u128` leaves inside enum payload positions
+/// (`pure-i64-composite/v22`).
+pub const MODULE_PROFILE_V25: &str = "mumei.native-pure-i64-module-linux-x86_64/v25";
 pub const MODULE_SCOPE: &str =
     "identity_consistency_only/no_authenticity_or_artifact_semantic_proof";
 pub const MODULE_RECHECK_PROFILE: &str = "mumei.native-module-source-recheck/v1";
@@ -184,6 +187,7 @@ pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, Bundl
         MODULE_PROFILE_V22 => Ok(RefinedAdmission::CompositeV19),
         MODULE_PROFILE_V23 => Ok(RefinedAdmission::CompositeV20),
         MODULE_PROFILE_V24 => Ok(RefinedAdmission::CompositeV21),
+        MODULE_PROFILE_V25 => Ok(RefinedAdmission::CompositeV22),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -263,6 +267,9 @@ pub const MULTIFILE_PROFILE_V23: &str = "mumei.native-pure-i64-multifile-linux-x
 /// v23 plus two-slot `i128`/`u128` leaves — the record must pin
 /// `leaf_widths` (`pure-i64-composite/v21`).
 pub const MULTIFILE_PROFILE_V24: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v24";
+/// v24 plus two-slot `i128`/`u128` leaves inside enum payload positions
+/// (`pure-i64-composite/v22`).
+pub const MULTIFILE_PROFILE_V25: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v25";
 pub const MULTIFILE_RECHECK_PROFILE: &str = "mumei.native-multifile-source-recheck/v1";
 
 pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, BundleError> {
@@ -291,6 +298,7 @@ pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, Bu
         MULTIFILE_PROFILE_V22 => Ok(RefinedAdmission::CompositeV19),
         MULTIFILE_PROFILE_V23 => Ok(RefinedAdmission::CompositeV20),
         MULTIFILE_PROFILE_V24 => Ok(RefinedAdmission::CompositeV21),
+        MULTIFILE_PROFILE_V25 => Ok(RefinedAdmission::CompositeV22),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -1270,6 +1278,7 @@ pub fn load_pinned_module_record(
             MODULE_PROFILE_V22,
             MODULE_PROFILE_V23,
             MODULE_PROFILE_V24,
+            MODULE_PROFILE_V25,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1348,6 +1357,7 @@ pub fn load_pinned_multifile_record(
             MULTIFILE_PROFILE_V22,
             MULTIFILE_PROFILE_V23,
             MULTIFILE_PROFILE_V24,
+            MULTIFILE_PROFILE_V25,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1417,7 +1427,7 @@ pub fn check_module_identity(
     check_module_members(&record.files, &binding, &atoms, files)
 }
 
-/// A v24 record must pin the two-slot pairing it describes; every
+/// A v24+ record must pin the two-slot pairing it describes; every
 /// other profile must leave the field out — rechecking re-derives the
 /// declared widths under the record's own admission so a pinned
 /// pairing cannot smuggle a wrong slot split past the comparison.
@@ -1427,12 +1437,21 @@ fn check_leaf_widths(
     admission: RefinedAdmission,
     profile: &str,
 ) -> Result<(), BundleError> {
-    let is_v24 = profile == MODULE_PROFILE_V24 || profile == MULTIFILE_PROFILE_V24;
+    let is_v24 = matches!(
+        profile,
+        MODULE_PROFILE_V24 | MODULE_PROFILE_V25 | MULTIFILE_PROFILE_V24 | MULTIFILE_PROFILE_V25
+    );
+    // v24 pins only when a wide leaf is actually declared in an atom
+    // signature, so a v24 record must show a 128 somewhere. v25 pins on
+    // the *declaration* of a wide enum payload — a module may declare
+    // `enum F { A(i128) }` without any atom consuming it, in which case
+    // every re-derived width is 64 and only the pairing equality binds.
+    let is_v24_only = matches!(profile, MODULE_PROFILE_V24 | MULTIFILE_PROFILE_V24);
     let expected = semantic_contract::module_leaf_widths(source, admission)
         .map_err(|_| BundleError("source outside bounded module profile"))?;
     let has_wide = expected.values().flatten().any(|width| *width == 128);
     if is_v24 {
-        if pinned != &expected || !has_wide {
+        if pinned != &expected || (is_v24_only && !has_wide) {
             return Err(BundleError("leaf-width pairing mismatch"));
         }
     } else if !pinned.is_empty() || has_wide {

@@ -195,6 +195,16 @@ pub const PURE_I64_COMPOSITE_PROFILE_V20: &str = "mumei.pure-i64-composite/v20";
 /// pairing so a recheck can group the slots back.
 pub const PURE_I64_COMPOSITE_PROFILE_V21: &str = "mumei.pure-i64-composite/v21";
 
+/// `pure-i64-composite/v22`: `i128`/`u128` leaves inside enum payload
+/// positions — `enum F { A(i128), B(i128) }` or `A(P), B(P)` with `P`
+/// carrying a wide leaf. A wide payload leaf carries two consecutive
+/// 64-bit slots under the same carriers convention a scalar payload
+/// leaf uses. Payload positions typed differently across variants
+/// (`A(i128), B(i64)`) stay rejected: a mixed-type union slot needs
+/// tag-conditional slot types, which the flattened signature does not
+/// express.
+pub const PURE_I64_COMPOSITE_PROFILE_V22: &str = "mumei.pure-i64-composite/v22";
+
 /// Maximum byte length a `Str` literal may declare under
 /// `pure-i64-composite/v13`: one cell per byte under the
 /// bounded-memory model.
@@ -285,6 +295,10 @@ pub enum RefinedAdmission {
     /// signature and the record's `leaf_widths` declares the pairing
     /// (`pure-i64-composite/v21`).
     CompositeV21,
+    /// `CompositeV22` additionally admits `i128`/`u128` leaves inside
+    /// enum payload positions — directly or inside a payload struct
+    /// (`pure-i64-composite/v22`).
+    CompositeV22,
 }
 
 impl RefinedAdmission {
@@ -429,6 +443,13 @@ impl RefinedAdmission {
     /// two consecutive 64-bit slots (`pure-i64-composite/v21`).
     pub fn admits_wide_leaves(self) -> bool {
         self >= Self::CompositeV21
+    }
+
+    /// Whether `i128`/`u128` leaves are admitted inside enum payload
+    /// positions — a wide payload leaf carries two consecutive 64-bit
+    /// slots under its carriers (`pure-i64-composite/v22`).
+    pub fn admits_wide_payloads(self) -> bool {
+        self >= Self::CompositeV22
     }
 }
 
@@ -776,7 +797,7 @@ pub fn module_leaf_widths(
                 signature_slots(&atom.params, &structs, &enums)
                     .iter()
                     .map(|slot| match slot {
-                        SignatureSlot::WideScalar(_) => 128,
+                        SignatureSlot::WideScalar(_) | SignatureSlot::EnumWideField { .. } => 128,
                         _ => 64,
                     })
                     .collect::<Vec<u64>>(),
@@ -1185,6 +1206,10 @@ fn fragment_profile(
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if has_wide_payload_leaves(enums, structs) {
+        // A 128-bit leaf inside an enum payload is only ever admitted
+        // under v22 — the strongest claim the ladder makes.
+        PURE_I64_COMPOSITE_PROFILE_V22
     } else if wide_leaves {
         // A 128-bit leaf is only ever admitted under v21 — the
         // strongest claim the ladder makes.
@@ -2265,9 +2290,11 @@ impl<'ctx> CallShapes<'ctx> {
         }
     }
 
-    /// The leaf kinds payload slot `i` expands to: one for a scalar
-    /// slot, the struct's flattened leaves for a composite slot
-    /// (`pure-i64-composite/v18`).
+    /// The leaf kinds payload slot `i` expands to, one entry per
+    /// 64-bit ABI slot: a scalar slot contributes one entry — two for
+    /// a 128-bit leaf, the same convention `flattened_kinds` uses —
+    /// and a composite slot contributes its struct's flattened leaves
+    /// (`pure-i64-composite/v18`, `/v22`).
     fn enum_slot_leaf_kinds(
         &self,
         variants: &[(String, Vec<PayloadSlotKind>)],
@@ -2279,6 +2306,9 @@ impl<'ctx> CallShapes<'ctx> {
                 .get(struct_name)
                 .map(|fields| self.flattened_kinds(fields))
                 .unwrap_or_default(),
+            Some(PayloadSlotKind::Scalar(kind @ (ScalarKind::I128 | ScalarKind::U128))) => {
+                vec![*kind, *kind]
+            }
             Some(PayloadSlotKind::Scalar(kind)) => vec![*kind],
             None => vec![ScalarKind::I64],
         }
@@ -2300,8 +2330,9 @@ impl<'ctx> CallShapes<'ctx> {
             .collect()
     }
 
-    /// The payload leaf count an enum lowers to — the sum of every
-    /// slot's leaf width (`pure-i64-composite/v18`).
+    /// The payload leaf count an enum lowers to — the 64-bit ABI slot
+    /// count `enum_layout_leaf_kinds` already lists per slot
+    /// (`pure-i64-composite/v18`, `/v22`).
     fn enum_layout_leaf_count(&self, variants: &[(String, Vec<PayloadSlotKind>)]) -> usize {
         self.enum_layout_leaf_kinds(variants).len()
     }
@@ -2336,9 +2367,6 @@ impl<'ctx> CallShapes<'ctx> {
                 let inner = self.structs.get(struct_name).cloned().unwrap_or_default();
                 composite_from_slots(self, &inner, leaves, ctx)
             } else {
-                let leaf = leaves.next().unwrap_or_else(|| {
-                    unreachable!("admitted enums always match their lowered arity")
-                });
                 let kind = variants
                     .iter()
                     .find_map(|(_, fields)| match fields.get(i) {
@@ -2346,7 +2374,29 @@ impl<'ctx> CallShapes<'ctx> {
                         _ => None,
                     })
                     .unwrap_or(ScalarKind::I64);
-                enum_slot_value(kind, leaf, ctx)
+                if matches!(kind, ScalarKind::I128 | ScalarKind::U128) {
+                    // A wide payload leaf consumes two consecutive
+                    // 64-bit leaves — the same [lo, hi] order a
+                    // `WideScalar` signature slot uses
+                    // (`pure-i64-composite/v22`).
+                    let lo = leaves.next().unwrap_or_else(|| {
+                        unreachable!("admitted enums always match their lowered arity")
+                    });
+                    let hi = leaves.next().unwrap_or_else(|| {
+                        unreachable!("admitted enums always match their lowered arity")
+                    });
+                    let agg = hi.concat(lo);
+                    if kind == ScalarKind::U128 {
+                        SourceValue::UWide(agg)
+                    } else {
+                        SourceValue::Wide(agg)
+                    }
+                } else {
+                    let leaf = leaves.next().unwrap_or_else(|| {
+                        unreachable!("admitted enums always match their lowered arity")
+                    });
+                    enum_slot_value(kind, leaf, ctx)
+                }
             };
             slots.push(value);
         }
@@ -2379,7 +2429,11 @@ impl<'ctx> CallShapes<'ctx> {
                         _ => None,
                     })
                     .unwrap_or(ScalarKind::I64);
-                enum_slot_value(kind, &BV::from_u64(ctx, 0, 64), ctx)
+                match kind {
+                    ScalarKind::I128 => SourceValue::Wide(BV::from_u64(ctx, 0, 128)),
+                    ScalarKind::U128 => SourceValue::UWide(BV::from_u64(ctx, 0, 128)),
+                    _ => enum_slot_value(kind, &BV::from_u64(ctx, 0, 64), ctx),
+                }
             }
         }
     }
@@ -2401,6 +2455,13 @@ fn enum_slot_eq<'ctx>(
         (
             SourceValue::Integer(x) | SourceValue::Unsigned(x),
             SourceValue::Integer(y) | SourceValue::Unsigned(y),
+        ) => Some(x._eq(y)),
+        // A wide payload leaf compares its whole 128-bit value — the
+        // emitter's `icmp` on the i128 union slot
+        // (`pure-i64-composite/v22`).
+        (
+            SourceValue::Wide(x) | SourceValue::UWide(x),
+            SourceValue::Wide(y) | SourceValue::UWide(y),
         ) => Some(x._eq(y)),
         (SourceValue::Boolean(x), SourceValue::Boolean(y)) => Some(x._eq(y)),
         // A composite payload slot compares leaf-by-leaf; every pair
@@ -2438,6 +2499,12 @@ fn default_composite_value<'ctx>(
             .iter()
             .map(|(name, shape)| {
                 let value = match shape {
+                    ValueKind::Scalar(ScalarKind::I128) => {
+                        SourceValue::Wide(BV::from_u64(ctx, 0, 128))
+                    }
+                    ValueKind::Scalar(ScalarKind::U128) => {
+                        SourceValue::UWide(BV::from_u64(ctx, 0, 128))
+                    }
                     ValueKind::Scalar(kind) => {
                         enum_slot_value(*kind, &BV::from_u64(ctx, 0, 64), ctx)
                     }
@@ -2963,23 +3030,39 @@ fn flatten_fields<'a>(
                                 flattened_struct_fields(structs, enums, fields)
                                     .iter()
                                     .map(|(inner, slot)| {
-                                        (
-                                            format!("{path}.{i}.{inner}"),
-                                            SignatureSlot::EnumField {
+                                        let signature_slot = match slot {
+                                            SignatureSlot::WideScalar(type_name) => {
+                                                SignatureSlot::EnumWideField {
+                                                    type_name: *type_name,
+                                                    carriers: carriers.clone(),
+                                                }
+                                            }
+                                            _ => SignatureSlot::EnumField {
                                                 type_name: slot_type_name(slot),
                                                 carriers: carriers.clone(),
                                             },
-                                        )
+                                        };
+                                        (format!("{path}.{i}.{inner}"), signature_slot)
                                     })
                                     .collect::<Vec<_>>(),
                             ),
-                            None => out.push((
-                                format!("{path}.{i}"),
-                                SignatureSlot::EnumField {
-                                    type_name: enum_slot_type(variants, i),
-                                    carriers,
-                                },
-                            )),
+                            None => {
+                                let type_name = enum_slot_type(variants, i);
+                                out.push((
+                                    format!("{path}.{i}"),
+                                    if matches!(type_name, Some("i128" | "u128")) {
+                                        SignatureSlot::EnumWideField {
+                                            type_name,
+                                            carriers,
+                                        }
+                                    } else {
+                                        SignatureSlot::EnumField {
+                                            type_name,
+                                            carriers,
+                                        }
+                                    },
+                                ));
+                            }
                         }
                     }
                 }
@@ -3071,7 +3154,8 @@ fn slot_type_name<'a>(slot: &SignatureSlot<'a>) -> Option<&'a str> {
     match slot {
         SignatureSlot::Scalar(type_name)
         | SignatureSlot::WideScalar(type_name)
-        | SignatureSlot::EnumField { type_name, .. } => *type_name,
+        | SignatureSlot::EnumField { type_name, .. }
+        | SignatureSlot::EnumWideField { type_name, .. } => *type_name,
         SignatureSlot::EnumTag { .. } => None,
     }
 }
@@ -3171,29 +3255,10 @@ fn seed_struct_composite<'ctx>(
                     .next()
                     .cloned()
                     .ok_or(SemanticContractError::Unsupported("source signature arity"))?;
-                let mut payload = Vec::with_capacity(enum_max_arity(variants));
-                for i in 0..enum_max_arity(variants) {
-                    // A composite slot consumes its struct's flattened
-                    // leaves as one `Composite` (`pure-i64-composite/v18`).
-                    if let Some(inner) =
-                        enum_slot_type(variants, i).and_then(|name| structs.get(name))
-                    {
-                        payload.push(seed_struct_composite(structs, enums, inner, slots, ctx)?);
-                        continue;
-                    }
-                    let slot = slots
-                        .next()
-                        .ok_or(SemanticContractError::Unsupported("source signature arity"))?;
-                    let kind = variants
-                        .iter()
-                        .find_map(|v| v.fields.get(i).and_then(|f| f.leaf_kind()))
-                        .unwrap_or(ScalarKind::I64);
-                    payload.push(enum_slot_value(kind, slot, ctx));
-                }
                 SourceValue::Enum {
                     name: enum_name.clone(),
                     tag,
-                    slots: payload,
+                    slots: seed_enum_payload(variants, structs, enums, slots, ctx)?,
                 }
             }
             _ => match field.leaf_kind() {
@@ -3231,6 +3296,55 @@ fn seed_struct_composite<'ctx>(
         values.push((field.name.clone(), value));
     }
     Ok(SourceValue::Composite(values))
+}
+
+/// The seeded payload `SourceValue`s of an enum value, in shared
+/// position order: a composite slot consumes its struct's flattened
+/// leaves (`pure-i64-composite/v18`), a wide leaf consumes two
+/// consecutive 64-bit slots (`pure-i64-composite/v22`), any other
+/// scalar leaf consumes one. Shared by `param_env`'s enum arm and
+/// `seed_struct_composite`'s enum-typed field arm.
+fn seed_enum_payload<'ctx>(
+    variants: &[ResolvedVariant],
+    structs: &StructEnv,
+    enums: &EnumEnv,
+    slots: &mut std::slice::Iter<'_, BV<'ctx>>,
+    ctx: &'ctx Context,
+) -> BodyResult<Vec<SourceValue<'ctx>>> {
+    let mut payload = Vec::with_capacity(enum_max_arity(variants));
+    for i in 0..enum_max_arity(variants) {
+        if let Some(inner) = enum_slot_type(variants, i).and_then(|name| structs.get(name)) {
+            payload.push(seed_struct_composite(structs, enums, inner, slots, ctx)?);
+            continue;
+        }
+        let kind = variants
+            .iter()
+            .find_map(|v| v.fields.get(i).and_then(|f| f.leaf_kind()))
+            .unwrap_or(ScalarKind::I64);
+        let value = match kind {
+            ScalarKind::I128 | ScalarKind::U128 => {
+                let lo = slots.next();
+                let hi = slots.next();
+                let (Some(lo), Some(hi)) = (lo, hi) else {
+                    return Err(SemanticContractError::Unsupported("source signature arity"));
+                };
+                let agg = hi.concat(lo);
+                if kind == ScalarKind::U128 {
+                    SourceValue::UWide(agg)
+                } else {
+                    SourceValue::Wide(agg)
+                }
+            }
+            _ => {
+                let Some(v) = slots.next() else {
+                    return Err(SemanticContractError::Unsupported("source signature arity"));
+                };
+                enum_slot_value(kind, v, ctx)
+            }
+        };
+        payload.push(value);
+    }
+    Ok(payload)
 }
 
 /// The flattened leaf bitvectors of a source value — the layout a
@@ -3304,6 +3418,33 @@ fn has_composite_payloads(enums: &EnumEnv, structs: &StructEnv) -> bool {
             .fields
             .iter()
             .any(|f| matches!(f.shape, ValueKind::Struct(_)))
+    })
+}
+
+/// Whether any admitted enum declares a 128-bit leaf in a payload
+/// position — directly or inside a payload struct — the marker that
+/// pins `pure-i64-composite/v22`, on the same convention as
+/// `has_composite_payloads`.
+fn has_wide_payload_leaves(enums: &EnumEnv, structs: &StructEnv) -> bool {
+    fn fields_have_wide(structs: &StructEnv, fields: &[ResolvedField]) -> bool {
+        fields.iter().any(|f| match &f.shape {
+            ValueKind::Scalar(ScalarKind::I128 | ScalarKind::U128) => true,
+            ValueKind::Struct(child) => structs
+                .get(child)
+                .map(|inner| fields_have_wide(structs, inner))
+                .unwrap_or(false),
+            _ => false,
+        })
+    }
+    enums.values().flatten().any(|variant| {
+        variant.fields.iter().any(|f| match &f.shape {
+            ValueKind::Scalar(ScalarKind::I128 | ScalarKind::U128) => true,
+            ValueKind::Struct(child) => structs
+                .get(child)
+                .map(|inner| fields_have_wide(structs, inner))
+                .unwrap_or(false),
+            _ => false,
+        })
     })
 }
 
@@ -3423,43 +3564,64 @@ fn struct_is_scalar_leaved(structs: &StructEnv, fields: &[ResolvedField]) -> boo
     visit(structs, fields, &mut BTreeSet::new())
 }
 
-/// The lowered leaf type names payload slot `i` expands to: one entry
-/// for a scalar slot, one per flattened leaf of its struct for a
-/// composite slot (`pure-i64-composite/v18`). `None` entries mirror
-/// `enum_slot_type`'s disagreement sentinel — unreachable for admitted
-/// enums, kept so callers can stay total.
-fn enum_slot_leaf_names<'a>(
+/// The signature slots payload position `i` expands to under
+/// `carriers`: one `EnumField` per scalar leaf, one `EnumWideField`
+/// per 128-bit leaf (`pure-i64-composite/v22`) — a direct `i128`/`u128`
+/// payload or a wide leaf inside a payload struct.
+fn enum_slot_leaf_slots<'a>(
     variants: &'a [ResolvedVariant],
     structs: &'a StructEnv,
     enums: &'a EnumEnv,
     i: usize,
-) -> Vec<Option<&'a str>> {
+    carriers: Vec<u64>,
+) -> Vec<SignatureSlot<'a>> {
     let Some(name) = enum_slot_type(variants, i) else {
         return Vec::new();
+    };
+    let field = |type_name: Option<&'a str>| SignatureSlot::EnumField {
+        type_name,
+        carriers: carriers.clone(),
+    };
+    let wide = |type_name: Option<&'a str>| SignatureSlot::EnumWideField {
+        type_name,
+        carriers: carriers.clone(),
     };
     match structs.get(name) {
         Some(fields) => flattened_struct_fields(structs, enums, fields)
             .iter()
             .map(|(_, slot)| match slot {
-                SignatureSlot::Scalar(type_name) | SignatureSlot::WideScalar(type_name) => {
-                    *type_name
-                }
-                _ => None,
+                SignatureSlot::WideScalar(type_name) => wide(*type_name),
+                _ => field(slot_type_name(slot)),
             })
             .collect(),
-        None => vec![Some(name)],
+        None if matches!(name, "i128" | "u128") => vec![wide(Some(name))],
+        None => vec![field(Some(name))],
     }
 }
 
-/// The leaf width payload slot `i` contributes: 1 for a scalar slot,
-/// the struct's flattened leaf count for a composite slot.
+/// The 64-bit input slots one signature leaf consumes: 2 for a wide
+/// leaf (`pure-i64-composite/v21` and payload leaves under v22), 1
+/// otherwise.
+fn signature_slot_weight(slot: &SignatureSlot<'_>) -> usize {
+    match slot {
+        SignatureSlot::WideScalar(_) | SignatureSlot::EnumWideField { .. } => 2,
+        _ => 1,
+    }
+}
+
+/// The 64-bit input-slot width payload position `i` contributes: 1
+/// for a scalar leaf, 2 for a wide leaf, the struct's flattened
+/// slot-weight sum for a composite slot (`pure-i64-composite/v22`).
 fn enum_slot_leaf_width(
     variants: &[ResolvedVariant],
     structs: &StructEnv,
     enums: &EnumEnv,
     i: usize,
 ) -> usize {
-    enum_slot_leaf_names(variants, structs, enums, i).len()
+    enum_slot_leaf_slots(variants, structs, enums, i, Vec::new())
+        .iter()
+        .map(signature_slot_weight)
+        .sum()
 }
 
 /// The payload leaf count an enum flattens to — the sum of every
@@ -3573,7 +3735,13 @@ fn declared_leaf_width_capped(items: &[Item], name: &str, depth: usize, cap: usi
             _ => (),
         }
     }
-    1
+    // A 128-bit leaf carries two 64-bit slots
+    // (`pure-i64-composite/v21`, `/v22`).
+    if matches!(name, "i128" | "u128") {
+        2
+    } else {
+        1
+    }
 }
 
 /// Every field path a declared composite type contributes below its
@@ -3732,6 +3900,8 @@ fn build_enum_env(
                     "u64" | "usize" if admission.admits_u64_leaves() => Some(ScalarKind::U64),
                     "isize" if admission.admits_u64_leaves() => Some(ScalarKind::I64),
                     "f64" if admission.admits_f64_leaves() => Some(ScalarKind::F64),
+                    "i128" if admission.admits_wide_payloads() => Some(ScalarKind::I128),
+                    "u128" if admission.admits_wide_payloads() => Some(ScalarKind::U128),
                     "bool" => Some(ScalarKind::Bool),
                     name => refined
                         .get(name)
@@ -3744,21 +3914,17 @@ fn build_enum_env(
                     // admitted only when every leaf of the struct is a
                     // scalar — an enum leaf inside would nest enums and
                     // could close a struct↔enum size cycle
-                    // (`pure-i64-composite/v18`).
+                    // (`pure-i64-composite/v18`). Wide leaves ride the
+                    // same flattening as scalar leaves under
+                    // `pure-i64-composite/v22`.
                     None if admission.admits_composite_payloads() => structs
                         .get(type_name)
                         .filter(|fields| {
-                            // A shared payload slot is one carrier
-                            // index per leaf — a 128-bit leaf is two
-                            // ABI slots whose halves cannot pair
-                            // across variants, so a payload struct
-                            // with a wide leaf is rejected here rather
-                            // than failing deeper with an arity error
-                            // (`pure-i64-composite/v21`).
                             struct_is_scalar_leaved(structs, fields)
-                                && !flattened_struct_fields(structs, &env, fields)
-                                    .iter()
-                                    .any(|(_, slot)| matches!(slot, SignatureSlot::WideScalar(_)))
+                                && (admission.admits_wide_payloads()
+                                    || !flattened_struct_fields(structs, &env, fields).iter().any(
+                                        |(_, slot)| matches!(slot, SignatureSlot::WideScalar(_)),
+                                    ))
                         })
                         .map(|_| ValueKind::Struct(type_name.to_owned())),
                     None => None,
@@ -5862,8 +6028,14 @@ fn expression_kind(
             // yields the declared integer kind, same as a binary
             // operand — but only toward `I64`/`U64`, never `Bool`.
             let branch_kind = match (then_kind, else_kind) {
-                (ScalarKind::Num, k @ (ScalarKind::I64 | ScalarKind::U64))
-                | (k @ (ScalarKind::I64 | ScalarKind::U64), ScalarKind::Num) => k,
+                (
+                    ScalarKind::Num,
+                    k @ (ScalarKind::I64 | ScalarKind::U64 | ScalarKind::I128 | ScalarKind::U128),
+                )
+                | (
+                    k @ (ScalarKind::I64 | ScalarKind::U64 | ScalarKind::I128 | ScalarKind::U128),
+                    ScalarKind::Num,
+                ) => k,
                 // A `Str` value stays out of the branch-value merge for
                 // slice A (`pure-i64-composite/v13`): branch-local `let`
                 // literals still index/read inside their arm, but the
@@ -5918,8 +6090,20 @@ fn expression_kind(
                     None => kind = Some(arm_kind),
                     Some(first) => {
                         kind = Some(match (first, arm_kind) {
-                            (ScalarKind::Num, k @ (ScalarKind::I64 | ScalarKind::U64))
-                            | (k @ (ScalarKind::I64 | ScalarKind::U64), ScalarKind::Num) => k,
+                            (
+                                ScalarKind::Num,
+                                k @ (ScalarKind::I64
+                                | ScalarKind::U64
+                                | ScalarKind::I128
+                                | ScalarKind::U128),
+                            )
+                            | (
+                                k @ (ScalarKind::I64
+                                | ScalarKind::U64
+                                | ScalarKind::I128
+                                | ScalarKind::U128),
+                                ScalarKind::Num,
+                            ) => k,
                             // As in the `if` merge: no `Str` arm value in
                             // slice A (`pure-i64-composite/v13`).
                             (ScalarKind::Str, _) | (_, ScalarKind::Str) => {
@@ -6335,13 +6519,7 @@ fn encode_atom_body<'ctx>(
         parse_body_expr_checked(&atom.body_expr).map_err(|_| SemanticContractError::Parse)?;
     // A wide leaf consumes two consecutive 64-bit inputs — the same
     // weighted arity `param_env` counts.
-    let input_slots: usize = slots
-        .iter()
-        .map(|slot| match slot {
-            SignatureSlot::WideScalar(_) => 2,
-            _ => 1,
-        })
-        .sum();
+    let input_slots: usize = slots.iter().map(signature_slot_weight).sum();
     let inputs: Vec<_> = (0..input_slots)
         .map(|i| BV::new_const(context, format!("input_{i}"), 64))
         .collect();
@@ -6410,12 +6588,33 @@ fn encode_atom_body<'ctx>(
         }
         // An enum result's value is its tag slot followed by the shared
         // payload slots — the tagged-union layout the emitter's
-        // returned aggregate decomposes into.
-        SourceValue::Enum { tag, slots, .. } => aggregate_value(
-            &std::iter::once(Ok(tag))
-                .chain(slots.into_iter().map(|slot| lower_scalar(slot, context)))
-                .collect::<BodyResult<Vec<_>>>()?,
-        ),
+        // returned aggregate decomposes into. `lower_composite` flattens
+        // each slot, so a wide leaf contributes its [lo, hi] halves in
+        // the same order inputs, arguments and call results use
+        // (`pure-i64-composite/v22`).
+        SourceValue::Enum { tag, slots, .. } => {
+            let mut leaves = vec![tag];
+            for slot in slots {
+                lower_composite(slot, context, &mut leaves)?;
+            }
+            aggregate_value(&leaves)
+        }
+    };
+    // A body that flattens narrower than the atom's declared `i128`/`u128`
+    // return (e.g. a match merging only 64-bit literal arms) still
+    // materializes the declared width at the call boundary: the emitter
+    // sign/zero-extends the returned SSA value, and the `result` binding
+    // applies the same coercion. Align the model value so translation
+    // validation compares same-width values
+    // (`pure-i64-composite/v22`).
+    let value = if call_returns.returns_wide(&atom.name) && value.get_size() < 128 {
+        if call_returns.returns_u128(&atom.name) {
+            value.zero_ext(128 - value.get_size())
+        } else {
+            value.sign_ext(128 - value.get_size())
+        }
+    } else {
+        value
     };
     let param_domain = signature_domain(&atom.params, &inputs, context, refined, structs, enums)?;
     let subrange_params = slots.iter().any(|slot| {
@@ -6427,7 +6626,8 @@ fn encode_atom_body<'ctx>(
     let refined_signature = slots.iter().any(|slot| {
         let name = match slot {
             SignatureSlot::Scalar(name) | SignatureSlot::WideScalar(name) => *name,
-            SignatureSlot::EnumField { type_name, .. } => *type_name,
+            SignatureSlot::EnumField { type_name, .. }
+            | SignatureSlot::EnumWideField { type_name, .. } => *type_name,
             SignatureSlot::EnumTag { .. } => None,
         };
         name.is_some_and(|n| refined.contains_key(n))
@@ -6497,10 +6697,7 @@ fn encode_atom_body<'ctx>(
                     .map(|fields| {
                         flattened_struct_fields(structs, enums, fields)
                             .iter()
-                            .map(|(_, slot)| match slot {
-                                SignatureSlot::WideScalar(_) => 2,
-                                _ => 1,
-                            })
+                            .map(|(_, slot)| signature_slot_weight(slot))
                             .sum::<usize>()
                     })
                     .or_else(|| {
@@ -6514,10 +6711,7 @@ fn encode_atom_body<'ctx>(
                 .map(|fields| {
                     flattened_struct_fields(structs, enums, fields)
                         .iter()
-                        .map(|(_, slot)| match slot {
-                            SignatureSlot::WideScalar(_) => 2,
-                            _ => 1,
-                        })
+                        .map(|(_, slot)| signature_slot_weight(slot))
                         .sum::<usize>()
                 })
                 .or_else(|| {
@@ -6539,7 +6733,8 @@ fn encode_atom_body<'ctx>(
                                 // (`pure-i64-composite/v21`) — never a
                                 // `double` either way.
                                 match slot {
-                                    SignatureSlot::WideScalar(_) => vec![false, false],
+                                    SignatureSlot::WideScalar(_)
+                                    | SignatureSlot::EnumWideField { .. } => vec![false, false],
                                     _ => vec![slot_type_name(slot) == Some("f64")],
                                 }
                             })
@@ -6551,7 +6746,17 @@ fn encode_atom_body<'ctx>(
                             kinds.extend(
                                 enum_leaf_paths(variants, structs, enums)
                                     .into_iter()
-                                    .map(|(_, type_name)| type_name == Some("f64")),
+                                    .flat_map(|(_, type_name)| {
+                                        // A wide payload leaf is two
+                                        // 64-bit ABI slots — neither
+                                        // is a `double`
+                                        // (`pure-i64-composite/v22`).
+                                        if matches!(type_name, Some("i128" | "u128")) {
+                                            vec![false, false]
+                                        } else {
+                                            vec![type_name == Some("f64")]
+                                        }
+                                    }),
                             );
                             kinds
                         })
@@ -6577,7 +6782,8 @@ fn encode_atom_body<'ctx>(
                         flattened_struct_fields(structs, enums, fields)
                             .iter()
                             .flat_map(|(_, slot)| match slot {
-                                SignatureSlot::WideScalar(_) => vec![false, false],
+                                SignatureSlot::WideScalar(_)
+                                | SignatureSlot::EnumWideField { .. } => vec![false, false],
                                 _ => vec![slot_type_name(slot) == Some("f64")],
                             })
                             .collect()
@@ -6588,7 +6794,13 @@ fn encode_atom_body<'ctx>(
                             kinds.extend(
                                 enum_leaf_paths(variants, structs, enums)
                                     .into_iter()
-                                    .map(|(_, type_name)| type_name == Some("f64")),
+                                    .flat_map(|(_, type_name)| {
+                                        if matches!(type_name, Some("i128" | "u128")) {
+                                            vec![false, false]
+                                        } else {
+                                            vec![type_name == Some("f64")]
+                                        }
+                                    }),
                             );
                             kinds
                         })
@@ -6637,6 +6849,17 @@ enum SignatureSlot<'a> {
         type_name: Option<&'a str>,
         carriers: Vec<u64>,
     },
+    /// A 128-bit payload leaf (`pure-i64-composite/v22`): one declared
+    /// payload leaf occupying TWO consecutive 64-bit input slots under
+    /// the same carriers convention `EnumField` uses.
+    EnumWideField {
+        type_name: Option<&'a str>,
+        // Wide leaves carry no range domain, so the carriers list is
+        // model symmetry today — kept so the flattened signature
+        // records the same metadata every payload leaf does.
+        #[allow(dead_code)]
+        carriers: Vec<u64>,
+    },
 }
 
 /// The declared scalar type name of every flattened input slot, in
@@ -6664,7 +6887,9 @@ fn signature_slots<'a>(
                     // Each payload leaf gets its own slot — a
                     // composite slot expands to its struct's leaf
                     // names under the same carriers
-                    // (`pure-i64-composite/v18`).
+                    // (`pure-i64-composite/v18`) and a wide leaf
+                    // carries two input slots
+                    // (`pure-i64-composite/v22`).
                     slots.extend((0..enum_max_arity(variants)).flat_map(|i| {
                         let carriers: Vec<u64> = variants
                             .iter()
@@ -6672,12 +6897,7 @@ fn signature_slots<'a>(
                             .filter(|(_, v)| v.fields.get(i).is_some())
                             .map(|(ordinal, _)| ordinal as u64)
                             .collect();
-                        enum_slot_leaf_names(variants, structs, enums, i)
-                            .into_iter()
-                            .map(move |type_name| SignatureSlot::EnumField {
-                                type_name,
-                                carriers: carriers.clone(),
-                            })
+                        enum_slot_leaf_slots(variants, structs, enums, i, carriers)
                     }));
                     slots
                 }
@@ -6712,15 +6932,7 @@ fn signature_domain<'ctx>(
     let slots = signature_slots(params, structs, enums);
     // A wide leaf consumes two consecutive 64-bit inputs — the same
     // weighted arity `param_env` counts.
-    if slots
-        .iter()
-        .map(|slot| match slot {
-            SignatureSlot::WideScalar(_) => 2usize,
-            _ => 1,
-        })
-        .sum::<usize>()
-        != inputs.len()
-    {
+    if slots.iter().map(signature_slot_weight).sum::<usize>() != inputs.len() {
         return Err(SemanticContractError::Unsupported("source signature arity"));
     }
     // The tag slot of the enum parameter currently being walked — an
@@ -6730,10 +6942,14 @@ fn signature_domain<'ctx>(
     let mut enum_tag: Option<&BV> = None;
     let mut inputs = inputs.iter();
     for slot in slots {
-        if let SignatureSlot::WideScalar(_) = slot {
+        if let SignatureSlot::WideScalar(_) | SignatureSlot::EnumWideField { .. } = slot {
             // A wide leaf occupies two consecutive 64-bit input slots,
-            // each a full-width carrier — no range domain applies.
-            enum_tag = None;
+            // each a full-width carrier — no range domain applies. An
+            // enum payload's wide leaf keeps the enclosing `enum_tag`
+            // (`pure-i64-composite/v22`).
+            if matches!(slot, SignatureSlot::WideScalar(_)) {
+                enum_tag = None;
+            }
             if inputs.next().is_none() || inputs.next().is_none() {
                 return Err(SemanticContractError::Unsupported("source signature arity"));
             }
@@ -6783,7 +6999,7 @@ fn signature_domain<'ctx>(
                 domain.extend(declared_slot_domain(type_name, v, context, refined)?);
             }
             // Consumed above — a wide leaf takes two input slots.
-            SignatureSlot::WideScalar(_) => unreachable!(),
+            SignatureSlot::WideScalar(_) | SignatureSlot::EnumWideField { .. } => unreachable!(),
         }
     }
     Ok(domain)
@@ -7616,10 +7832,7 @@ fn param_env<'ctx>(
 ) -> BodyResult<HashMap<String, SourceValue<'ctx>>> {
     let arity: usize = signature_slots(params, structs, enums)
         .iter()
-        .map(|slot| match slot {
-            SignatureSlot::WideScalar(_) => 2,
-            _ => 1,
-        })
+        .map(signature_slot_weight)
         .sum();
     if arity != inputs.len() {
         return Err(SemanticContractError::Unsupported("source signature arity"));
@@ -7637,45 +7850,13 @@ fn param_env<'ctx>(
             Some(fields) => seed_struct_composite(structs, enums, fields, &mut slots, ctx)?,
             None => match enum_variants(p, enums) {
                 Some(variants) => {
-                    let arity = enum_max_arity(variants);
                     let Some(tag) = slots.next() else {
                         return Err(SemanticContractError::Unsupported("source signature arity"));
                     };
-                    let mut slot_values = Vec::with_capacity(arity);
-                    for i in 0..arity {
-                        // A composite slot consumes its struct's
-                        // flattened leaves (`pure-i64-composite/v18`).
-                        if let Some(inner) =
-                            enum_slot_type(variants, i).and_then(|name| structs.get(name))
-                        {
-                            slot_values.push(seed_struct_composite(
-                                structs, enums, inner, &mut slots, ctx,
-                            )?);
-                            continue;
-                        }
-                        let Some(v) = slots.next() else {
-                            return Err(SemanticContractError::Unsupported(
-                                "source signature arity",
-                            ));
-                        };
-                        let kind = enum_slot_type(variants, i)
-                            .map(|name| match name {
-                                "bool" => ScalarKind::Bool,
-                                // `u64`/`f64` payloads keep their leaf
-                                // kind — `Integer` would read an
-                                // unsigned or bit-pattern slot signed.
-                                "u64" | "usize" => ScalarKind::U64,
-                                "isize" => ScalarKind::I64,
-                                "f64" => ScalarKind::F64,
-                                _ => refined.get(name).map_or(ScalarKind::I64, |a| a.kind),
-                            })
-                            .unwrap_or(ScalarKind::I64);
-                        slot_values.push(scalar(kind, v));
-                    }
                     SourceValue::Enum {
                         name: p.type_name.clone().unwrap_or_default(),
                         tag: tag.clone(),
-                        slots: slot_values,
+                        slots: seed_enum_payload(variants, structs, enums, &mut slots, ctx)?,
                     }
                 }
                 None => {
@@ -7824,13 +8005,20 @@ fn source_field_write<'ctx>(
             enums,
         )?;
         // The slot keeps its declared leaf shape — same coercion a
-        // composite field write applies.
+        // composite field write applies; a `Num` literal widens by the
+        // slot's signedness (`pure-i64-composite/v22`).
         let bound = match (slots.get(index), &bound) {
             (Some(SourceValue::Integer(_)), SourceValue::Number(v)) => {
                 SourceValue::Integer(v.clone())
             }
             (Some(SourceValue::Unsigned(_)), SourceValue::Number(v)) => {
                 SourceValue::Unsigned(v.clone())
+            }
+            (Some(SourceValue::Wide(_)), SourceValue::Number(v)) => {
+                SourceValue::Wide(v.sign_ext(64))
+            }
+            (Some(SourceValue::UWide(_)), SourceValue::Number(v)) => {
+                SourceValue::UWide(v.zero_ext(64))
             }
             (_, bound) => bound.clone(),
         };
@@ -8968,10 +9156,24 @@ fn result_value<'ctx>(
             slots: call_returns.seed_enum_slots(variants, &mut flat[1..].iter(), ctx),
         }
     } else if call_returns.returns_wide(atom) {
-        if call_returns.returns_u128(atom) {
-            SourceValue::UWide(value.clone())
+        // A literal-only body (`match f { _ => 3, … }`) flattens to a
+        // 64-bit aggregate — extend it into the declared 128-bit
+        // carrier the same way `widen_literal_operands` treats a `Num`
+        // operand: signed for `i128`, unsigned for `u128`
+        // (`pure-i64-composite/v21`, `/v22`).
+        let widened = if value.get_size() < 128 {
+            if call_returns.returns_u128(atom) {
+                value.zero_ext(128 - value.get_size())
+            } else {
+                value.sign_ext(128 - value.get_size())
+            }
         } else {
-            SourceValue::Wide(value.clone())
+            value.clone()
+        };
+        if call_returns.returns_u128(atom) {
+            SourceValue::UWide(widened)
+        } else {
+            SourceValue::Wide(widened)
         }
     } else if call_returns.returns_u64(atom) {
         SourceValue::Unsigned(value.clone())
@@ -10017,6 +10219,29 @@ fn source_expr<'ctx>(
                             enums,
                         )?;
                         match kind {
+                            // A wide payload leaf takes the `Wide`/
+                            // `UWide` value as-is, or a `Num` literal
+                            // widened by the slot's signedness — the
+                            // same adaptation `expect_kind` admits at
+                            // the ctor-kind gate (`pure-i64-composite/v21`,
+                            // `/v22`).
+                            PayloadSlotKind::Scalar(
+                                kind @ (ScalarKind::I128 | ScalarKind::U128),
+                            ) => match value {
+                                SourceValue::Wide(_) | SourceValue::UWide(_) => slots.push(value),
+                                SourceValue::Number(v) => {
+                                    if *kind == ScalarKind::U128 {
+                                        slots.push(SourceValue::UWide(v.zero_ext(64)))
+                                    } else {
+                                        slots.push(SourceValue::Wide(v.sign_ext(64)))
+                                    }
+                                }
+                                _ => {
+                                    return Err(SemanticContractError::Unsupported(
+                                        "enum constructor payload kind",
+                                    ))
+                                }
+                            },
                             PayloadSlotKind::Scalar(kind) => {
                                 slots.push(enum_slot_value(*kind, &lower_scalar(value, ctx)?, ctx))
                             }
@@ -13610,6 +13835,88 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
         // Under a narrower admission the module does not parse as the
         // composite fragment at all.
         assert!(module_leaf_widths(&source, RefinedAdmission::CompositeV20).is_err());
+    }
+
+    #[test]
+    fn composite_v22_admits_wide_enum_payloads() {
+        let v22 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV22)
+        };
+        let outcomes = |source: &str| {
+            refined_module_outcomes_admission(source, RefinedAdmission::CompositeV22)
+        };
+        let module = |piece: &str| format!("{piece}\n{MAIN0}");
+        for (piece, profile) in [
+            // A uniform `i128` payload position occupies two 64-bit
+            // input slots; the binder reads the paired leaf and a
+            // catch-all literal adapts to the arm's wide kind.
+            (
+                "enum F { A(i128), B(i128) }\natom pick(f: F) -> i128 requires: true; ensures: true; body: { match f { F::A(x) => x, _ => 0 } };",
+                PURE_I64_COMPOSITE_PROFILE_V22,
+            ),
+            // `u128` rides the same two-slot carrier.
+            (
+                "enum F { A(u128), B(u128) }\natom pick(f: F) -> bool requires: true; ensures: true; body: { match f { F::A(x) => x > 0, _ => false } };",
+                PURE_I64_COMPOSITE_PROFILE_V22,
+            ),
+            // A wide leaf inside a struct-typed payload position.
+            (
+                "struct P { x: i128, y: i64 }\nenum F { A(P), B(P) }\natom pick(f: F) -> i64 requires: true; ensures: true; body: { match f { F::A(p) => p.y, _ => 0 } };",
+                PURE_I64_COMPOSITE_PROFILE_V22,
+            ),
+            // An enum ctor whose payload position carries a wide leaf.
+            (
+                "enum F { A(i128), B(i128) }\natom wrap(x: i128) -> F requires: true; ensures: true; body: { F::A(x) };",
+                PURE_I64_COMPOSITE_PROFILE_V22,
+            ),
+        ] {
+            let source = module(piece);
+            match v22(&source) {
+                Ok(cs) => assert!(
+                    cs.iter().all(|c| c.profile == profile),
+                    "{piece}"
+                ),
+                Err(e) => panic!("{piece}: {e:?}"),
+            }
+            match std::panic::catch_unwind(|| outcomes(&source)) {
+                Ok(res) => assert!(
+                    res.iter().all(|r| *r == z3::SatResult::Unsat),
+                    "{piece}"
+                ),
+                Err(_) => panic!("outcomes failed for: {piece}"),
+            }
+        }
+        // A wrong postcondition over the bound wide leaf is refuted,
+        // not vacuous.
+        let wrong = module(
+            "enum F { A(i128), B(i128) }\natom pick(f: F) -> i128 requires: true; ensures: result == 0; body: { match f { F::A(x) => x, _ => 0 } };",
+        );
+        assert!(outcomes(&wrong).contains(&z3::SatResult::Sat));
+        // Mixed-type payload positions stay outside the fragment:
+        // `A(i128), B(i64)` has no uniform slot type.
+        let mixed = module(
+            "enum F { A(i128), B(i64) }\natom pick(f: F) -> i64 requires: true; ensures: true; body: { match f { F::A(x) => 1, _ => 0 } };",
+        );
+        assert!(v22(&mixed).is_err());
+        // Under a narrower admission a wide payload enum is refused.
+        let decl = module(
+            "enum F { A(i128), B(i128) }\natom pick(f: F) -> i128 requires: true; ensures: true; body: { match f { F::A(x) => x, _ => 0 } };",
+        );
+        for admission in [
+            RefinedAdmission::Reject,
+            RefinedAdmission::Composite,
+            RefinedAdmission::CompositeV20,
+            RefinedAdmission::CompositeV21,
+        ] {
+            assert!(
+                extract_pure_i64_module_contracts(&decl, "m.mm", None, admission).is_err(),
+                "{admission:?}"
+            );
+        }
+        // `leaf_widths` reports one 128-bit leaf per wide payload
+        // slot, tag excluded.
+        let widths = module_leaf_widths(&decl, RefinedAdmission::CompositeV22).unwrap();
+        assert_eq!(widths["pick"], vec![64, 128]);
     }
 }
 

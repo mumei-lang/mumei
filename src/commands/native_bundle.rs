@@ -1402,13 +1402,14 @@ fn emit_module(
 }
 
 /// The record profile a module-family bundle pins for the source profile
-/// its gate derived: `[v1, .., v21]` for the wrapping, refined v1,
-/// refined v2 and the composite v1–v18 fragments. Each recheck
+/// its gate derived: `[v1, .., v25]` for the wrapping, refined v1,
+/// refined v2 and the composite v1–v22 fragments. Each recheck
 /// re-derives under exactly that version's admission, never a wider one.
-fn record_profile(source_profile: &str, versions: [&'static str; 24]) -> &'static str {
-    let [v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24] =
+fn record_profile(source_profile: &str, versions: [&'static str; 25]) -> &'static str {
+    let [v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25] =
         versions;
     match source_profile {
+        semantic_contract::PURE_I64_COMPOSITE_PROFILE_V22 => v25,
         semantic_contract::PURE_I64_COMPOSITE_PROFILE_V21 => v24,
         semantic_contract::PURE_I64_COMPOSITE_PROFILE_V20 => v23,
         semantic_contract::PURE_I64_COMPOSITE_PROFILE_V19 => v22,
@@ -1436,7 +1437,7 @@ fn record_profile(source_profile: &str, versions: [&'static str; 24]) -> &'stati
     }
 }
 
-/// The `leaf_widths` pin a v24 record must carry: the declared leaf
+/// The `leaf_widths` pin a v24+ record must carry: the declared leaf
 /// widths re-derived under the producer's own admission when the source
 /// profile declares `i128`/`u128` leaves; empty on every older profile
 /// so the field stays absent from the serialized record.
@@ -1445,7 +1446,11 @@ fn leaf_widths_for_record(
     source: &str,
     admission: RefinedAdmission,
 ) -> Result<BTreeMap<String, Vec<u64>>, BundleError> {
-    if source_profile == semantic_contract::PURE_I64_COMPOSITE_PROFILE_V21 {
+    if matches!(
+        source_profile,
+        semantic_contract::PURE_I64_COMPOSITE_PROFILE_V21
+            | semantic_contract::PURE_I64_COMPOSITE_PROFILE_V22
+    ) {
         semantic_contract::module_leaf_widths(source, admission)
             .map_err(|_| BundleError("source outside bounded module profile"))
     } else {
@@ -1457,7 +1462,7 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
     // The producer always runs the widest (composite) admission; the
     // record's `profile` names a wider version only when the source
     // actually declares what needs it, so a plain module keeps pinning v1.
-    let admission = RefinedAdmission::CompositeV21;
+    let admission = RefinedAdmission::CompositeV22;
     let (binding, atoms, types, structs, enums) = prepare_module_source(source, admission)?;
     let parent = output
         .parent()
@@ -1509,6 +1514,7 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
                 MODULE_PROFILE_V22,
                 MODULE_PROFILE_V23,
                 MODULE_PROFILE_V24,
+                MODULE_PROFILE_V25,
             ],
         )
         .into(),
@@ -1627,7 +1633,7 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
             queue.push_back(member);
         }
     }
-    let admission = RefinedAdmission::CompositeV21;
+    let admission = RefinedAdmission::CompositeV22;
     let prepared = prepare_multifile_source(&root, &members, admission)?;
     let (binding, graph, atoms, types, structs, enums) = (
         prepared.binding,
@@ -1696,6 +1702,7 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
                 MULTIFILE_PROFILE_V22,
                 MULTIFILE_PROFILE_V23,
                 MULTIFILE_PROFILE_V24,
+                MULTIFILE_PROFILE_V25,
             ],
         )
         .into(),

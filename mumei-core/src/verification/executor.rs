@@ -2078,6 +2078,28 @@ fn verify_inner_impl(
         solver.assert(&v.le(&u64_max));
     }
 
+    // 2d'. `i128`/`u128` params: same unbounded-`Int` gap — assert the
+    // declared width's domain (`0 <= v <= u128::MAX` also carries the
+    // unsigned non-negativity `a >= 0` relies on).
+    for param in &atom.params {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        let (lo, hi) = match module_env.resolve_base_type(type_name).as_str() {
+            "i128" => (
+                "-170141183460469231731687303715884105728",
+                "170141183460469231731687303715884105727",
+            ),
+            "u128" => ("0", "340282366920938463463374607431768211455"),
+            _ => continue,
+        };
+        let Some(v) = env.get(&param.name).and_then(|d| d.as_int()) else {
+            continue;
+        };
+        solver.assert(&v.ge(&z3::ast::Int::from_str(&ctx, lo).expect("i128 lower bound literal")));
+        solver.assert(&v.le(&z3::ast::Int::from_str(&ctx, hi).expect("u128 upper bound literal")));
+    }
+
     // 2c. 全パラメータに対して配列長シンボルを事前生成
     #[allow(clippy::map_entry)]
     for param in &atom.params {

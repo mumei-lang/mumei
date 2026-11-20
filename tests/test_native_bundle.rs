@@ -3234,6 +3234,127 @@ fn module_bundle_v24_rejects_a_tampered_leaf_widths_pin() {
 }
 
 #[test]
+fn module_bundle_with_wide_enum_payload_builds_as_v25_and_rechecks() {
+    // A uniform `i128`/`u128` payload position occupies two 64-bit
+    // slots (`pure-i64-composite/v22`); the record pins bundle v25 and
+    // the declared `leaf_widths` (tag excluded, one 128 per wide leaf).
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "enum F { A(i128), B(i128) };\n\
+         atom pick(f: F) -> i128 requires: true; ensures: true; body: { match f { F::A(x) => x, _ => 0 } };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V25);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V22
+    );
+    assert_eq!(record["leaf_widths"]["pick"], serde_json::json!([64, 128]));
+    assert_eq!(record["leaf_widths"]["main"], serde_json::json!([]));
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    // A v25 record re-pinned as v24 is refused — v24 keeps the wide
+    // leaf out of the enum payload shape.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V24.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
+fn module_bundle_with_wide_enum_literals_and_merges_rechecks() {
+    // `Num` literal arms adapt to wide `if`/`match` merge results —
+    // `pure-i64-composite/v22`. (Constructing or writing a
+    // wide-payload enum in an atom body stays outside the admitted
+    // boundary — source verification keeps the Int-tag shape for
+    // non-scalar payloads.)
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "enum F { A(x: i128), B(y: i128) };\n\
+         enum G { C(u128), D(u128) };\n\
+         atom if_merge(b: bool, w: i128) -> i128 requires: w >= 0; ensures: result >= 0; body: { if b { 5 } else { w } };\n\
+         atom match_lit(f: F) -> i128 requires: true; ensures: result >= 3; body: { match f { F::A(_) => 4, _ => 3 } };\n\
+         atom match_wide(f: F) -> i128 requires: true; ensures: true; body: { match f { F::A(x) => x, _ => 3 } };\n\
+         atom umerge(g: G) -> u128 requires: true; ensures: true; body: { match g { G::C(x) => x, _ => 7 } };\n\
+         atom if_umerge(b: bool, w: u128) -> u128 requires: true; ensures: result == w || result == 0 - 1; body: { if b { w } else { 0 - 1 } };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V25);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V22
+    );
+    assert_eq!(
+        record["leaf_widths"]["match_lit"],
+        serde_json::json!([64, 128])
+    );
+    assert_eq!(
+        record["leaf_widths"]["match_wide"],
+        serde_json::json!([64, 128])
+    );
+    assert_eq!(
+        record["leaf_widths"]["umerge"],
+        serde_json::json!([64, 128])
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+}
+
+#[test]
+fn module_bundle_with_wide_enum_return_and_struct_field_rechecks() {
+    // An enum result encodes leaves `[tag, lo, hi]` so `result == f`
+    // holds, and a struct carrying a wide-payload enum flattens
+    // per-64-bit-slot through a `-> S` return —
+    // `pure-i64-composite/v22`.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "enum F { A(i128), B(i128) };\n\
+         struct S { a: i64, f: F }\n\
+         atom wrap(a: i64, f: F) -> S requires: true; ensures: result.a == a; body: { S { a: a, f: f } };\n\
+         atom id(f: F) -> F requires: true; ensures: result == f; body: { f };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V25);
+    assert_eq!(
+        record["leaf_widths"]["wrap"],
+        serde_json::json!([64, 64, 128])
+    );
+    assert_eq!(record["leaf_widths"]["id"], serde_json::json!([64, 128]));
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+}
+
+#[test]
+fn module_bundle_v25_pinned_by_declaration_without_wide_leaves_rechecks() {
+    // A declared `i128` payload pins bundle v25 on the declaration
+    // alone, so a module whose atoms never carry a wide leaf still
+    // records `leaf_widths` with no 128s — a rechecker must not
+    // demand a wide leaf that the declarations never used.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "enum F { A(i128), B(i128) };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V25);
+    assert_eq!(record["leaf_widths"]["main"], serde_json::json!([]));
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+}
+
+#[test]
 fn module_bundle_with_mixed_width_struct_builds_and_rechecks() {
     // A struct mixing a 64-bit leaf with a 128-bit leaf flattens
     // leaf-first — `{a: i64, b: i128}` occupies leaves [a, b.lo,
@@ -3294,6 +3415,40 @@ fn multifile_bundle_with_i128_leaves_builds_as_v24() {
     assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
         .status
         .success());
+}
+
+#[test]
+fn multifile_bundle_with_wide_enum_payload_builds_as_v25() {
+    // Multifile admission rides the same rung as module builds:
+    // `CompositeV22`, pinning `mumei.native-pure-i64-multifile/v25`.
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        root.path().join("flags.mm"),
+        "enum F { A(i128), B(i128) };\n\
+         atom pick(f: F) -> i128 requires: true; ensures: true; body: { match f { F::A(x) => x, _ => 0 } };\n",
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "import \"flags\" as t;\n\natom main() -> i64 requires: true; ensures: true; body: { 0 };\n",
+    )
+    .unwrap();
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MULTIFILE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MULTIFILE_PROFILE_V25);
+    assert_eq!(record["leaf_widths"]["pick"], serde_json::json!([64, 128]));
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
 }
 
 #[test]
