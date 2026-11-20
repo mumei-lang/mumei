@@ -5877,6 +5877,16 @@ stdout/stderr onto its declared outcome vocabulary (`valid`, `failed`,
 `reported_outcome` — the adapter's declared self-report, never a
 selection signal or Evidence acceptance.
 
+### Manifest-declared attempt stdin (mumei-agent #992)
+
+[mumei-agent#992](https://github.com/mumei-lang/mumei-agent/pull/992)
+adds `AdapterDescriptor.attempt_stdin`: an adapter manifest can declare
+the byte payload piped to the attempt process's standard input through
+`dispatch_attempt`'s `feed_bytes` channel — gated on a separate opt-in,
+`allow_manifest_attempt_stdin: true`, so declared input is inert
+without it. Scheduled attempts never inherit the parent's stdin: no
+declared feed means a closed pipe (deterministic EOF).
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
