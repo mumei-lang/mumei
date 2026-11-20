@@ -3031,6 +3031,33 @@ fn module_bundle_with_f64_arithmetic_builds_as_v22_and_rechecks() {
 }
 
 #[test]
+fn module_bundle_rejects_a_nan_refutable_f64_ensures() {
+    // `result == x + y` reads as `fp.eq(result, result)` under the
+    // admitted IEEE encoding — false whenever `x + y` is NaN, so the
+    // contract is refutable. The build must verify the source under the
+    // same IEEE semantics the rechecks pin: the default exact-rational
+    // `Real` model would prove it and ship a "verified" certificate the
+    // source recheck contradicts.
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        &source,
+        "atom add(x: f64, y: f64) -> f64 requires: true; ensures: result == x + y; body: { x + y };\n",
+    )
+    .unwrap();
+    assert!(!cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ])
+    .status
+    .success());
+}
+
+#[test]
 fn multifile_bundle_with_f64_arithmetic_builds_as_v22() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("app.mm");

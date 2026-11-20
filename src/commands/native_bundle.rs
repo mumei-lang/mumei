@@ -1312,6 +1312,7 @@ fn emit_module(
     enums: &[parser::EnumDef],
     stage: &Path,
     proof_work: &Path,
+    admission: RefinedAdmission,
 ) -> Result<EmittedModule, BundleError> {
     let mut env = verification::ModuleEnv::default();
     // Register the module's refined scalar, struct and enum
@@ -1341,7 +1342,15 @@ fn emit_module(
             &hir_atom,
             proof_work,
             &env,
-            &verification::VerificationConfig::default(),
+            &verification::VerificationConfig {
+                // Composite v19 admits the IEEE 754 `f64` operators in
+                // source contracts, so the contract must verify in the
+                // same encoding — the default exact-rational `Real`
+                // model would prove clauses a NaN input refutes (e.g.
+                // `ensures: result == x + y`).
+                ieee754_f64: admission.admits_f64_arithmetic(),
+                ..Default::default()
+            },
         )
         .map_err(|_| BundleError("source verification failed"))?;
         env.mark_verified(&atom.name);
@@ -1429,8 +1438,8 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
     // The producer always runs the widest (composite) admission; the
     // record's `profile` names a wider version only when the source
     // actually declares what needs it, so a plain module keeps pinning v1.
-    let (binding, atoms, types, structs, enums) =
-        prepare_module_source(source, RefinedAdmission::CompositeV19)?;
+    let admission = RefinedAdmission::CompositeV19;
+    let (binding, atoms, types, structs, enums) = prepare_module_source(source, admission)?;
     let parent = output
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -1450,6 +1459,7 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
         &enums,
         stage.path(),
         proof_work.path(),
+        admission,
     )?;
     let record = ModuleNativeBundleRecord {
         schema: MODULE_SCHEMA.into(),
@@ -1595,7 +1605,8 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
             queue.push_back(member);
         }
     }
-    let prepared = prepare_multifile_source(&root, &members, RefinedAdmission::CompositeV19)?;
+    let admission = RefinedAdmission::CompositeV19;
+    let prepared = prepare_multifile_source(&root, &members, admission)?;
     let (binding, graph, atoms, types, structs, enums) = (
         prepared.binding,
         prepared.import_graph_sha256,
@@ -1623,6 +1634,7 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
         &enums,
         stage.path(),
         proof_work.path(),
+        admission,
     )?;
     let sources_dir = stage.path().join(SOURCES_DIR);
     fs::create_dir(&sources_dir).map_err(|_| BundleError("cannot stage source members"))?;
