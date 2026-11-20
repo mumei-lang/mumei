@@ -5636,6 +5636,73 @@ enum parameter uses — so both layers verify `match b.e` and
 whole-field writes. Struct literals may carry enum values, and the
 v20 record validation allowlists were added alongside the profile.
 
+### Composite-typed enum payloads under composite TV (mumei #1145)
+
+[mumei#1145](https://github.com/mumei-lang/mumei/pull/1145) admits
+`enum Ev { Move(p: Point), Idle }` — an enum whose payload is a
+declared struct — as `mumei.pure-i64-composite/v18` and
+`module|multifile/v21`. A composite payload flattens into one
+`EnumField` leaf per scalar field on the linear `signature_domain`
+encoding, so `Ev::Move(Point{..})` and `Ev::Move(p)` construct,
+`match e { Ev::Move(p) => p.x }` reads, and `e.p = q` writes the
+whole slot under the usual tag gate; deeper paths (`p.inner.x`),
+enum/array payloads and recursive shapes fail closed. The emitter
+lowers construction, payload reads and payload writes leaf-wise.
+
+### Struct-typed enum payloads on the general Datatype path (mumei #1147)
+
+[mumei#1147](https://github.com/mumei-lang/mumei/pull/1147) widens
+`is_finite_adt` to admit enums whose payloads are structs with only
+scalar direct fields, so the general verifier encodes them as a Z3
+datatype instead of silently degrading to the Int-tag model where
+`p.x` reads and `e.p = v` writes were invisible. `field_leaf_types`
+names the leaves and `payload_leaf_range` gives each declared field
+its `(offset, width)` span inside the flattened ctor; ctor
+application expands declared-arity args via `expand_ctor_args`
+(`struct_fields_of_value`), match binds a composite payload as a
+fresh struct handle under both handle and bound names, and
+`enum_field_assign` rebuilds the ctor leaf-wise with each leaf
+sort-checked (BV(64) under `--bitvec-i64`) behind the existing
+`path_cond ⇒ is_V(e)` tag gate. Over-wide patterns (`Ev::Move(a, b)`
+on a one-field variant) now diagnose instead of panicking, and an
+arm binding that shadows an outer struct no longer destroys the
+outer field state at the merge point.
+
+### `.tag` reads and Int-tag param domains (mumei #1148)
+
+[mumei#1148](https://github.com/mumei-lang/mumei/pull/1148) admits
+`e.tag` reads on bound enum values on the general Datatype path —
+the read lowers to the variant discriminant so `e.tag == 1` and
+tag comparisons verify. An enum-typed parameter carried as the Int
+model gets its tag domain constrained to `0 <= tag < variants`, so
+constructors outside the declared variant set can no longer satisfy
+a caller's contract. Callee parameters of any type now shadow the
+caller's during contract instantiation (previously a same-named
+caller field const could be picked up instead), and match-target
+field consts resolve the caller's binding rather than the callee's
+same-named parameter.
+
+### Nested composite enum payloads (mumei #1149)
+
+[mumei#1149](https://github.com/mumei-lang/mumei/pull/1149) flattens
+nested composite payloads — `enum Ev { Move(p: Outer) }` where
+`Outer` itself holds a struct — into per-leaf bindings, so a nested
+payload reads and verifies leaf-wise instead of collapsing to an
+opaque slot. The per-atom DAG depth cap now warns instead of
+tripping an alias panic on an empty-struct `slice[0]`; deeper DAGs
+stay bounded by the declared budget.
+
+### Generic enum instances (mumei #1151)
+
+[mumei#1151](https://github.com/mumei-lang/mumei/pull/1151) resolves
+constructor and variant ownership for generic enum instances —
+`Option<i64>::Some` / `Result<T,E>::Ok` instantiate the monomorphized
+ctor and its payloads, with return types collected per instance so
+`match` binds concrete leaf types. A generic ctor reference with no
+instantiated instance fails closed (no silent integer fallback), and
+the verification cache now hashes the module's enum environment so a
+cached "verified" result cannot survive an enum declaration edit.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
