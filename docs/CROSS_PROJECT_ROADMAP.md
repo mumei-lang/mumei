@@ -6099,6 +6099,34 @@ that record, runs the conjunctive `evidence accept` into an
 promoting triple and failing closed when the pinned subject sha is
 tampered — five steps, `claimbook-acceptance-gate-v1` budget policy.
 
+### MCP scheduled-verification requirement-list (mumei-agent #1002)
+
+[mumei-agent#1002](https://github.com/mumei-lang/mumei-agent/pull/1002)
+mirrors the conjunctive check onto the MCP surface: the
+`verify_schedule` tool accepts
+`core_requirement_list_path: str | None = None` (requires
+`core_path`, conflicts with `core_requirement_path`), running
+`core evidence accept --stdin --json --requirement-list PATH` over
+the selected attempt's captured output against a declared
+`mumei.evidence-requirement-list/v1` document and recording Core's
+declared verdict with the emitted `requirement_fingerprint`. The
+path joins the declared-input set so error text redacts it; the
+promotable export stays CLI-only — the MCP tool does not write the
+gate triple.
+
+### Scheduled promotable export gate scenario (mumei-demo #161)
+
+[mumei-demo#161](https://github.com/mumei-lang/mumei-demo/pull/161)
+exercises the scheduled path end-to-end as an optional scenario:
+`schedule_export_gate` declares an adapter producing an evidence
+record from real `mumei evidence verify-source`, schedules it
+through the agent's `verify-schedule` route with
+`--core-requirement-list` and `--export-evidence-acceptance`, then
+shows `mumei claims --require-evidence-acceptance` emitting the
+claim book for the exported triple and failing closed when the
+pinned subject sha is tampered — six steps,
+`schedule-export-gate-v1` budget policy.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
