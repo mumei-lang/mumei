@@ -166,6 +166,13 @@ pub const PURE_I64_COMPOSITE_PROFILE_V15: &str = "mumei.pure-i64-composite/v15";
 /// payload field of the variant the binding's tag provably carries.
 pub const PURE_I64_COMPOSITE_PROFILE_V16: &str = "mumei.pure-i64-composite/v16";
 
+/// v17 admits enum-typed struct fields — a field `e: Color` flattens
+/// to a tag plus payload leaf slots exactly like an enum parameter,
+/// reads as a whole enum value (`match b.e`, `b.e.tag`, `b.e.p`),
+/// and admits only whole-field writes `b.e = e2`
+/// (`pure-i64-composite/v17`).
+pub const PURE_I64_COMPOSITE_PROFILE_V17: &str = "mumei.pure-i64-composite/v17";
+
 /// Maximum byte length a `Str` literal may declare under
 /// `pure-i64-composite/v13`: one cell per byte under the
 /// bounded-memory model.
@@ -209,7 +216,12 @@ pub const PURE_I64_COMPOSITE_MEMORY_PROFILE: &str = "mumei.pure-i64-composite-bo
 /// arguments carrying unsigned two's-complement semantics
 /// (`pure-i64-composite/v10`). `CompositeV14` additionally admits
 /// `e == e'`/`e != e'` equality between two values of one declared
-/// enum (`pure-i64-composite/v14`). A
+/// enum (`pure-i64-composite/v14`). `CompositeV17` additionally
+/// admits enum-typed struct fields — a declared enum nested inside a
+/// struct flattens to the same tag + payload slots an enum parameter
+/// carries, so `b.e` reads a whole enum value and `b.e = e2` writes
+/// one (`pure-i64-composite/v17`). V16 is reserved for the
+/// enum-payload-write profile (`e.p = v`) landing in parallel. A
 /// pinned record names which level produced it, so a
 /// rechecker re-derives under the record's own admission — never a
 /// wider one.
@@ -234,6 +246,7 @@ pub enum RefinedAdmission {
     CompositeV14,
     CompositeV15,
     CompositeV16,
+    CompositeV17,
 }
 
 impl RefinedAdmission {
@@ -341,6 +354,14 @@ impl RefinedAdmission {
     /// field must be unique and the binding's tag provably `V`.
     pub fn admits_enum_writes(self) -> bool {
         self >= Self::CompositeV16
+    }
+
+    /// Whether a struct field may be enum-typed — it flattens to a tag
+    /// plus payload leaf slots exactly like an enum parameter, reads
+    /// as a whole enum value, and admits only whole-field writes
+    /// `b.e = e2` (`pure-i64-composite/v17`).
+    pub fn admits_enum_struct_fields(self) -> bool {
+        self >= Self::CompositeV17
     }
 }
 
@@ -1013,6 +1034,11 @@ fn fragment_profile(
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if has_enum_fields(structs) {
+        // An enum-typed struct field is only ever admitted under v17,
+        // so a module containing one pins it — even when no atom
+        // reads the field (same convention as `has_nested_fields`).
+        PURE_I64_COMPOSITE_PROFILE_V17
     } else if enum_writes {
         // An enum payload write is only ever admitted under v16 — the
         // tag-gated slot update it requires is the deepest grammar the
@@ -1140,9 +1166,9 @@ fn atom_contract(
         .params
         .iter()
         .flat_map(|p| match struct_fields(p, structs) {
-            Some(fields) => flattened_struct_fields(structs, fields)
+            Some(fields) => flattened_struct_fields(structs, enums, fields)
                 .iter()
-                .map(|(path, f)| (format!("{}.{}", p.name, path), Some(f.type_name.as_str())))
+                .map(|(path, slot)| (format!("{}.{}", p.name, path), slot_type_name(slot)))
                 .collect::<Vec<_>>(),
             None => match enum_variants(p, enums) {
                 Some(variants) => {
@@ -1168,9 +1194,9 @@ fn atom_contract(
     // an enum result a tag binder (`result.tag`) plus one per payload
     // slot (`result.{i}`) — the flat expansion the obligation encodes.
     let result_binders = match result_fields {
-        Some(fields) => flattened_struct_fields(structs, fields)
+        Some(fields) => flattened_struct_fields(structs, enums, fields)
             .iter()
-            .map(|(path, f)| (format!("result.{}", path), Some(f.type_name.as_str())))
+            .map(|(path, slot)| (format!("result.{}", path), slot_type_name(slot)))
             .collect(),
         None => match atom.return_type.as_deref().and_then(|name| enums.get(name)) {
             Some(variants) => {
@@ -1543,7 +1569,8 @@ impl<'a> KindEnv<'a> {
     ) -> Result<(), SemanticContractError> {
         self.bind(name)?;
         if let Some(fields) = self.structs.get(type_name) {
-            for field in all_field_paths(self.structs, fields) {
+            let arity = enum_arities(self.enums);
+            for field in all_field_paths(self.structs, &arity, fields) {
                 for synthesized in [
                     format!("{name}_{}", field.replace('.', "_")),
                     format!("__struct_{name}_{}", field.replace('.', "_")),
@@ -1904,7 +1931,19 @@ impl<'ctx> CallShapes<'ctx> {
                     .get(child)
                     .map(|inner| self.flattened_kinds(inner))
                     .unwrap_or_default(),
-                ValueKind::Enum(_) => Vec::new(),
+                // An enum-typed field expands to a tag leaf plus one
+                // payload leaf per widest-variant index — the layout
+                // an enum parameter lowers in
+                // (`pure-i64-composite/v17`).
+                ValueKind::Enum(enum_name) => self
+                    .enums
+                    .get(enum_name)
+                    .map(|variants| {
+                        let mut kinds = vec![ScalarKind::I64];
+                        kinds.extend(enum_shape_slot_kinds(variants));
+                        kinds
+                    })
+                    .unwrap_or_default(),
             })
             .collect()
     }
@@ -2025,11 +2064,12 @@ fn check_atom_contract(
             }
         }
     }
+    let arity = enum_arities(enums);
     let mut reserved: BTreeSet<String> = composites
         .iter()
         .filter(|(_, type_name)| structs.contains_key(**type_name))
         .flat_map(|(param, struct_name)| {
-            all_field_paths(structs, &structs[*struct_name])
+            all_field_paths(structs, &arity, &structs[*struct_name])
                 .into_iter()
                 .flat_map(move |path| {
                     let path = path.replace('.', "_");
@@ -2042,7 +2082,7 @@ fn check_atom_contract(
         .collect();
     if admit_struct_values {
         reserved.extend(structs.iter().flat_map(|(struct_name, fields)| {
-            all_field_paths(structs, fields)
+            all_field_paths(structs, &arity, fields)
                 .into_iter()
                 .map(move |path| format!("__struct_{struct_name}_{}", path.replace('.', "_")))
         }));
@@ -2399,9 +2439,10 @@ impl ResolvedField {
 /// terminates.
 fn flatten_fields<'a>(
     structs: &'a StructEnv,
+    enums: &'a EnumEnv,
     fields: &'a [ResolvedField],
     prefix: &str,
-    out: &mut Vec<(String, &'a ResolvedField)>,
+    out: &mut Vec<(String, SignatureSlot<'a>)>,
 ) {
     for field in fields {
         let path = if prefix.is_empty() {
@@ -2412,10 +2453,37 @@ fn flatten_fields<'a>(
         match &field.shape {
             ValueKind::Struct(child) => {
                 if let Some(child_fields) = structs.get(child) {
-                    flatten_fields(structs, child_fields, &path, out);
+                    flatten_fields(structs, enums, child_fields, &path, out);
                 }
             }
-            _ => out.push((path, field)),
+            // An enum-typed field lays out like an enum parameter: a
+            // tag slot then one shared payload slot per index
+            // (`pure-i64-composite/v17`).
+            ValueKind::Enum(enum_name) => {
+                if let Some(variants) = enums.get(enum_name) {
+                    out.push((
+                        format!("{path}.tag"),
+                        SignatureSlot::EnumTag {
+                            variants: variants.len() as u64,
+                        },
+                    ));
+                    out.extend((0..enum_max_arity(variants)).map(|i| {
+                        (
+                            format!("{path}.{i}"),
+                            SignatureSlot::EnumField {
+                                type_name: enum_slot_type(variants, i),
+                                carriers: variants
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, v)| v.fields.get(i).is_some())
+                                    .map(|(ordinal, _)| ordinal as u64)
+                                    .collect(),
+                            },
+                        )
+                    }));
+                }
+            }
+            _ => out.push((path, SignatureSlot::Scalar(Some(field.type_name.as_str())))),
         }
     }
 }
@@ -2423,11 +2491,19 @@ fn flatten_fields<'a>(
 /// Every dotted field path of an admitted struct — inner prefixes
 /// included: `Outer { inner: Inner, c }` gives `inner`, `inner.a`,
 /// `inner.b`, `c`. The verifier and emitter synthesize names from
-/// every prefix, not just leaves.
-fn all_field_paths(structs: &StructEnv, fields: &[ResolvedField]) -> Vec<String> {
+/// every prefix, not just leaves. An enum-typed field contributes its
+/// own path plus its leaf paths (`e`, `e.tag`, `e.0`, …) so the
+/// flattened-name collision check covers every slot it mints.
+fn all_field_paths(
+    structs: &StructEnv,
+    enum_arity: &BTreeMap<String, usize>,
+    fields: &[ResolvedField],
+) -> Vec<String> {
     let mut out = Vec::new();
+    #[allow(clippy::too_many_arguments)]
     fn push_paths(
         structs: &StructEnv,
+        enum_arity: &BTreeMap<String, usize>,
         fields: &[ResolvedField],
         prefix: &str,
         out: &mut Vec<String>,
@@ -2439,24 +2515,54 @@ fn all_field_paths(structs: &StructEnv, fields: &[ResolvedField]) -> Vec<String>
                 format!("{prefix}.{}", field.name)
             };
             out.push(path.clone());
-            if let ValueKind::Struct(child) = &field.shape {
-                if let Some(inner) = structs.get(child) {
-                    push_paths(structs, inner, &path, out);
+            match &field.shape {
+                ValueKind::Struct(child) => {
+                    if let Some(inner) = structs.get(child) {
+                        push_paths(structs, enum_arity, inner, &path, out);
+                    }
                 }
+                ValueKind::Enum(enum_name) => {
+                    if let Some(arity) = enum_arity.get(enum_name) {
+                        out.push(format!("{path}.tag"));
+                        out.extend((0..*arity).map(|i| format!("{path}.{i}")));
+                    }
+                }
+                _ => (),
             }
         }
     }
-    push_paths(structs, fields, "", &mut out);
+    push_paths(structs, enum_arity, fields, "", &mut out);
     out
+}
+
+/// `enum_max_arity` keyed by enum name — the arity view
+/// `all_field_paths` and `leaf_count_exceeds` need where a full
+/// `EnumEnv` is not (yet) built.
+fn enum_arities(enums: &EnumEnv) -> BTreeMap<String, usize> {
+    enums
+        .iter()
+        .map(|(name, variants)| (name.clone(), enum_max_arity(variants)))
+        .collect()
+}
+
+/// The declared type name a signature leaf carries, for the typed
+/// binders the obligation emits — `None` on an enum tag slot, which
+/// the binder layer reports like an enum parameter's own tag.
+fn slot_type_name<'a>(slot: &SignatureSlot<'a>) -> Option<&'a str> {
+    match slot {
+        SignatureSlot::Scalar(type_name) | SignatureSlot::EnumField { type_name, .. } => *type_name,
+        SignatureSlot::EnumTag { .. } => None,
+    }
 }
 
 /// `flatten_fields` for a named struct's declared fields.
 fn flattened_struct_fields<'a>(
     structs: &'a StructEnv,
+    enums: &'a EnumEnv,
     fields: &'a [ResolvedField],
-) -> Vec<(String, &'a ResolvedField)> {
+) -> Vec<(String, SignatureSlot<'a>)> {
     let mut out = Vec::new();
-    flatten_fields(structs, fields, "", &mut out);
+    flatten_fields(structs, enums, fields, "", &mut out);
     out
 }
 
@@ -2465,9 +2571,15 @@ fn flattened_struct_fields<'a>(
 /// leaf slots, so a chain where every level names the same child type
 /// twice doubles the count per level — a bounded walk must bail as soon
 /// as the limit is passed rather than expanding first.
-fn leaf_count_exceeds(structs: &StructEnv, fields: &[ResolvedField], limit: usize) -> bool {
+fn leaf_count_exceeds(
+    structs: &StructEnv,
+    enum_arity: &BTreeMap<String, usize>,
+    fields: &[ResolvedField],
+    limit: usize,
+) -> bool {
     fn visit(
         structs: &StructEnv,
+        enum_arity: &BTreeMap<String, usize>,
         fields: &[ResolvedField],
         count: &mut usize,
         limit: usize,
@@ -2476,9 +2588,18 @@ fn leaf_count_exceeds(structs: &StructEnv, fields: &[ResolvedField], limit: usiz
             match &field.shape {
                 ValueKind::Struct(child) => {
                     if let Some(inner) = structs.get(child) {
-                        if visit(structs, inner, count, limit) {
+                        if visit(structs, enum_arity, inner, count, limit) {
                             return true;
                         }
+                    }
+                }
+                // An enum-typed field mints a tag slot plus one payload
+                // slot per widest-variant index — same layout as an
+                // enum parameter (`pure-i64-composite/v17`).
+                ValueKind::Enum(enum_name) => {
+                    *count += 1 + enum_arity.get(enum_name).copied().unwrap_or(0);
+                    if *count > limit {
+                        return true;
                     }
                 }
                 _ => {
@@ -2492,7 +2613,7 @@ fn leaf_count_exceeds(structs: &StructEnv, fields: &[ResolvedField], limit: usiz
         false
     }
     let mut count = 0usize;
-    visit(structs, fields, &mut count, limit)
+    visit(structs, enum_arity, fields, &mut count, limit)
 }
 
 /// A struct parameter's value from its lowered leaf slots: a scalar
@@ -2501,6 +2622,7 @@ fn leaf_count_exceeds(structs: &StructEnv, fields: &[ResolvedField], limit: usiz
 /// (`pure-i64-composite/v8`).
 fn seed_struct_composite<'ctx>(
     structs: &StructEnv,
+    enums: &EnumEnv,
     fields: &[ResolvedField],
     slots: &mut std::slice::Iter<'_, BV<'ctx>>,
     ctx: &'ctx Context,
@@ -2512,7 +2634,35 @@ fn seed_struct_composite<'ctx>(
                 let inner = structs
                     .get(child)
                     .ok_or(SemanticContractError::Unsupported("source signature arity"))?;
-                seed_struct_composite(structs, inner, slots, ctx)?
+                seed_struct_composite(structs, enums, inner, slots, ctx)?
+            }
+            // An enum-typed field consumes a tag slot plus one payload
+            // slot per widest-variant index, seeded exactly like an
+            // enum parameter (`pure-i64-composite/v17`).
+            ValueKind::Enum(enum_name) => {
+                let variants = enums
+                    .get(enum_name)
+                    .ok_or(SemanticContractError::Unsupported("source signature arity"))?;
+                let tag = slots
+                    .next()
+                    .cloned()
+                    .ok_or(SemanticContractError::Unsupported("source signature arity"))?;
+                let mut payload = Vec::with_capacity(enum_max_arity(variants));
+                for i in 0..enum_max_arity(variants) {
+                    let slot = slots
+                        .next()
+                        .ok_or(SemanticContractError::Unsupported("source signature arity"))?;
+                    let kind = variants
+                        .iter()
+                        .find_map(|v| v.fields.get(i).and_then(|f| f.leaf_kind()))
+                        .unwrap_or(ScalarKind::I64);
+                    payload.push(enum_slot_value(kind, slot, ctx));
+                }
+                SourceValue::Enum {
+                    name: enum_name.clone(),
+                    tag,
+                    slots: payload,
+                }
             }
             _ => {
                 let Some(v) = slots.next() else {
@@ -2547,6 +2697,15 @@ fn lower_composite<'ctx>(
             }
             Ok(())
         }
+        // An enum-typed field lowers tag-first like an enum
+        // parameter (`pure-i64-composite/v17`).
+        SourceValue::Enum { tag, slots, .. } => {
+            out.push(tag);
+            for slot in slots {
+                out.push(lower_scalar(slot, ctx)?);
+            }
+            Ok(())
+        }
         scalar => {
             out.push(lower_scalar(scalar, ctx)?);
             Ok(())
@@ -2563,6 +2722,16 @@ fn has_nested_fields(structs: &StructEnv) -> bool {
         .values()
         .flatten()
         .any(|f| matches!(f.shape, ValueKind::Struct(_)))
+}
+
+/// Whether any admitted struct declares an enum-typed field — the
+/// marker that pins `pure-i64-composite/v17`, on the same convention
+/// as `has_nested_fields`.
+fn has_enum_fields(structs: &StructEnv) -> bool {
+    structs
+        .values()
+        .flatten()
+        .any(|f| matches!(f.shape, ValueKind::Enum(_)))
 }
 
 /// The module's admitted struct declarations by name, fields in
@@ -2800,12 +2969,31 @@ fn build_struct_env(
     admission: RefinedAdmission,
 ) -> Result<StructEnv, SemanticContractError> {
     let nested_allowed = admission.admits_nested_structs();
+    let enum_fields_allowed = admission.admits_enum_struct_fields();
     // The declared struct names, so a field can name a sibling or a
     // forward-declared struct under `pure-i64-composite/v8`.
     let declared_names: BTreeSet<&str> = items
         .iter()
         .filter_map(|item| match item {
             Item::StructDef(def) => Some(def.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    // The declared enum names and each one's widest-variant arity —
+    // enough for an enum-typed field's admission, leaf count and
+    // path enumeration before `build_enum_env` resolves payload
+    // details (`pure-i64-composite/v17`).
+    let enum_arity: BTreeMap<String, usize> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::EnumDef(def) => Some((
+                def.name.clone(),
+                def.variants
+                    .iter()
+                    .map(|v| v.fields.len())
+                    .max()
+                    .unwrap_or(0),
+            )),
             _ => None,
         })
         .collect();
@@ -2913,6 +3101,12 @@ fn build_struct_env(
                 name if nested_allowed && declared_names.contains(name) => {
                     Some(ValueKind::Struct(name.to_owned()))
                 }
+                // `CompositeV17` admits a field whose type is an
+                // admitted enum: it flattens to a tag plus payload
+                // leaf slots exactly like an enum parameter.
+                name if enum_fields_allowed && enum_arity.contains_key(name) => {
+                    Some(ValueKind::Enum(name.to_owned()))
+                }
                 name if admission >= RefinedAdmission::CompositeV2 => refined
                     .get(name)
                     .filter(|alias| matches!(alias.base, "i64" | "bool"))
@@ -2952,7 +3146,7 @@ fn build_struct_env(
         // type doubles its leaf count per level, so expanding first
         // and counting later would exhaust memory before the limit
         // check could reject.
-        if leaf_count_exceeds(&env, fields, 16) || struct_depth(&env, fields, 0) > 8 {
+        if leaf_count_exceeds(&env, &enum_arity, fields, 16) || struct_depth(&env, fields, 0) > 8 {
             return Err(SemanticContractError::Unsupported(
                 "struct declaration nests beyond the aggregate limit",
             ));
@@ -2963,7 +3157,7 @@ fn build_struct_env(
         // underscore-joined paths, so such a declaration would alias
         // two independent slots to one symbol and prove them equal.
         let mut flattened_names = BTreeSet::new();
-        for path in all_field_paths(&env, fields) {
+        for path in all_field_paths(&env, &enum_arity, fields) {
             if !flattened_names.insert(path.replace('.', "_")) {
                 return Err(SemanticContractError::Unsupported(
                     "struct field paths collide when flattened",
@@ -3422,7 +3616,11 @@ fn block_prefix_kinds<'a>(
                             )?;
                             expect_kind(kind, field_kind)?;
                         }
-                        ValueKind::Struct(field_type) => {
+                        // An enum-typed field takes a whole-enum
+                        // write `b.e = e2` of the same declared enum
+                        // (`pure-i64-composite/v17`) — checked exactly
+                        // like a whole-subtree struct write.
+                        ValueKind::Struct(field_type) | ValueKind::Enum(field_type) => {
                             let field_type = field_type.clone();
                             let Ok(found) = composite_kind(
                                 value,
@@ -3441,11 +3639,6 @@ fn block_prefix_kinds<'a>(
                                     "struct field write type",
                                 ));
                             }
-                        }
-                        _ => {
-                            return Err(SemanticContractError::Unsupported(
-                                "struct field write kind",
-                            ));
                         }
                     }
                     inner_env.field_writes_used.set(true);
@@ -3710,14 +3903,15 @@ fn is_composite_value(
         Expr::Variable(name) => env.composite_name(name, scope).is_some(),
         Expr::FieldAccess(target, field) => {
             // A nullary `E::V`, or — under v8 — a read whose declared
-            // field is itself a struct (`o.inner`).
+            // field is itself a struct (`o.inner`), or — under v17 —
+            // an enum-typed field (`b.e`).
             (env.admit_enum_values && enum_ctor(target, field, scope, env).is_some())
                 || composite_target_name(target, scope, true, false, &BTreeSet::new(), env)
                     .ok()
                     .flatten()
                     .and_then(|struct_name| env.structs.get(struct_name))
                     .and_then(|fields| fields.iter().find(|f| f.name == *field))
-                    .is_some_and(|f| matches!(f.shape, ValueKind::Struct(_)))
+                    .is_some_and(|f| matches!(f.shape, ValueKind::Struct(_) | ValueKind::Enum(_)))
         }
         Expr::Call(name, _) => {
             (env.admit_enum_values && enum_call_ctor(name, env).is_some())
@@ -4029,10 +4223,23 @@ fn composite_kind<'a>(
                             ));
                         }
                     }
-                    ValueKind::Enum(_) => {
-                        return Err(SemanticContractError::Unsupported(
-                            "struct literal field type mismatch",
-                        ));
+                    // An enum-typed field takes a composite argument
+                    // of the same declared enum
+                    // (`pure-i64-composite/v17`).
+                    ValueKind::Enum(child) => {
+                        let produced = composite_kind(
+                            value,
+                            scope,
+                            result_in_scope,
+                            allow_wrapping_arithmetic,
+                            &BTreeSet::new(),
+                            env,
+                        )?;
+                        if produced != child.as_str() {
+                            return Err(SemanticContractError::Unsupported(
+                                "struct literal field type mismatch",
+                            ));
+                        }
                     }
                 }
             }
@@ -4089,24 +4296,45 @@ fn composite_kind<'a>(
             }
         }
         Expr::FieldAccess(target, field) if env.admit_enum_values => {
-            // A nullary `E::V` parses as field access on the enum name;
-            // field reads of an enum value never reach here — `match`
-            // is the only enum consumer, so no payload projection
-            // exists to kind-check.
-            let Some((enum_name, variant)) = enum_ctor(target, field, scope, env) else {
+            // A nullary `E::V` parses as field access on the enum name.
+            if let Some((enum_name, variant)) = enum_ctor(target, field, scope, env) {
+                enum_ctor_kind(
+                    &[],
+                    variant,
+                    scope,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    env,
+                )?;
+                return Ok(enum_name);
+            }
+            // An enum-typed field read `b.e` produces the whole enum
+            // value (`pure-i64-composite/v17`); like any enum value it
+            // passes through, merges, and serves as a `match`
+            // scrutinee — no payload projection exists to kind-check.
+            let Some(struct_name) = composite_target_name(
+                target,
+                scope,
+                result_in_scope,
+                allow_wrapping_arithmetic,
+                assignable,
+                env,
+            )?
+            else {
                 return Err(SemanticContractError::Unsupported(
                     "enum constructor outside the composite profile",
                 ));
             };
-            enum_ctor_kind(
-                &[],
-                variant,
-                scope,
-                result_in_scope,
-                allow_wrapping_arithmetic,
-                env,
-            )?;
-            Ok(enum_name)
+            env.structs
+                .get(struct_name)
+                .and_then(|fields| fields.iter().find(|f| f.name == *field))
+                .and_then(|f| match &f.shape {
+                    ValueKind::Enum(child) => Some(child.as_str()),
+                    _ => None,
+                })
+                .ok_or(SemanticContractError::Unsupported(
+                    "enum constructor outside the composite profile",
+                ))
         }
         // A struct-typed field read (`o.inner`, `pure-i64-composite/v8`)
         // produces the nested struct — a composite value that passes
@@ -4315,6 +4543,25 @@ fn match_arm_envs<'a>(
         Expr::Variable(name) => env
             .composite_name(name, scope)
             .and_then(|type_name| env.enums.get(type_name)),
+        // `match b.e` — an enum-typed field read
+        // (`pure-i64-composite/v17`) — destructures like an enum
+        // parameter scrutinee.
+        Expr::FieldAccess(inner, field) => composite_target_name(
+            inner,
+            scope,
+            result_in_scope,
+            allow_wrapping_arithmetic,
+            assignable,
+            env,
+        )
+        .ok()
+        .flatten()
+        .and_then(|struct_name| env.structs.get(struct_name))
+        .and_then(|fields| fields.iter().find(|f| f.name == *field))
+        .and_then(|f| match &f.shape {
+            ValueKind::Enum(enum_name) => env.enums.get(enum_name),
+            _ => None,
+        }),
         _ => None,
     };
     let mut out = Vec::with_capacity(arms.len());
@@ -5269,14 +5516,14 @@ fn encode_atom_body<'ctx>(
             .iter()
             .map(|p| {
                 struct_fields(p, structs)
-                    .map(|fields| flattened_struct_fields(structs, fields).len())
+                    .map(|fields| flattened_struct_fields(structs, enums, fields).len())
                     .or_else(|| enum_variants(p, enums).map(|v| 1 + enum_max_arity(v)))
             })
             .collect(),
         result_shape: atom.return_type.as_deref().and_then(|name| {
             structs
                 .get(name)
-                .map(|fields| flattened_struct_fields(structs, fields).len())
+                .map(|fields| flattened_struct_fields(structs, enums, fields).len())
                 .or_else(|| enums.get(name).map(|variants| 1 + enum_max_arity(variants)))
         }),
         param_leaf_doubles: atom
@@ -5285,9 +5532,9 @@ fn encode_atom_body<'ctx>(
             .map(|p| {
                 struct_fields(p, structs)
                     .map(|fields| {
-                        flattened_struct_fields(structs, fields)
+                        flattened_struct_fields(structs, enums, fields)
                             .iter()
-                            .map(|(_, f)| f.type_name == "f64")
+                            .map(|(_, slot)| slot_type_name(slot) == Some("f64"))
                             .collect()
                     })
                     .or_else(|| {
@@ -5310,9 +5557,9 @@ fn encode_atom_body<'ctx>(
                 structs
                     .get(name)
                     .map(|fields| {
-                        flattened_struct_fields(structs, fields)
+                        flattened_struct_fields(structs, enums, fields)
                             .iter()
-                            .map(|(_, f)| f.type_name == "f64")
+                            .map(|(_, slot)| slot_type_name(slot) == Some("f64"))
                             .collect()
                     })
                     .or_else(|| {
@@ -5372,9 +5619,9 @@ fn signature_slots<'a>(
     params
         .iter()
         .flat_map(|p| match struct_fields(p, structs) {
-            Some(fields) => flattened_struct_fields(structs, fields)
-                .iter()
-                .map(|(_, f)| SignatureSlot::Scalar(Some(f.type_name.as_str())))
+            Some(fields) => flattened_struct_fields(structs, enums, fields)
+                .into_iter()
+                .map(|(_, slot)| slot)
                 .collect(),
             None => match enum_variants(p, enums) {
                 Some(variants) => {
@@ -5636,6 +5883,21 @@ fn result_conjuncts_at<'ctx>(
     };
     let mut out = Vec::new();
     for (field, (_, field_value)) in fields.iter().zip(values) {
+        // An enum-typed field carries its enum's payload-slot
+        // conjuncts, so route it back through the enum arm above
+        // rather than the scalar alias layer
+        // (`pure-i64-composite/v17`).
+        if matches!(field.shape, ValueKind::Enum(_)) {
+            out.extend(result_conjuncts_at(
+                Some(field.type_name.as_str()),
+                field_value.clone(),
+                refined,
+                structs,
+                enums,
+                context,
+            )?);
+            continue;
+        }
         out.extend(refined_conjuncts_at(
             Some(field.type_name.as_str()),
             field_value.clone(),
@@ -6232,7 +6494,7 @@ fn param_env<'ctx>(
     let mut env = HashMap::new();
     for p in params {
         let value = match struct_fields(p, structs) {
-            Some(fields) => seed_struct_composite(structs, fields, &mut slots, ctx)?,
+            Some(fields) => seed_struct_composite(structs, enums, fields, &mut slots, ctx)?,
             None => match enum_variants(p, enums) {
                 Some(variants) => {
                     let arity = enum_max_arity(variants);
@@ -6478,6 +6740,14 @@ fn source_field_write<'ctx>(
         (SourceValue::Unsigned(_), SourceValue::Number(v)) => SourceValue::Unsigned(v),
         (_, bound) => bound,
     };
+    // A whole-enum write `b.e = e2` (`pure-i64-composite/v17`): the
+    // kind layer already required the same declared enum.
+    let same_enum = match (slot, &bound) {
+        (SourceValue::Enum { name: declared, .. }, SourceValue::Enum { name: written, .. }) => {
+            declared == written
+        }
+        _ => false,
+    };
     match (slot, &bound) {
         (SourceValue::Integer(_) | SourceValue::Number(_), SourceValue::Integer(_))
         | (SourceValue::Integer(_), SourceValue::Number(_))
@@ -6487,6 +6757,7 @@ fn source_field_write<'ctx>(
         | (SourceValue::Boolean(_), SourceValue::Boolean(_))
         | (SourceValue::Float64(_), SourceValue::Float64(_))
         | (SourceValue::Composite(_), SourceValue::Composite(_)) => {}
+        _ if same_enum => {}
         _ => {
             return Err(SemanticContractError::Unsupported(
                 "struct field write kind",
@@ -7269,7 +7540,36 @@ fn composite_from_slots<'ctx>(
                         let inner = call_returns.structs.get(child).cloned().unwrap_or_default();
                         composite_from_slots(call_returns, &inner, slots, ctx)
                     }
-                    ValueKind::Enum(_) => unreachable!("struct fields are never enum-typed"),
+                    // An enum-typed field consumes a tag slot plus one
+                    // payload slot per widest-variant index — the same
+                    // seed an enum parameter gets
+                    // (`pure-i64-composite/v17`).
+                    ValueKind::Enum(enum_name) => {
+                        let variants = call_returns
+                            .enums
+                            .get(enum_name)
+                            .cloned()
+                            .unwrap_or_default();
+                        let tag = slots.next().cloned().unwrap_or_else(|| {
+                            unreachable!("admitted structs always match their lowered arity")
+                        });
+                        let payload = enum_shape_slot_kinds(&variants)
+                            .iter()
+                            .map(|kind| {
+                                let v = slots.next().unwrap_or_else(|| {
+                                    unreachable!(
+                                        "admitted structs always match their lowered arity"
+                                    )
+                                });
+                                enum_slot_value(*kind, v, ctx)
+                            })
+                            .collect();
+                        SourceValue::Enum {
+                            name: enum_name.clone(),
+                            tag,
+                            slots: payload,
+                        }
+                    }
                 };
                 (name.clone(), value)
             })

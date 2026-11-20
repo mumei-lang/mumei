@@ -635,15 +635,7 @@ pub(crate) fn seed_env<'a>(vc: &VCtx<'a>, atom: &Atom) -> Env<'a> {
             .as_deref()
             .and_then(|type_name| module_env.get_struct(type_name))
         {
-            seed_struct_fields(
-                ctx,
-                &mut env,
-                &param.name,
-                sdef,
-                module_env,
-                ieee754_f64,
-                bitvec_i64,
-            );
+            seed_struct_fields(vc, &mut env, &param.name, sdef);
         }
     }
     if tuple_component_types(atom.return_type.as_deref()).is_none() {
@@ -667,15 +659,7 @@ pub(crate) fn seed_env<'a>(vc: &VCtx<'a>, atom: &Atom) -> Env<'a> {
         .as_deref()
         .and_then(|type_name| module_env.get_struct(type_name))
     {
-        seed_struct_fields(
-            ctx,
-            &mut env,
-            "result",
-            sdef,
-            module_env,
-            ieee754_f64,
-            bitvec_i64,
-        );
+        seed_struct_fields(vc, &mut env, "result", sdef);
     }
     env
 }

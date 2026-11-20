@@ -120,6 +120,12 @@ pub const MODULE_PROFILE_V18: &str = "mumei.native-pure-i64-module-linux-x86_64/
 /// current path (`pure-i64-composite/v16`). v1–v18 records keep their
 /// own gates.
 pub const MODULE_PROFILE_V19: &str = "mumei.native-pure-i64-module-linux-x86_64/v19";
+/// Module v20: the enum-typed-struct-field widening — a field
+/// `e: Color` flattens to a tag plus payload leaf slots exactly like
+/// an enum parameter under `pure-i64-composite/v17`. (v19 names the
+/// enum-payload-write widening on the composite ladder.) v1–v18
+/// records keep their own gates.
+pub const MODULE_PROFILE_V20: &str = "mumei.native-pure-i64-module-linux-x86_64/v20";
 pub const MODULE_SCOPE: &str =
     "identity_consistency_only/no_authenticity_or_artifact_semantic_proof";
 pub const MODULE_RECHECK_PROFILE: &str = "mumei.native-module-source-recheck/v1";
@@ -153,6 +159,7 @@ pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, Bundl
         MODULE_PROFILE_V17 => Ok(RefinedAdmission::CompositeV14),
         MODULE_PROFILE_V18 => Ok(RefinedAdmission::CompositeV15),
         MODULE_PROFILE_V19 => Ok(RefinedAdmission::CompositeV16),
+        MODULE_PROFILE_V20 => Ok(RefinedAdmission::CompositeV17),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -215,6 +222,9 @@ pub const MULTIFILE_PROFILE_V18: &str = "mumei.native-pure-i64-multifile-linux-x
 /// Multifile v19: the enum-payload-write widening of
 /// `MODULE_PROFILE_V19`.
 pub const MULTIFILE_PROFILE_V19: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v19";
+/// Multifile v20: the enum-typed-struct-field widening of
+/// `MODULE_PROFILE_V20` (v19 names the enum-payload-write widening).
+pub const MULTIFILE_PROFILE_V20: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v20";
 pub const MULTIFILE_RECHECK_PROFILE: &str = "mumei.native-multifile-source-recheck/v1";
 
 pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, BundleError> {
@@ -238,6 +248,7 @@ pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, Bu
         MULTIFILE_PROFILE_V17 => Ok(RefinedAdmission::CompositeV14),
         MULTIFILE_PROFILE_V18 => Ok(RefinedAdmission::CompositeV15),
         MULTIFILE_PROFILE_V19 => Ok(RefinedAdmission::CompositeV16),
+        MULTIFILE_PROFILE_V20 => Ok(RefinedAdmission::CompositeV17),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -1970,6 +1981,14 @@ mod source_recheck_tests {
         assert_eq!(
             multifile_refined_admission(MULTIFILE_PROFILE_V18).unwrap(),
             RefinedAdmission::CompositeV15
+        );
+        assert_eq!(
+            module_refined_admission(MODULE_PROFILE_V20).unwrap(),
+            RefinedAdmission::CompositeV17
+        );
+        assert_eq!(
+            multifile_refined_admission(MULTIFILE_PROFILE_V20).unwrap(),
+            RefinedAdmission::CompositeV17
         );
         assert!(module_refined_admission("mumei.other/v1").is_err());
         assert!(multifile_refined_admission("mumei.other/v1").is_err());
