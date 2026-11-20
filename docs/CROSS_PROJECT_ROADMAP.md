@@ -6025,6 +6025,44 @@ listing and the canonical contract table document the argument;
 acceptance remains a recorded dispatch observation, never a grade
 promotion.
 
+### Claim Book promotable gate (mumei #1172)
+
+[mumei#1172](https://github.com/mumei-lang/mumei/pull/1172) turns the
+requirement-list substrate into a gate: `mumei claims
+--require-evidence-acceptance <reqs.json> <evidence.json>
+<acceptance.json>` (repeatable, opt-in) refuses to emit the claim book
+unless every declared triple promotes — the acceptance descriptor must
+be a bounded `mumei.evidence-requirement-list-acceptance/v1` document
+pinning the requirement list by `requirement_list_fingerprint` and
+exactly one evidence record by `evidence_fingerprint` +
+`evidence_schema_version`, must report `consistent` with zero
+conflicts, and must declare verdict `accepted`. Every input is read
+through the bounded declared-input path and all three sha256 pins are
+checked against the declared bytes — a verdict-bearing descriptor the
+consumer did not itself evaluate is trusted only as far as its
+fingerprints.
+
+### Scheduled-attempt promotable export (mumei-agent #1000)
+
+[mumei-agent#1000](https://github.com/mumei-lang/mumei-agent/pull/1000)
+closes the loop from observation to promotable input:
+`verify-schedule --core-requirement-list PATH` (requires `--core`,
+conflicts with `--core-requirement`) runs `core evidence accept
+--stdin --json --requirement-list PATH` on the selected attempt's
+captured output, and `--export-evidence-acceptance DIR` writes the
+exact triple the Claim Book gate pins — the declared requirement list,
+the evaluated stdout bytes and the raw conjunctive descriptor — under
+`requirement-list.json`, `evidence.json` and `acceptance.json`. The
+descriptor is validated strictly (top-level object, no duplicate keys,
+`evidence_fingerprint` bound to the captured bytes, verdict
+`accepted`), the requirement list is re-hashed against the fingerprint
+Core evaluated before export, and a failed or cancelled check leaves
+nothing promotable: the reserved names are cleared of a prior export
+before dispatch and foreign files under them are refused, never
+deleted. Export targets colliding with declared inputs or `--output`
+are declaration errors. Acceptance remains a recorded dispatch
+observation — the gate decides promotion, not the scheduler.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
