@@ -5785,6 +5785,26 @@ slots, non-finite inners (recursive or array payloads) and forward
 references stay fail-closed. This lands the last of issue #983's
 five verification residuals.
 
+### Widened general-path enum payload scalars (mumei #1161)
+
+[mumei#1161](https://github.com/mumei-lang/mumei/pull/1161) widens the
+general-path enum payload scalars beyond `i64`: `field_leaf_types`
+now keeps each leaf's declared scalar (`u64`, `u32`, `i32` — and
+`usize`/`isize` through the existing `resolve_base_type` fold) instead
+of collapsing every payload leaf to `I64`, so an `E(u64)` leaf is
+verified with unsigned semantics and `a < 0` on it is vacuous rather
+than satisfiable. `Pattern::Variable` payload bindings register the
+declared fixed-width type into `local_int_types`, and every binding
+site the coverage pass walks snapshots and restores the map — a
+guarded arm's `x:u64` no longer leaks past its `match` onto an outer
+`x:i64`. Constructor payloads get a leaf-domain assert at each
+introduction site (`0 <= v` for unsigned leaves, plus the declared
+ceiling for narrower widths), and the `enum:`-leaf walk from #1158 is
+charged a shared emission budget (`MAX_ENUM_DOMAIN_NODES = 1024`) so
+variant-product domains stay bounded while partial conjunctions only
+weaken proofs. Mixing a widened leaf with a declared `i64` operand
+still rejects, matching the composite-path rule.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
