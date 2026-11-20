@@ -63,6 +63,17 @@ fn overwide_pattern_reports_a_diagnostic_not_a_panic() {
 }
 
 #[test]
+fn payload_binding_shadows_outer_struct_without_polluting_it() {
+    let out = run_verify(&fixture("test_enum_payload_shadow.mm"), "shadow");
+    assert!(
+        out.status.success(),
+        "a match-bound 'p' is arm-local — the outer struct's fields must survive the merge:\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn composite_payload_write_rejects_wrong_tag() {
     let out = run_verify(
         &fixture("test_enum_composite_payload_verify_negative.mm"),

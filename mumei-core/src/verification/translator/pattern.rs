@@ -244,6 +244,7 @@ pub(crate) fn pattern_bind_variables<'a>(
     env: &mut Env<'a>,
     vc: &VCtx<'a>,
     decl_hint: Option<&str>,
+    bound: &mut std::collections::HashSet<String>,
 ) {
     let module_env = vc.module_env;
     match pattern {
@@ -322,6 +323,21 @@ pub(crate) fn pattern_bind_variables<'a>(
                                         env, fname, &leaves,
                                     );
                                     env.insert(fname.clone(), handle.clone());
+                                    // The bound name shadows any outer
+                                    // binding — its field slots
+                                    // (`{fname}_{leaf}`,
+                                    // `__struct_{fname}_{leaf}`) are
+                                    // arm-local too, so the merge must
+                                    // not fold them into the post-match
+                                    // env like assignments.
+                                    for (leaf, _) in &leaves {
+                                        bound.insert(format!("{fname}_{leaf}"));
+                                        bound.insert(
+                                            crate::verification::translator::struct_field_key(
+                                                fname, leaf,
+                                            ),
+                                        );
+                                    }
                                 }
                                 continue;
                             }
@@ -351,6 +367,7 @@ pub(crate) fn pattern_bind_variables<'a>(
                                         env,
                                         vc,
                                         None,
+                                        bound,
                                     );
                                 }
                                 _ => {}
@@ -408,6 +425,7 @@ pub(crate) fn pattern_bind_variables<'a>(
                                     env,
                                     vc,
                                     field_hint.as_deref(),
+                                    bound,
                                 );
                             }
                             _ => {}
