@@ -426,22 +426,51 @@ impl<'a> VCtx<'a> {
 
     pub(crate) fn enter_contract_instantiation(
         &self,
-        atom: &str,
+        atom: &crate::parser::ast::Atom,
     ) -> ContractInstantiationGuard<'_, 'a> {
         self.contracts_in_instantiation
             .borrow_mut()
-            .push(atom.to_string());
-        ContractInstantiationGuard { vc: self }
+            .push(atom.name.clone());
+        // The callee's contract re-resolves its parameter names — seed its
+        // enum-typed params over the caller's same-named bindings so
+        // `.tag`/match owner resolution uses the callee's declared enum,
+        // not whatever the caller happened to name `e`.
+        let mut saved = Vec::new();
+        {
+            let mut locals = self.local_enum_types.borrow_mut();
+            for param in &atom.params {
+                let Some(type_name) = param.type_name.as_deref() else {
+                    continue;
+                };
+                let base = self.module_env.resolve_base_type(type_name);
+                if self.module_env.get_enum(&base).is_some() {
+                    saved.push((param.name.clone(), locals.insert(param.name.clone(), base)));
+                }
+            }
+        }
+        ContractInstantiationGuard { vc: self, saved }
     }
 }
 
 pub(crate) struct ContractInstantiationGuard<'v, 'a> {
     vc: &'v VCtx<'a>,
+    saved: Vec<(String, Option<String>)>,
 }
 
 impl Drop for ContractInstantiationGuard<'_, '_> {
     fn drop(&mut self) {
         let _ = self.vc.contracts_in_instantiation.borrow_mut().pop();
+        let mut locals = self.vc.local_enum_types.borrow_mut();
+        for (name, old) in self.saved.drain(..) {
+            match old {
+                Some(prev) => {
+                    locals.insert(name, prev);
+                }
+                None => {
+                    locals.remove(&name);
+                }
+            }
+        }
     }
 }
 

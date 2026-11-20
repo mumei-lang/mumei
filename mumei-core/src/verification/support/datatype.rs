@@ -565,14 +565,22 @@ pub(crate) fn binding_declared_type(vc: &VCtx, name: &str) -> Option<String> {
     if name == "result" {
         return atom.and_then(|a| a.return_type.clone());
     }
-    atom.and_then(|a| {
-        a.params
-            .iter()
-            .find(|p| p.name == name)
-            .and_then(|p| p.type_name.clone())
-    })
-    .or_else(|| vc.local_enum_types.borrow().get(name).cloned())
-    .or_else(|| vc.local_struct_types.borrow().get(name).cloned())
+    // Locals shadow params: a `let e = …` binding — or a callee param
+    // seeded during contract instantiation — must win over a same-named
+    // parameter of the current atom.
+    vc.local_enum_types
+        .borrow()
+        .get(name)
+        .cloned()
+        .or_else(|| vc.local_struct_types.borrow().get(name).cloned())
+        .or_else(|| {
+            atom.and_then(|a| {
+                a.params
+                    .iter()
+                    .find(|p| p.name == name)
+                    .and_then(|p| p.type_name.clone())
+            })
+        })
 }
 
 /// Declared type name of an expression, when statically recoverable:
@@ -788,22 +796,9 @@ pub(crate) fn resolve_variant_owner<'a>(
 /// does — without this the owner set is ambiguous across prelude enums.
 pub(crate) fn infer_expr_enum_name(vc: &VCtx, expr: &Expr) -> Option<String> {
     match expr {
-        Expr::Variable(v) => vc
-            .local_enum_types
-            .borrow()
-            .get(v.as_str())
-            .cloned()
-            .or_else(|| {
-                vc.current_atom
-                    .and_then(|atom| {
-                        atom.params
-                            .iter()
-                            .find(|p| p.name == *v)
-                            .and_then(|p| p.type_name.as_deref())
-                    })
-                    .map(|t| type_name_base(t).to_string())
-                    .filter(|t| vc.module_env.get_enum(t).is_some())
-            }),
+        Expr::Variable(v) => binding_declared_type(vc, v)
+            .map(|t| type_name_base(&t).to_string())
+            .filter(|t| vc.module_env.get_enum(t).is_some()),
         Expr::Call(name, _) => {
             if let Some((enum_name, variant)) = name.split_once("::") {
                 vc.module_env

@@ -203,6 +203,20 @@ fn enum_tag_reads_verify_on_datatype_and_int_tag_paths() {
 }
 
 #[test]
+fn enum_tag_in_callee_contract_uses_callee_enum() {
+    let output = mumei_verify("tests/test_enum_tag_callee_context.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("caller"),
+        "a callee's `.tag` must resolve the callee's enum, not a same-named caller binding — `caller`'s `result == 0` must be rejected:\n{combined}"
+    );
+}
+
+#[test]
 fn enum_ctor_payload_satisfying_field_type_verifies() {
     let output = mumei_verify("tests/test_enum_ctor_refined.mm");
     let combined = format!(

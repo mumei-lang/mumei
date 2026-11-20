@@ -551,7 +551,7 @@ fn unfold_constant_calls<'a>(
                 call_env.insert(param.name.clone(), bound);
             }
 
-            let _contract_guard = vc.enter_contract_instantiation(&atom.name);
+            let _contract_guard = vc.enter_contract_instantiation(atom);
             let Some(antecedent) = constant_call_antecedent(vc, atom, &args, &call_env) else {
                 continue;
             };
@@ -2487,7 +2487,7 @@ pub(crate) fn expr_to_z3<'a>(
                         let caller_requires =
                             crate::verification::caller_requires_obligation(&callee);
                         if caller_requires.trim() != "true" && !recursive_instance {
-                            let _contract_guard = vc.enter_contract_instantiation(&callee.name);
+                            let _contract_guard = vc.enter_contract_instantiation(&callee);
                             if let Some(solver) = solver_opt {
                                 let req_ast = parse_expression(&caller_requires);
                                 let req_z3 = expr_to_z3(vc, &req_ast, &mut call_env, None)?;
@@ -2983,7 +2983,7 @@ pub(crate) fn expr_to_z3<'a>(
                                 solver_opt,
                                 !recursive_instance && callee_semantics_match_caller(vc, &callee),
                             ) {
-                                let _contract_guard = vc.enter_contract_instantiation(&callee.name);
+                                let _contract_guard = vc.enter_contract_instantiation(&callee);
                                 if rec_signature.is_some() {
                                     // Result assumptions come from the same
                                     // builder the callee's body side uses
@@ -3088,7 +3088,7 @@ pub(crate) fn expr_to_z3<'a>(
                             && !recursive_instance
                             && callee_semantics_match_caller(vc, &callee)
                         {
-                            let _contract_guard = vc.enter_contract_instantiation(&callee.name);
+                            let _contract_guard = vc.enter_contract_instantiation(&callee);
                             call_env.insert("result".to_string(), result_z3.clone());
                             if let Some(len_sym) = &result_len {
                                 call_env.insert("__z3_arr_result".to_string(), result_z3.clone());
@@ -5039,7 +5039,7 @@ pub(crate) fn expr_to_z3<'a>(
                     let caller_requires =
                         crate::verification::caller_requires_obligation(&callee_atom);
                     if caller_requires.trim() != "true" && !recursive_instance {
-                        let _contract_guard = vc.enter_contract_instantiation(&callee_atom.name);
+                        let _contract_guard = vc.enter_contract_instantiation(&callee_atom);
                         let req_ast = parse_expression(&caller_requires);
                         let req_z3 = expr_to_z3(vc, &req_ast, &mut call_env, None)?;
                         if let Some(req_bool) = req_z3.as_bool() {
@@ -5251,8 +5251,7 @@ pub(crate) fn expr_to_z3<'a>(
                             solver_opt,
                             !recursive_instance && callee_semantics_match_caller(vc, &callee_atom),
                         ) {
-                            let _contract_guard =
-                                vc.enter_contract_instantiation(&callee_atom.name);
+                            let _contract_guard = vc.enter_contract_instantiation(&callee_atom);
                             if rec_signature.is_some() {
                                 assume_struct_contract(
                                     vc,
@@ -5323,7 +5322,7 @@ pub(crate) fn expr_to_z3<'a>(
                         crate::verification::ContractView::CallerEnsures,
                     );
                     if caller_ensures.trim() != "true" && !recursive_instance {
-                        let _contract_guard = vc.enter_contract_instantiation(&callee_atom.name);
+                        let _contract_guard = vc.enter_contract_instantiation(&callee_atom);
                         call_env.insert("result".to_string(), result_z3.clone());
                         if let Some(len_sym) = &result_len {
                             call_env.insert("__z3_arr_result".to_string(), result_z3.clone());
@@ -5627,32 +5626,46 @@ pub(crate) fn expr_to_z3<'a>(
             // struct-typed receivers (infer_expr_enum_name yields None).
             if field_name == "tag" {
                 if let Some(enum_name) = datatype::infer_expr_enum_name(vc, inner_expr) {
-                    if let Some(enum_def) = vc.module_env.get_enum(&enum_name) {
+                    // Prefer the instantiated declaration: a `Wrap<i64>`
+                    // value carries the monomorphized enum's datatype sort,
+                    // while the base name resolves to the generic def that
+                    // never builds one — reading `base` as the Int-tag would
+                    // hand a datatype term to an integer comparison.
+                    let enum_def = datatype::declared_type_of_expr(vc, inner_expr)
+                        .and_then(|t| vc.module_env.get_enum(&t))
+                        .or_else(|| vc.module_env.get_enum(&enum_name));
+                    if let Some(enum_def) = enum_def {
                         let base = expr_to_z3(vc, inner_expr, env, solver_opt)?;
-                        let Some(sort) = datatype::enum_datatype_sort(vc, enum_def) else {
-                            // Int-tag encoding: the value already is the tag.
-                            return Ok(base);
-                        };
-                        if let Some(dt) = base.as_datatype() {
-                            let n = enum_def.variants.len();
-                            let mut tag = Int::from_i64(ctx, (n - 1) as i64);
-                            for idx in (0..n - 1).rev() {
-                                let is_v = sort.variants[idx]
-                                    .tester
-                                    .apply(&[&dt])
-                                    .as_bool()
-                                    .ok_or_else(|| {
-                                        MumeiError::verification(format!(
-                                            "enum '{enum_name}' tester is not boolean"
-                                        ))
-                                    })?;
-                                tag = is_v.ite(&Int::from_i64(ctx, idx as i64), &tag);
+                        let sort = datatype::enum_datatype_sort(vc, enum_def);
+                        match (sort, base.as_datatype()) {
+                            (None, None) => {
+                                // Int-tag encoding: the value already is the tag.
+                                return Ok(base);
                             }
-                            return Ok(tag.into());
+                            (Some(sort), Some(dt)) => {
+                                let n = enum_def.variants.len();
+                                let mut tag = Int::from_i64(ctx, (n - 1) as i64);
+                                for idx in (0..n - 1).rev() {
+                                    let is_v = sort.variants[idx]
+                                        .tester
+                                        .apply(&[&dt])
+                                        .as_bool()
+                                        .ok_or_else(|| {
+                                            MumeiError::verification(format!(
+                                                "enum '{enum_name}' tester is not boolean"
+                                            ))
+                                        })?;
+                                    tag = is_v.ite(&Int::from_i64(ctx, idx as i64), &tag);
+                                }
+                                return Ok(tag.into());
+                            }
+                            // Declared finite-ADT but the env value is not a
+                            // datatype, or a datatype value whose def has no
+                            // sort (generic base): fall through to the
+                            // generic field resolution rather than returning
+                            // a non-tag term.
+                            _ => {}
                         }
-                        // Finite-ADT enum whose env value is not a datatype
-                        // (unmodeled source): fall through to the generic
-                        // field resolution rather than returning it as a tag.
                     }
                 }
             }
