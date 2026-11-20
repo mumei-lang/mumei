@@ -3,6 +3,7 @@ use mumei_core::evidence_acceptance::{self, Verdict};
 use mumei_core::producer_signature::{self, PRODUCER_SIGNATURE_SCHEMA};
 use mumei_core::source_evidence::{self, AcceptOutcome, Options, Outcome, RecheckOutcome};
 use mumei_core::verification_evidence::{self, MAX_INPUT_BYTES, SCHEMA_VERSION};
+use sha2::{Digest, Sha256};
 use std::{io::Write, path::Path};
 
 const TEXT: &str = "Evidence v1 representation valid.\n\
@@ -74,16 +75,22 @@ pub(crate) fn run(command: EvidenceCommand) {
             input,
             stdin,
             requirement,
+            requirement_list,
             json,
         } => (
             accept_list(
                 input.as_deref().map(Path::new),
                 stdin,
                 json,
-                Path::new(&requirement),
+                requirement.as_deref().map(Path::new),
+                requirement_list.as_deref().map(Path::new),
                 &mut output,
             ),
-            "Evidence list acceptance evaluation failed",
+            if requirement_list.is_some() {
+                "Evidence requirement list acceptance evaluation failed"
+            } else {
+                "Evidence list acceptance evaluation failed"
+            },
         ),
         EvidenceCommand::Check {
             input,
@@ -184,6 +191,12 @@ pub(crate) fn run(command: EvidenceCommand) {
                 }
                 ("Evidence list acceptance evaluation failed", _) => {
                     "Evidence rejected under the declared requirement; no record accepted"
+                }
+                ("Evidence requirement list acceptance evaluation failed", 3) => {
+                    "Evidence requirement list acceptance inconclusive; not every declared requirement accepted"
+                }
+                ("Evidence requirement list acceptance evaluation failed", _) => {
+                    "Evidence requirement list rejected; a declared requirement was rejected"
                 }
                 (_, 3) => {
                     "Source query inconclusive within bounded profile; no Evidence emitted"
@@ -570,7 +583,8 @@ fn accept_list(
     input: Option<&Path>,
     stdin: bool,
     json: bool,
-    requirement: &Path,
+    requirement: Option<&Path>,
+    requirement_list: Option<&Path>,
     output: &mut impl Write,
 ) -> Result<i32, &'static str> {
     let list_bytes = match (input, stdin) {
@@ -578,15 +592,8 @@ fn accept_list(
         (None, true) => super::input::read_stdin(MAX_INPUT_BYTES as u64)?,
         _ => return Err("choose exactly one evidence input"),
     };
-    let requirement_bytes = super::input::read_regular(requirement, MAX_INPUT_BYTES as u64)?;
-    let requirement = evidence_acceptance::decode_requirement(&requirement_bytes)
-        .map_err(|_| "invalid evidence requirement representation")?;
     let records = verification_evidence::decode_list(&list_bytes)
         .map_err(|_| "invalid evidence representation")?;
-    let evaluations: Vec<evidence_acceptance::Evaluation> = records
-        .iter()
-        .map(|record| evidence_acceptance::evaluate(&requirement, record))
-        .collect();
     // Consumer-side arbitration over the closed list: one accepting
     // record satisfies the requirement — but only when the list's
     // identity pins agree: an affirmative acceptance over a
@@ -594,17 +601,111 @@ fn accept_list(
     // affirmative rejection on any record rejects, and a list with no
     // verdict either way stays inconclusive.
     let consistency = verification_evidence::consistency_check(&records);
-    let verdict = if evaluations.iter().any(|ev| ev.verdict == Verdict::Accepted) {
-        if consistency.consistent {
-            Verdict::Accepted
+    let arbitrate = |evaluations: &[evidence_acceptance::Evaluation]| {
+        if evaluations.iter().any(|ev| ev.verdict == Verdict::Accepted) {
+            if consistency.consistent {
+                Verdict::Accepted
+            } else {
+                Verdict::Inconclusive
+            }
+        } else if evaluations.iter().any(|ev| ev.verdict == Verdict::Rejected) {
+            Verdict::Rejected
         } else {
             Verdict::Inconclusive
         }
-    } else if evaluations.iter().any(|ev| ev.verdict == Verdict::Rejected) {
-        Verdict::Rejected
-    } else {
-        Verdict::Inconclusive
     };
+    match (requirement, requirement_list) {
+        (Some(requirement), None) => {
+            let requirement_bytes =
+                super::input::read_regular(requirement, MAX_INPUT_BYTES as u64)?;
+            let requirement = evidence_acceptance::decode_requirement(&requirement_bytes)
+                .map_err(|_| "invalid evidence requirement representation")?;
+            let evaluations: Vec<evidence_acceptance::Evaluation> = records
+                .iter()
+                .map(|record| evidence_acceptance::evaluate(&requirement, record))
+                .collect();
+            let verdict = arbitrate(&evaluations);
+            accept_list_single(
+                verdict,
+                &evaluations,
+                &consistency,
+                &requirement_bytes,
+                &list_bytes,
+                json,
+                output,
+            )
+        }
+        (None, Some(requirement_list)) => {
+            let requirement_list_bytes =
+                super::input::read_regular(requirement_list, MAX_INPUT_BYTES as u64)?;
+            let envelope: Vec<Box<serde_json::value::RawValue>> =
+                serde_json::from_slice::<RequirementListEnvelope>(&requirement_list_bytes)
+                    .map_err(|_| "invalid evidence requirement representation")?
+                    .requirements;
+            let fingerprints: Vec<String> = envelope
+                .iter()
+                .map(|element| format!("{:x}", Sha256::digest(element.get().as_bytes())))
+                .collect();
+            let requirements =
+                evidence_acceptance::decode_requirement_list(&requirement_list_bytes)
+                    .map_err(|_| "invalid evidence requirement representation")?;
+            let per_requirement: Vec<(Verdict, Vec<evidence_acceptance::Evaluation>, String)> =
+                requirements
+                    .iter()
+                    .zip(fingerprints)
+                    .map(|(requirement, fingerprint)| {
+                        let evaluations: Vec<evidence_acceptance::Evaluation> = records
+                            .iter()
+                            .map(|record| evidence_acceptance::evaluate(requirement, record))
+                            .collect();
+                        (arbitrate(&evaluations), evaluations, fingerprint)
+                    })
+                    .collect();
+            // The declared list is conjunctive: every requirement must
+            // arbitrate to accepted — an affirmative rejection on any
+            // requirement rejects the whole list, and anything short of
+            // all-accepted stays inconclusive.
+            let verdict = if per_requirement
+                .iter()
+                .all(|(verdict, ..)| *verdict == Verdict::Accepted)
+            {
+                Verdict::Accepted
+            } else if per_requirement
+                .iter()
+                .any(|(verdict, ..)| *verdict == Verdict::Rejected)
+            {
+                Verdict::Rejected
+            } else {
+                Verdict::Inconclusive
+            };
+            accept_list_conjunctive(
+                verdict,
+                &per_requirement,
+                &consistency,
+                &requirement_list_bytes,
+                &list_bytes,
+                json,
+                output,
+            )
+        }
+        _ => Err("choose exactly one requirement declaration"),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RequirementListEnvelope {
+    requirements: Vec<Box<serde_json::value::RawValue>>,
+}
+
+fn accept_list_single(
+    verdict: Verdict,
+    evaluations: &[evidence_acceptance::Evaluation],
+    consistency: &verification_evidence::ConsistencyReport,
+    requirement_bytes: &[u8],
+    list_bytes: &[u8],
+    json: bool,
+    output: &mut impl Write,
+) -> Result<i32, &'static str> {
     let code = match verdict {
         Verdict::Accepted => 0,
         Verdict::Rejected => 1,
@@ -616,8 +717,8 @@ fn accept_list(
             "schema_version": "mumei.evidence-list-acceptance/v1",
             "evidence_schema_version": verification_evidence::LIST_SCHEMA_VERSION,
             "requirement_schema_version": evidence_acceptance::REQUIREMENT_SCHEMA,
-            "requirement_fingerprint": format!("{:x}", Sha256::digest(&requirement_bytes)),
-            "list_fingerprint": format!("{:x}", Sha256::digest(&list_bytes)),
+            "requirement_fingerprint": format!("{:x}", Sha256::digest(requirement_bytes)),
+            "list_fingerprint": format!("{:x}", Sha256::digest(list_bytes)),
             "acceptance": "evaluated",
             "verdict": verdict.as_str(),
             "consistent": consistency.consistent,
@@ -665,6 +766,102 @@ Scope: declared-requirement normalization over each record's representation plus
             accepted,
             rejected,
             evaluations.len() - accepted - rejected,
+            if consistency.consistent {
+                "no consistency conflicts".to_owned()
+            } else {
+                format!("{} consistency conflict(s)", consistency.conflict_count)
+            },
+        )
+        .into_bytes()
+    };
+    output
+        .write_all(&descriptor)
+        .map_err(|_| "cannot write evidence acceptance descriptor")?;
+    Ok(code)
+}
+
+fn accept_list_conjunctive(
+    verdict: Verdict,
+    per_requirement: &[(Verdict, Vec<evidence_acceptance::Evaluation>, String)],
+    consistency: &verification_evidence::ConsistencyReport,
+    requirement_list_bytes: &[u8],
+    list_bytes: &[u8],
+    json: bool,
+    output: &mut impl Write,
+) -> Result<i32, &'static str> {
+    let code = match verdict {
+        Verdict::Accepted => 0,
+        Verdict::Rejected => 1,
+        Verdict::Inconclusive => 3,
+    };
+    let descriptor = if json {
+        let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "mumei.evidence-requirement-list-acceptance/v1",
+            "evidence_schema_version": verification_evidence::LIST_SCHEMA_VERSION,
+            "requirement_schema_version": evidence_acceptance::REQUIREMENT_LIST_SCHEMA,
+            "requirement_list_fingerprint": format!("{:x}", Sha256::digest(requirement_list_bytes)),
+            "list_fingerprint": format!("{:x}", Sha256::digest(list_bytes)),
+            "acceptance": "evaluated",
+            "verdict": verdict.as_str(),
+            "consistent": consistency.consistent,
+            "conflict_count": consistency.conflict_count,
+            "conflicts": consistency.conflicts,
+            "requirements_evaluated": per_requirement.len(),
+            "records_evaluated": per_requirement
+                .first()
+                .map(|(_, evaluations, _)| evaluations.len())
+                .unwrap_or(0),
+            "requirements": per_requirement
+                .iter()
+                .enumerate()
+                .map(|(index, (verdict, evaluations, fingerprint))| serde_json::json!({
+                    "index": index,
+                    "requirement_fingerprint": fingerprint,
+                    "verdict": verdict.as_str(),
+                    "records": evaluations
+                        .iter()
+                        .enumerate()
+                        .map(|(index, evaluation)| serde_json::json!({
+                            "index": index,
+                            "verdict": evaluation.verdict.as_str(),
+                            "checks": evaluation
+                                .checks
+                                .iter()
+                                .map(|check| serde_json::json!({"name": check.name, "outcome": check.outcome}))
+                                .collect::<Vec<_>>(),
+                        }))
+                        .collect::<Vec<_>>(),
+                }))
+                .collect::<Vec<_>>(),
+            "checks_performed": ["representation_gate",
+                "declared_requirement_normalization",
+                "cross_record_pin_agreement",
+                "conjunctive_requirement_fold"],
+            "checks_not_performed": ["claim_truth", "producer_authenticity",
+                "historical_execution", "record_freshness",
+                "independent_model_correspondence", "artifact_semantics",
+                "tool_execution", "grade_promotion"],
+        }))
+        .map_err(|_| "cannot encode evidence acceptance descriptor")?;
+        bytes.push(b'\n');
+        bytes
+    } else {
+        let accepted = per_requirement
+            .iter()
+            .filter(|(verdict, ..)| *verdict == Verdict::Accepted)
+            .count();
+        let rejected = per_requirement
+            .iter()
+            .filter(|(verdict, ..)| *verdict == Verdict::Rejected)
+            .count();
+        format!(
+            "Evidence requirement list acceptance: {} ({} requirement(s): {} accepted, {} rejected, {} inconclusive; {}).\n\
+Scope: declared-requirement normalization over each record's representation plus cross-record pin agreement and a conjunctive requirement fold; no claim truth, producer authenticity, freshness, independent correspondence, artifact semantics, tool execution or grade promotion checked.\n",
+            verdict.as_str(),
+            per_requirement.len(),
+            accepted,
+            rejected,
+            per_requirement.len() - accepted - rejected,
             if consistency.consistent {
                 "no consistency conflicts".to_owned()
             } else {

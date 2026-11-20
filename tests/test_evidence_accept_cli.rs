@@ -366,3 +366,160 @@ fn malformed_list_fails_statically_without_content() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("FAKE_PRIVATE"), "{stderr}");
 }
+
+fn requirement_list_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let (dir, list, requirement) = list_fixture();
+    let saved: Value = serde_json::from_slice(&fs::read(&requirement).unwrap()).unwrap();
+    let requirement_list = dir.path().join("FAKE_PRIVATE_REQUIREMENT_LIST.json");
+    fs::write(
+        &requirement_list,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": "mumei.evidence-requirement-list/v1",
+            "requirements": [saved],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    (dir, list, requirement_list)
+}
+
+fn requirement_list_command(list: &Path, requirement_list: &Path, json: bool) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_mumei"));
+    cmd.args(["evidence", "accept-list"])
+        .arg(list)
+        .arg("--requirement-list")
+        .arg(requirement_list);
+    if json {
+        cmd.arg("--json");
+    }
+    cmd
+}
+
+#[test]
+fn requirement_list_all_accepted_emits_aggregate_accepted() {
+    let (_dir, list, requirement_list) = requirement_list_fixture();
+    let output = requirement_list_command(&list, &requirement_list, true)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let doc: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        doc["schema_version"],
+        "mumei.evidence-requirement-list-acceptance/v1"
+    );
+    assert_eq!(doc["verdict"], "accepted");
+    assert_eq!(doc["requirements_evaluated"], 1);
+    assert_eq!(doc["requirements"][0]["verdict"], "accepted");
+    assert_eq!(doc["requirements"][0]["records"][0]["verdict"], "accepted");
+    assert!(doc["checks_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c == "conjunctive_requirement_fold"));
+    assert_eq!(
+        doc["requirement_list_fingerprint"],
+        json!(format!(
+            "{:x}",
+            Sha256::digest(fs::read(&requirement_list).unwrap())
+        ))
+    );
+}
+
+#[test]
+fn requirement_list_one_rejected_requirement_rejects() {
+    let (_dir, list, requirement_list) = requirement_list_fixture();
+    rewrite_list(&requirement_list, |doc| {
+        let mut bad = doc["requirements"][0].clone();
+        bad["subject_sha256"] = json!("0".repeat(64));
+        doc["requirements"].as_array_mut().unwrap().push(bad);
+    });
+    let output = requirement_list_command(&list, &requirement_list, true)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let doc: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["verdict"], "rejected");
+    assert_eq!(doc["requirements"][0]["verdict"], "accepted");
+    assert_eq!(doc["requirements"][1]["verdict"], "rejected");
+}
+
+#[test]
+fn requirement_list_one_inconclusive_stays_inconclusive() {
+    let (_dir, list, requirement_list) = requirement_list_fixture();
+    rewrite_list(&requirement_list, |doc| {
+        let mut weak = doc["requirements"][0].clone();
+        weak["correspondence_status"] = json!(["validated"]);
+        doc["requirements"].as_array_mut().unwrap().push(weak);
+    });
+    let output = requirement_list_command(&list, &requirement_list, true)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let doc: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["verdict"], "inconclusive");
+    assert_eq!(doc["requirements"][1]["verdict"], "inconclusive");
+}
+
+#[test]
+fn requirement_list_conflict_demotes_accepted_to_inconclusive() {
+    let (_dir, list, requirement_list) = requirement_list_fixture();
+    rewrite_list(&list, |doc| {
+        let mut bad = doc["evidence"][0].clone();
+        bad["subject"]["sha256"] = json!("0".repeat(64));
+        doc["evidence"].as_array_mut().unwrap().push(bad);
+    });
+    let output = requirement_list_command(&list, &requirement_list, true)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let doc: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["verdict"], "inconclusive");
+    assert_eq!(doc["consistent"], false);
+    assert_eq!(doc["requirements"][0]["verdict"], "inconclusive");
+}
+
+#[test]
+fn requirement_list_empty_or_oversized_is_a_static_failure() {
+    let (_dir, list, requirement_list) = requirement_list_fixture();
+    let valid_item = serde_json::from_slice::<Value>(&fs::read(&requirement_list).unwrap())
+        .unwrap()["requirements"][0]
+        .clone();
+    rewrite_list(&requirement_list, |doc| {
+        doc["requirements"] = json!([]);
+    });
+    let output = requirement_list_command(&list, &requirement_list, true)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("FAKE_PRIVATE"), "{stderr}");
+    rewrite_list(&requirement_list, |doc| {
+        doc["requirements"] = json!(vec![valid_item.clone(); 16]);
+    });
+    let output = requirement_list_command(&list, &requirement_list, true)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    rewrite_list(&requirement_list, |doc| {
+        doc["requirements"] = json!(vec![valid_item; 17]);
+    });
+    let output = requirement_list_command(&list, &requirement_list, true)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}
+
+#[test]
+fn requirement_and_requirement_list_are_exclusive() {
+    let (_dir, list, requirement) = list_fixture();
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args(["evidence", "accept-list"])
+        .arg(&list)
+        .arg("--requirement")
+        .arg(&requirement)
+        .arg("--requirement-list")
+        .arg(&requirement)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+}
