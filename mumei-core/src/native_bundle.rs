@@ -115,6 +115,11 @@ pub const MODULE_PROFILE_V17: &str = "mumei.native-pure-i64-module-linux-x86_64/
 /// v1–v16 records keep their own gates; v17 names the enum-equality
 /// widening on the composite ladder.
 pub const MODULE_PROFILE_V18: &str = "mumei.native-pure-i64-module-linux-x86_64/v18";
+/// Module v19: the enum-payload-write widening — `e.p = v` writes the
+/// payload slot `p` of the variant the tag provably carries under the
+/// current path (`pure-i64-composite/v16`). v1–v18 records keep their
+/// own gates.
+pub const MODULE_PROFILE_V19: &str = "mumei.native-pure-i64-module-linux-x86_64/v19";
 pub const MODULE_SCOPE: &str =
     "identity_consistency_only/no_authenticity_or_artifact_semantic_proof";
 pub const MODULE_RECHECK_PROFILE: &str = "mumei.native-module-source-recheck/v1";
@@ -147,6 +152,7 @@ pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, Bundl
         MODULE_PROFILE_V16 => Ok(RefinedAdmission::CompositeV13),
         MODULE_PROFILE_V17 => Ok(RefinedAdmission::CompositeV14),
         MODULE_PROFILE_V18 => Ok(RefinedAdmission::CompositeV15),
+        MODULE_PROFILE_V19 => Ok(RefinedAdmission::CompositeV16),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -206,6 +212,9 @@ pub const MULTIFILE_PROFILE_V17: &str = "mumei.native-pure-i64-multifile-linux-x
 /// Multifile v18: the nested-field-write widening of
 /// `MODULE_PROFILE_V18`.
 pub const MULTIFILE_PROFILE_V18: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v18";
+/// Multifile v19: the enum-payload-write widening of
+/// `MODULE_PROFILE_V19`.
+pub const MULTIFILE_PROFILE_V19: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v19";
 pub const MULTIFILE_RECHECK_PROFILE: &str = "mumei.native-multifile-source-recheck/v1";
 
 pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, BundleError> {
@@ -228,6 +237,7 @@ pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, Bu
         MULTIFILE_PROFILE_V16 => Ok(RefinedAdmission::CompositeV13),
         MULTIFILE_PROFILE_V17 => Ok(RefinedAdmission::CompositeV14),
         MULTIFILE_PROFILE_V18 => Ok(RefinedAdmission::CompositeV15),
+        MULTIFILE_PROFILE_V19 => Ok(RefinedAdmission::CompositeV16),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -1191,6 +1201,7 @@ pub fn load_pinned_module_record(
             MODULE_PROFILE_V16,
             MODULE_PROFILE_V17,
             MODULE_PROFILE_V18,
+            MODULE_PROFILE_V19,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1263,6 +1274,7 @@ pub fn load_pinned_multifile_record(
             MULTIFILE_PROFILE_V16,
             MULTIFILE_PROFILE_V17,
             MULTIFILE_PROFILE_V18,
+            MULTIFILE_PROFILE_V19,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE

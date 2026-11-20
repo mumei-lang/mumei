@@ -2861,6 +2861,38 @@ fn module_bundle_with_nested_field_writes_builds_as_v18_and_rechecks() {
 }
 
 #[test]
+fn module_bundle_with_enum_payload_writes_builds_as_v19_and_rechecks() {
+    // `bump` writes a named payload slot (`t.p = w`): the build, the
+    // source recheck and the LLVM snapshot recheck all carry the
+    // tag-gated payload rebuild under composite v16.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "enum C { T(p: i64), U }\n\
+         atom bump(w: i64) -> C requires: true; ensures: result == C::T(w); body: { let t = C::T(0); t.p = w; t };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V19);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V16
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // A v19 record re-pinned as v18 is refused: v18 keeps enum
+    // payload writes out of the composite shape.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V18.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
 fn multifile_bundle_with_nested_field_writes_builds_as_v18() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("app.mm");
