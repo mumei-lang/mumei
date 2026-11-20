@@ -234,3 +234,17 @@ fn enum_ctor_payload_satisfying_field_type_verifies() {
         "payloads satisfying the declared field type — including inside match arms — must verify:\n{combined}"
     );
 }
+
+#[test]
+fn match_target_field_const_prefers_caller_binding() {
+    let output = mumei_verify("tests/test_enum_match_arg_field_shadowed.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && combined.contains("Verification passed"),
+        "`s_v` projects the caller's `s: HolderA` — the callee's same-named `s: HolderB` param must not shadow it:\n{combined}"
+    );
+}

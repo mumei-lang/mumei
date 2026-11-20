@@ -525,20 +525,22 @@ fn target_param_enum_name(vc: &VCtx, target: &Dynamic) -> Option<String> {
     for (pos, _) in sym.match_indices('_') {
         let (binding, path) = sym.split_at(pos);
         let path = &path[1..];
-        // A callee param being instantiated shadows the current atom's
-        // same-named parameter for the field-path walk as well.
-        let param_ty = vc
-            .instantiation_params
-            .borrow()
+        // The const prefix names the *binding whose field* is projected —
+        // an actual argument's name in the caller, not a callee param. So
+        // the caller's own parameters win over a callee's same-named param,
+        // and among nested instantiation frames the outermost (oldest)
+        // frame is the context that seeded the const.
+        let param_ty = atom
+            .params
             .iter()
-            .rev()
-            .find(|(n, _)| n == binding)
-            .and_then(|(_, ty)| ty.clone())
+            .find(|p| p.name == binding)
+            .and_then(|p| p.type_name.clone())
             .or_else(|| {
-                atom.params
+                vc.instantiation_params
+                    .borrow()
                     .iter()
-                    .find(|p| p.name == binding)
-                    .and_then(|p| p.type_name.clone())
+                    .find(|(n, _)| n == binding)
+                    .and_then(|(_, ty)| ty.clone())
             });
         let Some(struct_name) = param_ty.as_deref().map(type_name_base) else {
             continue;
