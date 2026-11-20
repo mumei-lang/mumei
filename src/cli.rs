@@ -534,8 +534,15 @@ pub(crate) enum EvidenceCommand {
         #[arg(long)]
         stdin: bool,
         /// Regular mumei.evidence-requirement/v1 JSON file (at most 65,536 bytes); the declared pins and assurance floor
+        #[arg(
+            long,
+            required_unless_present = "requirement_list",
+            conflicts_with = "requirement_list"
+        )]
+        requirement: Option<String>,
+        /// Regular mumei.evidence-requirement-list/v1 JSON file (at most 65,536 bytes); a conjunctive set of declared requirements
         #[arg(long)]
-        requirement: String,
+        requirement_list: Option<String>,
         /// Emit a static mumei.evidence-acceptance/v1 descriptor, not reusable Evidence or a certificate
         #[arg(long)]
         json: bool,

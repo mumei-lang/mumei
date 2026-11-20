@@ -18,7 +18,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei evidence sign` | 5 | Detachably sign a bounded record's raw bytes with a declared ed25519 key into a producer-signature envelope; binds the declared key id only |
 | `mumei evidence keygen` | 1 | Generate a fresh ed25519 producer keypair; writes the 64-char hex secret to a new file and prints only the public key |
 | `mumei evidence check` | 3 | Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity |
-| `mumei evidence accept` | 3 | Normalize one declared requirement against one Evidence record into a bounded verdict; no tool execution or proof acceptance |
+| `mumei evidence accept` | 4 | Normalize one declared requirement against one Evidence record into a bounded verdict; no tool execution or proof acceptance |
 | `mumei evidence accept-list` | 4 | Normalize one declared requirement against a bounded Evidence list envelope — per-record verdicts plus an aggregate; no tool execution or proof acceptance |
 | `mumei evidence check-list` | 3 | Validate a bounded Evidence list envelope's representation — every record individually, not their truth or consistency |
 | `mumei evidence check-consistency` | 3 | Check a bounded Evidence list envelope's cross-record identity-pin agreement, not pin correctness or truth |
@@ -246,7 +246,7 @@ Normalize one declared requirement against one Evidence record into a bounded ve
 Usage:
 
 ```text
-Usage: mumei evidence accept [OPTIONS] --requirement <REQUIREMENT> [INPUT]
+Usage: mumei evidence accept [OPTIONS] [INPUT]
 ```
 
 ### Positional arguments
@@ -261,6 +261,7 @@ Usage: mumei evidence accept [OPTIONS] --requirement <REQUIREMENT> [INPUT]
 |---|---|---|---|
 | `--stdin` | false | — | Read one common Evidence record from standard input (at most 65,536 bytes); never infer stdin from a missing file |
 | `--requirement <REQUIREMENT>` | — | — | Regular mumei.evidence-requirement/v1 JSON file (at most 65,536 bytes); the declared pins and assurance floor |
+| `--requirement-list <REQUIREMENT_LIST>` | — | — | Regular mumei.evidence-requirement-list/v1 JSON file (at most 65,536 bytes); a conjunctive set of declared requirements |
 | `--json` | false | — | Emit a static mumei.evidence-acceptance/v1 descriptor, not reusable Evidence or a certificate |
 
 ## `mumei evidence accept-list`
