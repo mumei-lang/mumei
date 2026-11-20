@@ -3234,6 +3234,29 @@ fn module_bundle_v24_rejects_a_tampered_leaf_widths_pin() {
 }
 
 #[test]
+fn module_bundle_with_mixed_width_struct_builds_and_rechecks() {
+    // A struct mixing a 64-bit leaf with a 128-bit leaf flattens
+    // leaf-first — `{a: i64, b: i128}` occupies leaves [a, b.lo,
+    // b.hi], so `leaf_widths` reads `[64, 128]` and an `insertvalue`
+    // writing `b` spans two ABI slots.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "struct S { a: i64, b: i128 }\n\
+         atom mk(a: i64, b: i128) -> S requires: true; ensures: result.a == a; body: { S { a: a, b: b } };\n\
+         atom rd(s: S) -> i64 requires: true; ensures: result == s.a; body: { s.a };\n\
+         atom lit(b: i64) -> S requires: true; ensures: true; body: { S { a: 1, b: 2 } };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V24);
+    assert_eq!(record["leaf_widths"]["mk"], serde_json::json!([64, 128]));
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+}
+
+#[test]
 fn multifile_bundle_with_i128_leaves_builds_as_v24() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("app.mm");
