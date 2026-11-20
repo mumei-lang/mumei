@@ -3747,7 +3747,19 @@ fn build_enum_env(
                     // (`pure-i64-composite/v18`).
                     None if admission.admits_composite_payloads() => structs
                         .get(type_name)
-                        .filter(|fields| struct_is_scalar_leaved(structs, fields))
+                        .filter(|fields| {
+                            // A shared payload slot is one carrier
+                            // index per leaf — a 128-bit leaf is two
+                            // ABI slots whose halves cannot pair
+                            // across variants, so a payload struct
+                            // with a wide leaf is rejected here rather
+                            // than failing deeper with an arity error
+                            // (`pure-i64-composite/v21`).
+                            struct_is_scalar_leaved(structs, fields)
+                                && !flattened_struct_fields(structs, &env, fields)
+                                    .iter()
+                                    .any(|(_, slot)| matches!(slot, SignatureSlot::WideScalar(_)))
+                        })
                         .map(|_| ValueKind::Struct(type_name.to_owned())),
                     None => None,
                 };
@@ -7980,8 +7992,8 @@ fn merge_source_values<'ctx>(
         // 128-bit leaves merge as one vector; a literal branch value
         // zero-extends into the carrier (`pure-i64-composite/v21`).
         (W(a), W(b)) => Ok(W(cond.ite(&a, &b))),
-        (W(a), N(b)) => Ok(W(cond.ite(&a, &b.zero_ext(64)))),
-        (N(a), W(b)) => Ok(W(cond.ite(&a.zero_ext(64), &b))),
+        (W(a), N(b)) => Ok(W(cond.ite(&a, &b.sign_ext(64)))),
+        (N(a), W(b)) => Ok(W(cond.ite(&a.sign_ext(64), &b))),
         (UW(a), UW(b)) => Ok(UW(cond.ite(&a, &b))),
         (UW(a), N(b)) => Ok(UW(cond.ite(&a, &b.zero_ext(64)))),
         (N(a), UW(b)) => Ok(UW(cond.ite(&a.zero_ext(64), &b))),
@@ -8524,14 +8536,17 @@ fn source_while<'ctx>(
                 (Some(I(old) | N(old)), I(new) | N(new)) => I(body_guard.ite(new, old)),
                 (Some(B(old)), B(new)) => B(body_guard.ite(new, old)),
                 (Some(F(old)), F(new)) => F(body_guard.ite(new, old)),
-                // 128-bit leaves phi-merge as one vector; literal
-                // writes zero-extend (`pure-i64-composite/v21`).
+                // 128-bit leaves phi-merge as one vector; a literal
+                // branch value extends its 64 bits into the carrier —
+                // sign-extended for `i128`, zero-extended for `u128`
+                // (`pure-i64-composite/v21`).
                 (Some(W(old)), W(new)) => W(body_guard.ite(new, old)),
-                (Some(W(old)), N(new)) => W(body_guard.ite(new, &old.zero_ext(64))),
-                (Some(N(old)), W(new)) => W(body_guard.ite(new, &old.zero_ext(64))),
+                (Some(W(old)), N(new)) => W(body_guard.ite(&new.sign_ext(64), old)),
+                (Some(N(old)), W(new)) => W(body_guard.ite(new, &old.sign_ext(64))),
                 (Some(UW(old)), UW(new)) => UW(body_guard.ite(new, old)),
-                (Some(UW(old)), N(new)) => UW(body_guard.ite(new, &old.zero_ext(64))),
+                (Some(UW(old)), N(new)) => UW(body_guard.ite(&new.zero_ext(64), old)),
                 (Some(N(old)), UW(new)) => UW(body_guard.ite(new, &old.zero_ext(64))),
+
                 // A loop-carried `a[i] = v` keeps the merged array: the
                 // body's write applies only where the loop actually ran.
                 // A body rebinding `a = [...]` mints a fresh `alloc`,
@@ -9098,6 +9113,15 @@ fn source_expr<'ctx>(
                     (ValueKind::Scalar(ScalarKind::U64), SourceValue::Number(v)) => {
                         SourceValue::Unsigned(v)
                     }
+                    // A literal under a wide leaf extends its 64 bits
+                    // into the carrier — sign for `i128`, zero for
+                    // `u128` (`pure-i64-composite/v21`).
+                    (ValueKind::Scalar(ScalarKind::I128), SourceValue::Number(v)) => {
+                        SourceValue::Wide(v.sign_ext(64))
+                    }
+                    (ValueKind::Scalar(ScalarKind::U128), SourceValue::Number(v)) => {
+                        SourceValue::UWide(v.zero_ext(64))
+                    }
                     (_, value) => value,
                 };
                 let shape_ok = match (declared_shape, &value) {
@@ -9118,6 +9142,8 @@ fn source_expr<'ctx>(
                             SourceValue::Unsigned(_) | SourceValue::Number(_)
                         ) | (ValueKind::Scalar(ScalarKind::Bool), SourceValue::Boolean(_))
                             | (ValueKind::Scalar(ScalarKind::F64), SourceValue::Float64(_))
+                            | (ValueKind::Scalar(ScalarKind::I128), SourceValue::Wide(_))
+                            | (ValueKind::Scalar(ScalarKind::U128), SourceValue::UWide(_))
                             | (ValueKind::Struct(_), SourceValue::Composite(_))
                     ),
                 };
