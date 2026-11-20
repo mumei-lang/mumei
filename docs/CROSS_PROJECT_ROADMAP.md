@@ -5724,6 +5724,23 @@ declaration presence alone pins v20/v23, and the recheck-llvm module
 environment now whitelists the emitter's private constant `str_lit`
 byte-string global when the admission covers `Str` leaves.
 
+### i128/u128 two-slot carriers (mumei #1154)
+
+[mumei#1154](https://github.com/mumei-lang/mumei/pull/1154) admits
+declared `i128`/`u128` leaves under `pure-i64-composite/v21` (bundle
+v24). Each 128-bit leaf occupies two consecutive 64-bit ABI slots
+(`[lo, hi]` — LLVM's own i128 pairing), bound into a `BV(128)`
+`SourceValue::Wide`/`UWide` built `hi.concat(lo)`; signed/unsigned
+mixing and 64-bit coercions stay fail-closed, and literals widen by
+signedness (i128 sign-extends, u128 zero-extends — in the model and
+the emitter's `wide_int_cast`). TV learns the leaf span in aggregate
+ranges, inserts and call results; the emitter records `u128` in
+`var_types` so comparisons lower to `ULT`/`UGT`/`udiv`/`urem`/`lshr`
+instead of signed predicates, and `chan`/`task` payloads wider than
+the i64 slot are boxed. The record gains `leaf_widths`
+(`atom → Vec<u64>`) so a v24 recheck re-derives the slot split and a
+tampered pairing fails closed.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
