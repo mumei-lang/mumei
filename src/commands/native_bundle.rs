@@ -1312,6 +1312,7 @@ fn emit_module(
     enums: &[parser::EnumDef],
     stage: &Path,
     proof_work: &Path,
+    admission: RefinedAdmission,
 ) -> Result<EmittedModule, BundleError> {
     let mut env = verification::ModuleEnv::default();
     // Register the module's refined scalar, struct and enum
@@ -1341,7 +1342,15 @@ fn emit_module(
             &hir_atom,
             proof_work,
             &env,
-            &verification::VerificationConfig::default(),
+            &verification::VerificationConfig {
+                // Composite v19 admits the IEEE 754 `f64` operators in
+                // source contracts, so the contract must verify in the
+                // same encoding — the default exact-rational `Real`
+                // model would prove clauses a NaN input refutes (e.g.
+                // `ensures: result == x + y`).
+                ieee754_f64: admission.admits_f64_arithmetic(),
+                ..Default::default()
+            },
         )
         .map_err(|_| BundleError("source verification failed"))?;
         env.mark_verified(&atom.name);
@@ -1396,10 +1405,11 @@ fn emit_module(
 /// its gate derived: `[v1, .., v21]` for the wrapping, refined v1,
 /// refined v2 and the composite v1–v18 fragments. Each recheck
 /// re-derives under exactly that version's admission, never a wider one.
-fn record_profile(source_profile: &str, versions: [&'static str; 21]) -> &'static str {
-    let [v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21] =
+fn record_profile(source_profile: &str, versions: [&'static str; 22]) -> &'static str {
+    let [v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22] =
         versions;
     match source_profile {
+        semantic_contract::PURE_I64_COMPOSITE_PROFILE_V19 => v22,
         semantic_contract::PURE_I64_COMPOSITE_PROFILE_V18 => v21,
         semantic_contract::PURE_I64_COMPOSITE_PROFILE_V17 => v20,
         semantic_contract::PURE_I64_COMPOSITE_PROFILE_V16 => v19,
@@ -1428,8 +1438,8 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
     // The producer always runs the widest (composite) admission; the
     // record's `profile` names a wider version only when the source
     // actually declares what needs it, so a plain module keeps pinning v1.
-    let (binding, atoms, types, structs, enums) =
-        prepare_module_source(source, RefinedAdmission::CompositeV18)?;
+    let admission = RefinedAdmission::CompositeV19;
+    let (binding, atoms, types, structs, enums) = prepare_module_source(source, admission)?;
     let parent = output
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -1449,6 +1459,7 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
         &enums,
         stage.path(),
         proof_work.path(),
+        admission,
     )?;
     let record = ModuleNativeBundleRecord {
         schema: MODULE_SCHEMA.into(),
@@ -1476,6 +1487,7 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
                 MODULE_PROFILE_V19,
                 MODULE_PROFILE_V20,
                 MODULE_PROFILE_V21,
+                MODULE_PROFILE_V22,
             ],
         )
         .into(),
@@ -1593,7 +1605,8 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
             queue.push_back(member);
         }
     }
-    let prepared = prepare_multifile_source(&root, &members, RefinedAdmission::CompositeV18)?;
+    let admission = RefinedAdmission::CompositeV19;
+    let prepared = prepare_multifile_source(&root, &members, admission)?;
     let (binding, graph, atoms, types, structs, enums) = (
         prepared.binding,
         prepared.import_graph_sha256,
@@ -1621,6 +1634,7 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
         &enums,
         stage.path(),
         proof_work.path(),
+        admission,
     )?;
     let sources_dir = stage.path().join(SOURCES_DIR);
     fs::create_dir(&sources_dir).map_err(|_| BundleError("cannot stage source members"))?;
@@ -1657,6 +1671,7 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
                 MULTIFILE_PROFILE_V19,
                 MULTIFILE_PROFILE_V20,
                 MULTIFILE_PROFILE_V21,
+                MULTIFILE_PROFILE_V22,
             ],
         )
         .into(),

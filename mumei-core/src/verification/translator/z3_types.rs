@@ -153,6 +153,37 @@ pub(crate) fn float_eq<'a>(ctx: &'a Context, lhs: &Float<'a>, rhs: &Float<'a>) -
     unsafe { Bool::wrap(ctx, ast) }
 }
 
+/// Decode a 64-bit bitvector as an IEEE 754 binary64 `Float` — the inverse
+/// of `ieee_bv_from_float`. The composite profile's `f64` leaf keeps its
+/// bit-pattern carrier (`pure-i64-composite/v19`); arithmetic decodes it,
+/// computes and re-encodes, so an i64/f64 slot confusion still compares
+/// different bytes rather than silently widening.
+pub(crate) fn float_from_ieee_bv<'a>(ctx: &'a Context, bits: &BV<'a>) -> Float<'a> {
+    let raw = raw_z3_context(ctx);
+    let sort = unsafe { z3_sys::Z3_mk_fpa_sort_double(raw) };
+    let ast = unsafe { z3_sys::Z3_mk_fpa_to_fp_bv(raw, bits.get_z3_ast(), sort) };
+    unsafe { Float::wrap(ctx, ast) }
+}
+
+/// The canonical quiet-NaN payload `ieee_bv_from_float` collapses every
+/// NaN result to.
+const CANONICAL_QUIET_NAN64: u64 = 0x7FF8_0000_0000_0000;
+
+/// Encode an IEEE 754 binary64 `Float` back to its 64-bit bitvector.
+/// `fp.to_ieee_bv` is partial on a NaN input — any NaN bit pattern
+/// satisfies it — and the emitted `fadd`/`fsub`/`fmul`/`fdiv` likewise
+/// produce an unspecified NaN payload, so both sides of the comparison
+/// collapse a NaN to the canonical quiet-NaN pattern: the claim compares
+/// NaN-ness, never the payload.
+pub(crate) fn ieee_bv_from_float<'a>(ctx: &'a Context, value: &Float<'a>) -> BV<'a> {
+    let raw = raw_z3_context(ctx);
+    let ast = unsafe { z3_sys::Z3_mk_fpa_to_ieee_bv(raw, value.get_z3_ast()) };
+    let bits = unsafe { BV::wrap(ctx, ast) };
+    let nan = unsafe { z3_sys::Z3_mk_fpa_is_nan(raw, value.get_z3_ast()) };
+    let nan = unsafe { Bool::wrap(ctx, nan) };
+    nan.ite(&BV::from_u64(ctx, CANONICAL_QUIET_NAN64, 64), &bits)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ArrayElementSort {
     Int,

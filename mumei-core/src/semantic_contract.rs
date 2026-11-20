@@ -174,6 +174,14 @@ pub const PURE_I64_COMPOSITE_PROFILE_V16: &str = "mumei.pure-i64-composite/v16";
 pub const PURE_I64_COMPOSITE_PROFILE_V17: &str = "mumei.pure-i64-composite/v17";
 pub const PURE_I64_COMPOSITE_PROFILE_V18: &str = "mumei.pure-i64-composite/v18";
 
+/// `pure-i64-composite/v19`: real `f64` arithmetic — the admitted
+/// operators `+`, `-`, `*`, `/` and `==` on `f64` leaves decode the
+/// bit-pattern slots as IEEE 754 binary64 and compute under
+/// round-nearest-ties-to-even, the same semantics the emitted
+/// `fadd`/`fsub`/`fmul`/`fdiv`/`fcmp oeq` carry. Float literals stay
+/// rejected and `!=`/ordering remain outside the emitter surface.
+pub const PURE_I64_COMPOSITE_PROFILE_V19: &str = "mumei.pure-i64-composite/v19";
+
 /// Maximum byte length a `Str` literal may declare under
 /// `pure-i64-composite/v13`: one cell per byte under the
 /// bounded-memory model.
@@ -249,6 +257,7 @@ pub enum RefinedAdmission {
     CompositeV16,
     CompositeV17,
     CompositeV18,
+    CompositeV19,
 }
 
 impl RefinedAdmission {
@@ -375,6 +384,13 @@ impl RefinedAdmission {
     pub fn admits_composite_payloads(self) -> bool {
         self >= Self::CompositeV18
     }
+
+    /// Whether source `f64` arithmetic (`+ - * / ==` on `f64` leaves)
+    /// is admitted with real IEEE 754 semantics
+    /// (`pure-i64-composite/v19`).
+    pub fn admits_f64_arithmetic(self) -> bool {
+        self >= Self::CompositeV19
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -480,7 +496,7 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, _, _, _, _, _, _, _, _, _, _, _, _, _) =
+    let (items, refined, structs, _, _, _, _, _, _, _, _, _, _, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     // The bounded profile stays a single-atom contract — sibling atoms
     // only serve as call targets, which the widened profile alone admits.
@@ -501,6 +517,7 @@ pub fn extract_pure_i64_contract(
         &refined,
         &structs,
         &EnumEnv::new(),
+        false,
         false,
         false,
         false,
@@ -552,6 +569,7 @@ pub fn extract_pure_i64_module_contracts(
         enum_scalar_ops,
         nested_writes,
         enum_writes,
+        f64_arith,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     // The translator-IR pin must see the same type environment the
     // verifier's certificate does — a `Port`-typed binder carries its
@@ -597,6 +615,7 @@ pub fn extract_pure_i64_module_contracts(
                 enum_scalar_ops,
                 nested_writes,
                 enum_writes,
+                f64_arith,
                 &cert_env,
             )),
             // Type and struct declarations carry no per-atom contract;
@@ -631,6 +650,7 @@ pub fn module_source_profile(
         enum_scalar_ops,
         nested_writes,
         enum_writes,
+        f64_arithmetic,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     Ok(fragment_profile(
         true,
@@ -649,6 +669,7 @@ pub fn module_source_profile(
         enum_scalar_ops,
         nested_writes,
         enum_writes,
+        f64_arithmetic,
     ))
 }
 
@@ -671,6 +692,7 @@ type AdmittedModule = (
     RefinedEnv,
     StructEnv,
     EnumEnv,
+    bool,
     bool,
     bool,
     bool,
@@ -804,6 +826,7 @@ fn admit_pure_i64_atoms(
     let enum_scalar_ops_used = std::cell::Cell::new(false);
     let nested_writes_used = std::cell::Cell::new(false);
     let enum_writes_used = std::cell::Cell::new(false);
+    let f64_arithmetic_used = std::cell::Cell::new(false);
     for item in &items {
         let Item::Atom(sibling) = item else {
             continue;
@@ -840,6 +863,7 @@ fn admit_pure_i64_atoms(
             admission.admits_enum_scalar_ops(),
             admission.admits_nested_writes(),
             admission.admits_enum_writes(),
+            admission.admits_f64_arithmetic(),
             &struct_values_used,
             &field_writes_used,
             &enum_values_used,
@@ -849,6 +873,7 @@ fn admit_pure_i64_atoms(
             &enum_scalar_ops_used,
             &nested_writes_used,
             &enum_writes_used,
+            &f64_arithmetic_used,
         )?;
     }
     let u64_leaves = uses_u64_leaves(&items);
@@ -870,6 +895,7 @@ fn admit_pure_i64_atoms(
         enum_scalar_ops_used.get(),
         nested_writes_used.get(),
         enum_writes_used.get(),
+        f64_arithmetic_used.get(),
     ))
 }
 
@@ -1043,9 +1069,15 @@ fn fragment_profile(
     enum_scalar_ops: bool,
     nested_writes: bool,
     enum_writes: bool,
+    f64_arithmetic: bool,
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if f64_arithmetic {
+        // Real `f64` arithmetic is only ever admitted under v19 — the
+        // IEEE decode/compute/re-encode it requires is the strongest
+        // claim the ladder makes.
+        PURE_I64_COMPOSITE_PROFILE_V19
     } else if has_composite_payloads(enums, structs) {
         // A composite-typed enum payload is only ever admitted under
         // v18 — a declared enum carrying one pins it even when no
@@ -1128,6 +1160,61 @@ fn fragment_profile(
     }
 }
 
+/// IEEE 754 binary64 arithmetic on bit-pattern leaves
+/// (`pure-i64-composite/v19`). Both the source operator and the emitted
+/// float instruction share this helper: the leaf's 64-bit slot decodes
+/// to `Float`, computes under round-nearest-ties-to-even and re-encodes,
+/// so the checked value is the hardware `f64` result — NaN payloads and
+/// signed zero included. `fdiv` is total (x/0.0 yields ±inf), so no
+/// definedness obligation is recorded.
+/// The four IEEE 754 binary64 arithmetic operators
+/// `pure-i64-composite/v19` admits — the same set the emitter lowers
+/// to `fadd`/`fsub`/`fmul`/`fdiv`.
+#[derive(Clone, Copy)]
+pub enum F64Arith {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+pub fn f64_arith<'ctx>(ctx: &'ctx Context, a: &BV<'ctx>, b: &BV<'ctx>, op: F64Arith) -> BV<'ctx> {
+    use crate::verification::translator::z3_types::{
+        float_from_ieee_bv, ieee_bv_from_float, round_nearest_even,
+    };
+    let rne = round_nearest_even(ctx);
+    let fa = float_from_ieee_bv(ctx, a);
+    let fb = float_from_ieee_bv(ctx, b);
+    let result = match op {
+        F64Arith::Add => rne.add(&fa, &fb),
+        F64Arith::Sub => rne.sub(&fa, &fb),
+        F64Arith::Mul => rne.mul(&fa, &fb),
+        F64Arith::Div => rne.div(&fa, &fb),
+    };
+    ieee_bv_from_float(ctx, &result)
+}
+
+/// IEEE 754 binary64 equality (`fp.eq`) on bit-pattern leaves — NaN
+/// compares unequal to everything including itself and +0.0 equals
+/// -0.0, the predicate the emitted `fcmp oeq` tests
+/// (`pure-i64-composite/v19`).
+pub fn f64_eq<'ctx>(ctx: &'ctx Context, a: &BV<'ctx>, b: &BV<'ctx>) -> Bool<'ctx> {
+    use crate::verification::translator::z3_types::{float_eq, float_from_ieee_bv};
+    let fa = float_from_ieee_bv(ctx, a);
+    let fb = float_from_ieee_bv(ctx, b);
+    float_eq(ctx, &fa, &fb)
+}
+
+/// Whether a 64-bit bit-pattern leaf carries an IEEE 754 binary64 NaN —
+/// the `fpa.isNaN` predicate on the decoded value.
+pub fn f64_is_nan<'ctx>(ctx: &'ctx Context, a: &BV<'ctx>) -> Bool<'ctx> {
+    use crate::verification::translator::z3_types::float_from_ieee_bv;
+    let raw = crate::verification::translator::z3_types::raw_z3_context(ctx);
+    let fa = float_from_ieee_bv(ctx, a);
+    let ast = unsafe { z3_sys::Z3_mk_fpa_is_nan(raw, fa.get_z3_ast()) };
+    unsafe { Bool::wrap(ctx, ast) }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn atom_contract(
     mut atom: Atom,
@@ -1150,6 +1237,7 @@ fn atom_contract(
     enum_scalar_ops: bool,
     nested_writes: bool,
     enum_writes: bool,
+    f64_arithmetic: bool,
     cert_env: &ModuleEnv,
 ) -> Result<SemanticContract, SemanticContractError> {
     atom.span.file = source_name.to_owned();
@@ -1170,6 +1258,7 @@ fn atom_contract(
         enum_scalar_ops,
         nested_writes,
         enum_writes,
+        f64_arithmetic,
     );
     let result_fields = atom
         .return_type
@@ -1563,6 +1652,12 @@ struct KindEnv<'a> {
     /// Set when the atom writes an enum payload field, so the module
     /// names the v16 profile only when it needs it.
     enum_writes_used: &'a std::cell::Cell<bool>,
+    /// Whether `f64` arithmetic (`+ - * / ==` on `f64` leaves) is
+    /// admitted (`pure-i64-composite/v19`).
+    admit_f64_arithmetic: bool,
+    /// Set when the atom applies an `f64` operator, so the module
+    /// names the v19 profile only when it needs it.
+    f64_arithmetic_used: &'a std::cell::Cell<bool>,
 }
 
 impl<'a> KindEnv<'a> {
@@ -2228,6 +2323,7 @@ fn check_atom_contract(
     admit_enum_scalar_ops: bool,
     admit_nested_writes: bool,
     admit_enum_writes: bool,
+    admit_f64_arithmetic: bool,
     struct_values_used: &std::cell::Cell<bool>,
     field_writes_used: &std::cell::Cell<bool>,
     enum_values_used: &std::cell::Cell<bool>,
@@ -2237,6 +2333,7 @@ fn check_atom_contract(
     enum_scalar_ops_used: &std::cell::Cell<bool>,
     nested_writes_used: &std::cell::Cell<bool>,
     enum_writes_used: &std::cell::Cell<bool>,
+    f64_arithmetic_used: &std::cell::Cell<bool>,
 ) -> Result<(), SemanticContractError> {
     // Struct parameters stay out of the scalar scope — so they are
     // neither scalar operands nor rebindable — and live in the
@@ -2319,6 +2416,8 @@ fn check_atom_contract(
         nested_writes_used,
         admit_enum_writes,
         enum_writes_used,
+        admit_f64_arithmetic,
+        f64_arithmetic_used,
     };
     for p in &atom.params {
         env.bind(&p.name)?;
@@ -3869,6 +3968,8 @@ fn resolve_alias(
                     nested_writes_used: &std::cell::Cell::new(false),
                     admit_enum_writes: false,
                     enum_writes_used: &std::cell::Cell::new(false),
+                    admit_f64_arithmetic: false,
+                    f64_arithmetic_used: &std::cell::Cell::new(false),
                 },
             )?,
             ScalarKind::Bool,
@@ -5361,7 +5462,10 @@ fn expression_kind(
             // appearing on both sides resolves to `i64` (literal
             // arithmetic is signed until a `u64` context fixes it).
             let unified = match (left, right) {
-                (ScalarKind::Num, k) | (k, ScalarKind::Num) => k,
+                // A `Num` literal never adapts to `f64` — float
+                // literals are outside the fragment, so `a + 1` fails
+                // here rather than encoding `1` as an integer leaf.
+                (ScalarKind::Num, k) | (k, ScalarKind::Num) if k != ScalarKind::F64 => k,
                 (l, r) if l == r => l,
                 _ => {
                     return Err(SemanticContractError::Unsupported(
@@ -5416,6 +5520,23 @@ fn expression_kind(
                         ) =>
                 {
                     Ok(unified)
+                }
+                // `f64` arithmetic (`pure-i64-composite/v19`): real
+                // IEEE 754 binary64 semantics — the same ops the
+                // emitter lowers to `fadd`/`fsub`/`fmul`/`fdiv`.
+                // `!=` and ordering stay outside: the emitter never
+                // emits them for float operands.
+                Op::Add | Op::Sub | Op::Mul | Op::Div
+                    if env.admit_f64_arithmetic && unified == ScalarKind::F64 =>
+                {
+                    env.f64_arithmetic_used.set(true);
+                    Ok(ScalarKind::F64)
+                }
+                // `x == y` on `f64` lowers to `fcmp oeq` — IEEE
+                // equality with NaN unequal and +0.0/-0.0 equal.
+                Op::Eq if env.admit_f64_arithmetic && unified == ScalarKind::F64 => {
+                    env.f64_arithmetic_used.set(true);
+                    Ok(ScalarKind::Bool)
                 }
                 _ => Err(SemanticContractError::Unsupported(
                     "operator or operand kinds",
@@ -5902,7 +6023,7 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let (items, refined, structs, enums, _, _, _, _, _, _, _, arrays, strs, _, _, _) =
+    let (items, refined, structs, enums, _, _, _, _, _, _, _, arrays, strs, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
@@ -8705,6 +8826,17 @@ fn source_expr<'ctx>(
                         _ => eq,
                     })
                 }
+                // `f64` arithmetic (`pure-i64-composite/v19`): the
+                // bit-pattern leaf decodes to IEEE 754 binary64,
+                // computes under round-nearest-ties-to-even and
+                // re-encodes — the value the emitted
+                // `fadd`/`fsub`/`fmul`/`fdiv` produces. `==` lowers
+                // to `fcmp oeq`, the `fp.eq` IEEE equality.
+                (F(a), Op::Add, F(b)) => F(f64_arith(ctx, &a, &b, F64Arith::Add)),
+                (F(a), Op::Sub, F(b)) => F(f64_arith(ctx, &a, &b, F64Arith::Sub)),
+                (F(a), Op::Mul, F(b)) => F(f64_arith(ctx, &a, &b, F64Arith::Mul)),
+                (F(a), Op::Div, F(b)) => F(f64_arith(ctx, &a, &b, F64Arith::Div)),
+                (F(a), Op::Eq, F(b)) => B(f64_eq(ctx, &a, &b)),
                 _ => {
                     return Err(SemanticContractError::Unsupported(
                         "unsupported source operator",
@@ -12414,6 +12546,123 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
             report.as_ref().is_ok_and(|contracts| !contracts.is_empty()),
             "bound composite must shadow the scalar param: {report:?}"
         );
+    }
+
+    #[test]
+    fn composite_v19_admits_f64_arithmetic() {
+        let v19 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV19)
+        };
+        let outcomes = |source: &str| {
+            refined_module_outcomes_admission(source, RefinedAdmission::CompositeV19)
+        };
+        let module = |piece: &str| format!("{piece}\n{MAIN0}");
+        for piece in [
+            // Each admitted operator — add/sub/mul/div — on f64 leaves.
+            // `ensures: result == x + y` would be refutable — NaN
+            // inputs make `fp.eq` false, which is exactly the IEEE
+            // equality the emitted `fcmp oeq` carries — so arithmetic
+            // atoms keep `ensures: true`.
+            "atom add(x: f64, y: f64) -> f64 requires: true; ensures: true; body: { x + y };",
+            "atom sub(x: f64, y: f64) -> f64 requires: true; ensures: true; body: { x - y };",
+            "atom mul(x: f64, y: f64) -> f64 requires: true; ensures: true; body: { x * y };",
+            "atom div(x: f64, y: f64) -> f64 requires: true; ensures: true; body: { x / y };",
+            // `x == y` reads as IEEE equality (`fcmp oeq`).
+            "atom eq(x: f64, y: f64) -> bool requires: true; ensures: result == (x == y); body: { x == y };",
+            // Compound expressions and requires both read the same way.
+            "atom mix(x: f64, y: f64, z: f64) -> f64 requires: x == x; ensures: true; body: { x * y - x / z };",
+        ] {
+            let source = module(piece);
+            match v19(&source) {
+                Ok(cs) => assert!(
+                    cs.iter()
+                        .all(|c| c.profile == PURE_I64_COMPOSITE_PROFILE_V19),
+                    "{piece}"
+                ),
+                Err(e) => panic!("{piece}: {e:?}"),
+            }
+            match std::panic::catch_unwind(|| outcomes(&source)) {
+                Ok(res) => assert!(
+                    res.iter().all(|r| *r == z3::SatResult::Unsat),
+                    "{piece}"
+                ),
+                Err(_) => panic!("outcomes failed for: {piece}"),
+            }
+        }
+        // v19 pins only when arithmetic is used: a pass-through-only
+        // module keeps the v11 leaf profile.
+        let copy = module("atom copy(a: f64) -> f64 requires: true; ensures: true; body: { a };");
+        assert_eq!(
+            module_source_profile(&copy, RefinedAdmission::CompositeV19).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V11
+        );
+        let source = module(
+            "atom add(x: f64, y: f64) -> f64 requires: true; ensures: true; body: { x + y };",
+        );
+        assert_eq!(
+            module_source_profile(&source, RefinedAdmission::CompositeV19).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V19
+        );
+        // Narrower admissions keep `f64` operators out — the v18
+        // ladder top included.
+        for admission in [
+            RefinedAdmission::Reject,
+            RefinedAdmission::CompositeV12,
+            RefinedAdmission::CompositeV18,
+        ] {
+            assert!(
+                extract_pure_i64_module_contracts(&source, "m.mm", None, admission).is_err(),
+                "{admission:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn composite_v19_rejects_f64_ops_outside_the_emitter_surface() {
+        let v19 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV19)
+        };
+        for (piece, why) in [
+            // `!=` has no emitted counterpart — the emitter rejects it.
+            (
+                "atom c(a: f64, b: f64) -> bool requires: true; ensures: true; body: { a != b };",
+                "f64 !=",
+            ),
+            // Ordering on `f64` is not emitted either.
+            (
+                "atom c(a: f64, b: f64) -> bool requires: true; ensures: true; body: { a < b };",
+                "f64 lt",
+            ),
+            (
+                "atom c(a: f64, b: f64) -> bool requires: true; ensures: true; body: { a >= b };",
+                "f64 ge",
+            ),
+            // Remainder and bitwise ops stay integer-only.
+            (
+                "atom c(a: f64, b: f64) -> f64 requires: true; ensures: true; body: { a % b };",
+                "f64 rem",
+            ),
+            (
+                "atom c(a: f64, b: f64) -> f64 requires: true; ensures: true; body: { a & b };",
+                "f64 bitand",
+            ),
+            // A `Num` literal never adapts to `f64` — `a + 1` fails
+            // closed at the kind check, not later in the encoder.
+            (
+                "atom c(a: f64) -> f64 requires: true; ensures: true; body: { a + 1 };",
+                "f64 literal mix",
+            ),
+            // A float literal is still outside the fragment.
+            (
+                "atom c(a: f64) -> f64 requires: true; ensures: true; body: { 1.5 };",
+                "float literal",
+            ),
+        ] {
+            assert!(
+                v19(&format!("{piece}\n{MAIN0}")).is_err(),
+                "admitted: {why}"
+            );
+        }
     }
 }
 
