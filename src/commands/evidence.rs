@@ -179,6 +179,12 @@ pub(crate) fn run(command: EvidenceCommand) {
                 ("Evidence acceptance evaluation failed", _) => {
                     "Evidence rejected under the declared requirement; nothing accepted"
                 }
+                ("Evidence list acceptance evaluation failed", 3) => {
+                    "Evidence list acceptance inconclusive under the declared requirement; no record accepted"
+                }
+                ("Evidence list acceptance evaluation failed", _) => {
+                    "Evidence rejected under the declared requirement; no record accepted"
+                }
                 (_, 3) => {
                     "Source query inconclusive within bounded profile; no Evidence emitted"
                 }
