@@ -2869,6 +2869,17 @@ pub(crate) fn expr_to_z3<'a>(
                             datatype::param_z3_value_for_vc(vc, result_name.as_str(), result_type)
                         };
 
+                        // A widened-integer enum payload leaf
+                        // (`u64`/`u32`/`i32`) keeps its declared width on a
+                        // call result too — the result const is minted
+                        // fresh here, so the param-time domain asserts
+                        // cannot reach it.
+                        if let (Some(solver), Some(bound)) =
+                            (solver_opt, datatype::enum_value_leaf_domain(vc, &result_z3))
+                        {
+                            solver.assert(&bound);
+                        }
+
                         // Array results: mint the result's `len` symbol up
                         // front and key it by the result array's ast — the
                         // callee's `ensures: len(result) == k` asserts on it,
@@ -3011,6 +3022,13 @@ pub(crate) fn expr_to_z3<'a>(
                                     )?;
                                 }
                             }
+                        }
+
+                        // Enum-typed fields inside a struct call result are
+                        // fresh datatype consts — bound their widened
+                        // integer leaves the same way params are bounded.
+                        if let Some(solver) = solver_opt {
+                            datatype::assert_enum_value_domains(vc, solver, env);
                         }
 
                         // `arr[i]` inside `ensures` means the POST-call
@@ -5170,6 +5188,17 @@ pub(crate) fn expr_to_z3<'a>(
                         datatype::param_z3_value_for_vc(vc, result_name.as_str(), result_type)
                     };
 
+                    // A widened-integer enum payload leaf
+                    // (`u64`/`u32`/`i32`) keeps its declared width on a
+                    // call result too — the result const is minted fresh
+                    // here, so the param-time domain asserts cannot reach
+                    // it.
+                    if let (Some(solver), Some(bound)) =
+                        (solver_opt, datatype::enum_value_leaf_domain(vc, &result_z3))
+                    {
+                        solver.assert(&bound);
+                    }
+
                     // Array results on the congruent path mint their `len`
                     // through the `#len` projection UF (the (contents, len)
                     // pair). The non-congruent reference-call path keeps its
@@ -5283,6 +5312,13 @@ pub(crate) fn expr_to_z3<'a>(
                                 )?;
                             }
                         }
+                    }
+
+                    // Enum-typed fields inside a struct call result are
+                    // fresh datatype consts — bound their widened integer
+                    // leaves the same way params are bounded.
+                    if let Some(solver) = solver_opt {
+                        datatype::assert_enum_value_domains(vc, solver, env);
                     }
 
                     // A refined return type is part of the callee's

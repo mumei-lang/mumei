@@ -112,6 +112,10 @@ pub(crate) fn verify_atom_invariant(
         }
     }
 
+    // Widened integer payload leaves inside enum-typed params carry the
+    // same declared-width domain the verify path asserts.
+    super::datatype::assert_enum_value_domains(&vc, &solver, &env);
+
     // invariant 式をパース
     let inv_ast = parse_expression(invariant_raw);
     let inv_z3 =
