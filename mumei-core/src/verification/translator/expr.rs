@@ -2945,15 +2945,7 @@ pub(crate) fn expr_to_z3<'a>(
                                         })
                                         .collect()
                                 } else {
-                                    seed_struct_fields(
-                                        ctx,
-                                        env,
-                                        &result_name,
-                                        sdef,
-                                        vc.module_env,
-                                        vc.ieee754_f64,
-                                        vc.bitvec_i64,
-                                    )
+                                    seed_struct_fields(vc, env, &result_name, sdef)
                                 };
                             // The UF-path fields live under the per-call
                             // handle in `env` too, so `let t = f(..); t.x`
@@ -5225,15 +5217,7 @@ pub(crate) fn expr_to_z3<'a>(
                                     })
                                     .collect()
                             } else {
-                                seed_struct_fields(
-                                    ctx,
-                                    env,
-                                    &result_name,
-                                    sdef,
-                                    vc.module_env,
-                                    vc.ieee754_f64,
-                                    vc.bitvec_i64,
-                                )
+                                seed_struct_fields(vc, env, &result_name, sdef)
                             };
                         if rec_signature.is_some() {
                             bind_struct_fields(env, &result_name, &result_fields);

@@ -1805,17 +1805,8 @@ fn verify_inner_impl(
         .return_type
         .as_deref()
         .and_then(|type_name| module_env.get_struct(type_name));
-    let result_struct_fields = struct_return.map(|sdef| {
-        seed_struct_fields(
-            &ctx,
-            &mut env,
-            "result",
-            sdef,
-            module_env,
-            ieee754_f64,
-            bitvec_i64,
-        )
-    });
+    let result_struct_fields =
+        struct_return.map(|sdef| seed_struct_fields(&vc, &mut env, "result", sdef));
     if let Some(type_name) = atom
         .return_type
         .as_deref()
@@ -2010,15 +2001,7 @@ fn verify_inner_impl(
                 // ソートは `param_z3_value` に従う（`i64` は bit-vector モードで BV(64)、
                 // `f64` は既定 Real / `--ieee754-f64` で Float）ので、`result.<field>`
                 // や構造体リテラルのフィールド値と同じエンコーディングになる。
-                let param_fields = seed_struct_fields(
-                    &ctx,
-                    &mut env,
-                    &param.name,
-                    sdef,
-                    module_env,
-                    ieee754_f64,
-                    bitvec_i64,
-                );
+                let param_fields = seed_struct_fields(&vc, &mut env, &param.name, sdef);
                 vc.local_struct_types
                     .borrow_mut()
                     .insert(param.name.clone(), type_name.clone());

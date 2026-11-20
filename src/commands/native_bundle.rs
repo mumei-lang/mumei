@@ -1393,13 +1393,14 @@ fn emit_module(
 }
 
 /// The record profile a module-family bundle pins for the source profile
-/// its gate derived: `[v1, .., v19]` for the wrapping, refined v1,
-/// refined v2 and the composite v1–v16 fragments. Each recheck
+/// its gate derived: `[v1, .., v20]` for the wrapping, refined v1,
+/// refined v2 and the composite v1–v17 fragments. Each recheck
 /// re-derives under exactly that version's admission, never a wider one.
-fn record_profile(source_profile: &str, versions: [&'static str; 19]) -> &'static str {
-    let [v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19] =
+fn record_profile(source_profile: &str, versions: [&'static str; 20]) -> &'static str {
+    let [v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20] =
         versions;
     match source_profile {
+        semantic_contract::PURE_I64_COMPOSITE_PROFILE_V17 => v20,
         semantic_contract::PURE_I64_COMPOSITE_PROFILE_V16 => v19,
         semantic_contract::PURE_I64_COMPOSITE_PROFILE_V14 => v17,
         semantic_contract::PURE_I64_COMPOSITE_PROFILE_V15 => v18,
@@ -1427,7 +1428,7 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
     // record's `profile` names a wider version only when the source
     // actually declares what needs it, so a plain module keeps pinning v1.
     let (binding, atoms, types, structs, enums) =
-        prepare_module_source(source, RefinedAdmission::CompositeV16)?;
+        prepare_module_source(source, RefinedAdmission::CompositeV17)?;
     let parent = output
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -1472,6 +1473,7 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
                 MODULE_PROFILE_V17,
                 MODULE_PROFILE_V18,
                 MODULE_PROFILE_V19,
+                MODULE_PROFILE_V20,
             ],
         )
         .into(),
@@ -1589,7 +1591,7 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
             queue.push_back(member);
         }
     }
-    let prepared = prepare_multifile_source(&root, &members, RefinedAdmission::CompositeV16)?;
+    let prepared = prepare_multifile_source(&root, &members, RefinedAdmission::CompositeV17)?;
     let (binding, graph, atoms, types, structs, enums) = (
         prepared.binding,
         prepared.import_graph_sha256,
@@ -1651,6 +1653,7 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
                 MULTIFILE_PROFILE_V17,
                 MULTIFILE_PROFILE_V18,
                 MULTIFILE_PROFILE_V19,
+                MULTIFILE_PROFILE_V20,
             ],
         )
         .into(),

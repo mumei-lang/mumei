@@ -50,43 +50,28 @@ pub(crate) fn bind_struct_fields<'a>(
 }
 
 /// Declare one fresh symbol per field of `sdef` for `binding` (sorts follow
-/// `param_z3_value`, i.e. the encoding of the run) and register them.
-/// A struct-typed field seeds recursively — its leaves land under
-/// `__struct_<binding>_<field>_<leaf>`, so a nested read
+/// `param_z3_value_for_vc`, i.e. the encoding of the run — an enum-typed
+/// field seeds as the enum's Z3 datatype like an enum parameter does) and
+/// register them. A struct-typed field seeds recursively — its leaves land
+/// under `__struct_<binding>_<field>_<leaf>`, so a nested read
 /// `<binding>.<field>.<leaf>` projects through the same keys a literal
 /// init writes and two aliases of one inner value compare equal.
 /// Depth is capped like the fragment's admission bound so a recursive
 /// declaration degenerates to an unseeded const instead of looping.
 pub(crate) fn seed_struct_fields<'a>(
-    ctx: &'a Context,
+    vc: &VCtx<'a>,
     env: &mut Env<'a>,
     binding: &str,
     sdef: &StructDef,
-    module_env: &ModuleEnv,
-    ieee754_f64: bool,
-    bitvec_i64: bool,
 ) -> Vec<(String, Dynamic<'a>)> {
-    seed_struct_fields_depth(
-        ctx,
-        env,
-        binding,
-        sdef,
-        module_env,
-        ieee754_f64,
-        bitvec_i64,
-        0,
-    )
+    seed_struct_fields_depth(vc, env, binding, sdef, 0)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn seed_struct_fields_depth<'a>(
-    ctx: &'a Context,
+    vc: &VCtx<'a>,
     env: &mut Env<'a>,
     binding: &str,
     sdef: &StructDef,
-    module_env: &ModuleEnv,
-    ieee754_f64: bool,
-    bitvec_i64: bool,
     depth: usize,
 ) -> Vec<(String, Dynamic<'a>)> {
     const MAX_NESTED_SEED_DEPTH: usize = 16;
@@ -95,28 +80,16 @@ fn seed_struct_fields_depth<'a>(
         .iter()
         .map(|field| {
             let name = format!("{binding}_{}", field.name);
-            let value = param_z3_value(
-                ctx,
+            let value = crate::verification::support::datatype::param_z3_value_for_vc(
+                vc,
                 &name,
                 Some(&field.type_name),
-                module_env,
-                ieee754_f64,
-                bitvec_i64,
             );
             if depth < MAX_NESTED_SEED_DEPTH {
-                if let Some(inner) = module_env.get_struct(&field.type_name) {
+                if let Some(inner) = vc.module_env.get_struct(&field.type_name) {
                     // Seed the inner leaves under this field's own
                     // binding name: `__struct_<binding>_<field>_<leaf>`.
-                    seed_struct_fields_depth(
-                        ctx,
-                        env,
-                        &name,
-                        inner,
-                        module_env,
-                        ieee754_f64,
-                        bitvec_i64,
-                        depth + 1,
-                    );
+                    seed_struct_fields_depth(vc, env, &name, inner, depth + 1);
                 }
             }
             (field.name.clone(), value)

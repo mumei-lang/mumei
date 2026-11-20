@@ -607,6 +607,17 @@ fn havoc_written_struct_fields<'a>(
                 let fresh: Dynamic = match old.get_sort().kind() {
                     z3::SortKind::Int => Int::fresh_const(ctx, &format!("__post_{key}")).into(),
                     z3::SortKind::Bool => Bool::fresh_const(ctx, &format!("__post_{key}")).into(),
+                    // Enum-typed fields seed as the enum's datatype
+                    // (`pure-i64-composite/v17`): without the fresh
+                    // post-view, a `requires` referencing the written
+                    // field evaluates against the post-write ctor and
+                    // reads as a contradiction.
+                    z3::SortKind::Datatype => z3::ast::Datatype::new_const(
+                        ctx,
+                        format!("__post_{key}").as_str(),
+                        &old.get_sort(),
+                    )
+                    .into(),
                     // Non-scalar field slots keep the input view; no
                     // admitted field-write profile reaches them.
                     _ => continue,
@@ -635,15 +646,7 @@ pub(crate) fn seed_env<'a>(vc: &VCtx<'a>, atom: &Atom) -> Env<'a> {
             .as_deref()
             .and_then(|type_name| module_env.get_struct(type_name))
         {
-            seed_struct_fields(
-                ctx,
-                &mut env,
-                &param.name,
-                sdef,
-                module_env,
-                ieee754_f64,
-                bitvec_i64,
-            );
+            seed_struct_fields(vc, &mut env, &param.name, sdef);
         }
     }
     if tuple_component_types(atom.return_type.as_deref()).is_none() {
@@ -667,15 +670,7 @@ pub(crate) fn seed_env<'a>(vc: &VCtx<'a>, atom: &Atom) -> Env<'a> {
         .as_deref()
         .and_then(|type_name| module_env.get_struct(type_name))
     {
-        seed_struct_fields(
-            ctx,
-            &mut env,
-            "result",
-            sdef,
-            module_env,
-            ieee754_f64,
-            bitvec_i64,
-        );
+        seed_struct_fields(vc, &mut env, "result", sdef);
     }
     env
 }
