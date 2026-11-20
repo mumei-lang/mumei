@@ -5896,6 +5896,35 @@ enforced as an ordinary observed outcome. The host's `memory_bound_mb`
 still wins; on platforms with no POSIX bound mechanism the manifest
 fallback stays unenforced rather than breaking the schedule.
 
+### Scheduled-attempt evidence check via `--core` (mumei-agent #994)
+
+[mumei-agent#994](https://github.com/mumei-lang/mumei-agent/pull/994)
+lets a scheduled attempt carry a declared Core evidence check: after the
+schedule selects an adapter, `verify-schedule --core <path>` (absolute path
+to a regular file) pipes the selected output through `core evidence check`
+with the policy timeout capped at 60s and records the result on
+`AttemptScheduleResult.evidence_check`; `evaluate_evidence_check` maps the
+check plus the emitted `mumei.evidence-check-acceptance/v1` descriptor into
+`evidence_acceptance` only when the descriptor's schema version matches.
+Both fields serialize on the existing `mumei.attempt-schedule/v1` record —
+the check is a dispatch observation, never a grade or claim verdict. C11
+stays partial; Core meaning and acceptance, C12's demand gate and any
+default audit/CLI/MCP route are unchanged — Evidence acceptance remains
+open.
+
+### Audit-lane scheduled evidence check (mumei-agent #995)
+
+[mumei-agent#995](https://github.com/mumei-lang/mumei-agent/pull/995)
+adds `audit --schedule-core <path>` (with
+`--enable-scheduled-verification`): the declared Core path is validated as
+absolute and regular, joins the `--schedule-*` gating names and the
+declared-path redaction set, and flows into each scheduled attempt's
+`evidence_check`/`evidence_acceptance` exactly as `verify-schedule --core`
+does. `--output` may not overwrite any declared input — compared by
+realpath and samefile so a hardlink is also refused. The record stays a
+dispatch record: it never alters `verification_status` or `success`. C11
+stays partial; Evidence acceptance remains open.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
