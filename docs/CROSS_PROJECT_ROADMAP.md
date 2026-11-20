@@ -5831,6 +5831,71 @@ attempt cycle without production effects. The lane is exercised by
 dedicated tests against the stub only; no adapter-facing semantics
 change.
 
+### Type-switch alternatives in the normal-flow CFG (mumei-agent #988)
+
+[mumei-agent#988](https://github.com/mumei-lang/mumei-agent/pull/988)
+models `switch v := x.(type)` alternatives as explicit edges in the
+normal-flow CFG instead of a single collapsed branch: each `case T`
+binds the narrowed type for its own body, and the default/other-cases
+path keeps the declared type. The accompanying dataflow fixes keep
+self-reslices (`s = s[:0]`), different-name reslices (`x := s[lo:hi]`)
+and channel direction casts (`chan<- int(ch)`) from losing nil or
+closed state — a reslice keeps the same backing and a direction cast
+is the same runtime channel — while map indexes whose keys contain a
+colon (`m["a:b"]`) are no longer misread as reslices.
+
+### Goto/label edges in the normal-flow CFG (mumei-agent #989)
+
+[mumei-agent#989](https://github.com/mumei-lang/mumei-agent/pull/989)
+turns `goto`/`label` into real normal-flow CFG edges: forward and
+backward jumps are wired to their label targets, `break`/`continue`
+keep working inside labelled loops, and labels that Tree-sitter
+returns without a child statement (`L:` before `}`) or stacked
+(`L1: L2: stmt`) still register as `goto` targets. Unreachable
+predecessors no longer leak into unassigned-use pre-states, so a use
+reached only through a jumped-over assignment reports definite rather
+than possible, and the synthetic stacked-label wrapper stays
+transparent to dataflow scope.
+
+### Manifest-declared attempt argv (mumei-agent #990)
+
+[mumei-agent#990](https://github.com/mumei-lang/mumei-agent/pull/990)
+adds `AdapterDescriptor.attempt_argv`: an adapter manifest can declare
+its own attempt command, which `verify-schedule` and the audit
+`--enable-scheduled-verification` schedule fall back to when the host
+argv map has no entry — but only under an explicit host opt-in,
+`allow_manifest_attempt_argv: true` in the declared planner policy, so
+a manifest can never plant an executable command on its own.
+
+### Declared output verdict markers (mumei-agent #991)
+
+[mumei-agent#991](https://github.com/mumei-lang/mumei-agent/pull/991)
+adds `AdapterDescriptor.verdict_markers`: an ordered tuple of
+`{stream, contains, outcome}` declarations that map an adapter's raw
+stdout/stderr onto its declared outcome vocabulary (`valid`, `failed`,
+`inconclusive`). The schedule records the first match as the entry's
+`reported_outcome` — the adapter's declared self-report, never a
+selection signal or Evidence acceptance.
+
+### Manifest-declared attempt stdin (mumei-agent #992)
+
+[mumei-agent#992](https://github.com/mumei-lang/mumei-agent/pull/992)
+adds `AdapterDescriptor.attempt_stdin`: an adapter manifest can declare
+the byte payload piped to the attempt process's standard input through
+`dispatch_attempt`'s `feed_bytes` channel — gated on a separate opt-in,
+`allow_manifest_attempt_stdin: true`, so declared input is inert
+without it. Scheduled attempts never inherit the parent's stdin: no
+declared feed means a closed pipe (deterministic EOF).
+
+### Manifest-declared attempt memory bound (mumei-agent #993)
+
+[mumei-agent#993](https://github.com/mumei-lang/mumei-agent/pull/993)
+makes a manifest's `max_memory_mb` the scheduled attempt's ceiling when
+the host declares no bound of its own — the adapter's declared budget,
+enforced as an ordinary observed outcome. The host's `memory_bound_mb`
+still wins; on platforms with no POSIX bound mechanism the manifest
+fallback stays unenforced rather than breaking the schedule.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
