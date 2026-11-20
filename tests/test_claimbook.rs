@@ -1916,3 +1916,147 @@ fn unparsable_certificate_and_input_return_exit_four() {
     );
     assert_eq!(output.status.code(), Some(4));
 }
+
+/// Build a promotable acceptance triple inside `dir`: verify the clamp
+/// fixture into a v1 record, declare a matching
+/// `mumei.evidence-requirement-list/v1`, run `evidence accept
+/// --requirement-list` and return (requirement_list, evidence, acceptance).
+fn acceptance_triple(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let source = copy_fixture(dir, "semantic_contract_clamp.mm", "ev.mm");
+    let verify = run_in(
+        dir,
+        &[
+            "evidence",
+            "verify-source",
+            source.to_str().expect("UTF-8 path"),
+            "--json",
+        ],
+    );
+    assert!(verify.status.success());
+    let record = dir.join("record.json");
+    std::fs::write(&record, &verify.stdout).expect("write record");
+    let saved: Value = serde_json::from_slice(&verify.stdout).expect("parse record");
+    let requirement = json!({
+        "schema_version": "mumei.evidence-requirement/v1",
+        "subject_sha256": saved["subject"]["sha256"],
+        "obligation_id": saved["obligation_id"],
+        "semantics": {
+            "profile": saved["semantics"]["profile"],
+            "integer_model": saved["semantics"]["integer_model"],
+            "target_triple": saved["semantics"]["target_triple"],
+        },
+        "minimum_assurance": "unbounded_proof",
+        "correspondence_status": ["validated", "assumed"],
+        "excluded_assumptions": [],
+    });
+    let requirement_list = dir.join("requirements.json");
+    std::fs::write(
+        &requirement_list,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": "mumei.evidence-requirement-list/v1",
+            "requirements": [requirement],
+        }))
+        .expect("serialize requirement list"),
+    )
+    .expect("write requirement list");
+    let accept = run_in(
+        dir,
+        &[
+            "evidence",
+            "accept",
+            record.to_str().expect("UTF-8 path"),
+            "--requirement-list",
+            requirement_list.to_str().expect("UTF-8 path"),
+            "--json",
+        ],
+    );
+    assert!(
+        accept.status.success(),
+        "evidence accept failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&accept.stdout),
+        String::from_utf8_lossy(&accept.stderr)
+    );
+    let acceptance = dir.join("acceptance.json");
+    std::fs::write(&acceptance, &accept.stdout).expect("write acceptance");
+    (requirement_list, record, acceptance)
+}
+
+#[test]
+fn require_evidence_acceptance_gates_promotable_triple() {
+    let dir = fresh_dir("acceptance-gate");
+    let source = copy_fixture(&dir, "claimbook_atoms.mm", "main.mm");
+    let (requirement_list, record, acceptance) = acceptance_triple(&dir);
+    let (req, ev, acc) = (
+        requirement_list.to_str().expect("UTF-8 path").to_string(),
+        record.to_str().expect("UTF-8 path").to_string(),
+        acceptance.to_str().expect("UTF-8 path").to_string(),
+    );
+    let args = ["--require-evidence-acceptance", &req, &ev, &acc];
+    let output = claims(&dir, &source, &args);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "gate rejected a promotable triple\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // A descriptor that does not pin the declared evidence fails closed.
+    let tampered = dir.join("tampered.json");
+    let mut record_doc: Value =
+        serde_json::from_slice(&std::fs::read(&record).expect("read record"))
+            .expect("parse record");
+    record_doc["subject"]["sha256"] = json!("0".repeat(64));
+    std::fs::write(
+        &tampered,
+        serde_json::to_vec_pretty(&record_doc).expect("reserialize"),
+    )
+    .expect("write tampered record");
+    let tampered_arg = tampered.to_str().expect("UTF-8 path").to_string();
+    let output = claims(
+        &dir,
+        &source,
+        &["--require-evidence-acceptance", &req, &tampered_arg, &acc],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--require-evidence-acceptance"),
+        "stderr:\n{stderr}"
+    );
+    assert!(!stderr.contains("clamp"), "stderr:\n{stderr}");
+
+    // A non-accepted verdict fails closed too.
+    let rejected_acceptance = dir.join("rejected-acceptance.json");
+    let mut descriptor: Value =
+        serde_json::from_slice(&std::fs::read(&acceptance).expect("read acceptance"))
+            .expect("parse acceptance");
+    descriptor["verdict"] = json!("inconclusive");
+    std::fs::write(
+        &rejected_acceptance,
+        serde_json::to_vec_pretty(&descriptor).expect("reserialize"),
+    )
+    .expect("write rejected acceptance");
+    let rejected_arg = rejected_acceptance
+        .to_str()
+        .expect("UTF-8 path")
+        .to_string();
+    let output = claims(
+        &dir,
+        &source,
+        &["--require-evidence-acceptance", &req, &ev, &rejected_arg],
+    );
+    assert_eq!(output.status.code(), Some(1));
+
+    // A missing input is a rejection, never a silent pass.
+    let missing = dir
+        .join("missing.json")
+        .to_str()
+        .expect("UTF-8 path")
+        .to_string();
+    let output = claims(
+        &dir,
+        &source,
+        &["--require-evidence-acceptance", &req, &ev, &missing],
+    );
+    assert_eq!(output.status.code(), Some(1));
+}

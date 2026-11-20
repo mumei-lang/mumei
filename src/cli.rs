@@ -372,6 +372,9 @@ pub(crate) enum Command {
         /// Require every claim to meet this Seal Grade
         #[arg(long, value_parser = ["G0", "G1", "G2", "G3", "G4", "G5"])]
         require_grade: Option<String>,
+        /// Require a promotable acceptance triple: <requirement-list> <evidence> <acceptance> — the gate fails closed unless the mumei.evidence-requirement-list-acceptance/v1 descriptor pins these declared inputs with verdict accepted
+        #[arg(long, num_args = 3, value_names = ["REQUIREMENT_LIST", "EVIDENCE", "ACCEPTANCE"])]
+        require_evidence_acceptance: Vec<String>,
     },
     /// Check whether atom contracts reject deterministic implementation mutations
     Controls {

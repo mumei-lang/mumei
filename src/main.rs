@@ -115,6 +115,7 @@ fn main() {
             require_discriminating,
             require_complete,
             require_grade,
+            require_evidence_acceptance,
         }) => commands::claims::cmd_claims(
             &input,
             commands::claims::ClaimsOptions {
@@ -128,6 +129,7 @@ fn main() {
                 require_discriminating,
                 require_complete,
                 require_grade: require_grade.as_deref(),
+                require_evidence_acceptance: &require_evidence_acceptance,
             },
         ),
         Some(Command::Controls {
