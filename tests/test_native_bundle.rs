@@ -3041,20 +3041,30 @@ fn module_bundle_rejects_a_nan_refutable_f64_ensures() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("app.mm");
     let bundle = root.path().join("bundle");
+    // A second atom makes `build` take the module path
+    // (`build_module`), where `emit_module` verifies `add` under the
+    // admission-derived IEEE config — a single-atom source would bail
+    // out on the `build_single` admission gate before any contract
+    // check ran.
     fs::write(
         &source,
-        "atom add(x: f64, y: f64) -> f64 requires: true; ensures: result == x + y; body: { x + y };\n",
+        "atom add(x: f64, y: f64) -> f64 requires: true; ensures: result == x + y; body: { x + y };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
     )
     .unwrap();
-    assert!(!cli(&[
+    let output = cli(&[
         "native-bundle",
         "build",
         source.to_str().unwrap(),
         "-o",
         bundle.to_str().unwrap(),
-    ])
-    .status
-    .success());
+    ]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("add"),
+        "expected the failed atom in the error output, got: {stderr}"
+    );
 }
 
 #[test]
