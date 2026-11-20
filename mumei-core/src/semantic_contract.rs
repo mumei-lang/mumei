@@ -3493,10 +3493,22 @@ fn build_struct_env(
     let enum_paths: BTreeMap<String, Vec<String>> = items
         .iter()
         .filter_map(|item| match item {
-            Item::EnumDef(def) => Some((
-                def.name.clone(),
-                declared_field_paths(items, def.name.as_str(), 8),
-            )),
+            // `declared_field_paths` materialises every flattened path
+            // BEFORE the leaf gate could reject a wide declaration, so an
+            // out-of-budget enum still walks an exponential tree (16^d
+            // paths at depth d). Gate on the precomputed leaf width first:
+            // anything already over the `<= 16` budget fails admission
+            // here without expanding a single path.
+            Item::EnumDef(def)
+                if enum_widths
+                    .get(def.name.as_str())
+                    .is_some_and(|width| *width <= 16) =>
+            {
+                Some((
+                    def.name.clone(),
+                    declared_field_paths(items, def.name.as_str(), 8),
+                ))
+            }
             _ => None,
         })
         .collect();
@@ -12328,6 +12340,37 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
             )
             .is_ok(),
             "a shared child struct must admit like a scalar-leaved one"
+        );
+    }
+
+    #[test]
+    fn composite_enum_payloads_reject_wide_declarations_without_expanding() {
+        // A >16-leaf declaration must fail the leaf budget WITHOUT
+        // `declared_field_paths` materialising the exponential path set —
+        // the earlier gate-on-width order is what makes wide declarations
+        // cheap to reject rather than an allocation hang.
+        let mut decls = String::from("struct S0 {\n");
+        for i in 0..16 {
+            decls.push_str(&format!("    f{i}: i64,\n"));
+        }
+        decls.push_str("}\n");
+        for level in 1..4 {
+            decls.push_str(&format!("struct S{level} {{\n"));
+            for i in 0..16 {
+                decls.push_str(&format!("    f{i}: S{},\n", level - 1));
+            }
+            decls.push_str("}\n");
+        }
+        decls.push_str("enum Ev { V(p: S3) }\n");
+        assert!(
+            extract_pure_i64_module_contracts(
+                &format!("{decls}atom step(e: Ev) -> i64 requires: true; ensures: true; body: {{ 0 }};\n{MAIN0}"),
+                "m.mm",
+                None,
+                RefinedAdmission::CompositeV18
+            )
+            .is_err(),
+            "a >16-leaf declaration must stay outside v18"
         );
     }
 }
