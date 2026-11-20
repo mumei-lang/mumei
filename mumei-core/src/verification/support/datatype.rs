@@ -63,7 +63,7 @@ pub(crate) fn field_leaf_types(
     let mut visiting = std::collections::HashSet::new();
     let mut seen = std::collections::HashSet::new();
     let mut work = 0usize;
-    collect_field_leaves(
+    if collect_field_leaves(
         field_type,
         module_env,
         String::new(),
@@ -71,7 +71,24 @@ pub(crate) fn field_leaf_types(
         &mut visiting,
         &mut seen,
         &mut work,
-    )?;
+    )
+    .is_none()
+    {
+        // A bounded rejection is silent to callers (`None` falls back to
+        // the scalar path), so surface *which* budget tripped — otherwise
+        // an exponential shared-subtree walk is indistinguishable from a
+        // structural reject (recursion, enum/array leaf, name collision).
+        if work > MAX_LEAF_FIELD_VISITS {
+            eprintln!(
+                "warning: enum payload flattening exceeded the leaf-walk visit budget ({MAX_LEAF_FIELD_VISITS}); the payload binds as a scalar projection"
+            );
+        } else if leaves.len() >= MAX_PAYLOAD_LEAVES {
+            eprintln!(
+                "warning: enum payload exceeds {MAX_PAYLOAD_LEAVES} leaves; the payload binds as a scalar projection"
+            );
+        }
+        return None;
+    }
     Some(leaves)
 }
 

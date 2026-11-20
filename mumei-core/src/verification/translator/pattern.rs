@@ -25,7 +25,12 @@ fn rebuild_payload_direct_fields<'a>(
         let width = datatype::field_leaf_types(&field.type_name, vc.module_env)?.len();
         let slice = leaves.get(cursor..cursor + width)?;
         cursor += width;
-        if let Some(inner) = vc.module_env.get_struct(&field.type_name) {
+        // Aliases resolve like the variant-field lookup above does — an
+        // un-resolved name misses `get_struct` and falls into the scalar
+        // path, where an empty struct's zero-width slice would panic on
+        // `slice[0]` (and a non-empty one would bind a leaf, not a handle).
+        let resolved_ty = vc.module_env.resolve_base_type(&field.type_name);
+        if let Some(inner) = vc.module_env.structs.get(&resolved_ty) {
             let inner_handle =
                 crate::verification::translator::fresh_struct_handle(ctx, &inner.name);
             let inner_name = inner_handle.decl().name();
@@ -33,7 +38,7 @@ fn rebuild_payload_direct_fields<'a>(
             crate::verification::translator::bind_struct_fields(env, &inner_name, &inner_direct);
             direct.push((field.name.clone(), inner_handle));
         } else {
-            direct.push((field.name.clone(), slice[0].clone()));
+            direct.push((field.name.clone(), slice.first()?.clone()));
         }
     }
     (cursor == leaves.len()).then_some(direct)
