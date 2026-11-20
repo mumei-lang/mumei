@@ -196,6 +196,30 @@ pub(crate) fn bitpreserve_cast<'a>(
     }
 }
 
+/// `bitpreserve_cast` with signedness: widening a signed 128-bit leaf
+/// (`i128`, `pure-i64-composite/v21`) sign-extends so a `-1` literal or
+/// narrower signed operand stays `-1`; unsigned targets keep `zext`.
+pub(crate) fn wide_int_cast<'a>(
+    builder: &Builder<'a>,
+    value: BasicValueEnum<'a>,
+    target_ty: inkwell::types::BasicTypeEnum<'a>,
+    signed: bool,
+) -> mumei_core::verification::MumeiResult<BasicValueEnum<'a>> {
+    if value.get_type() == target_ty {
+        return Ok(value);
+    }
+    if let (BasicValueEnum::IntValue(int_val), inkwell::types::BasicTypeEnum::IntType(target_int)) =
+        (value, target_ty)
+    {
+        if signed && int_val.get_type().get_bit_width() < target_int.get_bit_width() {
+            return Ok(
+                llvm!(builder.build_int_s_extend(int_val, target_int, "payload_sext")).into(),
+            );
+        }
+    }
+    bitpreserve_cast(builder, value, target_ty)
+}
+
 fn declare_malloc<'a>(
     context: &'a Context,
     module: &Module<'a>,
@@ -252,10 +276,16 @@ fn declare_payload_box_alloc_failed<'a>(
 /// aggregates (struct values, enum tagged unions, array fat pointers) do not
 /// fit and are transported by address instead.
 pub(crate) fn payload_needs_box(ty: BasicTypeEnum<'_>) -> bool {
-    matches!(
-        ty,
-        BasicTypeEnum::StructType(_) | BasicTypeEnum::ArrayType(_) | BasicTypeEnum::VectorType(_)
-    )
+    match ty {
+        BasicTypeEnum::StructType(_)
+        | BasicTypeEnum::ArrayType(_)
+        | BasicTypeEnum::VectorType(_) => true,
+        // A scalar wider than the 64-bit slot truncates under
+        // `bitpreserve_cast`: box it into a heap slot like an
+        // aggregate (`pure-i64-composite/v21`).
+        BasicTypeEnum::IntType(int) => int.get_bit_width() > 64,
+        _ => false,
+    }
 }
 
 /// Encode `value` into a runtime i64 slot without losing bits. Scalars and
@@ -454,6 +484,13 @@ pub(crate) fn resolve_param_type<'a>(
             // spelling from String at the `lower()` layer (e.g. a dedicated
             // variant) rather than re-adding a string match here. Same note
             // applies to `param_z3_value` in verification/translator.rs.
+            // `i128`/`u128` (`pure-i64-composite/v21`): a native
+            // 128-bit machine integer parameter — one LLVM `i128`
+            // leaf, which the record's `leaf_widths` pairs back into
+            // the two 64-bit ABI slots the source model uses.
+            if base == "i128" || base == "u128" {
+                return context.i128_type().into();
+            }
             match lower(&base) {
                 LoweredType::F64 => context.f64_type().into(),
                 LoweredType::Str => context.ptr_type(inkwell::AddressSpace::default()).into(),
@@ -524,6 +561,9 @@ pub(crate) fn resolve_return_type<'a>(
 ) -> inkwell::types::BasicTypeEnum<'a> {
     if let Some(ref ret_type) = signature.return_type {
         let base = module_env.resolve_base_type(ret_type);
+        if base == "i128" || base == "u128" {
+            return context.i128_type().into();
+        }
         match lower(&base) {
             LoweredType::F64 => context.f64_type().into(),
             LoweredType::Str => context.ptr_type(AddressSpace::default()).into(),

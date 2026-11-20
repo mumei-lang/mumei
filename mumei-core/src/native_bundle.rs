@@ -143,6 +143,9 @@ pub const MODULE_PROFILE_V22: &str = "mumei.native-pure-i64-module-linux-x86_64/
 /// v22 plus the `str_bound: N;` clause — atoms may declare a per-atom
 /// `Str` bound (`pure-i64-composite/v20`).
 pub const MODULE_PROFILE_V23: &str = "mumei.native-pure-i64-module-linux-x86_64/v23";
+/// v23 plus two-slot `i128`/`u128` leaves — the record must pin
+/// `leaf_widths` (`pure-i64-composite/v21`).
+pub const MODULE_PROFILE_V24: &str = "mumei.native-pure-i64-module-linux-x86_64/v24";
 pub const MODULE_SCOPE: &str =
     "identity_consistency_only/no_authenticity_or_artifact_semantic_proof";
 pub const MODULE_RECHECK_PROFILE: &str = "mumei.native-module-source-recheck/v1";
@@ -180,6 +183,7 @@ pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, Bundl
         MODULE_PROFILE_V21 => Ok(RefinedAdmission::CompositeV18),
         MODULE_PROFILE_V22 => Ok(RefinedAdmission::CompositeV19),
         MODULE_PROFILE_V23 => Ok(RefinedAdmission::CompositeV20),
+        MODULE_PROFILE_V24 => Ok(RefinedAdmission::CompositeV21),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -256,6 +260,9 @@ pub const MULTIFILE_PROFILE_V22: &str = "mumei.native-pure-i64-multifile-linux-x
 /// v22 plus the `str_bound: N;` clause — atoms may declare a per-atom
 /// `Str` bound (`pure-i64-composite/v20`).
 pub const MULTIFILE_PROFILE_V23: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v23";
+/// v23 plus two-slot `i128`/`u128` leaves — the record must pin
+/// `leaf_widths` (`pure-i64-composite/v21`).
+pub const MULTIFILE_PROFILE_V24: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v24";
 pub const MULTIFILE_RECHECK_PROFILE: &str = "mumei.native-multifile-source-recheck/v1";
 
 pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, BundleError> {
@@ -283,6 +290,7 @@ pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, Bu
         MULTIFILE_PROFILE_V21 => Ok(RefinedAdmission::CompositeV18),
         MULTIFILE_PROFILE_V22 => Ok(RefinedAdmission::CompositeV19),
         MULTIFILE_PROFILE_V23 => Ok(RefinedAdmission::CompositeV20),
+        MULTIFILE_PROFILE_V24 => Ok(RefinedAdmission::CompositeV21),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -594,6 +602,12 @@ pub struct ModuleNativeBundleRecord {
     pub link_build: LinkBuild,
     pub settings: BuildSettings,
     pub files: BTreeMap<BundleFile, ContentIdentity>,
+    /// v24: per-atom declared leaf widths (`64` scalar/enum, `128`
+    /// wide) in signature order — pins the two-slot pairing
+    /// `pure-i64-composite/v21` modules carry. Absent/empty on older
+    /// profiles, required non-empty under v24.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub leaf_widths: BTreeMap<String, Vec<u64>>,
 }
 
 /// The file-level pin half of a multifile record: which member ordered
@@ -630,6 +644,10 @@ pub struct MultifileNativeBundleRecord {
     /// each pinned to the bytes the merge consumed — a consumer re-derives
     /// the merged text from these pins instead of trusting a filesystem.
     pub sources: BTreeMap<String, ContentIdentity>,
+    /// v24: per-atom declared leaf widths — same semantics as the
+    /// module record's `leaf_widths`, over the merged text.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub leaf_widths: BTreeMap<String, Vec<u64>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1251,6 +1269,7 @@ pub fn load_pinned_module_record(
             MODULE_PROFILE_V21,
             MODULE_PROFILE_V22,
             MODULE_PROFILE_V23,
+            MODULE_PROFILE_V24,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1328,6 +1347,7 @@ pub fn load_pinned_multifile_record(
             MULTIFILE_PROFILE_V21,
             MULTIFILE_PROFILE_V22,
             MULTIFILE_PROFILE_V23,
+            MULTIFILE_PROFILE_V24,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1388,12 +1408,37 @@ pub fn check_module_identity(
     files: &BTreeMap<BundleFile, Vec<u8>>,
 ) -> Result<(), BundleError> {
     let record = load_pinned_module_record(record_bytes, expected_id)?;
-    let (binding, atoms, _types, _structs, _enums) =
-        prepare_module_source(source, module_refined_admission(&record.profile)?)?;
+    let admission = module_refined_admission(&record.profile)?;
+    let (binding, atoms, _types, _structs, _enums) = prepare_module_source(source, admission)?;
     if record.source != binding {
         return Err(BundleError("source or compiler identity mismatch"));
     }
+    check_leaf_widths(&record.leaf_widths, source, admission, &record.profile)?;
     check_module_members(&record.files, &binding, &atoms, files)
+}
+
+/// A v24 record must pin the two-slot pairing it describes; every
+/// other profile must leave the field out — rechecking re-derives the
+/// declared widths under the record's own admission so a pinned
+/// pairing cannot smuggle a wrong slot split past the comparison.
+fn check_leaf_widths(
+    pinned: &BTreeMap<String, Vec<u64>>,
+    source: &str,
+    admission: RefinedAdmission,
+    profile: &str,
+) -> Result<(), BundleError> {
+    let is_v24 = profile == MODULE_PROFILE_V24 || profile == MULTIFILE_PROFILE_V24;
+    let expected = semantic_contract::module_leaf_widths(source, admission)
+        .map_err(|_| BundleError("source outside bounded module profile"))?;
+    let has_wide = expected.values().flatten().any(|width| *width == 128);
+    if is_v24 {
+        if pinned != &expected || !has_wide {
+            return Err(BundleError("leaf-width pairing mismatch"));
+        }
+    } else if !pinned.is_empty() || has_wide {
+        return Err(BundleError("leaf-width pairing mismatch"));
+    }
+    Ok(())
 }
 
 /// Compare a multifile bundle's snapshots to an externally supplied
@@ -1418,16 +1463,19 @@ pub fn check_multifile_identity(
     {
         return Err(BundleError("missing or replaced source member"));
     }
-    let prepared = prepare_multifile_source(
-        root_name,
-        sources,
-        multifile_refined_admission(&record.profile)?,
-    )?;
+    let admission = multifile_refined_admission(&record.profile)?;
+    let prepared = prepare_multifile_source(root_name, sources, admission)?;
     if record.source != prepared.binding
         || record.source_files.import_graph_sha256 != prepared.import_graph_sha256
     {
         return Err(BundleError("source or compiler identity mismatch"));
     }
+    check_leaf_widths(
+        &record.leaf_widths,
+        &prepared.merged,
+        admission,
+        &record.profile,
+    )?;
     check_module_members(&record.files, &prepared.binding, &prepared.atoms, files)
 }
 

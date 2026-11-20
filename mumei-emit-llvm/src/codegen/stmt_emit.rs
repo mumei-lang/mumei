@@ -3,7 +3,7 @@ use crate::codegen::expr_emit::{
     hir_int_type_name, infer_struct_type_name, is_fixed_int_type_name, resolve_named_type,
     LAMBDA_MARK,
 };
-use crate::codegen::lowering::{bitpreserve_cast, ArrayPtr};
+use crate::codegen::lowering::{bitpreserve_cast, wide_int_cast, ArrayPtr};
 use crate::codegen::pattern_emit::find_field_index;
 use crate::codegen::task_runtime::declare_task_group_should_cancel_current_extern;
 use inkwell::builder::Builder;
@@ -337,10 +337,23 @@ pub(crate) fn compile_hir_stmt<'a>(
                 context, builder, module, function, value, variables, var_types, array_ptrs,
                 module_env,
             )?;
-            variables.insert(var.clone(), val);
+            // `let x: i128 = …` (`pure-i64-composite/v21`): the declared
+            // 128-bit leaf binds a native `i128` — a literal or narrower
+            // RHS zero-extends into the slot.
             let declared_base = ty
                 .as_deref()
                 .map(|ty_name| resolve_named_type(module_env, ty_name));
+            let val = if matches!(declared_base.as_deref(), Some("i128") | Some("u128")) {
+                wide_int_cast(
+                    builder,
+                    val,
+                    context.i128_type().into(),
+                    declared_base.as_deref() == Some("i128"),
+                )?
+            } else {
+                val
+            };
+            variables.insert(var.clone(), val);
             let inferred_ty = declared_base
                 .clone()
                 .filter(|base| {
@@ -414,6 +427,28 @@ pub(crate) fn compile_hir_stmt<'a>(
                             context, builder, module, function, value, variables, var_types,
                             array_ptrs, module_env,
                         )?;
+                        // A 128-bit leaf field (`pure-i64-composite/v21`)
+                        // takes a native `i128` — a literal or narrower
+                        // written value zero-extends into the slot.
+                        let leaf_type_name = if segments.len() == 1 {
+                            module_env
+                                .get_struct(&struct_ty)
+                                .and_then(|sd| {
+                                    index_path.first().and_then(|&i| sd.fields.get(i as usize))
+                                })
+                                .map(|f| f.type_name.as_str())
+                        } else {
+                            Some(level_ty)
+                        };
+                        let val = match leaf_type_name.map(|t| resolve_named_type(module_env, t)) {
+                            Some(base) if base == "i128" || base == "u128" => wide_int_cast(
+                                builder,
+                                val,
+                                context.i128_type().into(),
+                                base == "i128",
+                            )?,
+                            _ => val,
+                        };
                         let old = variables.get(base).copied().ok_or_else(|| {
                             MumeiError::codegen(format!(
                                 "struct binding '{base}' has no aggregate value"
@@ -664,6 +699,17 @@ pub(crate) fn compile_hir_stmt<'a>(
                 // captures `s` packs the capture from `array_ptrs`.
                 array_ptrs.remove(var.as_str());
             }
+            // `x = …` on a declared 128-bit binding widens the RHS the
+            // same way `let` does (`pure-i64-composite/v21`).
+            let val = match var_types
+                .get(var.as_str())
+                .map(|t| resolve_named_type(module_env, t))
+            {
+                Some(base) if base == "i128" || base == "u128" => {
+                    wide_int_cast(builder, val, context.i128_type().into(), base == "i128")?
+                }
+                _ => val,
+            };
             variables.insert(var.clone(), val);
             if let Some(struct_ty) = infer_struct_type_name(value, var_types, module_env) {
                 var_types.insert(var.clone(), struct_ty);
