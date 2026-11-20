@@ -4,11 +4,14 @@
 //! A mumei `enum` that is not marked `is_recursive` by the parser (no `Self`
 //! payload), is not generic (`type_params` is empty — `Option<T>` stays out
 //! until a monomorphisation layer exists), and whose payload fields all
-//! resolve to `i64`/`f64`/`Str`/`bool` through `resolve_base_type` (fields
-//! that are other enums, structs, or arrays keep the enum on the Int-tag
-//! path) is lowered to a real Z3 datatype: variants become constructors with
-//! `is-<Variant>` testers and per-field selectors of the *correct* sort (a
-//! `Str` payload projects as a Z3 `String`, not as an Int tag).
+//! resolve to `i64`/`i32`/`u64`/`u32`/`f64`/`Str`/`bool` through
+//! `resolve_base_type` (fields that are other enums, structs, or arrays keep
+//! the enum on the Int-tag path) is lowered to a real Z3 datatype: variants
+//! become constructors with `is-<Variant>` testers and per-field selectors of
+//! the *correct* sort (a `Str` payload projects as a Z3 `String`, not as an
+//! Int tag). Width-narrowed integer leaves (`u64`/`u32`/`i32`) land on `Int`
+//! — [`enum_value_leaf_domain`] bounds them to their declared width at every
+//! introduction point, mirroring the `u64`-param domain asserts.
 //!
 //! Recursive enums keep the Int-tag encoding and the `inductive_data_type`
 //! fragment tag (Lean 4 delegation boundary).
@@ -16,14 +19,14 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use z3::ast::{Ast, Bool, Datatype, Dynamic};
-use z3::{Context, DatatypeAccessor, DatatypeSort, Sort};
+use z3::ast::{Ast, Bool, Datatype, Dynamic, Int};
+use z3::{Context, DatatypeAccessor, DatatypeSort, Solver, Sort};
 
 use crate::lowering::{lower, LoweredType};
 use crate::parser::ast::{EnumDef, Expr, Stmt};
 use crate::verification::module_env::ModuleEnv;
 use crate::verification::translator::{VCtx, F64_EBITS, F64_SBITS};
-use crate::verification::types::{MumeiError, MumeiResult};
+use crate::verification::types::{Env, MumeiError, MumeiResult};
 
 /// Deepest enum-in-payload nesting a finite ADT accepts — a bound so a
 /// mutual `A(B)`, `B(A)` declaration cycle cannot recurse the
@@ -315,8 +318,141 @@ pub(crate) fn payload_leaf_range(
     None
 }
 
+/// `lo <= v <= hi` for the widened integer leaf kinds `field_is_scalar`
+/// admits beyond `i64`: `u64`, `u32` and `i32` (`usize`/`isize` already
+/// resolved to `u64`/`i64`). `i64`/`f64`/`Str`/`bool` leaves return `None`
+/// — `Int` is unbounded by design and the non-integer sorts carry their
+/// own domain.
+fn int_leaf_bound<'a>(ctx: &'a Context, base: &str, v: &Int<'a>) -> Option<Bool<'a>> {
+    let (lo, hi) = match base {
+        "u64" => (Int::from_u64(ctx, 0), Int::from_u64(ctx, u64::MAX)),
+        "u32" => (
+            Int::from_u64(ctx, 0),
+            Int::from_u64(ctx, u64::from(u32::MAX)),
+        ),
+        "i32" => (
+            Int::from_i64(ctx, i64::from(i32::MIN)),
+            Int::from_i64(ctx, i64::from(i32::MAX)),
+        ),
+        _ => return None,
+    };
+    Some(Bool::and(ctx, &[&v.ge(&lo), &v.le(&hi)]))
+}
+
+/// `value` is an enum datatype constant: the conjunction holding every
+/// `u64`/`u32`/`i32` payload leaf inside its declared width, gated on the
+/// variant that owns it (`is_V(value) => bounds_V`). The widened
+/// `field_is_scalar` set lands these leaves on `Int` — unbounded, they
+/// admit values the ABI cannot produce (a negative `u64`), the same gap
+/// `u64` params needed an explicit domain assert for. `None` when `value`
+/// is not a finite-ADT enum constant, every leaf is domain-exact, or the
+/// run is `bitvec_i64` — a `BV(64)` leaf accepts every 64-bit pattern,
+/// and narrower-width BV domains are the separate gap the direct
+/// `u32`/`i32` params already carry.
+pub(crate) fn enum_value_leaf_domain<'a>(vc: &VCtx<'a>, value: &Dynamic<'a>) -> Option<Bool<'a>> {
+    if vc.bitvec_i64 {
+        return None;
+    }
+    let dt = value.as_datatype()?;
+    let target_sort = dt.get_sort();
+    // A datatype const's `decl()` names the constant, not its sort — pin
+    // the enum by comparing sorts, the same probe
+    // `variant_tester_condition` uses.
+    let enum_def = vc.module_env.enums.values().find(|e| {
+        is_finite_adt(e, vc.module_env)
+            && enum_datatype_sort(vc, e)
+                .map(|s| s.sort == target_sort)
+                .unwrap_or(false)
+    })?;
+    let mut budget = MAX_ENUM_DOMAIN_NODES;
+    enum_leaf_domain_for(vc, enum_def, value, MAX_ENUM_PAYLOAD_NEST, &mut budget)
+}
+
+/// Total conjunction nodes [`enum_leaf_domain_for`] may emit for one
+/// enum value. The `enum:`-leaf walk multiplies variant counts level by
+/// level (V outer × V inner × ...), so a declared nesting shape like 16
+/// variants over 8 levels would otherwise mint ~4 billion conjuncts
+/// before the solver ever sees a query. Past the cap the walk simply
+/// stops descending — a dropped domain assumption only weakens what the
+/// proof may assume, never what it may claim.
+const MAX_ENUM_DOMAIN_NODES: usize = 1024;
+
+/// The per-variant conjunction [`enum_value_leaf_domain`] builds for a
+/// value already pinned to `enum_def`. An `enum:`-marked leaf is a single
+/// inner-datatype accessor — `as_int()` cannot see it — so the walk
+/// recurses into the inner enum's own leaf bounds, fueled by
+/// `MAX_ENUM_PAYLOAD_NEST` like the admission-time flattening and
+/// charged against `budget` per emitted node and per descent.
+fn enum_leaf_domain_for<'a>(
+    vc: &VCtx<'a>,
+    enum_def: &crate::parser::EnumDef,
+    value: &Dynamic<'a>,
+    fuel: u8,
+    budget: &mut usize,
+) -> Option<Bool<'a>> {
+    let dt = value.as_datatype()?;
+    let sort = enum_datatype_sort(vc, enum_def)?;
+    let mut conjuncts = Vec::new();
+    for (vidx, variant) in enum_def.variants.iter().enumerate() {
+        let mut accessor_idx = 0usize;
+        let mut bounds: Vec<Bool> = Vec::new();
+        for field in &variant.field_types {
+            for (_leaf_name, base) in field_leaf_types(&field.name, vc.module_env)? {
+                let sel = variant_selector_apply(&sort, vidx, accessor_idx, value);
+                if let Some(inner_name) = base.strip_prefix("enum:") {
+                    let inner = (fuel > 0 && *budget > 0)
+                        .then(|| vc.module_env.enums.get(inner_name))
+                        .flatten();
+                    if let (Some(sel), Some(inner)) = (sel, inner) {
+                        *budget -= 1;
+                        if let Some(bound) = enum_leaf_domain_for(vc, inner, &sel, fuel - 1, budget)
+                        {
+                            *budget = budget.saturating_sub(1);
+                            bounds.push(bound);
+                        }
+                    }
+                } else if let Some(bound) = sel
+                    .and_then(|sel| sel.as_int())
+                    .and_then(|sel| int_leaf_bound(vc.ctx, base.as_str(), &sel))
+                {
+                    *budget = budget.saturating_sub(1);
+                    bounds.push(bound);
+                }
+                accessor_idx += 1;
+            }
+        }
+        if bounds.is_empty() {
+            continue;
+        }
+        let bound_refs: Vec<&Bool> = bounds.iter().collect();
+        let is_v = sort.variants[vidx].tester.apply(&[&dt]).as_bool()?;
+        *budget = budget.saturating_sub(1);
+        conjuncts.push(is_v.implies(&Bool::and(vc.ctx, &bound_refs)));
+    }
+    if conjuncts.is_empty() {
+        return None;
+    }
+    let conjunct_refs: Vec<&Bool> = conjuncts.iter().collect();
+    Some(Bool::and(vc.ctx, &conjunct_refs))
+}
+
+/// Assert [`enum_value_leaf_domain`] for every enum datatype constant
+/// seeded in `env` — call once after param/result seeding (params, bound
+/// struct fields and the `result` handle all land there) so a widened
+/// payload leaf cannot take a value its declared width excludes.
+pub(crate) fn assert_enum_value_domains<'a>(vc: &VCtx<'a>, solver: &Solver<'a>, env: &Env<'a>) {
+    for value in env.values() {
+        if let Some(bound) = enum_value_leaf_domain(vc, value) {
+            solver.assert(&bound);
+        }
+    }
+}
+
 /// `true` when a variant field type lowers to a scalar Z3 sort. Enum, struct,
-/// and array payloads keep the enum on the Int-tag path.
+/// and array payloads keep the enum on the Int-tag path. `usize`/`isize`
+/// resolve to `u64`/`i64` inside `resolve_base_type`; `i128`/`u128` and
+/// `f32` stay out (`LoweredType` has no 128-bit variant, and `f32` has no
+/// sort mapping yet).
 fn field_is_scalar(field_type: &str, module_env: &ModuleEnv) -> bool {
     let base = module_env.resolve_base_type(field_type);
     if module_env.enums.contains_key(&base)
@@ -327,7 +463,13 @@ fn field_is_scalar(field_type: &str, module_env: &ModuleEnv) -> bool {
     }
     matches!(
         lower(&base),
-        LoweredType::I64 | LoweredType::F64 | LoweredType::Str | LoweredType::Bool
+        LoweredType::I64
+            | LoweredType::I32
+            | LoweredType::U64
+            | LoweredType::U32
+            | LoweredType::F64
+            | LoweredType::Str
+            | LoweredType::Bool
     )
 }
 

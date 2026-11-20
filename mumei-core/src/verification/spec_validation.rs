@@ -230,6 +230,7 @@ pub fn check_spec_satisfiability_with_timeout(
         bitvec_i64_global,
     );
     let mut env = seed_env(&vc, atom);
+    super::support::datatype::assert_enum_value_domains(&vc, &solver, &env);
     let mut had_clause_skips = false;
     assert_parameter_refinements(&vc, &solver, atom, module_env, &mut env)?;
     let checked_requires =
@@ -302,6 +303,7 @@ pub fn check_spec_satisfiability_with_timeout(
         }
         if let Some(body) = &body_stmt {
             havoc_written_struct_fields(&vc, atom, body, &mut local_env);
+            super::support::datatype::assert_enum_value_domains(&vc, &local_solver, &local_env);
         }
         match assert_clause(&vc, &local_solver, &mut local_env, atom, clause, "ensures")? {
             ClauseLoweringOutcome::Applied => {
@@ -340,6 +342,11 @@ pub fn check_spec_satisfiability_with_timeout(
         }
         if let Some(body) = &body_stmt {
             havoc_written_struct_fields(&vc, atom, body, &mut combined_env);
+            super::support::datatype::assert_enum_value_domains(
+                &vc,
+                &combined_solver,
+                &combined_env,
+            );
         }
         for clause in &ensure_clauses {
             if let ClauseLoweringOutcome::Skipped(warning) = assert_clause(
@@ -376,6 +383,7 @@ pub fn check_spec_satisfiability_with_timeout(
             }
             let local_solver = Solver::new(&ctx);
             let mut local_env = seed_env(&vc, atom);
+            super::support::datatype::assert_enum_value_domains(&vc, &local_solver, &local_env);
             assert_parameter_refinements(&vc, &local_solver, atom, module_env, &mut local_env)?;
             if let ClauseLoweringOutcome::Skipped(warning) = assert_clause(
                 &vc,

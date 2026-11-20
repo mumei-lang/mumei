@@ -2100,6 +2100,12 @@ fn verify_inner_impl(
         solver.assert(&v.le(&z3::ast::Int::from_str(&ctx, hi).expect("u128 upper bound literal")));
     }
 
+    // 2e. Enum-typed inputs: `u64`/`u32`/`i32` payload leaves carry the
+    // same declared-width domain the bare `u64` assert above gives a
+    // scalar param — every enum datatype constant seeded so far (params,
+    // bound struct fields, `result`) gets its per-variant leaf bounds.
+    datatype::assert_enum_value_domains(&vc, &solver, &env);
+
     // 2c. 全パラメータに対して配列長シンボルを事前生成
     #[allow(clippy::map_entry)]
     for param in &atom.params {
