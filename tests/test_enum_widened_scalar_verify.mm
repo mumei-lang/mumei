@@ -68,3 +68,42 @@ body: {
         _ => 1
     }
 }
+
+// Nested enum payloads: the inner `u64` leaf keeps its declared domain
+// inside `Outer::Wrap` — the `enum:`-marked leaf is recursed into, not
+// skipped.
+enum Inner {
+    A(u64),
+    B
+}
+
+enum Outer {
+    Wrap(Inner),
+    C
+}
+
+atom nested_nonneg(e: Outer) -> i64
+requires: true;
+ensures: result == 1;
+body: {
+    match e {
+        Outer::Wrap(i) => match i {
+            Inner::A(x) => if x >= 0 { 1 } else { 0 },
+            _ => 1
+        },
+        _ => 1
+    }
+}
+
+// The bound payload leaf carries its declared width into arithmetic —
+// `x + x` on a `u64` leaf takes the unsigned operand path, not a signed
+// `i64` fold that would diverge from LLVM's wrapping `add i64`.
+atom double(e: W) -> i64
+requires: true;
+ensures: result == 1;
+body: {
+    match e {
+        W::A(x) => if x + x >= x { 1 } else { 0 },
+        _ => 1
+    }
+}

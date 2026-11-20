@@ -364,6 +364,21 @@ pub(crate) fn enum_value_leaf_domain<'a>(vc: &VCtx<'a>, value: &Dynamic<'a>) -> 
                 .map(|s| s.sort == target_sort)
                 .unwrap_or(false)
     })?;
+    enum_leaf_domain_for(vc, enum_def, value, MAX_ENUM_PAYLOAD_NEST)
+}
+
+/// The per-variant conjunction [`enum_value_leaf_domain`] builds for a
+/// value already pinned to `enum_def`. An `enum:`-marked leaf is a single
+/// inner-datatype accessor — `as_int()` cannot see it — so the walk
+/// recurses into the inner enum's own leaf bounds, fueled by
+/// `MAX_ENUM_PAYLOAD_NEST` like the admission-time flattening.
+fn enum_leaf_domain_for<'a>(
+    vc: &VCtx<'a>,
+    enum_def: &crate::parser::EnumDef,
+    value: &Dynamic<'a>,
+    fuel: u8,
+) -> Option<Bool<'a>> {
+    let dt = value.as_datatype()?;
     let sort = enum_datatype_sort(vc, enum_def)?;
     let mut conjuncts = Vec::new();
     for (vidx, variant) in enum_def.variants.iter().enumerate() {
@@ -371,7 +386,17 @@ pub(crate) fn enum_value_leaf_domain<'a>(vc: &VCtx<'a>, value: &Dynamic<'a>) -> 
         let mut bounds: Vec<Bool> = Vec::new();
         for field in &variant.field_types {
             for (_leaf_name, base) in field_leaf_types(&field.name, vc.module_env)? {
-                if let Some(bound) = variant_selector_apply(&sort, vidx, accessor_idx, value)
+                let sel = variant_selector_apply(&sort, vidx, accessor_idx, value);
+                if let Some(inner_name) = base.strip_prefix("enum:") {
+                    let inner = (fuel > 0)
+                        .then(|| vc.module_env.enums.get(inner_name))
+                        .flatten();
+                    if let (Some(sel), Some(inner)) = (sel, inner) {
+                        if let Some(bound) = enum_leaf_domain_for(vc, inner, &sel, fuel - 1) {
+                            bounds.push(bound);
+                        }
+                    }
+                } else if let Some(bound) = sel
                     .and_then(|sel| sel.as_int())
                     .and_then(|sel| int_leaf_bound(vc.ctx, base.as_str(), &sel))
                 {
