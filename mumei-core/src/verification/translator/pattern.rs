@@ -71,8 +71,23 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                                 .get(&vc.module_env.resolve_base_type(ft))
                         });
                         if let Some(sdef) = sdef {
+                            // Nested payloads flatten deeper than the direct
+                            // fields — leaf names come from the same source
+                            // the accessors were declared with
+                            // (`inner_x` for `b.inner.x`).
+                            let leaf_types = enum_def.and_then(|edef| {
+                                datatype::field_leaf_types(
+                                    &edef.variants[variant_idx].field_types.get(i)?.name,
+                                    vc.module_env,
+                                )
+                            });
                             let mut leaves: Vec<(String, Dynamic)> = Vec::with_capacity(width);
                             for j in off..off + width {
+                                let leaf_name = leaf_types
+                                    .as_ref()
+                                    .and_then(|lt| lt.get(j - off))
+                                    .map(|(n, _)| n.clone())
+                                    .unwrap_or_else(|| sdef.fields[j - off].name.clone());
                                 let leaf =
                                     datatype::variant_selector_apply(&sort, variant_idx, j, target)
                                         .unwrap_or_else(|| {
@@ -83,7 +98,7 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                                             )
                                             .into()
                                         });
-                                leaves.push((sdef.fields[j - off].name.clone(), leaf));
+                                leaves.push((leaf_name, leaf));
                             }
                             let handle = crate::verification::translator::fresh_struct_handle(
                                 ctx, &sdef.name,
@@ -289,7 +304,16 @@ pub(crate) fn pattern_bind_variables<'a>(
                                 // Composite payload: bind a fresh struct
                                 // handle whose leaves are the selector
                                 // applies, under both the handle's decl
-                                // name and any bound variable name.
+                                // name and any bound variable name. Leaf
+                                // names come from `field_leaf_types` so a
+                                // nested payload lands on the same
+                                // `<name>_<path>` keys reads resolve.
+                                let leaf_types = enum_def.and_then(|edef| {
+                                    datatype::field_leaf_types(
+                                        &edef.variants[variant_idx].field_types.get(i)?.name,
+                                        vc.module_env,
+                                    )
+                                });
                                 let mut leaves: Vec<(String, Dynamic)> = Vec::with_capacity(width);
                                 for j in off..off + width {
                                     let Some(leaf) = datatype::variant_selector_apply(
@@ -300,7 +324,12 @@ pub(crate) fn pattern_bind_variables<'a>(
                                     ) else {
                                         continue;
                                     };
-                                    leaves.push((sdef.fields[j - off].name.clone(), leaf));
+                                    let leaf_name = leaf_types
+                                        .as_ref()
+                                        .and_then(|lt| lt.get(j - off))
+                                        .map(|(n, _)| n.clone())
+                                        .unwrap_or_else(|| sdef.fields[j - off].name.clone());
+                                    leaves.push((leaf_name, leaf));
                                 }
                                 if leaves.len() != width {
                                     continue;

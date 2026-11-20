@@ -222,6 +222,20 @@ fn enum_tag_in_callee_contract_uses_callee_enum() {
 }
 
 #[test]
+fn enum_nested_composite_payload_leaves_verify() {
+    let output = mumei_verify("tests/test_enum_nested_payload.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && combined.contains("Verification passed"),
+        "a payload whose declared type is itself a struct must flatten into per-leaf bindings (b.inner.x) on ctor, match binding and field-assign paths:\n{combined}"
+    );
+}
+
+#[test]
 fn enum_ctor_payload_satisfying_field_type_verifies() {
     let output = mumei_verify("tests/test_enum_ctor_refined.mm");
     let combined = format!(

@@ -945,15 +945,19 @@ fn enum_field_assign<'a>(
         &vc.module_env
             .resolve_base_type(&edef.variants[vidx].field_types[fidx].name),
     );
-    let val_leaves: Vec<Dynamic> = if let Some(sdef) = composite_sdef {
-        match crate::verification::translator::struct_fields_of_value(env, &val, sdef) {
-            Some(fields) => fields.into_iter().map(|(_, v)| v).collect(),
-            None => {
-                return Err(MumeiError::type_error(format!(
-                    "enum field '{var}' expects a struct value"
-                )))
-            }
-        }
+    let val_leaves: Vec<Dynamic> = if composite_sdef.is_some() {
+        // Flatten deeper than direct fields — nested payloads bind leaves
+        // like `inner_x`, keyed the same way `nested_field_bindings` reports
+        // the value's env entries.
+        let Some(fields) =
+            datatype::field_leaf_types(&edef.variants[vidx].field_types[fidx].name, vc.module_env)
+                .and_then(|lt| datatype::flattened_value_leaves(env, &val, &lt))
+        else {
+            return Err(MumeiError::type_error(format!(
+                "enum field '{var}' expects a struct value"
+            )));
+        };
+        fields
     } else {
         vec![val.clone()]
     };
