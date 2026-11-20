@@ -6,6 +6,39 @@ use crate::lowering::{lower, LoweredType};
 use crate::parser::EnumVariant;
 use serde_json::json;
 
+/// Rebuild `sdef`'s direct field list from a flat per-leaf value list —
+/// the list a composite enum payload flattens into, in `field_leaf_types`
+/// order. A struct-typed field becomes a fresh inner handle whose own
+/// fields are bound recursively, so `handle.inner.x` projects a declared
+/// field (`inner`) instead of only seeing flat `inner_x` leaves — the same
+/// shape a param-seeded nested struct has.
+fn rebuild_payload_direct_fields<'a>(
+    ctx: &'a Context,
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    sdef: &StructDef,
+    leaves: &[Dynamic<'a>],
+) -> Option<Vec<(String, Dynamic<'a>)>> {
+    let mut direct = Vec::with_capacity(sdef.fields.len());
+    let mut cursor = 0usize;
+    for field in &sdef.fields {
+        let width = datatype::field_leaf_types(&field.type_name, vc.module_env)?.len();
+        let slice = leaves.get(cursor..cursor + width)?;
+        cursor += width;
+        if let Some(inner) = vc.module_env.get_struct(&field.type_name) {
+            let inner_handle =
+                crate::verification::translator::fresh_struct_handle(ctx, &inner.name);
+            let inner_name = inner_handle.decl().name();
+            let inner_direct = rebuild_payload_direct_fields(ctx, vc, env, inner, slice)?;
+            crate::verification::translator::bind_struct_fields(env, &inner_name, &inner_direct);
+            direct.push((field.name.clone(), inner_handle));
+        } else {
+            direct.push((field.name.clone(), slice[0].clone()));
+        }
+    }
+    (cursor == leaves.len()).then_some(direct)
+}
+
 pub(crate) fn pattern_to_z3_condition<'a>(
     ctx: &'a Context,
     pattern: &Pattern,
@@ -104,10 +137,21 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                                 ctx, &sdef.name,
                             );
                             let handle_name = handle.decl().name();
+                            // Bind the declared direct fields — a
+                            // struct-typed field projects to a fresh inner
+                            // handle so `h.inner.x` resolves; the flat leaf
+                            // keys stay off the handle itself so
+                            // `project_struct_fields` sees the declared
+                            // fields, not `inner_x`-style leaves.
+                            let leaf_vals: Vec<Dynamic> =
+                                leaves.iter().map(|(_, v)| v.clone()).collect();
+                            let direct =
+                                rebuild_payload_direct_fields(ctx, vc, env, sdef, &leaf_vals)
+                                    .unwrap_or_else(|| leaves.clone());
                             crate::verification::translator::bind_struct_fields(
                                 env,
                                 &handle_name,
-                                &leaves,
+                                &direct,
                             );
                             env.insert(format!("__proj_{}_{}", variant_leaf, i), handle.clone());
                             match field_pattern {
@@ -338,10 +382,22 @@ pub(crate) fn pattern_bind_variables<'a>(
                                     ctx, &sdef.name,
                                 );
                                 let handle_name = handle.decl().name();
+                                // The handle carries the declared direct
+                                // fields: a struct-typed field projects to a
+                                // fresh inner handle so `b.inner` resolves
+                                // (e.g. returning the bound `b` as its
+                                // struct type) — the flat `inner_x` keys
+                                // stay off the handle so projection sees
+                                // declared fields only.
+                                let leaf_vals: Vec<Dynamic> =
+                                    leaves.iter().map(|(_, v)| v.clone()).collect();
+                                let direct =
+                                    rebuild_payload_direct_fields(ctx, vc, env, sdef, &leaf_vals)
+                                        .unwrap_or_else(|| leaves.clone());
                                 crate::verification::translator::bind_struct_fields(
                                     env,
                                     &handle_name,
-                                    &leaves,
+                                    &direct,
                                 );
                                 env.insert(
                                     format!("__proj_{}_{}", variant_leaf, i),
@@ -351,14 +407,26 @@ pub(crate) fn pattern_bind_variables<'a>(
                                     crate::verification::translator::bind_struct_fields(
                                         env, fname, &leaves,
                                     );
+                                    crate::verification::translator::bind_struct_fields(
+                                        env, fname, &direct,
+                                    );
                                     env.insert(fname.clone(), handle.clone());
                                     // The bound name shadows any outer
                                     // binding — its field slots
                                     // (`{fname}_{leaf}`,
-                                    // `__struct_{fname}_{leaf}`) are
+                                    // `__struct_{fname}_{leaf}`,
+                                    // `{fname}_{field}`) are
                                     // arm-local too, so the merge must
                                     // not fold them into the post-match
                                     // env like assignments.
+                                    for (field, _) in &direct {
+                                        bound.insert(format!("{fname}_{field}"));
+                                        bound.insert(
+                                            crate::verification::translator::struct_field_key(
+                                                fname, field,
+                                            ),
+                                        );
+                                    }
                                     for (leaf, _) in &leaves {
                                         bound.insert(format!("{fname}_{leaf}"));
                                         bound.insert(
