@@ -4538,3 +4538,44 @@ fn multifile_bundle_with_enum_equality_builds_as_v17() {
         .status
         .success());
 }
+
+#[test]
+fn module_bundle_with_nested_enum_payload_builds_as_v26_and_rechecks() {
+    // An enum payload position typed as another enum flattens into the
+    // inner enum's own leaf layout — inner tag plus its payload leaves
+    // (`pure-i64-composite/v23`); the record pins bundle v26 and every
+    // ABI leaf is 64-bit.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "enum E { X(i64), Y(i64) };\n\
+         enum F { A(E), B };\n\
+         atom pick(f: F) -> i64 requires: true; ensures: true; body: { match f { F::A(e) => match e { E::X(v) => v, _ => 0 }, _ => 0 } };\n\
+         atom wrap(e: E) -> F requires: true; ensures: true; body: { F::A(e) };\n\
+         atom eqe(f: F, g: F) -> bool requires: true; ensures: true; body: { f == g };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V26);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V23
+    );
+    assert_eq!(
+        record["leaf_widths"]["pick"],
+        serde_json::json!([64, 64, 64])
+    );
+    assert_eq!(record["leaf_widths"]["main"], serde_json::json!([]));
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // A v26 record re-pinned as v25 is refused — v25 keeps enum
+    // payloads out of the payload positions.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V25.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}

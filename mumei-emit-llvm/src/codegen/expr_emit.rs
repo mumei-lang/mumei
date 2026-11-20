@@ -1061,6 +1061,104 @@ fn reject_array_chan_payload(payload_ty_name: &str, op: &str) -> MumeiResult<()>
     Ok(())
 }
 
+/// Element-wise `i1` equality of one enum payload leaf: integers and
+/// floats compare directly, `Str` pointer slots defer to `mumei_str_eq`,
+/// and an aggregate leaf — a nested enum or struct payload
+/// (`pure-i64-composite/v23`) — recurses field by field. Undef fields
+/// (unit-variant padding) carry no information and are skipped.
+fn enum_leaf_eq<'a>(
+    builder: &Builder<'a>,
+    context: &'a Context,
+    module: &Module<'a>,
+    lf: BasicValueEnum<'a>,
+    rf: BasicValueEnum<'a>,
+) -> MumeiResult<inkwell::values::IntValue<'a>> {
+    fn is_undef(v: BasicValueEnum) -> bool {
+        match v {
+            BasicValueEnum::IntValue(v) => v.is_undef(),
+            BasicValueEnum::FloatValue(v) => v.is_undef(),
+            BasicValueEnum::PointerValue(v) => v.is_undef(),
+            BasicValueEnum::StructValue(v) => v.is_undef(),
+            BasicValueEnum::ArrayValue(v) => v.is_undef(),
+            BasicValueEnum::VectorValue(v) => v.is_undef(),
+        }
+    }
+    match lf {
+        BasicValueEnum::IntValue(l) => Ok(llvm!(builder.build_int_compare(
+            IntPredicate::EQ,
+            l,
+            rf.into_int_value(),
+            "enum_eq_int"
+        ))),
+        BasicValueEnum::FloatValue(l) => Ok(llvm!(builder.build_float_compare(
+            FloatPredicate::OEQ,
+            l,
+            rf.into_float_value(),
+            "enum_eq_float"
+        ))),
+        // `Str` payloads are pointers — compare contents via the runtime
+        // helper.
+        BasicValueEnum::PointerValue(_) => {
+            let str_eq_fn = module.get_function("mumei_str_eq").unwrap_or_else(|| {
+                let ptr_t = context.ptr_type(inkwell::AddressSpace::default());
+                let fn_type = context
+                    .i64_type()
+                    .fn_type(&[ptr_t.into(), ptr_t.into()], false);
+                module.add_function("mumei_str_eq", fn_type, None)
+            });
+            let res = llvm!(builder.build_call(str_eq_fn, &[lf.into(), rf.into()], "enum_eq_str"));
+            let res_int = res
+                .try_as_basic_value()
+                .left()
+                .ok_or(MumeiError::codegen("str_eq returned void".to_string()))?
+                .into_int_value();
+            Ok(llvm!(builder.build_int_compare(
+                IntPredicate::NE,
+                res_int,
+                context.i64_type().const_int(0, false),
+                "enum_eq_str_bool"
+            )))
+        }
+        BasicValueEnum::StructValue(ls) => {
+            let rs = rf.into_struct_value();
+            let mut acc = context.bool_type().const_int(1, false);
+            for idx in 0..ls.get_type().count_fields() {
+                let le = llvm!(builder.build_extract_value(ls, idx, "enum_eq_l"));
+                let re = llvm!(builder.build_extract_value(rs, idx, "enum_eq_r"));
+                if is_undef(le) || is_undef(re) {
+                    continue;
+                }
+                acc = llvm!(builder.build_and(
+                    acc,
+                    enum_leaf_eq(builder, context, module, le, re)?,
+                    "enum_eq_and"
+                ));
+            }
+            Ok(acc)
+        }
+        BasicValueEnum::ArrayValue(la) => {
+            let ra = rf.into_array_value();
+            let mut acc = context.bool_type().const_int(1, false);
+            for idx in 0..la.get_type().len() {
+                let le = llvm!(builder.build_extract_value(la, idx, "enum_eq_l"));
+                let re = llvm!(builder.build_extract_value(ra, idx, "enum_eq_r"));
+                if is_undef(le) || is_undef(re) {
+                    continue;
+                }
+                acc = llvm!(builder.build_and(
+                    acc,
+                    enum_leaf_eq(builder, context, module, le, re)?,
+                    "enum_eq_and"
+                ));
+            }
+            Ok(acc)
+        }
+        BasicValueEnum::VectorValue(_) => Err(MumeiError::codegen(
+            "enum payload leaf equality of a vector value is not supported".to_string(),
+        )),
+    }
+}
+
 /// Declared payload type of the channel `expr` denotes, when the channel is a
 /// binding introduced with a `chan<T>` type.
 pub(crate) fn chan_payload_type_name(
@@ -2294,51 +2392,8 @@ pub(crate) fn compile_hir_expr<'a>(
                                 if is_undef(lf) || is_undef(rf) {
                                     continue;
                                 }
-                                let cmp: inkwell::values::IntValue = if lf.is_int_value() {
-                                    llvm!(builder.build_int_compare(
-                                        IntPredicate::EQ,
-                                        lf.into_int_value(),
-                                        rf.into_int_value(),
-                                        "enum_eq_int"
-                                    ))
-                                } else if lf.is_float_value() {
-                                    llvm!(builder.build_float_compare(
-                                        FloatPredicate::OEQ,
-                                        lf.into_float_value(),
-                                        rf.into_float_value(),
-                                        "enum_eq_float"
-                                    ))
-                                } else {
-                                    // Pointer slot → Str payload — compare
-                                    // contents via the runtime helper.
-                                    let str_eq_fn =
-                                        module.get_function("mumei_str_eq").unwrap_or_else(|| {
-                                            let ptr_t =
-                                                context.ptr_type(inkwell::AddressSpace::default());
-                                            let fn_type = context
-                                                .i64_type()
-                                                .fn_type(&[ptr_t.into(), ptr_t.into()], false);
-                                            module.add_function("mumei_str_eq", fn_type, None)
-                                        });
-                                    let res = llvm!(builder.build_call(
-                                        str_eq_fn,
-                                        &[lf.into(), rf.into()],
-                                        "enum_eq_str"
-                                    ));
-                                    let res_int = res
-                                        .try_as_basic_value()
-                                        .left()
-                                        .ok_or(MumeiError::codegen(
-                                            "str_eq returned void".to_string(),
-                                        ))?
-                                        .into_int_value();
-                                    llvm!(builder.build_int_compare(
-                                        IntPredicate::NE,
-                                        res_int,
-                                        context.i64_type().const_int(0, false),
-                                        "enum_eq_str_bool"
-                                    ))
-                                };
+                                let cmp: inkwell::values::IntValue =
+                                    enum_leaf_eq(builder, context, module, lf, rf)?;
                                 acc = llvm!(builder.build_and(acc, cmp, "enum_eq_and"));
                             }
                             if matches!(op, HirBinOp::Neq) {

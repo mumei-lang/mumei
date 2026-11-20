@@ -205,6 +205,16 @@ pub const PURE_I64_COMPOSITE_PROFILE_V21: &str = "mumei.pure-i64-composite/v21";
 /// express.
 pub const PURE_I64_COMPOSITE_PROFILE_V22: &str = "mumei.pure-i64-composite/v22";
 
+/// `pure-i64-composite/v23`: one level of nested enum payloads —
+/// `enum F { A(E) }` where `E` is itself a declared enum. The inner
+/// enum lowers to its own tag plus payload leaf slots inside the
+/// outer union layout, so the flattened signature sees an inner
+/// `EnumTag` domain and per-tag carriers exactly like an enum
+/// parameter. The inner enum must be fully scalar/composite-leaved
+/// (no further nested enums): deeper nesting stays rejected — the
+/// positional slot expansion is unbounded past one level.
+pub const PURE_I64_COMPOSITE_PROFILE_V23: &str = "mumei.pure-i64-composite/v23";
+
 /// Maximum byte length a `Str` literal may declare under
 /// `pure-i64-composite/v13`: one cell per byte under the
 /// bounded-memory model.
@@ -299,6 +309,11 @@ pub enum RefinedAdmission {
     /// enum payload positions — directly or inside a payload struct
     /// (`pure-i64-composite/v22`).
     CompositeV22,
+    /// `CompositeV23` additionally admits one level of nested enum
+    /// payloads — `enum F { A(E) }` where `E` is itself a declared,
+    /// non-recursive enum whose payload leaves are scalar or composite
+    /// (`pure-i64-composite/v23`).
+    CompositeV23,
 }
 
 impl RefinedAdmission {
@@ -450,6 +465,16 @@ impl RefinedAdmission {
     /// slots under its carriers (`pure-i64-composite/v22`).
     pub fn admits_wide_payloads(self) -> bool {
         self >= Self::CompositeV22
+    }
+
+    /// Whether an enum payload field may be enum-typed — the inner
+    /// tagged union flattens into the outer payload position as an
+    /// inner tag plus the inner enum's payload leaves
+    /// (`pure-i64-composite/v23`). One level only: the inner enum's
+    /// own payloads must be flat (scalar or struct leaves), which
+    /// also bounds the layout against enum↔enum cycles.
+    pub fn admits_nested_enum_payloads(self) -> bool {
+        self >= Self::CompositeV23
     }
 }
 
@@ -1206,6 +1231,10 @@ fn fragment_profile(
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if has_nested_enum_payloads(enums) {
+        // A nested enum payload is only ever admitted under v23 — the
+        // strongest claim the ladder makes.
+        PURE_I64_COMPOSITE_PROFILE_V23
     } else if has_wide_payload_leaves(enums, structs) {
         // A 128-bit leaf inside an enum payload is only ever admitted
         // under v22 — the strongest claim the ladder makes.
@@ -2111,8 +2140,8 @@ fn call_return_kinds<'ctx>(
                                         ValueKind::Struct(name) => {
                                             PayloadSlotKind::Composite(name.clone())
                                         }
-                                        ValueKind::Enum(_) => {
-                                            unreachable!("enum payload fields are never enum-typed")
+                                        ValueKind::Enum(name) => {
+                                            PayloadSlotKind::Enum(name.clone())
                                         }
                                     })
                                     .collect::<Vec<_>>(),
@@ -2129,13 +2158,16 @@ fn call_return_kinds<'ctx>(
     }
 }
 
-/// One payload slot's kind-level shape: a scalar leaf, or — under
-/// `pure-i64-composite/v18` — a struct the slot lowers as one
-/// aggregate slot whose leaves expand in the flattened signature.
+/// One payload slot's kind-level shape: a scalar leaf, a struct the
+/// slot lowers as one aggregate slot whose leaves expand in the
+/// flattened signature (`pure-i64-composite/v18`), or an enum the
+/// slot lowers as an inner tag plus its own flattened leaves
+/// (`pure-i64-composite/v23`).
 #[derive(Clone)]
 enum PayloadSlotKind {
     Scalar(ScalarKind),
     Composite(String),
+    Enum(String),
 }
 
 /// One enum variant: its name plus the kinds of its payload slots.
@@ -2306,6 +2338,15 @@ impl<'ctx> CallShapes<'ctx> {
                 .get(struct_name)
                 .map(|fields| self.flattened_kinds(fields))
                 .unwrap_or_default(),
+            // A nested enum slot flattens to its own tag plus the
+            // inner layout's leaves (`pure-i64-composite/v23`).
+            Some(PayloadSlotKind::Enum(enum_name)) => {
+                let mut kinds = vec![ScalarKind::I64];
+                if let Some(inner) = self.enums.get(enum_name) {
+                    kinds.extend(self.enum_layout_leaf_kinds(inner));
+                }
+                kinds
+            }
             Some(PayloadSlotKind::Scalar(kind @ (ScalarKind::I128 | ScalarKind::U128))) => {
                 vec![*kind, *kind]
             }
@@ -2350,6 +2391,19 @@ impl<'ctx> CallShapes<'ctx> {
         }
     }
 
+    /// The declared enum name payload slot `i` carries, when it is a
+    /// nested-enum slot (`pure-i64-composite/v23`).
+    fn enum_slot_enum<'s>(
+        &'s self,
+        variants: &'s [(String, Vec<PayloadSlotKind>)],
+        i: usize,
+    ) -> Option<&'s str> {
+        match variants.iter().find_map(|(_, slots)| slots.get(i)) {
+            Some(PayloadSlotKind::Enum(enum_name)) => Some(enum_name.as_str()),
+            _ => None,
+        }
+    }
+
     /// The payload slots of `variants` rebuilt from its flattened
     /// leaves: each scalar slot consumes one leaf, a composite slot
     /// consumes its struct's whole leaf span as one `Composite`
@@ -2363,7 +2417,21 @@ impl<'ctx> CallShapes<'ctx> {
     ) -> Vec<SourceValue<'ctx>> {
         let mut slots = Vec::with_capacity(layout_arity(variants));
         for i in 0..layout_arity(variants) {
-            let value = if let Some(struct_name) = self.enum_slot_struct(variants, i) {
+            let value = if let Some(enum_name) = self.enum_slot_enum(variants, i) {
+                // A nested enum leaf consumes an inner tag leaf plus
+                // the inner layout's leaf span — the same flattened
+                // order `enum_slot_leaf_kinds` reports
+                // (`pure-i64-composite/v23`).
+                let tag = leaves.next().unwrap_or_else(|| {
+                    unreachable!("admitted enums always match their lowered arity")
+                });
+                let inner = self.enums.get(enum_name).cloned().unwrap_or_default();
+                SourceValue::Enum {
+                    name: enum_name.to_owned(),
+                    tag: tag.clone(),
+                    slots: self.seed_enum_slots(&inner, leaves, ctx),
+                }
+            } else if let Some(struct_name) = self.enum_slot_struct(variants, i) {
                 let inner = self.structs.get(struct_name).cloned().unwrap_or_default();
                 composite_from_slots(self, &inner, leaves, ctx)
             } else {
@@ -2411,6 +2479,16 @@ impl<'ctx> CallShapes<'ctx> {
         i: usize,
         ctx: &'ctx Context,
     ) -> SourceValue<'ctx> {
+        if let Some(enum_name) = self.enum_slot_enum(variants, i) {
+            let inner = self.enums.get(enum_name).cloned().unwrap_or_default();
+            return SourceValue::Enum {
+                name: enum_name.to_owned(),
+                tag: BV::from_u64(ctx, 0, 64),
+                slots: (0..layout_arity(&inner))
+                    .map(|j| self.default_enum_slot(&inner, j, ctx))
+                    .collect(),
+            };
+        }
         match self.enum_slot_struct(variants, i) {
             Some(struct_name) => default_composite_value(
                 self,
@@ -2477,6 +2555,30 @@ fn enum_slot_eq<'ctx>(
                 eqs.into_iter()
                     .reduce(|acc, eq| Bool::and(ctx, &[&acc, &eq]))
             }),
+        // A nested enum payload compares as the emitter's positional
+        // `extractvalue`/`icmp` chain: inner tag plus each inner slot
+        // (`pure-i64-composite/v23`).
+        (
+            SourceValue::Enum {
+                name: an,
+                tag: at,
+                slots: a_slots,
+            },
+            SourceValue::Enum {
+                name: bn,
+                tag: bt,
+                slots: b_slots,
+            },
+        ) if an == bn && a_slots.len() == b_slots.len() => a_slots
+            .iter()
+            .zip(b_slots.iter())
+            .map(|(x, y)| enum_slot_eq(x, y, ctx))
+            .collect::<Option<Vec<_>>>()
+            .and_then(|eqs| {
+                eqs.into_iter()
+                    .reduce(|acc, eq| Bool::and(ctx, &[&acc, &eq]))
+            })
+            .map(|slots_eq| Bool::and(ctx, &[&at._eq(bt), &slots_eq])),
         // `f64` slots stay out: the emitter compares them with
         // `fcmp oeq`, which bitwise `_eq` cannot model (NaN != NaN,
         // -0.0 == +0.0). `Str` slots need a content compare the model
@@ -3313,6 +3415,22 @@ fn seed_enum_payload<'ctx>(
 ) -> BodyResult<Vec<SourceValue<'ctx>>> {
     let mut payload = Vec::with_capacity(enum_max_arity(variants));
     for i in 0..enum_max_arity(variants) {
+        // A nested enum slot consumes an inner tag leaf plus the inner
+        // layout's leaf span — the flattened order
+        // `enum_slot_leaf_slots` emits (`pure-i64-composite/v23`).
+        if let Some(inner_variants) = enum_slot_type(variants, i).and_then(|name| enums.get(name)) {
+            let tag = slots
+                .next()
+                .cloned()
+                .ok_or(SemanticContractError::Unsupported("source signature arity"))?;
+            let inner_name = enum_slot_type(variants, i).unwrap_or_default();
+            payload.push(SourceValue::Enum {
+                name: inner_name.to_owned(),
+                tag,
+                slots: seed_enum_payload(inner_variants, structs, enums, slots, ctx)?,
+            });
+            continue;
+        }
         if let Some(inner) = enum_slot_type(variants, i).and_then(|name| structs.get(name)) {
             payload.push(seed_struct_composite(structs, enums, inner, slots, ctx)?);
             continue;
@@ -3445,6 +3563,18 @@ fn has_wide_payload_leaves(enums: &EnumEnv, structs: &StructEnv) -> bool {
                 .unwrap_or(false),
             _ => false,
         })
+    })
+}
+
+/// Whether any admitted enum declares an enum-typed payload field —
+/// the marker that pins `pure-i64-composite/v23`, on the same
+/// convention as `has_composite_payloads`.
+fn has_nested_enum_payloads(enums: &EnumEnv) -> bool {
+    enums.values().flatten().any(|variant| {
+        variant
+            .fields
+            .iter()
+            .any(|f| matches!(f.shape, ValueKind::Enum(_)))
     })
 }
 
@@ -3594,6 +3724,27 @@ fn enum_slot_leaf_slots<'a>(
                 _ => field(slot_type_name(slot)),
             })
             .collect(),
+        // A nested-enum payload leaf flattens into the inner enum's own
+        // lowered shape: an `EnumTag` (inner variants) plus its payload
+        // leaf slots carrying the inner carriers, so the domain walker
+        // binds each inner slot under the tags that declare it
+        // (`pure-i64-composite/v23`).
+        None if enums.contains_key(name) => {
+            let inner = enums.get(name).map(Vec::as_slice).unwrap_or(&[]);
+            let mut slots = vec![SignatureSlot::EnumTag {
+                variants: inner.len() as u64,
+            }];
+            slots.extend((0..enum_max_arity(inner)).flat_map(|j| {
+                let inner_carriers: Vec<u64> = inner
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| v.fields.get(j).is_some())
+                    .map(|(ordinal, _)| ordinal as u64)
+                    .collect();
+                enum_slot_leaf_slots(inner, structs, enums, j, inner_carriers)
+            }));
+            slots
+        }
         None if matches!(name, "i128" | "u128") => vec![wide(Some(name))],
         None => vec![field(Some(name))],
     }
@@ -3643,13 +3794,29 @@ fn enum_leaf_paths<'a>(
 ) -> Vec<(String, Option<&'a str>)> {
     let mut out = Vec::new();
     for i in 0..enum_max_arity(variants) {
-        match enum_slot_type(variants, i).and_then(|name| structs.get(name)) {
+        let slot_name = enum_slot_type(variants, i);
+        match slot_name.and_then(|name| structs.get(name)) {
             Some(fields) => out.extend(
                 flattened_struct_fields(structs, enums, fields)
                     .iter()
                     .map(|(path, slot)| (format!("{i}.{path}"), slot_type_name(slot))),
             ),
-            None => out.push((format!("{i}"), enum_slot_type(variants, i))),
+            // A nested-enum payload leaf expands like an enum-typed struct
+            // field: an inner tag leaf then the inner enum's own payload
+            // leaves under `{i}.{j}` paths (`pure-i64-composite/v23`).
+            None if slot_name.is_some_and(|name| enums.contains_key(name)) => {
+                let inner = enums
+                    .get(slot_name.expect("checked above"))
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                out.push((format!("{i}.tag"), None));
+                out.extend(
+                    enum_leaf_paths(inner, structs, enums)
+                        .into_iter()
+                        .map(|(path, type_name)| (format!("{i}.{path}"), type_name)),
+                );
+            }
+            None => out.push((format!("{i}"), slot_name)),
         }
     }
     out
@@ -3917,17 +4084,50 @@ fn build_enum_env(
                     // (`pure-i64-composite/v18`). Wide leaves ride the
                     // same flattening as scalar leaves under
                     // `pure-i64-composite/v22`.
-                    None if admission.admits_composite_payloads() => structs
-                        .get(type_name)
-                        .filter(|fields| {
-                            struct_is_scalar_leaved(structs, fields)
-                                && (admission.admits_wide_payloads()
-                                    || !flattened_struct_fields(structs, &env, fields).iter().any(
-                                        |(_, slot)| matches!(slot, SignatureSlot::WideScalar(_)),
-                                    ))
+                    //
+                    // An enum-typed payload field is a nested tagged
+                    // union, admitted one level deep: the inner enum
+                    // must already be resolved (forward references
+                    // close) and its payload must hold no enum-typed
+                    // fields, so the layout stays finite
+                    // (`pure-i64-composite/v23`). The two attempts must
+                    // share one arm — a `None` struct result still has
+                    // to fall through to the enum lookup.
+                    None => {
+                        let composite = admission
+                            .admits_composite_payloads()
+                            .then(|| {
+                                structs
+                                    .get(type_name)
+                                    .filter(|fields| {
+                                        struct_is_scalar_leaved(structs, fields)
+                                            && (admission.admits_wide_payloads()
+                                                || !flattened_struct_fields(structs, &env, fields)
+                                                    .iter()
+                                                    .any(|(_, slot)| {
+                                                        matches!(slot, SignatureSlot::WideScalar(_))
+                                                    }))
+                                    })
+                                    .map(|_| ValueKind::Struct(type_name.to_owned()))
+                            })
+                            .flatten();
+                        composite.or_else(|| {
+                            admission
+                                .admits_nested_enum_payloads()
+                                .then(|| {
+                                    env.get(type_name)
+                                        .filter(|inner| {
+                                            inner.iter().all(|v| {
+                                                v.fields
+                                                    .iter()
+                                                    .all(|f| !matches!(f.shape, ValueKind::Enum(_)))
+                                            })
+                                        })
+                                        .map(|_| ValueKind::Enum(type_name.to_owned()))
+                                })
+                                .flatten()
                         })
-                        .map(|_| ValueKind::Struct(type_name.to_owned())),
-                    None => None,
+                    }
                 };
                 let Some(shape) = shape.filter(|_| {
                     ty.type_args.is_empty() && ty.effect_set.is_none() && ty.capability.is_none()
@@ -5157,8 +5357,22 @@ fn enum_ctor_kind<'a>(
                     ));
                 }
             }
-            ValueKind::Enum(_) => {
-                unreachable!("enum-typed payloads are never admitted")
+            // A nested enum payload argument must itself produce that
+            // enum value (`pure-i64-composite/v23`).
+            ValueKind::Enum(enum_name) => {
+                let produced = composite_kind(
+                    arg,
+                    scope,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    &BTreeSet::new(),
+                    env,
+                )?;
+                if produced != enum_name.as_str() {
+                    return Err(SemanticContractError::Unsupported(
+                        "enum constructor payload kind",
+                    ));
+                }
             }
         }
     }
@@ -5686,8 +5900,14 @@ fn match_arm_envs<'a>(
                                         // make `p.x` an unbound leaf read.
                                         arm_scope.remove(name);
                                     }
-                                    ValueKind::Enum(_) => {
-                                        unreachable!("enum-typed payloads are never admitted")
+                                    // A nested enum payload binder is a
+                                    // composite name — `match e`,
+                                    // `e == e2` and pass-through read
+                                    // through it
+                                    // (`pure-i64-composite/v23`).
+                                    ValueKind::Enum(type_name) => {
+                                        arm_env.bind_composite(name, type_name)?;
+                                        arm_scope.remove(name);
                                     }
                                 }
                                 arm_assignable.remove(name);
@@ -10257,6 +10477,18 @@ fn source_expr<'ctx>(
                                     ))
                                 }
                             },
+                            // A nested enum payload takes the
+                            // `SourceValue::Enum` whole — the ctor-kind
+                            // gate already matched its enum name
+                            // (`pure-i64-composite/v23`).
+                            PayloadSlotKind::Enum(_) => match value {
+                                SourceValue::Enum { .. } => slots.push(value),
+                                _ => {
+                                    return Err(SemanticContractError::Unsupported(
+                                        "enum constructor payload kind",
+                                    ))
+                                }
+                            },
                         }
                     }
                     for i in payload_kinds.len()..layout_arity(variants) {
@@ -13917,6 +14149,104 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
         // slot, tag excluded.
         let widths = module_leaf_widths(&decl, RefinedAdmission::CompositeV22).unwrap();
         assert_eq!(widths["pick"], vec![64, 128]);
+    }
+
+    #[test]
+    fn composite_v23_admits_nested_enum_payloads() {
+        let v23 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV23)
+        };
+        let outcomes = |source: &str| {
+            refined_module_outcomes_admission(source, RefinedAdmission::CompositeV23)
+        };
+        let module = |piece: &str| format!("{piece}\n{MAIN0}");
+        let decls = "enum E { X(i64), Y(i64) }\nenum F { A(E), B }";
+        for (piece, profile) in [
+            // A nested payload leaf flattens into the inner enum's own
+            // tag + payload leaves; a match arm binds `e` as a
+            // composite the inner match destructures again.
+            (
+                format!("{decls}\natom pick(f: F) -> i64 requires: true; ensures: true; body: {{ match f {{ F::A(e) => match e {{ E::X(v) => v, _ => 0 }}, _ => 0 }} }};"),
+                PURE_I64_COMPOSITE_PROFILE_V23,
+            ),
+            // A constructor fills the enum-typed slot with a bound
+            // inner value.
+            (
+                format!("{decls}\natom wrap(e: E) -> F requires: true; ensures: true; body: {{ F::A(e) }};"),
+                PURE_I64_COMPOSITE_PROFILE_V23,
+            ),
+            // Deep equality descends into the inner tag and payload
+            // leaves.
+            (
+                format!("{decls}\natom eqe(f: F, g: F) -> bool requires: true; ensures: true; body: {{ f == g }};"),
+                PURE_I64_COMPOSITE_PROFILE_V23,
+            ),
+        ] {
+            let source = module(&piece);
+            match v23(&source) {
+                Ok(cs) => assert!(
+                    cs.iter().all(|c| c.profile == profile),
+                    "{piece}"
+                ),
+                Err(e) => panic!("{piece}: {e:?}"),
+            }
+            match std::panic::catch_unwind(|| outcomes(&source)) {
+                Ok(res) => assert!(
+                    res.iter().all(|r| *r == z3::SatResult::Unsat),
+                    "{piece}"
+                ),
+                Err(_) => panic!("outcomes failed for: {piece}"),
+            }
+        }
+        // A wrong postcondition over the inner payload leaf is
+        // refuted, not vacuous.
+        let wrong = module(&format!(
+            "{decls}\natom pick(f: F) -> i64 requires: true; ensures: result == 0; body: {{ match f {{ F::A(e) => match e {{ E::X(v) => v, _ => 0 }}, _ => 0 }} }};",
+        ));
+        assert!(outcomes(&wrong).contains(&z3::SatResult::Sat));
+        // Depth-2 nesting stays outside: the inner enum's own payload
+        // may not carry an enum.
+        let deep = module(
+            "enum E3 { Q(i64) }\nenum E2 { N(E3) }\nenum F { A(E2), B }\natom pick(f: F) -> i64 requires: true; ensures: true; body: { match f { F::A(e) => 1, _ => 0 } };",
+        );
+        assert!(v23(&deep).is_err());
+        // A forward reference stays outside: the inner enum must be
+        // declared before the outer.
+        let forward = module(
+            "enum F { A(E), B }\nenum E { X(i64), Y(i64) }\natom pick(f: F) -> i64 requires: true; ensures: true; body: { match f { F::A(e) => 1, _ => 0 } };",
+        );
+        assert!(v23(&forward).is_err());
+        // A mixed-type payload position stays outside: `A(E), B(i64)`
+        // has no uniform slot type.
+        let mixed = module(
+            "enum E { X(i64), Y(i64) }\nenum F { A(E), B(i64) }\natom pick(f: F) -> i64 requires: true; ensures: true; body: { match f { F::A(e) => 1, _ => 0 } };",
+        );
+        assert!(v23(&mixed).is_err());
+        // Scalar reads through the bound inner binder stay outside the
+        // fragment (consistent with enum parameters): `e.tag`, `e.p`.
+        let tag_read = module(&format!(
+            "{decls}\natom isA(f: F) -> bool requires: true; ensures: true; body: {{ match f {{ F::A(e) => e.tag == 0, _ => false }} }};",
+        ));
+        assert!(v23(&tag_read).is_err());
+        // Under a narrower admission a nested-payload enum is refused.
+        let decl = module(&format!(
+            "{decls}\natom pick(f: F) -> i64 requires: true; ensures: true; body: {{ match f {{ F::A(e) => match e {{ E::X(v) => v, _ => 0 }}, _ => 0 }} }};",
+        ));
+        for admission in [
+            RefinedAdmission::Reject,
+            RefinedAdmission::Composite,
+            RefinedAdmission::CompositeV21,
+            RefinedAdmission::CompositeV22,
+        ] {
+            assert!(
+                extract_pure_i64_module_contracts(&decl, "m.mm", None, admission).is_err(),
+                "{admission:?}"
+            );
+        }
+        // `leaf_widths` reports the inner tag + payload leaves at 64
+        // bits each, outer tag first.
+        let widths = module_leaf_widths(&decl, RefinedAdmission::CompositeV23).unwrap();
+        assert_eq!(widths["pick"], vec![64, 64, 64]);
     }
 }
 

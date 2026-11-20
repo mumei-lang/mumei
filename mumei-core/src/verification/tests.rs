@@ -4912,11 +4912,13 @@ fn test_generic_enum_param_keeps_inductive_tag() {
 
 #[test]
 fn test_enum_payload_field_tag() {
-    // An enum with a non-scalar payload (another enum) is not a finite ADT.
+    // An enum with a non-scalar payload whose inner enum is itself not a
+    // finite ADT (array payload) stays on the Int-tag path — only a finite
+    // inner enum makes the outer a finite ADT (pure-i64-composite/v23).
     let mut module_env = ModuleEnv::new();
     module_env.enums.insert(
         "Inner".to_string(),
-        test_enum_def("Inner", &[("I", &[])], &[], false),
+        test_enum_def("Inner", &[("I", &["[i64; 2]"])], &[], false),
     );
     module_env.enums.insert(
         "Outer".to_string(),
