@@ -5925,6 +5925,34 @@ realpath and samefile so a hardlink is also refused. The record stays a
 dispatch record: it never alters `verification_status` or `success`. C11
 stays partial; Evidence acceptance remains open.
 
+### MCP scheduled-attempt evidence check (mumei-agent #996)
+
+[mumei-agent#996](https://github.com/mumei-lang/mumei-agent/pull/996)
+gives the MCP `verify_schedule` tool a `core_path` argument declaring the
+same trusted Core executable as `verify-schedule --core`: a selected
+attempt's output runs through the Core representation check and the
+schedule record carries `evidence_check`/`evidence_acceptance` — a
+dispatch observation only. C11 stays partial; Evidence acceptance
+remains open.
+
+### Evidence accept-list consumer arbitration (mumei #1165)
+
+[mumei#1165](https://github.com/mumei-lang/mumei/pull/1165) adds
+`mumei evidence accept-list`: a declared
+`mumei.evidence-requirement/v1` requirement is evaluated against each
+record of a bounded `mumei.verification-evidence-list/v1` document via
+`evidence_acceptance::evaluate`, and the results fold into a disjunctive
+verdict — any `Accepted` accepts the list, else any `Rejected` rejects,
+else `Inconclusive` — emitted as `mumei.evidence-list-acceptance/v1`
+with per-record verdicts, fingerprints and performed/not-performed
+checks. Records are validated statically (closed shape, bounded list);
+the error prefix "Evidence list acceptance evaluation failed" routes
+its own exit messages so failures never fall through to the
+source-query diagnostics. Consistency conflicts between records are
+reported in `checks_not_performed` and stay out of scope for the
+aggregate — arbitration remains a consumer-side declaration, not a
+grade promotion.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
