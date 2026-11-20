@@ -5957,6 +5957,22 @@ descriptor emits `consistent`, `conflict_count` and the bounded
 check. Arbitration remains a consumer-side declaration, not a grade
 promotion.
 
+`accept-list` also accepts `--requirement-list <reqs.json>` (mutually
+exclusive with `--requirement`): a bounded
+`mumei.evidence-requirement-list/v1` document declares a *conjunctive*
+set of requirements (at most 16, non-empty — a vacuous conjunction is
+a representation error), and each requirement arbitrates against the
+same record list independently. The aggregate verdict requires every
+requirement accepted — an affirmative rejection on any requirement
+rejects the whole list, anything short of all-accepted stays
+inconclusive — and cross-record inconsistency still demotes accepted
+verdicts. Emitted as
+`mumei.evidence-requirement-list-acceptance/v1` with per-requirement
+verdicts, per-requirement fingerprints and per-record verdicts, under
+an added `conjunctive_requirement_fold` performed check. This is the
+requirement-list substrate a grade promotion gate would consume;
+promotion itself remains open (mumei#1168).
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:

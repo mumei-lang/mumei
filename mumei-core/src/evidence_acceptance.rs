@@ -23,8 +23,13 @@ use crate::verification_evidence::{self, Evidence, MAX_INPUT_BYTES};
 
 /// Schema identifier a requirement document must declare.
 pub const REQUIREMENT_SCHEMA: &str = "mumei.evidence-requirement/v1";
+/// Schema identifier a bounded requirement-list document must declare.
+pub const REQUIREMENT_LIST_SCHEMA: &str = "mumei.evidence-requirement-list/v1";
 /// Schema identifier of the emitted acceptance descriptor.
 pub const ACCEPTANCE_SCHEMA: &str = "mumei.evidence-acceptance/v1";
+/// Cap on requirements in one declared list — the document stays bounded
+/// like every other admission surface.
+pub const MAX_REQUIREMENTS: usize = 16;
 
 const ASSURANCE_FLOORS: &[&str] = &[
     "unbounded_proof",
@@ -151,6 +156,41 @@ pub fn decode_requirement(bytes: &[u8]) -> Result<Requirement, AcceptanceError> 
         serde_json::from_slice(bytes).map_err(|_| AcceptanceError::InvalidRequirement)?;
     requirement.validate()?;
     Ok(requirement)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequirementList {
+    schema_version: String,
+    requirements: Vec<Box<serde_json::value::RawValue>>,
+}
+
+/// Decode a bounded `mumei.evidence-requirement-list/v1` document: a
+/// non-empty list of declared requirements, each element's raw bytes
+/// routed through `decode_requirement` so the closed-shape and
+/// field-level gates apply exactly as they do standalone. An empty list
+/// is a representation error — a vacuous conjunction must never be
+/// admitted as "all requirements accepted".
+pub fn decode_requirement_list(bytes: &[u8]) -> Result<Vec<Requirement>, AcceptanceError> {
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(AcceptanceError::InputTooLarge);
+    }
+    if !is_json_object(bytes) {
+        return Err(AcceptanceError::InvalidRequirement);
+    }
+    let envelope: RequirementList =
+        serde_json::from_slice(bytes).map_err(|_| AcceptanceError::InvalidRequirement)?;
+    if envelope.schema_version != REQUIREMENT_LIST_SCHEMA
+        || envelope.requirements.is_empty()
+        || envelope.requirements.len() > MAX_REQUIREMENTS
+    {
+        return Err(AcceptanceError::InvalidRequirement);
+    }
+    envelope
+        .requirements
+        .iter()
+        .map(|element| decode_requirement(element.get().as_bytes()))
+        .collect()
 }
 
 /// One check's outcome: `passed` | `failed` | `indeterminate`.
