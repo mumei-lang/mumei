@@ -6166,6 +6166,84 @@ represent) stays closed, per-pass label state resets before every loop
 fixed-point re-walk and fallthrough double walk, and `defer`/`go` or an
 unresolvable target remain outside the fragment.
 
+### Scalar-element local containers (mumei-agent #1006)
+
+[mumei-agent#1006](https://github.com/mumei-lang/mumei-agent/pull/1006)
+admits `[]T`/`[N]T`/`map[K]T` locals whose elements are scalar or
+pointer into a bound opaque-container model: one conflated dep set
+carries every element's provenance, `a[i] = v` lands in the backing
+every sharer reads, `a[i]` unions the sharers' sets with the index's
+own deps, and a `b := a` copy shares a slice/map backing while an array
+copy mints a fresh one.
+
+### Nested scalar-element local containers (mumei-agent #1007)
+
+[mumei-agent#1007](https://github.com/mumei-lang/mumei-agent/pull/1007)
+extends the same model one level: `[][]T`, `map[K][]T` and `[N][]T`
+bind with a one-level conflation — `a[i][j] = v` stores into the
+backing every sharer reads and `a[i][j]` unions the sharers' sets with
+both indexes' deps. Extracting an inner container stays closed at this
+step.
+
+### Index-extract an inner container (mumei-agent #1008)
+
+[mumei-agent#1008](https://github.com/mumei-lang/mumei-agent/pull/1008)
+admits `b := a[i]` on a bound nested-scalar container: the extracted
+inner container joins the share group so `b[j] = v` lands in the root's
+backing and `a[i][j]`/`b[j]` reads observe each other's stores. Index
+donors inside composite literals and callee-write index arguments
+union the root's share group the same way.
+
+### Index-extract reseat (mumei-agent #1009)
+
+[mumei-agent#1009](https://github.com/mumei-lang/mumei-agent/pull/1009)
+admits the reseat form `b = a[i]`: the destination's share group
+reseats onto the operand's backing at pre-state — `a, a[0] = arr, x`
+resolves `a[0]` against the OLD `a` — and an array operand expands the
+store's holders over its current tokens because `a = arr` copies into
+`a`'s own storage, but only while the write stays inline (`[1][]int64`'s
+`a[0][0]` writes through the inner slice header's backing and detaches).
+
+### Append on an extracted inner container (mumei-agent #1010)
+
+[mumei-agent#1010](https://github.com/mumei-lang/mumei-agent/pull/1010)
+admits `b := append(a[i], v)` on a bound nested-scalar container: the
+appended slice may reuse the extracted element's backing, so `b` unions
+the root's share-group tokens beside its fresh result token and the
+appended elements' deps land in the root's sharers like the plain
+`append(a, v)` slice case. A discarded `_ = append(a[i], x)` still
+registers the union as a may-write on the group, and parallel-assignment
+RHS resolves `append(a[i], v)` at the pre-state group.
+
+### Field member extraction (mumei-agent #1011)
+
+[mumei-agent#1011](https://github.com/mumei-lang/mumei-agent/pull/1011)
+admits `a := s.F` on a local composite whose member is a scalar-element
+container (`[][]int64`/`map[K][]T`/`[N][]T`): `a` joins the field's
+share group like the single-level form, an array member EMBEDDING a
+collection (`[1][]int64`) shares its copied header instead of minting a
+fresh value copy, and `s.F = rhs` reseats the field onto the operand's
+backing (literal/call sources mint a backing like a local; conditional
+stores union instead of replacing). `[][][]T` members and deeper stayed
+closed at this step.
+
+### Arbitrary-depth nested containers (mumei-agent #1012)
+
+[mumei-agent#1012](https://github.com/mumei-lang/mumei-agent/pull/1012)
+lifts the two-level cap: `_scalar_elem_nested_collection` is recursive,
+so `[][][]T` and deeper bind like the two-level forms, and a field
+member that itself nests a scalar container (`struct { F [][][]T }`)
+shares at any depth. `_opaque_container_index_target` unwinds the full
+operand chain — `a := s.F` on a member whose type is a pure array
+(`[N]int64`) mints a fresh value copy instead of joining the group,
+while a member embedding a collection shares the copied header.
+Element writes at any depth land on the root's share group, a
+deep index READ (`a[i][j][k]`) descends one `elem` per level like the
+two-level form, and `append(a[i][j], v)` joins the appended slice to
+the root's group with the appended elements' own tokens unioned in.
+A deep array argument (`[1][1][]int64`) shares caller memory through
+the same path.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
