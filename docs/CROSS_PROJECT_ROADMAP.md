@@ -5857,6 +5857,26 @@ reached only through a jumped-over assignment reports definite rather
 than possible, and the synthetic stacked-label wrapper stays
 transparent to dataflow scope.
 
+### Manifest-declared attempt argv (mumei-agent #990)
+
+[mumei-agent#990](https://github.com/mumei-lang/mumei-agent/pull/990)
+adds `AdapterDescriptor.attempt_argv`: an adapter manifest can declare
+its own attempt command, which `verify-schedule` and the audit
+`--enable-scheduled-verification` schedule fall back to when the host
+argv map has no entry — but only under an explicit host opt-in,
+`allow_manifest_attempt_argv: true` in the declared planner policy, so
+a manifest can never plant an executable command on its own.
+
+### Declared output verdict markers (mumei-agent #991)
+
+[mumei-agent#991](https://github.com/mumei-lang/mumei-agent/pull/991)
+adds `AdapterDescriptor.verdict_markers`: an ordered tuple of
+`{stream, contains, outcome}` declarations that map an adapter's raw
+stdout/stderr onto its declared outcome vocabulary (`valid`, `failed`,
+`inconclusive`). The schedule records the first match as the entry's
+`reported_outcome` — the adapter's declared self-report, never a
+selection signal or Evidence acceptance.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
