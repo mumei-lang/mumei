@@ -6204,6 +6204,17 @@ store's holders over its current tokens because `a = arr` copies into
 `a`'s own storage, but only while the write stays inline (`[1][]int64`'s
 `a[0][0]` writes through the inner slice header's backing and detaches).
 
+### Append on an extracted inner container (mumei-agent #1010)
+
+[mumei-agent#1010](https://github.com/mumei-lang/mumei-agent/pull/1010)
+admits `b := append(a[i], v)` on a bound nested-scalar container: the
+appended slice may reuse the extracted element's backing, so `b` unions
+the root's share-group tokens beside its fresh result token and the
+appended elements' deps land in the root's sharers like the plain
+`append(a, v)` slice case. A discarded `_ = append(a[i], x)` still
+registers the union as a may-write on the group, and parallel-assignment
+RHS resolves `append(a[i], v)` at the pre-state group.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
