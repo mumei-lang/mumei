@@ -7352,20 +7352,15 @@ fn signature_domain<'ctx>(
                 depth,
             } => {
                 let d = depth as usize;
-                // A `bool` payload slot stays canonical under EVERY tag
-                // where the slot exists: the source layer reads it as
-                // `v != 0` while the emitter and LLVM pass the raw i64,
-                // so leaving the padding value unconstrained under a
-                // non-carrier tag would let a plain pass-through
-                // compare `ite(v != 0, 1, 0)` against the raw `v`.
+                // A `bool` payload slot stays canonical under EVERY
+                // interpretation — live or padding: the source layer reads
+                // it as `v != 0` while the emitter and LLVM pass the raw
+                // i64, so leaving the slot unconstrained under a
+                // non-carrying (or payloadless outer) tag would let a
+                // plain pass-through compare `ite(v != 0, 1, 0)` against
+                // the raw `v` and report Different on a correct atom.
                 if enum_slot_is_bool(type_name, refined) {
-                    domain.push(
-                        enum_gate
-                            .get(d)
-                            .cloned()
-                            .unwrap_or_else(|| Bool::from_bool(context, false))
-                            .implies(&v.bvule(&BV::from_u64(context, 1, 64))),
-                    );
+                    domain.push(v.bvule(&BV::from_u64(context, 1, 64)));
                 }
                 if carriers.is_empty() {
                     continue;
