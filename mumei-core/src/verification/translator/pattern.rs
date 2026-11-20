@@ -102,11 +102,19 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                             // The pattern may bind more fields than the
                             // variant declares — `V(a, b)` on `V(i64)` —
                             // so index safely; an out-of-range slot falls
-                            // through to the scalar fallback const.
+                            // through to the scalar fallback const. An
+                            // enum-typed field is a single inner-datatype
+                            // accessor, not a flattened struct — it must
+                            // stay on the scalar path so a nested
+                            // `Pair::P(..)` pattern recurses on the inner
+                            // enum (and so a prelude struct of the same
+                            // name cannot hijack the slot).
                             let ft = &edef.variants[variant_idx].field_types.get(i)?.name;
-                            vc.module_env
-                                .structs
-                                .get(&vc.module_env.resolve_base_type(ft))
+                            let resolved = vc.module_env.resolve_base_type(ft);
+                            if vc.module_env.enums.contains_key(&resolved) {
+                                return None;
+                            }
+                            vc.module_env.structs.get(&resolved)
                         });
                         if let Some(sdef) = sdef {
                             // Nested payloads flatten deeper than the direct
@@ -343,11 +351,17 @@ pub(crate) fn pattern_bind_variables<'a>(
                             let sdef = enum_def.and_then(|edef| {
                                 // Over-wide patterns (`V(a, b)` on
                                 // `V(i64)`) index past the declared
-                                // fields — stay on the scalar path.
+                                // fields — stay on the scalar path. An
+                                // enum-typed field is one inner-datatype
+                                // accessor, not a flattened struct, so a
+                                // nested variant pattern binds through
+                                // the scalar path below.
                                 let ft = &edef.variants[variant_idx].field_types.get(i)?.name;
-                                vc.module_env
-                                    .structs
-                                    .get(&vc.module_env.resolve_base_type(ft))
+                                let resolved = vc.module_env.resolve_base_type(ft);
+                                if vc.module_env.enums.contains_key(&resolved) {
+                                    return None;
+                                }
+                                vc.module_env.structs.get(&resolved)
                             });
                             if let Some(sdef) = sdef {
                                 // Composite payload: bind a fresh struct

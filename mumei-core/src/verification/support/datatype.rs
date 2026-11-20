@@ -25,25 +25,59 @@ use crate::verification::module_env::ModuleEnv;
 use crate::verification::translator::{VCtx, F64_EBITS, F64_SBITS};
 use crate::verification::types::{MumeiError, MumeiResult};
 
+/// Deepest enum-in-payload nesting a finite ADT accepts — a bound so a
+/// mutual `A(B)`, `B(A)` declaration cycle cannot recurse the
+/// flattening walk forever (self-reference already fails
+/// `is_recursive`, this covers cycles the flag does not name).
+const MAX_ENUM_PAYLOAD_NEST: u8 = 8;
+
 /// `true` when `enum_def` is finite + non-recursive + scalar-payload only
 /// (a declared *struct* payload whose direct fields are all scalar also
 /// counts: its leaves flatten into the constructor, mirroring the trusted
-/// verifier's `pure-i64-composite/v18` layout). Enum, array and nested
-/// composite payloads keep the Int-tag path.
+/// verifier's `pure-i64-composite/v18` layout; a payload field typed as
+/// another finite enum counts too, carrying one accessor of the inner
+/// enum's datatype sort — `pure-i64-composite/v23`). Array and deeper-
+/// than-`MAX_ENUM_PAYLOAD_NEST` composite payloads keep the Int-tag path.
 pub(crate) fn is_finite_adt(enum_def: &EnumDef, module_env: &ModuleEnv) -> bool {
+    is_finite_adt_fueled(
+        enum_def,
+        module_env,
+        MAX_ENUM_PAYLOAD_NEST,
+        &mut FiniteFuelMemo::default(),
+    )
+}
+
+/// Memoized `is_finite_adt_fueled` answers keyed by `(enum_name, fuel)`.
+/// A shared inner enum on every field of every level used to re-walk its
+/// subtree per field — `16 fields × 8 levels` was ~4 billion leaf walks.
+/// `fuel` strictly decreases on each enum edge, so a `(name, fuel)` key
+/// cannot re-enter while in progress and no cycle marker is needed.
+type FiniteFuelMemo = HashMap<(String, u8), bool>;
+
+fn is_finite_adt_fueled(
+    enum_def: &EnumDef,
+    module_env: &ModuleEnv,
+    fuel: u8,
+    memo: &mut FiniteFuelMemo,
+) -> bool {
+    let key = (enum_def.name.clone(), fuel);
+    if let Some(&finite) = memo.get(&key) {
+        return finite;
+    }
     // Empty enums cannot form a Z3 datatype (`DatatypeBuilder::finish`
     // asserts at least one variant) and never have a constructible value, so
     // they keep the Int-tag encoding — the vacuous `all()` below would
     // otherwise claim them.
-    if enum_def.is_recursive || !enum_def.type_params.is_empty() || enum_def.variants.is_empty() {
-        return false;
-    }
-    enum_def.variants.iter().all(|variant| {
-        variant
-            .field_types
-            .iter()
-            .all(|field| field_leaf_types(field.name.as_str(), module_env).is_some())
-    })
+    let finite = !enum_def.is_recursive
+        && enum_def.type_params.is_empty()
+        && !enum_def.variants.is_empty()
+        && enum_def.variants.iter().all(|variant| {
+            variant.field_types.iter().all(|field| {
+                field_leaf_types_fueled(field.name.as_str(), module_env, fuel, memo).is_some()
+            })
+        });
+    memo.insert(key, finite);
+    finite
 }
 
 /// The `(leaf_name, leaf_base_type)` pairs a payload field contributes to
@@ -59,6 +93,20 @@ pub(crate) fn field_leaf_types(
     field_type: &str,
     module_env: &ModuleEnv,
 ) -> Option<Vec<(String, String)>> {
+    field_leaf_types_fueled(
+        field_type,
+        module_env,
+        MAX_ENUM_PAYLOAD_NEST,
+        &mut FiniteFuelMemo::default(),
+    )
+}
+
+fn field_leaf_types_fueled(
+    field_type: &str,
+    module_env: &ModuleEnv,
+    fuel: u8,
+    memo: &mut FiniteFuelMemo,
+) -> Option<Vec<(String, String)>> {
     let mut leaves = Vec::new();
     let mut visiting = std::collections::HashSet::new();
     let mut seen = std::collections::HashSet::new();
@@ -71,6 +119,8 @@ pub(crate) fn field_leaf_types(
         &mut visiting,
         &mut seen,
         &mut work,
+        fuel,
+        memo,
     )
     .is_none()
     {
@@ -105,6 +155,7 @@ const MAX_PAYLOAD_LEAVES: usize = 16;
 /// shared-subtree walk outright.
 const MAX_LEAF_FIELD_VISITS: usize = 16 * MAX_PAYLOAD_LEAVES;
 
+#[allow(clippy::too_many_arguments)]
 fn collect_field_leaves(
     field_type: &str,
     module_env: &ModuleEnv,
@@ -113,6 +164,8 @@ fn collect_field_leaves(
     visiting: &mut std::collections::HashSet<String>,
     seen: &mut std::collections::HashSet<String>,
     work: &mut usize,
+    fuel: u8,
+    memo: &mut FiniteFuelMemo,
 ) -> Option<()> {
     *work += 1;
     if *work > MAX_LEAF_FIELD_VISITS {
@@ -126,6 +179,22 @@ fn collect_field_leaves(
         return Some(());
     }
     let base = module_env.resolve_base_type(field_type);
+    // An enum-typed payload leaf contributes a single `enum:`-marked leaf —
+    // it is ONE constructor accessor carrying the inner enum's own datatype
+    // sort (`pure-i64-composite/v23` in the trusted fragment). The inner
+    // enum must itself flatten finitely; `fuel` bounds the walk so a
+    // `A(B)`/`B(A)` declaration cycle cannot diverge.
+    if let Some(inner) = module_env.enums.get(&base) {
+        let fuel = fuel.checked_sub(1)?;
+        if !is_finite_adt_fueled(inner, module_env, fuel, memo) {
+            return None;
+        }
+        if !seen.insert(name.clone()) || leaves.len() >= MAX_PAYLOAD_LEAVES {
+            return None;
+        }
+        leaves.push((name, format!("enum:{base}")));
+        return Some(());
+    }
     let sdef = module_env.structs.get(&base)?;
     // A recursive struct declaration (`Node { n: Node }`) cannot flatten —
     // path-level guard, not a done-set: the same struct may still appear
@@ -147,6 +216,8 @@ fn collect_field_leaves(
             visiting,
             seen,
             work,
+            fuel,
+            memo,
         )?;
     }
     visiting.remove(&base);
@@ -189,30 +260,37 @@ fn field_leaf_sorts<'a>(
 ) -> Option<Vec<(String, Sort<'a>)>> {
     let leaves = field_leaf_types(field_type, vc.module_env)?;
     let single = leaves.len() == 1 && leaves[0].0.is_empty();
-    Some(
-        leaves
-            .into_iter()
-            .map(|(leaf_name, base)| {
-                let name = if single {
-                    format!("{variant_name}_{field_idx}")
-                } else {
-                    format!("{variant_name}_{field_idx}_{leaf_name}")
-                };
-                let sort = match lower(&base) {
-                    LoweredType::F64 if vc.ieee754_f64 => Sort::float(vc.ctx, F64_EBITS, F64_SBITS),
-                    LoweredType::F64 => Sort::real(vc.ctx),
-                    LoweredType::Str => Sort::string(vc.ctx),
-                    LoweredType::Bool => Sort::bool(vc.ctx),
-                    // `--bitvec-i64` encodes integer values as BV(64) — the
-                    // accessor sorts must match the args callers pass (a
-                    // struct param's fields are seeded BV too).
-                    _ if vc.bitvec_i64 => Sort::bitvector(vc.ctx, 64),
-                    _ => Sort::int(vc.ctx),
-                };
-                (name, sort)
-            })
-            .collect(),
-    )
+    let mut out = Vec::with_capacity(leaves.len());
+    for (leaf_name, base) in leaves {
+        let name = if single {
+            format!("{variant_name}_{field_idx}")
+        } else {
+            format!("{variant_name}_{field_idx}_{leaf_name}")
+        };
+        // `enum:`-marked leaves carry the inner enum's own datatype sort —
+        // Z3 nests ADTs, so the inner sort object (cached per context) is
+        // the accessor domain directly. A sort under construction recurses
+        // here for its inner enum; `is_finite_adt` already bounded the nest.
+        if let Some(inner_name) = base.strip_prefix("enum:") {
+            let inner = vc.module_env.get_enum(inner_name)?;
+            let inner_sort = enum_datatype_sort(vc, inner)?;
+            out.push((name, inner_sort.sort.clone()));
+            continue;
+        }
+        let sort = match lower(&base) {
+            LoweredType::F64 if vc.ieee754_f64 => Sort::float(vc.ctx, F64_EBITS, F64_SBITS),
+            LoweredType::F64 => Sort::real(vc.ctx),
+            LoweredType::Str => Sort::string(vc.ctx),
+            LoweredType::Bool => Sort::bool(vc.ctx),
+            // `--bitvec-i64` encodes integer values as BV(64) — the
+            // accessor sorts must match the args callers pass (a
+            // struct param's fields are seeded BV too).
+            _ if vc.bitvec_i64 => Sort::bitvector(vc.ctx, 64),
+            _ => Sort::int(vc.ctx),
+        };
+        out.push((name, sort));
+    }
+    Some(out)
 }
 
 /// `(leaf_offset, leaf_width)` of declared field `field_idx` inside
