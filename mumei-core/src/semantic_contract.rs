@@ -3096,6 +3096,8 @@ fn flatten_fields<'a>(
     fields: &'a [ResolvedField],
     prefix: &str,
     out: &mut Vec<(String, SignatureSlot<'a>)>,
+    depth: u8,
+    carriers: &[u64],
 ) {
     for field in fields {
         let path = if prefix.is_empty() {
@@ -3106,23 +3108,29 @@ fn flatten_fields<'a>(
         match &field.shape {
             ValueKind::Struct(child) => {
                 if let Some(child_fields) = structs.get(child) {
-                    flatten_fields(structs, enums, child_fields, &path, out);
+                    flatten_fields(structs, enums, child_fields, &path, out, depth, carriers);
                 }
             }
             // An enum-typed field lays out like an enum parameter: a
             // tag slot then the shared payload leaves — a composite
             // slot expands to one leaf per flattened field of its
-            // struct (`pure-i64-composite/v17`, `/v18`).
+            // struct (`pure-i64-composite/v17`, `/v18`). Under an
+            // enclosing enum slot the field's tag sits one level deeper
+            // and its leaves gate on the inner tag
+            // (`pure-i64-composite/v23`).
             ValueKind::Enum(enum_name) => {
                 if let Some(variants) = enums.get(enum_name) {
+                    let tag_depth = depth + u8::from(!carriers.is_empty());
                     out.push((
                         format!("{path}.tag"),
                         SignatureSlot::EnumTag {
                             variants: variants.len() as u64,
+                            carriers: carriers.to_vec(),
+                            depth: tag_depth,
                         },
                     ));
                     for i in 0..enum_max_arity(variants) {
-                        let carriers: Vec<u64> = variants
+                        let slot_carriers: Vec<u64> = variants
                             .iter()
                             .enumerate()
                             .filter(|(_, v)| v.fields.get(i).is_some())
@@ -3130,38 +3138,104 @@ fn flatten_fields<'a>(
                             .collect();
                         match enum_slot_type(variants, i).and_then(|name| structs.get(name)) {
                             Some(fields) => out.extend(
-                                flattened_struct_fields(structs, enums, fields)
-                                    .iter()
-                                    .map(|(inner, slot)| {
-                                        let signature_slot = match slot {
-                                            SignatureSlot::WideScalar(type_name) => {
-                                                SignatureSlot::EnumWideField {
-                                                    type_name: *type_name,
-                                                    carriers: carriers.clone(),
-                                                }
+                                flattened_struct_fields_at(
+                                    structs,
+                                    enums,
+                                    fields,
+                                    tag_depth,
+                                    &slot_carriers,
+                                )
+                                .iter()
+                                .map(|(inner, slot)| {
+                                    // Scalar leaves still need this
+                                    // slot's carriers; enum slots the
+                                    // deeper walk already formed carry
+                                    // their own level's metadata
+                                    // (`pure-i64-composite/v23`).
+                                    let signature_slot = match slot {
+                                        SignatureSlot::WideScalar(type_name) => {
+                                            SignatureSlot::EnumWideField {
+                                                type_name: *type_name,
+                                                carriers: slot_carriers.clone(),
+                                                depth: tag_depth,
                                             }
-                                            _ => SignatureSlot::EnumField {
-                                                type_name: slot_type_name(slot),
-                                                carriers: carriers.clone(),
-                                            },
-                                        };
-                                        (format!("{path}.{i}.{inner}"), signature_slot)
-                                    })
-                                    .collect::<Vec<_>>(),
+                                        }
+                                        SignatureSlot::Scalar(type_name) => {
+                                            SignatureSlot::EnumField {
+                                                type_name: *type_name,
+                                                carriers: slot_carriers.clone(),
+                                                depth: tag_depth,
+                                            }
+                                        }
+                                        _ => slot.clone(),
+                                    };
+                                    (format!("{path}.{i}.{inner}"), signature_slot)
+                                })
+                                .collect::<Vec<_>>(),
                             ),
                             None => {
                                 let type_name = enum_slot_type(variants, i);
+                                // A nested-enum payload slot expands to
+                                // the inner tag plus the inner enum's
+                                // own leaf slots — the seeder consumes
+                                // the same shape, so a single
+                                // `EnumField` slot would misalign the
+                                // signature (`pure-i64-composite/v23`).
+                                if type_name.is_some_and(|name| enums.contains_key(name)) {
+                                    let inner = enums
+                                        .get(type_name.expect("checked above"))
+                                        .map(Vec::as_slice)
+                                        .unwrap_or(&[]);
+                                    out.push((
+                                        format!("{path}.{i}.tag"),
+                                        SignatureSlot::EnumTag {
+                                            variants: inner.len() as u64,
+                                            carriers: slot_carriers.clone(),
+                                            depth: tag_depth + 1,
+                                        },
+                                    ));
+                                    let inner_slots: Vec<SignatureSlot> =
+                                        (0..enum_max_arity(inner))
+                                            .flat_map(|j| {
+                                                let inner_carriers: Vec<u64> = inner
+                                                    .iter()
+                                                    .enumerate()
+                                                    .filter(|(_, v)| v.fields.get(j).is_some())
+                                                    .map(|(ordinal, _)| ordinal as u64)
+                                                    .collect();
+                                                enum_slot_leaf_slots(
+                                                    inner,
+                                                    structs,
+                                                    enums,
+                                                    j,
+                                                    inner_carriers,
+                                                    tag_depth + 1,
+                                                )
+                                            })
+                                            .collect();
+                                    out.extend(
+                                        enum_leaf_paths(inner, structs, enums)
+                                            .into_iter()
+                                            .zip(inner_slots)
+                                            .map(|((leaf, _), slot)| {
+                                                (format!("{path}.{i}.{leaf}"), slot)
+                                            }),
+                                    );
+                                    continue;
+                                }
                                 out.push((
                                     format!("{path}.{i}"),
                                     if matches!(type_name, Some("i128" | "u128")) {
                                         SignatureSlot::EnumWideField {
                                             type_name,
-                                            carriers,
+                                            carriers: slot_carriers,
+                                            depth: tag_depth,
                                         }
                                     } else {
                                         SignatureSlot::EnumField {
                                             type_name,
-                                            carriers,
+                                            carriers: slot_carriers,
+                                            depth: tag_depth,
                                         }
                                     },
                                 ));
@@ -3269,8 +3343,22 @@ fn flattened_struct_fields<'a>(
     enums: &'a EnumEnv,
     fields: &'a [ResolvedField],
 ) -> Vec<(String, SignatureSlot<'a>)> {
+    flattened_struct_fields_at(structs, enums, fields, 0, &[])
+}
+
+/// `flattened_struct_fields` inside an enclosing enum slot: `depth`
+/// is the enclosing tag's stack index and `carriers` its carrier
+/// ordinals, so nested enum fields gate on the right tags
+/// (`pure-i64-composite/v23`).
+fn flattened_struct_fields_at<'a>(
+    structs: &'a StructEnv,
+    enums: &'a EnumEnv,
+    fields: &'a [ResolvedField],
+    depth: u8,
+    carriers: &[u64],
+) -> Vec<(String, SignatureSlot<'a>)> {
     let mut out = Vec::new();
-    flatten_fields(structs, enums, fields, "", &mut out);
+    flatten_fields(structs, enums, fields, "", &mut out, depth, carriers);
     out
 }
 
@@ -3705,6 +3793,7 @@ fn enum_slot_leaf_slots<'a>(
     enums: &'a EnumEnv,
     i: usize,
     carriers: Vec<u64>,
+    depth: u8,
 ) -> Vec<SignatureSlot<'a>> {
     let Some(name) = enum_slot_type(variants, i) else {
         return Vec::new();
@@ -3712,28 +3801,38 @@ fn enum_slot_leaf_slots<'a>(
     let field = |type_name: Option<&'a str>| SignatureSlot::EnumField {
         type_name,
         carriers: carriers.clone(),
+        depth,
     };
     let wide = |type_name: Option<&'a str>| SignatureSlot::EnumWideField {
         type_name,
         carriers: carriers.clone(),
+        depth,
     };
     match structs.get(name) {
-        Some(fields) => flattened_struct_fields(structs, enums, fields)
+        Some(fields) => flattened_struct_fields_at(structs, enums, fields, depth, &carriers)
             .iter()
             .map(|(_, slot)| match slot {
+                // Only bare scalar leaves take this slot's carriers —
+                // enum slots the deeper walk emitted already carry
+                // their own depth and carriers
+                // (`pure-i64-composite/v23`).
                 SignatureSlot::WideScalar(type_name) => wide(*type_name),
-                _ => field(slot_type_name(slot)),
+                SignatureSlot::Scalar(type_name) => field(*type_name),
+                _ => slot.clone(),
             })
             .collect(),
         // A nested-enum payload leaf flattens into the inner enum's own
         // lowered shape: an `EnumTag` (inner variants) plus its payload
         // leaf slots carrying the inner carriers, so the domain walker
         // binds each inner slot under the tags that declare it
-        // (`pure-i64-composite/v23`).
+        // (`pure-i64-composite/v23`). The inner tag sits one level
+        // deeper and exists only under the outer `carriers`.
         None if enums.contains_key(name) => {
             let inner = enums.get(name).map(Vec::as_slice).unwrap_or(&[]);
             let mut slots = vec![SignatureSlot::EnumTag {
                 variants: inner.len() as u64,
+                carriers,
+                depth: depth + 1,
             }];
             slots.extend((0..enum_max_arity(inner)).flat_map(|j| {
                 let inner_carriers: Vec<u64> = inner
@@ -3742,7 +3841,7 @@ fn enum_slot_leaf_slots<'a>(
                     .filter(|(_, v)| v.fields.get(j).is_some())
                     .map(|(ordinal, _)| ordinal as u64)
                     .collect();
-                enum_slot_leaf_slots(inner, structs, enums, j, inner_carriers)
+                enum_slot_leaf_slots(inner, structs, enums, j, inner_carriers, depth + 1)
             }));
             slots
         }
@@ -3770,7 +3869,7 @@ fn enum_slot_leaf_width(
     enums: &EnumEnv,
     i: usize,
 ) -> usize {
-    enum_slot_leaf_slots(variants, structs, enums, i, Vec::new())
+    enum_slot_leaf_slots(variants, structs, enums, i, Vec::new(), 0)
         .iter()
         .map(signature_slot_weight)
         .sum()
@@ -7063,12 +7162,23 @@ enum SignatureSlot<'a> {
     WideScalar(Option<&'a str>),
     EnumTag {
         variants: u64,
+        /// For a nested enum's tag (`pure-i64-composite/v23`): the
+        /// enclosing enum's ordinals that carry the slot this tag lives
+        /// in — the tag exists only under those outer tags. Empty for a
+        /// param/field-level enum tag (unconditional domain).
+        carriers: Vec<u64>,
+        /// Tag-stack depth: 0 for a param/field-level enum's tag, +1
+        /// per enclosing enum slot level.
+        depth: u8,
     },
     /// One shared payload slot of an enum parameter: `carriers` lists
     /// the ordinals of the variants that declare a field at this index.
     EnumField {
         type_name: Option<&'a str>,
         carriers: Vec<u64>,
+        /// Tag-stack depth of the enum tag `carriers` indexes — 0 for
+        /// the outermost enum's payload leaves (`pure-i64-composite/v23`).
+        depth: u8,
     },
     /// A 128-bit payload leaf (`pure-i64-composite/v22`): one declared
     /// payload leaf occupying TWO consecutive 64-bit input slots under
@@ -7080,6 +7190,9 @@ enum SignatureSlot<'a> {
         // records the same metadata every payload leaf does.
         #[allow(dead_code)]
         carriers: Vec<u64>,
+        /// Tag-stack depth of the enum tag `carriers` indexes
+        /// (`pure-i64-composite/v23`).
+        depth: u8,
     },
 }
 
@@ -7104,6 +7217,8 @@ fn signature_slots<'a>(
                 Some(variants) => {
                     let mut slots = vec![SignatureSlot::EnumTag {
                         variants: variants.len() as u64,
+                        carriers: Vec::new(),
+                        depth: 0,
                     }];
                     // Each payload leaf gets its own slot — a
                     // composite slot expands to its struct's leaf
@@ -7118,7 +7233,7 @@ fn signature_slots<'a>(
                             .filter(|(_, v)| v.fields.get(i).is_some())
                             .map(|(ordinal, _)| ordinal as u64)
                             .collect();
-                        enum_slot_leaf_slots(variants, structs, enums, i, carriers)
+                        enum_slot_leaf_slots(variants, structs, enums, i, carriers, 0)
                     }));
                     slots
                 }
@@ -7156,20 +7271,33 @@ fn signature_domain<'ctx>(
     if slots.iter().map(signature_slot_weight).sum::<usize>() != inputs.len() {
         return Err(SemanticContractError::Unsupported("source signature arity"));
     }
-    // The tag slot of the enum parameter currently being walked — an
-    // `EnumField` slot's domain binds only under tags whose variant
-    // declares a field at that index; under every other tag the slot is
-    // padding and unconstrained.
-    let mut enum_tag: Option<&BV> = None;
+    // Tag-stack by nesting depth (`pure-i64-composite/v23`):
+    // `enum_tags[d]` is the BV bound to the live enum tag at level `d`,
+    // `enum_gate[d]` the condition under which entities at level `d`
+    // exist at all (`enum_gate[0]` is trivially true — a param tag is
+    // unconditional). A leaf slot at depth `d` binds only when
+    // `enum_gate[d] ∧ enum_tags[d] ∈ carriers`; under every other tag
+    // the slot is padding and unconstrained. Slots arrive in DFS order,
+    // so a slot at depth `d` ends every deeper group.
+    let mut enum_tags: Vec<Option<&BV>> = vec![None];
+    let mut enum_gate: Vec<Bool> = vec![Bool::from_bool(context, true)];
     let mut inputs = inputs.iter();
     for slot in slots {
+        let slot_depth = match slot {
+            SignatureSlot::EnumTag { depth, .. }
+            | SignatureSlot::EnumField { depth, .. }
+            | SignatureSlot::EnumWideField { depth, .. } => depth as usize,
+            _ => 0,
+        };
+        enum_tags.truncate(slot_depth + 1);
+        enum_gate.truncate(slot_depth + 1);
         if let SignatureSlot::WideScalar(_) | SignatureSlot::EnumWideField { .. } = slot {
             // A wide leaf occupies two consecutive 64-bit input slots,
             // each a full-width carrier — no range domain applies. An
-            // enum payload's wide leaf keeps the enclosing `enum_tag`
+            // enum payload's wide leaf keeps the enclosing tag
             // (`pure-i64-composite/v22`).
             if matches!(slot, SignatureSlot::WideScalar(_)) {
-                enum_tag = None;
+                enum_tags[0] = None;
             }
             if inputs.next().is_none() || inputs.next().is_none() {
                 return Err(SemanticContractError::Unsupported("source signature arity"));
@@ -7180,43 +7308,88 @@ fn signature_domain<'ctx>(
             return Err(SemanticContractError::Unsupported("source signature arity"));
         };
         match slot {
-            SignatureSlot::EnumTag { variants } => {
-                enum_tag = Some(v);
-                // The tag carries the variant ordinal: bounded above by
-                // the variant count (unsigned, so a negative bit pattern
-                // fails too), matching the tagged union's domain.
-                domain.push(v.bvult(&BV::from_u64(context, variants, 64)));
+            SignatureSlot::EnumTag {
+                variants,
+                carriers,
+                depth,
+            } => {
+                let d = depth as usize;
+                // The tag exists under its enclosing tag's carriers — a
+                // param-level tag (`carriers` empty at depth 0) exists
+                // unconditionally. Its ordinal domain binds only where
+                // the tag is live (`pure-i64-composite/v23`).
+                let exists = if d == 0 {
+                    Bool::from_bool(context, true)
+                } else {
+                    match enum_tags.get(d - 1).copied().flatten() {
+                        Some(outer) if !carriers.is_empty() => {
+                            let carrier_tags = carriers
+                                .iter()
+                                .map(|ordinal| outer._eq(&BV::from_u64(context, *ordinal, 64)))
+                                .collect::<Vec<_>>();
+                            Bool::and(
+                                context,
+                                &[
+                                    &enum_gate[d - 1],
+                                    &Bool::or(context, &carrier_tags.iter().collect::<Vec<_>>()),
+                                ],
+                            )
+                        }
+                        _ => Bool::from_bool(context, false),
+                    }
+                };
+                domain.push(exists.implies(&v.bvult(&BV::from_u64(context, variants, 64))));
+                while enum_tags.len() <= d {
+                    enum_tags.push(None);
+                    enum_gate.push(Bool::from_bool(context, false));
+                }
+                enum_tags[d] = Some(v);
+                enum_gate[d] = exists;
             }
             SignatureSlot::EnumField {
                 type_name,
                 carriers,
+                depth,
             } => {
-                // A `bool` payload slot stays canonical under EVERY
-                // tag: the source layer reads it as `v != 0` while the
-                // emitter and LLVM pass the raw i64, so leaving the
-                // padding value unconstrained under a non-carrier tag
-                // would let a plain pass-through compare `ite(v != 0,
-                // 1, 0)` against the raw `v`.
+                let d = depth as usize;
+                // A `bool` payload slot stays canonical under EVERY tag
+                // where the slot exists: the source layer reads it as
+                // `v != 0` while the emitter and LLVM pass the raw i64,
+                // so leaving the padding value unconstrained under a
+                // non-carrier tag would let a plain pass-through
+                // compare `ite(v != 0, 1, 0)` against the raw `v`.
                 if enum_slot_is_bool(type_name, refined) {
-                    domain.push(v.bvule(&BV::from_u64(context, 1, 64)));
+                    domain.push(
+                        enum_gate
+                            .get(d)
+                            .cloned()
+                            .unwrap_or_else(|| Bool::from_bool(context, false))
+                            .implies(&v.bvule(&BV::from_u64(context, 1, 64))),
+                    );
                 }
                 if carriers.is_empty() {
                     continue;
                 }
-                let Some(tag) = enum_tag else {
+                let Some(tag) = enum_tags.get(d).copied().flatten() else {
                     continue;
                 };
                 let carrier_tags = carriers
                     .iter()
                     .map(|ordinal| tag._eq(&BV::from_u64(context, *ordinal, 64)))
                     .collect::<Vec<_>>();
-                let carries = Bool::or(context, &carrier_tags.iter().collect::<Vec<_>>());
+                let carries = Bool::and(
+                    context,
+                    &[
+                        &enum_gate[d],
+                        &Bool::or(context, &carrier_tags.iter().collect::<Vec<_>>()),
+                    ],
+                );
                 for conjunct in declared_slot_domain(type_name, v, context, refined)? {
                     domain.push(carries.implies(&conjunct));
                 }
             }
             SignatureSlot::Scalar(type_name) => {
-                enum_tag = None;
+                enum_tags[0] = None;
                 domain.extend(declared_slot_domain(type_name, v, context, refined)?);
             }
             // Consumed above — a wide leaf takes two input slots.
