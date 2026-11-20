@@ -540,6 +540,21 @@ pub(crate) enum EvidenceCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Normalize one declared requirement against a bounded Evidence list envelope — per-record verdicts plus an aggregate; no tool execution or proof acceptance
+    AcceptList {
+        /// Regular mumei.verification-evidence-list/v1 JSON file (at most 65,536 bytes); not a native report envelope or proof certificate
+        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        input: Option<String>,
+        /// Read one bounded Evidence list envelope from standard input (at most 65,536 bytes); never infer stdin from a missing file
+        #[arg(long)]
+        stdin: bool,
+        /// Regular mumei.evidence-requirement/v1 JSON file (at most 65,536 bytes); the declared pins and assurance floor
+        #[arg(long)]
+        requirement: String,
+        /// Emit a static mumei.evidence-list-acceptance/v1 descriptor, not reusable Evidence or a certificate
+        #[arg(long)]
+        json: bool,
+    },
     /// Validate a bounded Evidence list envelope's representation — every record individually, not their truth or consistency
     CheckList {
         /// Regular JSON file (at most 65,536 bytes); not a native report envelope or proof certificate
