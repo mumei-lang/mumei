@@ -5703,6 +5703,27 @@ instantiated instance fails closed (no silent integer fallback), and
 the verification cache now hashes the module's enum environment so a
 cached "verified" result cannot survive an enum declaration edit.
 
+### f64 arithmetic under composite TV + per-atom `str_bound` (mumei #1152, #1153)
+
+[mumei#1152](https://github.com/mumei-lang/mumei/pull/1152) admits
+`f64` `+ - * / ==` under `pure-i64-composite/v19` (bundle v22) as real
+IEEE 754 binary64 — the TV encodes `double` leaves with z3 `FP` sorts
+(fpa-add/sub/mul/div, `fp.eq`, NaN collapsed to the canonical quiet-NaN
+pattern), source contracts verify under the IEEE encoding, and the
+emitter lowers them to `fadd`/`fsub`/`fmul`/`fdiv`/`fcmp oeq` so
+recheck-llvm round-trips.
+
+[mumei#1153](https://github.com/mumei-lang/mumei/pull/1153) adds a
+per-atom `str_bound: N;` clause (same machinery as `max_unroll`) under
+composite v20 / bundle v23: the `Str` literal cap becomes the declared
+bound instead of the default `STR_BOUND` (64), capped at
+`STR_BOUND_MAX` (1024). `KindEnv.str_bound` reaches the literal kind
+gate through a shared `Cell` carried in `CallShapes`, so a clause
+declared on one atom never leaks its bound into a sibling's contract —
+declaration presence alone pins v20/v23, and the recheck-llvm module
+environment now whitelists the emitter's private constant `str_lit`
+byte-string global when the admission covers `Str` leaves.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
