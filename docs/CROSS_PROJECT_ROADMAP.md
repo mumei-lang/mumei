@@ -5609,6 +5609,17 @@ sibling payload slots carried over unchanged. Enum-typed atom
 parameters now seed `local_enum_types` the way struct params seed
 the struct map, so match-arm narrowing discharges the tag gate.
 
+### Signed trust anchors (mumei-agent #985, issue #984 Option A)
+
+[mumei-agent#985](https://github.com/mumei-lang/mumei-agent/pull/985)
+signs the trust anchors themselves: the producer-key registry and
+the revocation list each carry an optional detached signature
+verified under a declared root pin, so a tampered anchor file is
+rejected instead of silently authorizing a swapped key. The
+anchor shape stays closed — unsigned anchors still load exactly
+as before, and a malformed or unverifiable signature fails the
+load rather than degrading to unsigned acceptance.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
