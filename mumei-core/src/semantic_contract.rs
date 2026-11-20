@@ -7984,13 +7984,20 @@ fn source_field_write<'ctx>(
             enums,
         )?;
         // The slot keeps its declared leaf shape — same coercion a
-        // composite field write applies.
+        // composite field write applies; a `Num` literal widens by the
+        // slot's signedness (`pure-i64-composite/v22`).
         let bound = match (slots.get(index), &bound) {
             (Some(SourceValue::Integer(_)), SourceValue::Number(v)) => {
                 SourceValue::Integer(v.clone())
             }
             (Some(SourceValue::Unsigned(_)), SourceValue::Number(v)) => {
                 SourceValue::Unsigned(v.clone())
+            }
+            (Some(SourceValue::Wide(_)), SourceValue::Number(v)) => {
+                SourceValue::Wide(v.sign_ext(64))
+            }
+            (Some(SourceValue::UWide(_)), SourceValue::Number(v)) => {
+                SourceValue::UWide(v.zero_ext(64))
             }
             (_, bound) => bound.clone(),
         };
@@ -10178,21 +10185,28 @@ fn source_expr<'ctx>(
                         )?;
                         match kind {
                             // A wide payload leaf takes the `Wide`/
-                            // `UWide` value as-is — the ctor-kind gate
-                            // already matched its kind
-                            // (`pure-i64-composite/v22`).
-                            PayloadSlotKind::Scalar(ScalarKind::I128 | ScalarKind::U128) => {
-                                match value {
-                                    SourceValue::Wide(_) | SourceValue::UWide(_) => {
-                                        slots.push(value)
-                                    }
-                                    _ => {
-                                        return Err(SemanticContractError::Unsupported(
-                                            "enum constructor payload kind",
-                                        ))
+                            // `UWide` value as-is, or a `Num` literal
+                            // widened by the slot's signedness — the
+                            // same adaptation `expect_kind` admits at
+                            // the ctor-kind gate (`pure-i64-composite/v21`,
+                            // `/v22`).
+                            PayloadSlotKind::Scalar(
+                                kind @ (ScalarKind::I128 | ScalarKind::U128),
+                            ) => match value {
+                                SourceValue::Wide(_) | SourceValue::UWide(_) => slots.push(value),
+                                SourceValue::Number(v) => {
+                                    if *kind == ScalarKind::U128 {
+                                        slots.push(SourceValue::UWide(v.zero_ext(64)))
+                                    } else {
+                                        slots.push(SourceValue::Wide(v.sign_ext(64)))
                                     }
                                 }
-                            }
+                                _ => {
+                                    return Err(SemanticContractError::Unsupported(
+                                        "enum constructor payload kind",
+                                    ))
+                                }
+                            },
                             PayloadSlotKind::Scalar(kind) => {
                                 slots.push(enum_slot_value(*kind, &lower_scalar(value, ctx)?, ctx))
                             }
