@@ -189,6 +189,39 @@ fn enum_ctor_violation_inside_reachable_match_arm_is_rejected() {
 }
 
 #[test]
+fn enum_tag_reads_verify_on_datatype_and_int_tag_paths() {
+    let output = mumei_verify("tests/test_enum_tag_read.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && combined.contains("Verification passed"),
+        ".tag on a bound enum value must read the variant index (datatype) or the tag int (Int-tag):\n{combined}"
+    );
+}
+
+#[test]
+fn enum_tag_in_callee_contract_uses_callee_enum() {
+    let output = mumei_verify("tests/test_enum_tag_callee_context.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("caller"),
+        "a callee's `.tag` must resolve the callee's enum, not a same-named caller binding — `caller`'s `result == 0` must be rejected:\n{combined}"
+    );
+    assert!(
+        combined.contains("'caller_struct': verified")
+            || combined.contains("'caller_struct': skipped"),
+        "a callee's struct param must shadow a caller's same-named enum binding — `caller_struct`'s `h.v.tag` must resolve `Holder.v: Ev` and verify:\n{combined}"
+    );
+}
+
+#[test]
 fn enum_ctor_payload_satisfying_field_type_verifies() {
     let output = mumei_verify("tests/test_enum_ctor_refined.mm");
     let combined = format!(
@@ -199,5 +232,19 @@ fn enum_ctor_payload_satisfying_field_type_verifies() {
     assert!(
         output.status.success() && combined.contains("Verification passed"),
         "payloads satisfying the declared field type — including inside match arms — must verify:\n{combined}"
+    );
+}
+
+#[test]
+fn match_target_field_const_prefers_caller_binding() {
+    let output = mumei_verify("tests/test_enum_match_arg_field_shadowed.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && combined.contains("Verification passed"),
+        "`s_v` projects the caller's `s: HolderA` — the callee's same-named `s: HolderB` param must not shadow it:\n{combined}"
     );
 }
