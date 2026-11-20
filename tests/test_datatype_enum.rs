@@ -248,8 +248,13 @@ fn enum_nested_payload_dag_stays_bounded() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("dag_probe"),
-        "a deep shared-subtree payload must be bounded by the visit budget:\n{combined}"
+        combined.contains("leaf-walk visit budget"),
+        "the visit-budget rejection must be observable — otherwise the test cannot tell the bounded walk ran:\n{combined}"
+    );
+    assert!(
+        combined.contains("'dag_probe': verified")
+            || combined.contains("'dag_probe': skipped"),
+        "a deep shared-subtree payload must fail the flattening closed (scalar fallback), not hang or error:\n{combined}"
     );
 }
 
@@ -267,6 +272,7 @@ fn enum_ctor_payload_satisfying_field_type_verifies() {
     );
 }
 
+
 #[test]
 fn match_target_field_const_prefers_caller_binding() {
     let output = mumei_verify("tests/test_enum_match_arg_field_shadowed.mm");
@@ -278,5 +284,19 @@ fn match_target_field_const_prefers_caller_binding() {
     assert!(
         output.status.success() && combined.contains("Verification passed"),
         "`s_v` projects the caller's `s: HolderA` — the callee's same-named `s: HolderB` param must not shadow it:\n{combined}"
+    );
+}
+
+#[test]
+fn enum_nested_payload_alias_empty_struct_does_not_panic() {
+    let output = mumei_verify("tests/test_enum_nested_alias_empty.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && combined.contains("Verification passed"),
+        "an alias to an empty struct flattens to zero leaves — the bound handle must not index an empty slice:\n{combined}"
     );
 }
