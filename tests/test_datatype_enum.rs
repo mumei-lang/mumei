@@ -236,6 +236,24 @@ fn enum_nested_composite_payload_leaves_verify() {
 }
 
 #[test]
+fn enum_nested_payload_dag_stays_bounded() {
+    // A 30-level payload where every struct has two identical children
+    // would take 2^30 leaf-walk visits — and all leaves are empty
+    // structs, so the leaf cap alone never trips. The visit budget must
+    // fail the flattening closed instead of hanging verification.
+    let output = mumei_verify("tests/test_enum_nested_dag.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("dag_probe"),
+        "a deep shared-subtree payload must be bounded by the visit budget:\n{combined}"
+    );
+}
+
+#[test]
 fn enum_ctor_payload_satisfying_field_type_verifies() {
     let output = mumei_verify("tests/test_enum_ctor_refined.mm");
     let combined = format!(
