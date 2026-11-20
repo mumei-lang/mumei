@@ -481,6 +481,9 @@ fn requirement_list_conflict_demotes_accepted_to_inconclusive() {
 #[test]
 fn requirement_list_empty_or_oversized_is_a_static_failure() {
     let (_dir, list, requirement_list) = requirement_list_fixture();
+    let valid_item = serde_json::from_slice::<Value>(&fs::read(&requirement_list).unwrap())
+        .unwrap()["requirements"][0]
+        .clone();
     rewrite_list(&requirement_list, |doc| {
         doc["requirements"] = json!([]);
     });
@@ -491,8 +494,14 @@ fn requirement_list_empty_or_oversized_is_a_static_failure() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("FAKE_PRIVATE"), "{stderr}");
     rewrite_list(&requirement_list, |doc| {
-        let item = doc["requirements"][0].clone();
-        doc["requirements"] = json!(vec![item; 17]);
+        doc["requirements"] = json!(vec![valid_item.clone(); 16]);
+    });
+    let output = requirement_list_command(&list, &requirement_list, true)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    rewrite_list(&requirement_list, |doc| {
+        doc["requirements"] = json!(vec![valid_item; 17]);
     });
     let output = requirement_list_command(&list, &requirement_list, true)
         .output()
