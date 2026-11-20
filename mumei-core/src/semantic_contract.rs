@@ -6588,12 +6588,17 @@ fn encode_atom_body<'ctx>(
         }
         // An enum result's value is its tag slot followed by the shared
         // payload slots — the tagged-union layout the emitter's
-        // returned aggregate decomposes into.
-        SourceValue::Enum { tag, slots, .. } => aggregate_value(
-            &std::iter::once(Ok(tag))
-                .chain(slots.into_iter().map(|slot| lower_scalar(slot, context)))
-                .collect::<BodyResult<Vec<_>>>()?,
-        ),
+        // returned aggregate decomposes into. `lower_composite` flattens
+        // each slot, so a wide leaf contributes its [lo, hi] halves in
+        // the same order inputs, arguments and call results use
+        // (`pure-i64-composite/v22`).
+        SourceValue::Enum { tag, slots, .. } => {
+            let mut leaves = vec![tag];
+            for slot in slots {
+                lower_composite(slot, context, &mut leaves)?;
+            }
+            aggregate_value(&leaves)
+        }
     };
     let param_domain = signature_domain(&atom.params, &inputs, context, refined, structs, enums)?;
     let subrange_params = slots.iter().any(|slot| {
