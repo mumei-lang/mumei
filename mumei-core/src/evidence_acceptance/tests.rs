@@ -306,3 +306,35 @@ fn rejected_and_inconclusive_checks_do_not_hide_each_other() {
     assert_eq!(check(&evaluation, "obligation_pin"), "failed");
     assert_eq!(check(&evaluation, "result_polarity"), "indeterminate");
 }
+
+#[test]
+fn promotable_gate_accepts_oversized_valid_descriptor() {
+    let requirement_list = serde_json::to_vec(&json!({
+        "schema_version": "mumei.evidence-requirement-list/v1",
+        "requirements": [requirement()],
+    }))
+    .unwrap();
+    let evidence = serde_json::to_vec(&json!({
+        "schema_version": "mumei.verification-evidence-list/v1",
+        "evidence": [],
+    }))
+    .unwrap();
+    let descriptor = serde_json::to_vec(&json!({
+        "schema_version": "mumei.evidence-requirement-list-acceptance/v1",
+        "verdict": "accepted",
+        "requirement_schema_version": "mumei.evidence-requirement-list/v1",
+        "requirement_list_fingerprint": format!("{:x}", Sha256::digest(&requirement_list)),
+        "evidence_schema_version": "mumei.verification-evidence-list/v1",
+        "list_fingerprint": format!("{:x}", Sha256::digest(&evidence)),
+        "consistent": true,
+        "conflict_count": 0,
+        // Per-requirement per-record check outcomes make a real
+        // descriptor larger than the single-document input bound; the
+        // gate must not reject it for size alone.
+        "per_requirement": "x".repeat(MAX_INPUT_BYTES * 2),
+    }))
+    .unwrap();
+    assert!(descriptor.len() > MAX_INPUT_BYTES);
+    assert!(descriptor.len() <= MAX_ACCEPTANCE_DESCRIPTOR_BYTES);
+    assert!(promotable_failures(&requirement_list, &evidence, &descriptor).is_empty());
+}

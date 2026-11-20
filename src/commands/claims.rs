@@ -282,34 +282,50 @@ pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
         }
     }
     if !require_evidence_acceptance.is_empty() {
-        // Fail-closed promotable gate: the declared acceptance descriptor
-        // must pin exactly these declared inputs with verdict accepted —
-        // anything else (a mismatch, a different descriptor, a
-        // non-accepted verdict, unresolved conflicts) is a rejection,
-        // never a silent pass.
-        let mut gate_inputs = Vec::new();
-        for (label, path) in ["requirement list", "evidence", "acceptance"]
-            .iter()
-            .zip(require_evidence_acceptance.iter())
-        {
-            match fs::read(path) {
-                Ok(bytes) => gate_inputs.push(bytes),
-                Err(error) => {
-                    rejected = true;
-                    eprintln!(
-                        "--require-evidence-acceptance: could not read {label} '{path}': {error}"
-                    );
+        // Fail-closed promotable gate: every declared acceptance
+        // descriptor must pin exactly its declared inputs with verdict
+        // accepted — anything else (a mismatch, a different descriptor,
+        // a non-accepted verdict, unresolved conflicts) is a rejection,
+        // never a silent pass. Every declared triple gates, not just
+        // the first.
+        for triple in require_evidence_acceptance.chunks(3) {
+            let mut gate_inputs = Vec::new();
+            for (label, path, bound) in [
+                (
+                    "requirement list",
+                    &triple[0],
+                    mumei_core::verification_evidence::MAX_INPUT_BYTES as u64,
+                ),
+                (
+                    "evidence",
+                    &triple[1],
+                    mumei_core::verification_evidence::MAX_INPUT_BYTES as u64,
+                ),
+                (
+                    "acceptance",
+                    &triple[2],
+                    mumei_core::evidence_acceptance::MAX_ACCEPTANCE_DESCRIPTOR_BYTES as u64,
+                ),
+            ] {
+                match super::input::read_regular(Path::new(path), bound) {
+                    Ok(bytes) => gate_inputs.push(bytes),
+                    Err(reason) => {
+                        rejected = true;
+                        eprintln!(
+                            "--require-evidence-acceptance: could not read {label} '{path}': {reason}"
+                        );
+                    }
                 }
             }
-        }
-        if gate_inputs.len() == 3 {
-            for failure in mumei_core::evidence_acceptance::promotable_failures(
-                &gate_inputs[0],
-                &gate_inputs[1],
-                &gate_inputs[2],
-            ) {
-                rejected = true;
-                eprintln!("--require-evidence-acceptance: {failure}");
+            if gate_inputs.len() == 3 {
+                for failure in mumei_core::evidence_acceptance::promotable_failures(
+                    &gate_inputs[0],
+                    &gate_inputs[1],
+                    &gate_inputs[2],
+                ) {
+                    rejected = true;
+                    eprintln!("--require-evidence-acceptance: {failure}");
+                }
             }
         }
     }

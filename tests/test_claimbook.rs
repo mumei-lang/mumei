@@ -2060,3 +2060,64 @@ fn require_evidence_acceptance_gates_promotable_triple() {
     );
     assert_eq!(output.status.code(), Some(1));
 }
+
+#[test]
+fn require_evidence_acceptance_gates_every_declared_triple() {
+    let dir = fresh_dir("acceptance-gate-multi");
+    let source = copy_fixture(&dir, "claimbook_atoms.mm", "main.mm");
+    let (requirement_list, record, acceptance) = acceptance_triple(&dir);
+    let (req, ev, acc) = (
+        requirement_list.to_str().expect("UTF-8 path").to_string(),
+        record.to_str().expect("UTF-8 path").to_string(),
+        acceptance.to_str().expect("UTF-8 path").to_string(),
+    );
+    let missing = dir
+        .join("missing.json")
+        .to_str()
+        .expect("UTF-8 path")
+        .to_string();
+
+    // A passing first triple must not mask a rejecting second triple.
+    let output = claims(
+        &dir,
+        &source,
+        &[
+            "--require-evidence-acceptance",
+            &req,
+            &ev,
+            &acc,
+            "--require-evidence-acceptance",
+            &req,
+            &ev,
+            &missing,
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--require-evidence-acceptance"),
+        "stderr:\n{stderr}"
+    );
+
+    // Two promotable triples pass.
+    let output = claims(
+        &dir,
+        &source,
+        &[
+            "--require-evidence-acceptance",
+            &req,
+            &ev,
+            &acc,
+            "--require-evidence-acceptance",
+            &req,
+            &ev,
+            &acc,
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "gate rejected two promotable triples\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

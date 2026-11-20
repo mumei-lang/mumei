@@ -366,6 +366,12 @@ pub fn evaluate(requirement: &Requirement, evidence: &Evidence) -> Evaluation {
 pub const REQUIREMENT_LIST_ACCEPTANCE_SCHEMA: &str =
     "mumei.evidence-requirement-list-acceptance/v1";
 
+/// Size bound for the acceptance descriptor a promotable gate reads.
+/// The descriptor repeats per-requirement per-record check outcomes, so
+/// it is larger than a single input document — bounded at 4 MiB, far
+/// above the worst case for 16 requirements × 64 records.
+pub const MAX_ACCEPTANCE_DESCRIPTOR_BYTES: usize = 4 * 1024 * 1024;
+
 /// The fields a promotable gate pins on, out of a
 /// `mumei.evidence-requirement-list-acceptance/v1` descriptor. Unknown
 /// fields are ignored — the pinned surface is the declared schema,
@@ -412,7 +418,7 @@ pub fn promotable_failures(
     if evidence_bytes.len() > MAX_INPUT_BYTES {
         failures.push("evidence input exceeds the declared size bound".to_string());
     }
-    if acceptance_bytes.len() > MAX_INPUT_BYTES {
+    if acceptance_bytes.len() > MAX_ACCEPTANCE_DESCRIPTOR_BYTES {
         failures.push("acceptance descriptor exceeds the declared size bound".to_string());
         return failures;
     }
