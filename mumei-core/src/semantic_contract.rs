@@ -2569,16 +2569,17 @@ fn enum_slot_eq<'ctx>(
                 tag: bt,
                 slots: b_slots,
             },
-        ) if an == bn && a_slots.len() == b_slots.len() => a_slots
-            .iter()
-            .zip(b_slots.iter())
-            .map(|(x, y)| enum_slot_eq(x, y, ctx))
-            .collect::<Option<Vec<_>>>()
-            .and_then(|eqs| {
-                eqs.into_iter()
-                    .reduce(|acc, eq| Bool::and(ctx, &[&acc, &eq]))
-            })
-            .map(|slots_eq| Bool::and(ctx, &[&at._eq(bt), &slots_eq])),
+        ) if an == bn && a_slots.len() == b_slots.len() => {
+            // An all-unit-variant inner enum has no payload leaves — the
+            // fold still owes the tag compare (`pure-i64-composite/v23`).
+            let mut eqs: Vec<Bool> = Vec::with_capacity(a_slots.len() + 1);
+            eqs.push(at._eq(bt));
+            for (x, y) in a_slots.iter().zip(b_slots.iter()) {
+                eqs.push(enum_slot_eq(x, y, ctx)?);
+            }
+            let refs: Vec<&Bool> = eqs.iter().collect();
+            Some(Bool::and(ctx, &refs))
+        }
         // `f64` slots stay out: the emitter compares them with
         // `fcmp oeq`, which bitwise `_eq` cannot model (NaN != NaN,
         // -0.0 == +0.0). `Str` slots need a content compare the model
