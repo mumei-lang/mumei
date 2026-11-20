@@ -321,7 +321,6 @@ fn enum_ctor_payload_satisfying_field_type_verifies() {
     );
 }
 
-
 #[test]
 fn match_target_field_const_prefers_caller_binding() {
     let output = mumei_verify("tests/test_enum_match_arg_field_shadowed.mm");
@@ -373,7 +372,9 @@ fn enum_generic_ctor_with_no_instance_does_not_panic() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        !combined.contains("panicked") && !combined.contains("internal error"),
-        "a generic ctor with zero registered instances must fail closed, not panic:\n{combined}"
+        !output.status.success()
+            && !combined.contains("panicked")
+            && !combined.contains("internal error"),
+        "a generic ctor with zero registered instances must fail closed — the match rejects, never panics and never verifies:\n{combined}"
     );
 }
