@@ -1633,7 +1633,7 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
             queue.push_back(member);
         }
     }
-    let admission = RefinedAdmission::CompositeV21;
+    let admission = RefinedAdmission::CompositeV22;
     let prepared = prepare_multifile_source(&root, &members, admission)?;
     let (binding, graph, atoms, types, structs, enums) = (
         prepared.binding,
