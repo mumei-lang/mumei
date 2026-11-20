@@ -1749,6 +1749,13 @@ unsafe fn check_function(
                 // Loads read an i64 cell — a pointer-typed load would
                 // escape provenance tracking and is rejected by the
                 // `width` check the same way an aggregate load is.
+                // `s[i]` byte reads on `str_lit` globals emit
+                // `gep i8`/`load i8`, which this 64-bit-cell gate
+                // refuses. Such sources already fail closed earlier:
+                // the bundle build's general verifier rejects `s[i]`
+                // as out-of-bounds, so they never reach this gate —
+                // byte-cell coverage in either model is a separate
+                // slice (checked by the v23 bundle test).
                 LLVMOpcode::LLVMLoad => {
                     if !gates.bounded_memory || width(LLVMTypeOf(inst))? != 64 {
                         return Err(ValidationError("unsupported LLVM load"));

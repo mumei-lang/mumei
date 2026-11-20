@@ -3068,6 +3068,36 @@ fn module_bundle_rejects_a_nan_refutable_f64_ensures() {
 }
 
 #[test]
+fn module_bundle_str_index_stays_outside_the_bundlable_fragment() {
+    // Scope boundary: a `s[i]` byte read is inside the v20 composite
+    // contract but outside the general verifier the bundle build runs
+    // — it rejects the index as out-of-bounds, so the build fails
+    // closed before emitting `gep i8`/`load i8` (a byte-cell model in
+    // either layer is a separate slice).
+    let root = tempfile::tempdir().unwrap();
+    let literal = "a".repeat(100);
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        &source,
+        format!(
+            "atom big() -> u64 requires: true; ensures: result == 97; str_bound: 128; body: {{ let s = \"{literal}\"; s[99] }};\n\
+             atom main() -> i64 requires: true; ensures: true; body: {{ 0 }};"
+        ),
+    )
+    .unwrap();
+    assert!(!cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ])
+    .status
+    .success());
+}
+
+#[test]
 fn module_bundle_with_str_bound_builds_as_v23_and_rechecks() {
     // A declared `str_bound: N;` clause admits the longer literal
     // (`pure-i64-composite/v20`) and the record pins bundle v23.
