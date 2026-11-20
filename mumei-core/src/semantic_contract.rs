@@ -3195,6 +3195,15 @@ fn enum_decl_slot_name<'a>(def: &'a crate::parser::ast::EnumDef, i: usize) -> Op
 /// gates anyway, so a bounded estimate keeps the count finite for
 /// `leaf_count_exceeds` before `EnumEnv` exists.
 fn declared_leaf_width(items: &[Item], name: &str, depth: usize) -> usize {
+    // Callers only distinguish `<= 16` (the admission budget) from
+    // over-budget, so the walk caps at 17: without the cap a shared-child
+    // DAG (`S_d { f0..f15: S_{d-1} }`) walks 16^d nodes before the
+    // admission gate can reject it — the same exponential blow-up the
+    // `enum_paths` gate removes from path materialisation.
+    declared_leaf_width_capped(items, name, depth, 17)
+}
+
+fn declared_leaf_width_capped(items: &[Item], name: &str, depth: usize, cap: usize) -> usize {
     if depth == 0 {
         return usize::MAX / 4;
     }
@@ -3202,10 +3211,14 @@ fn declared_leaf_width(items: &[Item], name: &str, depth: usize) -> usize {
         match item {
             Item::StructDef(def) if def.name == name => {
                 return def.fields.iter().fold(0usize, |count, field| {
-                    count.saturating_add(declared_leaf_width(
+                    if count > cap {
+                        return count;
+                    }
+                    count.saturating_add(declared_leaf_width_capped(
                         items,
                         field.type_name.as_str(),
                         depth - 1,
+                        cap,
                     ))
                 });
             }
@@ -3217,9 +3230,12 @@ fn declared_leaf_width(items: &[Item], name: &str, depth: usize) -> usize {
                     .max()
                     .unwrap_or(0);
                 return (0..arity).fold(1usize, |count, i| {
+                    if count > cap {
+                        return count;
+                    }
                     count.saturating_add(
                         enum_decl_slot_name(def, i)
-                            .map(|t| declared_leaf_width(items, t, depth - 1))
+                            .map(|t| declared_leaf_width_capped(items, t, depth - 1, cap))
                             .unwrap_or(1),
                     )
                 });
@@ -12353,15 +12369,16 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
     #[test]
     fn composite_enum_payloads_reject_wide_declarations_without_expanding() {
         // A >16-leaf declaration must fail the leaf budget WITHOUT
-        // `declared_field_paths` materialising the exponential path set —
-        // the earlier gate-on-width order is what makes wide declarations
-        // cheap to reject rather than an allocation hang.
+        // `declared_field_paths` materialising the exponential path set or
+        // `declared_leaf_width` walking it — the cap + gate-on-width order
+        // is what makes wide declarations cheap to reject rather than an
+        // allocation hang (8 levels × 16 children = 16^8 naive nodes).
         let mut decls = String::from("struct S0 {\n");
         for i in 0..16 {
             decls.push_str(&format!("    f{i}: i64,\n"));
         }
         decls.push_str("}\n");
-        for level in 1..4 {
+        for level in 1..8 {
             decls.push_str(&format!("struct S{level} {{\n"));
             for i in 0..16 {
                 decls.push_str(&format!("    f{i}: S{},\n", level - 1));
