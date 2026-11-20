@@ -332,10 +332,12 @@ fn empty_or_inconclusive_list_is_inconclusive_exit_3() {
 fn malformed_list_fails_statically_without_content() {
     let dir = tempfile::tempdir().unwrap();
     let bad = dir.path().join("bad.json");
-    fs::write(&bad, "{}").unwrap();
+    fs::write(&bad, b"{\"evidence\": \"FAKE_PRIVATE_MALFORMED\"}").unwrap();
     let (_d2, _record, requirement, _s) = fixture();
     let output = list_command(&bad, &requirement, true).output().unwrap();
     assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("FAKE_PRIVATE"), "{stdout}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("FAKE_PRIVATE"), "{stderr}");
 }
