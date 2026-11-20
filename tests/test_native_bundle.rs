@@ -3234,6 +3234,39 @@ fn module_bundle_v24_rejects_a_tampered_leaf_widths_pin() {
 }
 
 #[test]
+fn module_bundle_with_wide_enum_payload_builds_as_v25_and_rechecks() {
+    // A uniform `i128`/`u128` payload position occupies two 64-bit
+    // slots (`pure-i64-composite/v22`); the record pins bundle v25 and
+    // the declared `leaf_widths` (tag excluded, one 128 per wide leaf).
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "enum F { A(i128), B(i128) };\n\
+         atom pick(f: F) -> i128 requires: true; ensures: true; body: { match f { F::A(x) => x, _ => 0 } };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V25);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V22
+    );
+    assert_eq!(record["leaf_widths"]["pick"], serde_json::json!([64, 128]));
+    assert_eq!(record["leaf_widths"]["main"], serde_json::json!([]));
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    // A v25 record re-pinned as v24 is refused — v24 keeps the wide
+    // leaf out of the enum payload shape.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V24.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
 fn module_bundle_with_mixed_width_struct_builds_and_rechecks() {
     // A struct mixing a 64-bit leaf with a 128-bit leaf flattens
     // leaf-first — `{a: i64, b: i128}` occupies leaves [a, b.lo,
