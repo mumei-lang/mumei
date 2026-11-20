@@ -294,6 +294,8 @@ fn mixed_list_still_accepts_on_one_accepted_record() {
     rewrite_list(&list, |doc| {
         let mut bad = doc["evidence"][0].clone();
         bad["subject"]["sha256"] = json!("0".repeat(64));
+        bad["subject"]["id"] = json!("other.mm");
+        bad["obligation_id"] = json!("other-obligation");
         doc["evidence"].as_array_mut().unwrap().push(bad);
     });
     let output = list_command(&list, &requirement, true).output().unwrap();
@@ -301,6 +303,29 @@ fn mixed_list_still_accepts_on_one_accepted_record() {
     let doc: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(doc["verdict"], "accepted");
     assert_eq!(doc["records"][1]["verdict"], "rejected");
+}
+
+#[test]
+fn conflicting_list_never_accepts_silently() {
+    // Same obligation_id, different subject sha256 — an accepted
+    // verdict over a contradictory pin set must not pass.
+    let (_dir, list, requirement) = list_fixture();
+    rewrite_list(&list, |doc| {
+        let mut bad = doc["evidence"][0].clone();
+        bad["subject"]["sha256"] = json!("0".repeat(64));
+        doc["evidence"].as_array_mut().unwrap().push(bad);
+    });
+    let output = list_command(&list, &requirement, true).output().unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let doc: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["verdict"], "inconclusive");
+    assert_eq!(doc["consistent"], false);
+    assert!(doc["conflict_count"].as_u64().unwrap() >= 1);
+    assert!(doc["checks_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c == "cross_record_pin_agreement"));
 }
 
 #[test]

@@ -588,11 +588,18 @@ fn accept_list(
         .map(|record| evidence_acceptance::evaluate(&requirement, record))
         .collect();
     // Consumer-side arbitration over the closed list: one accepting
-    // record satisfies the requirement; otherwise an affirmative
-    // rejection on any record rejects, and a list with no verdict
-    // either way stays inconclusive.
+    // record satisfies the requirement — but only when the list's
+    // identity pins agree: an affirmative acceptance over a
+    // contradictory set is never a silent pass. Otherwise an
+    // affirmative rejection on any record rejects, and a list with no
+    // verdict either way stays inconclusive.
+    let consistency = verification_evidence::consistency_check(&records);
     let verdict = if evaluations.iter().any(|ev| ev.verdict == Verdict::Accepted) {
-        Verdict::Accepted
+        if consistency.consistent {
+            Verdict::Accepted
+        } else {
+            Verdict::Inconclusive
+        }
     } else if evaluations.iter().any(|ev| ev.verdict == Verdict::Rejected) {
         Verdict::Rejected
     } else {
@@ -613,6 +620,9 @@ fn accept_list(
             "list_fingerprint": format!("{:x}", Sha256::digest(&list_bytes)),
             "acceptance": "evaluated",
             "verdict": verdict.as_str(),
+            "consistent": consistency.consistent,
+            "conflict_count": consistency.conflict_count,
+            "conflicts": consistency.conflicts,
             "records_evaluated": evaluations.len(),
             "records": evaluations
                 .iter()
@@ -627,7 +637,9 @@ fn accept_list(
                         .collect::<Vec<_>>(),
                 }))
                 .collect::<Vec<_>>(),
-            "checks_performed": ["representation_gate", "declared_requirement_normalization"],
+            "checks_performed": ["representation_gate",
+                "declared_requirement_normalization",
+                "cross_record_pin_agreement"],
             "checks_not_performed": ["claim_truth", "producer_authenticity",
                 "historical_execution", "record_freshness",
                 "independent_model_correspondence", "artifact_semantics",
@@ -646,13 +658,18 @@ fn accept_list(
             .filter(|ev| ev.verdict == Verdict::Rejected)
             .count();
         format!(
-            "Evidence list acceptance: {} ({} record(s): {} accepted, {} rejected, {} inconclusive).\n\
-Scope: declared-requirement normalization over each record's representation only; no claim truth, producer authenticity, freshness, independent correspondence, artifact semantics, tool execution or grade promotion checked.\n",
+            "Evidence list acceptance: {} ({} record(s): {} accepted, {} rejected, {} inconclusive; {}).\n\
+Scope: declared-requirement normalization over each record's representation plus cross-record pin agreement; no claim truth, producer authenticity, freshness, independent correspondence, artifact semantics, tool execution or grade promotion checked.\n",
             verdict.as_str(),
             evaluations.len(),
             accepted,
             rejected,
             evaluations.len() - accepted - rejected,
+            if consistency.consistent {
+                "no consistency conflicts".to_owned()
+            } else {
+                format!("{} consistency conflict(s)", consistency.conflict_count)
+            },
         )
         .into_bytes()
     };
