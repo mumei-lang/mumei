@@ -6127,6 +6127,19 @@ claim book for the exported triple and failing closed when the
 pinned subject sha is tampered — six steps,
 `schedule-export-gate-v1` budget policy.
 
+### MCP verification-plan route mirror (mumei-agent #1003)
+
+[mumei-agent#1003](https://github.com/mumei-lang/mumei-agent/pull/1003)
+closes the MCP coverage gap for the C04 planner route: a `verify_plan`
+tool takes declared request/adapters/policy paths (plus optional
+stamped runtime observations) and returns the
+`mumei.verification-plan/v1` descriptor — the selected adapter, its
+effective non-secret settings, per-candidate selection/exclusion
+reasons and the fallback origin — mirroring the `verify-plan` CLI
+(#987) and `verify_schedule` MCP shape, with declared-path validation
+and redacted errors. Planning only: nothing is spawned, dispatched or
+accepted.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
