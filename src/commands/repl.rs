@@ -263,6 +263,7 @@ pub(crate) fn repl_register_extern_fn(
         is_async: false,
         trust_level: parser::TrustLevel::Trusted,
         max_unroll: None,
+        str_bound: None,
         invariant: None,
         effects: vec![],
         return_type: Some(ext_fn.return_type.clone()),

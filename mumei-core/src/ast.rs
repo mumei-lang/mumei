@@ -824,6 +824,7 @@ impl Monomorphizer {
             is_async: generic.is_async,
             trust_level: generic.trust_level.clone(),
             max_unroll: generic.max_unroll,
+            str_bound: generic.str_bound,
             invariant: generic.invariant.clone(),
             effects: mono_effects,
             return_type: generic.return_type.clone(),

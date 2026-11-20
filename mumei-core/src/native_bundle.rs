@@ -140,6 +140,9 @@ pub const MODULE_PROFILE_V21: &str = "mumei.native-pure-i64-module-linux-x86_64/
 /// literals and `!=`/ordering stay outside. v1–v21 records keep their
 /// own gates.
 pub const MODULE_PROFILE_V22: &str = "mumei.native-pure-i64-module-linux-x86_64/v22";
+/// v22 plus the `str_bound: N;` clause — atoms may declare a per-atom
+/// `Str` bound (`pure-i64-composite/v20`).
+pub const MODULE_PROFILE_V23: &str = "mumei.native-pure-i64-module-linux-x86_64/v23";
 pub const MODULE_SCOPE: &str =
     "identity_consistency_only/no_authenticity_or_artifact_semantic_proof";
 pub const MODULE_RECHECK_PROFILE: &str = "mumei.native-module-source-recheck/v1";
@@ -176,6 +179,7 @@ pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, Bundl
         MODULE_PROFILE_V20 => Ok(RefinedAdmission::CompositeV17),
         MODULE_PROFILE_V21 => Ok(RefinedAdmission::CompositeV18),
         MODULE_PROFILE_V22 => Ok(RefinedAdmission::CompositeV19),
+        MODULE_PROFILE_V23 => Ok(RefinedAdmission::CompositeV20),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -249,6 +253,9 @@ pub const MULTIFILE_PROFILE_V21: &str = "mumei.native-pure-i64-multifile-linux-x
 /// admission and IR whitelist `MODULE_PROFILE_V22` names, under the
 /// import-closure member shape. v1–v21 records keep their own gates.
 pub const MULTIFILE_PROFILE_V22: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v22";
+/// v22 plus the `str_bound: N;` clause — atoms may declare a per-atom
+/// `Str` bound (`pure-i64-composite/v20`).
+pub const MULTIFILE_PROFILE_V23: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v23";
 pub const MULTIFILE_RECHECK_PROFILE: &str = "mumei.native-multifile-source-recheck/v1";
 
 pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, BundleError> {
@@ -275,6 +282,7 @@ pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, Bu
         MULTIFILE_PROFILE_V20 => Ok(RefinedAdmission::CompositeV17),
         MULTIFILE_PROFILE_V21 => Ok(RefinedAdmission::CompositeV18),
         MULTIFILE_PROFILE_V22 => Ok(RefinedAdmission::CompositeV19),
+        MULTIFILE_PROFILE_V23 => Ok(RefinedAdmission::CompositeV20),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -1242,6 +1250,7 @@ pub fn load_pinned_module_record(
             MODULE_PROFILE_V20,
             MODULE_PROFILE_V21,
             MODULE_PROFILE_V22,
+            MODULE_PROFILE_V23,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1318,6 +1327,7 @@ pub fn load_pinned_multifile_record(
             MULTIFILE_PROFILE_V20,
             MULTIFILE_PROFILE_V21,
             MULTIFILE_PROFILE_V22,
+            MULTIFILE_PROFILE_V23,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE

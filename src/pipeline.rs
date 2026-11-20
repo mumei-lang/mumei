@@ -315,6 +315,7 @@ pub(crate) fn try_load_and_prepare_with_full_options_and_persistence(
                         is_async: false,
                         trust_level: parser::TrustLevel::Trusted,
                         max_unroll: None,
+                        str_bound: None,
                         invariant: None,
                         effects: vec![],
                         return_type: Some(ext_fn.return_type.clone()),

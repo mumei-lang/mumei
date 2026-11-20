@@ -332,7 +332,13 @@ fn validate(
         if native {
             check_native_module(module.as_mut_ptr(), raw)?;
         } else {
-            check_module(module.as_mut_ptr(), model.bounded_memory, false, optimized)?;
+            check_module(
+                module.as_mut_ptr(),
+                model.bounded_memory,
+                false,
+                optimized,
+                false,
+            )?;
         }
         compare_function(
             &context,
@@ -444,7 +450,7 @@ fn validate_module(
     // the bounded-memory whitelist — sibling members are potential call
     // targets and re-gate on their own model at comparison time.
     let any_memory = models.iter().any(|model| model.bounded_memory);
-    unsafe { check_module(module.as_mut_ptr(), any_memory, false, optimized)? };
+    unsafe { check_module(module.as_mut_ptr(), any_memory, false, optimized, false)? };
     let mut functions = Vec::new();
     let mut any_definedness = false;
     let mut any_param_domain = false;
@@ -614,6 +620,7 @@ pub fn validate_native_module(
             user_main.as_value_ref(),
             any_memory,
             admission.admits_f64_arithmetic(),
+            admission.admits_str_leaves(),
         )?
     };
     let call_renames = native_call_renames(true);
@@ -1093,18 +1100,56 @@ unsafe fn constant_aggregate(value: LLVMValueRef, optimized: bool) -> bool {
         })
 }
 
-unsafe fn check_module_environment(module: LLVMModuleRef) -> Result<()> {
+unsafe fn check_module_environment(module: LLVMModuleRef, str_leaves: bool) -> Result<()> {
     let mut asm_size = 0;
     LLVMGetModuleInlineAsm(module, &mut asm_size);
     if asm_size != 0
         || !LLVMGetFirstNamedMetadata(module).is_null()
-        || !LLVMGetFirstGlobal(module).is_null()
         || !LLVMGetFirstGlobalAlias(module).is_null()
         || !LLVMGetFirstGlobalIFunc(module).is_null()
     {
         return Err(ValidationError("module outside bounded snapshot profile"));
     }
+    // A `let s = "lit"` binding lowers to a private constant
+    // byte-string global (`str_lit`) — the only global the bounded
+    // shape may carry, and only when the admission covers `Str`
+    // leaves. Anything else stays refused.
+    let mut global = LLVMGetFirstGlobal(module);
+    while !global.is_null() {
+        if !(str_leaves && is_str_lit_global(global)) {
+            return Err(ValidationError("module outside bounded snapshot profile"));
+        }
+        global = LLVMGetNextGlobal(global);
+    }
     Ok(())
+}
+
+/// Whether `global` is exactly the emitter's string-literal shape: a
+/// private/internal constant with a constant byte-array initializer
+/// named `str_lit` (LLVM uniquifies duplicates as `str_lit.N`).
+unsafe fn is_str_lit_global(global: LLVMValueRef) -> bool {
+    let linkage = LLVMGetLinkage(global);
+    if !matches!(
+        linkage,
+        llvm_sys::LLVMLinkage::LLVMPrivateLinkage | llvm_sys::LLVMLinkage::LLVMInternalLinkage
+    ) || LLVMIsGlobalConstant(global) == 0
+    {
+        return false;
+    }
+    let init = LLVMGetInitializer(global);
+    if init.is_null()
+        || (LLVMIsAConstantDataArray(init).is_null() && LLVMIsAConstantArray(init).is_null())
+    {
+        return false;
+    }
+    let mut len = 0usize;
+    let name = LLVMGetValueName2(global, &mut len);
+    if name.is_null() {
+        return false;
+    }
+    std::ffi::CStr::from_ptr(name)
+        .to_bytes()
+        .starts_with(b"str_lit")
 }
 
 unsafe fn check_module(
@@ -1112,8 +1157,9 @@ unsafe fn check_module(
     bounded_memory: bool,
     f64_arithmetic: bool,
     optimized: bool,
+    str_leaves: bool,
 ) -> Result<()> {
-    check_module_environment(module)?;
+    check_module_environment(module, str_leaves)?;
     let mut member = LLVMGetFirstFunction(module);
     if member.is_null() {
         return Err(ValidationError("module outside bounded function profile"));
@@ -1882,7 +1928,7 @@ unsafe fn unflagged_arithmetic(inst: LLVMValueRef) -> Result<()> {
 }
 
 unsafe fn check_native_module(module: LLVMModuleRef, user_main: LLVMValueRef) -> Result<()> {
-    check_module_environment(module)?;
+    check_module_environment(module, false)?;
     let main = LLVMGetNamedFunction(module, c"main".as_ptr());
     if main.is_null() {
         return Err(ValidationError("missing native main wrapper"));
@@ -1917,8 +1963,9 @@ unsafe fn check_native_module_multi(
     user_main: LLVMValueRef,
     bounded_memory: bool,
     f64_arithmetic: bool,
+    str_leaves: bool,
 ) -> Result<()> {
-    check_module_environment(module)?;
+    check_module_environment(module, str_leaves)?;
     let main = LLVMGetNamedFunction(module, c"main".as_ptr());
     if main.is_null() {
         return Err(ValidationError("missing native main wrapper"));

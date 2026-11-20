@@ -1973,6 +1973,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
     let mut consumed_params: Vec<String> = Vec::new();
     let mut resources: Vec<String> = Vec::new();
     let mut max_unroll: Option<usize> = None;
+    let mut str_bound: Option<usize> = None;
     let mut spec_metadata: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut invariant: Option<String> = None;
@@ -2099,6 +2100,15 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                 }
                 ctx.expect(Token::Semicolon);
             }
+            Token::StrBound => {
+                ctx.advance();
+                ctx.expect(Token::Colon);
+                if let Token::IntLit(n) = ctx.peek().clone() {
+                    ctx.advance();
+                    str_bound = Some(n as usize);
+                }
+                ctx.expect(Token::Semicolon);
+            }
             Token::Invariant => {
                 ctx.advance();
                 ctx.expect(Token::Colon);
@@ -2194,7 +2204,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                     .map(|t| (t.line, t.col))
                     .unwrap_or((0, 0));
                 ctx.syntax_failure(format!(
-                    "unknown atom clause keyword '{tok}:' at {line}:{col} — expected requires/ensures/cover/body/invariant/effects/contract/consume/resources/semantics/max_unroll/effect_pre/effect_post"
+                    "unknown atom clause keyword '{tok}:' at {line}:{col} — expected requires/ensures/cover/body/invariant/effects/contract/consume/resources/semantics/max_unroll/str_bound/effect_pre/effect_post"
                 ));
                 ctx.advance();
             }
@@ -2239,6 +2249,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         is_async: false,
         trust_level: TrustLevel::Verified,
         max_unroll,
+        str_bound,
         invariant,
         effects,
         return_type,

@@ -27,6 +27,7 @@ fn atom(name: &str) -> Atom {
         is_async: false,
         trust_level: TrustLevel::Verified,
         max_unroll: None,
+        str_bound: None,
         invariant: None,
         effects: Vec::new(),
         return_type: None,

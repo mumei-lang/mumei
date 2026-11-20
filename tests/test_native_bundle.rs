@@ -3068,6 +3068,81 @@ fn module_bundle_rejects_a_nan_refutable_f64_ensures() {
 }
 
 #[test]
+fn module_bundle_with_str_bound_builds_as_v23_and_rechecks() {
+    // A declared `str_bound: N;` clause admits the longer literal
+    // (`pure-i64-composite/v20`) and the record pins bundle v23.
+    let root = tempfile::tempdir().unwrap();
+    let literal = "a".repeat(100);
+    let (source, bundle, id) = build_source(
+        root.path(),
+        &format!(
+            "atom big() -> i64 requires: true; ensures: result == 100; str_bound: 128; body: {{ let s = \"{literal}\"; len(s) }};\n\
+             atom main() -> i64 requires: true; ensures: true; body: {{ 0 }};"
+        ),
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V23);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V20
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // A v23 record re-pinned as v22 is refused: v22 keeps the
+    // `str_bound` clause out of the composite shape.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V22.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
+fn multifile_bundle_with_str_bound_builds_as_v23() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    let literal = "a".repeat(80);
+    fs::write(
+        root.path().join("text.mm"),
+        format!(
+            "atom first() -> i64 requires: true; ensures: result == 80; str_bound: 96; body: {{ let s = \"{literal}\"; len(s) }};\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "import \"text\" as t;\n\natom main() -> i64 requires: true; ensures: true; body: { 0 };\n",
+    )
+    .unwrap();
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MULTIFILE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MULTIFILE_PROFILE_V23);
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // Under a v22 pin the member's `str_bound` clause stays refused.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MULTIFILE_PROFILE_V22.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
 fn multifile_bundle_with_f64_arithmetic_builds_as_v22() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("app.mm");
