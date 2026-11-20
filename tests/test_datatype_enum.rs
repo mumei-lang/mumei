@@ -259,6 +259,55 @@ fn enum_nested_payload_dag_stays_bounded() {
 }
 
 #[test]
+fn enum_generic_instance_match_and_ctor_verify() {
+    // `match e { Wrap::W(v) => … }` on `e: Wrap<i64>` (and `Wrap<bool>`)
+    // resolves the generic qualifier to the instance the declared type
+    // pins — tester, selectors and `.tag` all work on the Datatype path.
+    let output = mumei_verify("tests/test_enum_generic.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && combined.contains("Verification passed"),
+        "a generic enum's monomorphized instances must verify under match/`.tag` with declared-type disambiguation:\n{combined}"
+    );
+}
+
+#[test]
+fn enum_generic_sole_instance_ctor_verifies() {
+    // `Wrap::W(3)` resolves through the sole registered `Wrap<i64>`
+    // instance — no declared binding type needed.
+    let output = mumei_verify("tests/test_enum_generic_ctor.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && combined.contains("Verification passed"),
+        "a generic-qualifier ctor with one registered instance must construct it:\n{combined}"
+    );
+}
+
+#[test]
+fn enum_generic_ambiguous_ctor_is_rejected() {
+    // `Wrap::W(3)` with both `Wrap<i64>` and `Wrap<bool>` registered and
+    // no declared type to disambiguate must fail closed.
+    let output = mumei_verify("tests/test_enum_generic_ambiguous_negative.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("is ambiguous"),
+        "an ambiguous generic-enum ctor must be rejected, not resolved at HashMap order:\n{combined}"
+    );
+}
+
+#[test]
 fn enum_ctor_payload_satisfying_field_type_verifies() {
     let output = mumei_verify("tests/test_enum_ctor_refined.mm");
     let combined = format!(
@@ -271,7 +320,6 @@ fn enum_ctor_payload_satisfying_field_type_verifies() {
         "payloads satisfying the declared field type — including inside match arms — must verify:\n{combined}"
     );
 }
-
 
 #[test]
 fn match_target_field_const_prefers_caller_binding() {
@@ -298,5 +346,35 @@ fn enum_nested_payload_alias_empty_struct_does_not_panic() {
     assert!(
         output.status.success() && combined.contains("Verification passed"),
         "an alias to an empty struct flattens to zero leaves — the bound handle must not index an empty slice:\n{combined}"
+    );
+}
+
+#[test]
+fn enum_generic_binding_tag_reads_instance_domain() {
+    let output = mumei_verify("tests/test_enum_generic_ctor.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && combined.contains("Verification passed"),
+        "`let e = Wrap::W(3)` must bind `e` to the sole instance `Wrap<i64>` so `e.tag == 0` verifies:\n{combined}"
+    );
+}
+
+#[test]
+fn enum_generic_ctor_with_no_instance_does_not_panic() {
+    let output = mumei_verify("tests/test_enum_generic_no_instance.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success()
+            && !combined.contains("panicked")
+            && !combined.contains("internal error"),
+        "a generic ctor with zero registered instances must fail closed — the match rejects, never panics and never verifies:\n{combined}"
     );
 }

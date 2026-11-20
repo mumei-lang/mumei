@@ -471,6 +471,28 @@ pub fn compute_proof_hash_with_flags(
     for name in struct_names {
         hash_struct_contract(&mut hasher, name, module_env);
     }
+    // Enum declarations affect verdicts the atom text does not capture —
+    // match exhaustiveness, variant ownership and, for generic enums,
+    // which `E<...>` instances exist (constructor/pattern disambiguation
+    // is sensitive to the instance set). Hash the whole enum environment
+    // so an identical atom in a different enum context cannot replay a
+    // stale verdict.
+    let mut enum_names: Vec<&String> = module_env.enums.keys().collect();
+    enum_names.sort();
+    for name in enum_names {
+        hasher.update(b"|enum:");
+        hasher.update(name.as_bytes());
+        if let Some(edef) = module_env.enums.get(name) {
+            for variant in &edef.variants {
+                hasher.update(b"|variant:");
+                hasher.update(variant.name.as_bytes());
+                for field_type in &variant.field_types {
+                    hasher.update(b":");
+                    hasher.update(field_type.name.as_bytes());
+                }
+            }
+        }
+    }
 
     // 3. Include callee signatures (transitive dependencies)
     let mut visited = HashSet::new();

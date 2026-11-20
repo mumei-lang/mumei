@@ -4215,7 +4215,16 @@ pub(crate) fn expr_to_z3<'a>(
             // rebound to the evaluated body value, so only the Expr knows.
             let decl_hint: Option<String> =
                 crate::verification::support::datatype::declared_type_of_expr(vc, target).map(
-                    |t| crate::verification::support::datatype::type_name_base(&t).to_string(),
+                    |t| {
+                        // A generic instance (`Wrap<i64>`) is itself the
+                        // registered enum — keep it, since `type_name_base`
+                        // would strip down to the unencodable generic def.
+                        if vc.module_env.get_enum(&t).is_some() {
+                            t
+                        } else {
+                            crate::verification::support::datatype::type_name_base(&t).to_string()
+                        }
+                    },
                 );
 
             // Clause lowering (`requires`/`ensures`, struct invariants, match
