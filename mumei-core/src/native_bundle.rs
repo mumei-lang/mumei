@@ -132,6 +132,14 @@ pub const MODULE_PROFILE_V20: &str = "mumei.native-pure-i64-module-linux-x86_64/
 /// under `pure-i64-composite/v18`. v1–v20 records keep their own
 /// gates.
 pub const MODULE_PROFILE_V21: &str = "mumei.native-pure-i64-module-linux-x86_64/v21";
+/// Module v22: the `f64`-arithmetic widening of `MODULE_PROFILE_V21` —
+/// source `+ - * / ==` on `f64` leaves admit under
+/// `pure-i64-composite/v19`, decoding the bit-pattern slots as IEEE 754
+/// binary64 under round-nearest-ties-to-even; the IR whitelist gains
+/// the emitted `fadd`/`fsub`/`fmul`/`fdiv`/`fcmp oeq` shapes. Float
+/// literals and `!=`/ordering stay outside. v1–v21 records keep their
+/// own gates.
+pub const MODULE_PROFILE_V22: &str = "mumei.native-pure-i64-module-linux-x86_64/v22";
 pub const MODULE_SCOPE: &str =
     "identity_consistency_only/no_authenticity_or_artifact_semantic_proof";
 pub const MODULE_RECHECK_PROFILE: &str = "mumei.native-module-source-recheck/v1";
@@ -167,6 +175,7 @@ pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, Bundl
         MODULE_PROFILE_V19 => Ok(RefinedAdmission::CompositeV16),
         MODULE_PROFILE_V20 => Ok(RefinedAdmission::CompositeV17),
         MODULE_PROFILE_V21 => Ok(RefinedAdmission::CompositeV18),
+        MODULE_PROFILE_V22 => Ok(RefinedAdmission::CompositeV19),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -235,6 +244,11 @@ pub const MULTIFILE_PROFILE_V20: &str = "mumei.native-pure-i64-multifile-linux-x
 /// Multifile v21: the composite-enum-payload widening of
 /// `MODULE_PROFILE_V21` — `pure-i64-composite/v18`.
 pub const MULTIFILE_PROFILE_V21: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v21";
+/// Multifile v22: the `f64`-arithmetic widening of
+/// `MULTIFILE_PROFILE_V21` — the same `pure-i64-composite/v19`
+/// admission and IR whitelist `MODULE_PROFILE_V22` names, under the
+/// import-closure member shape. v1–v21 records keep their own gates.
+pub const MULTIFILE_PROFILE_V22: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v22";
 pub const MULTIFILE_RECHECK_PROFILE: &str = "mumei.native-multifile-source-recheck/v1";
 
 pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, BundleError> {
@@ -260,6 +274,7 @@ pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, Bu
         MULTIFILE_PROFILE_V19 => Ok(RefinedAdmission::CompositeV16),
         MULTIFILE_PROFILE_V20 => Ok(RefinedAdmission::CompositeV17),
         MULTIFILE_PROFILE_V21 => Ok(RefinedAdmission::CompositeV18),
+        MULTIFILE_PROFILE_V22 => Ok(RefinedAdmission::CompositeV19),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -1226,6 +1241,7 @@ pub fn load_pinned_module_record(
             MODULE_PROFILE_V19,
             MODULE_PROFILE_V20,
             MODULE_PROFILE_V21,
+            MODULE_PROFILE_V22,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1301,6 +1317,7 @@ pub fn load_pinned_multifile_record(
             MULTIFILE_PROFILE_V19,
             MULTIFILE_PROFILE_V20,
             MULTIFILE_PROFILE_V21,
+            MULTIFILE_PROFILE_V22,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE

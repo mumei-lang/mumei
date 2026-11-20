@@ -7,7 +7,7 @@ mod pattern;
 mod stmt;
 mod struct_invariants;
 mod temporal;
-mod z3_types;
+pub(crate) mod z3_types;
 
 pub(crate) use constraints::{
     apply_refinement_constraint, assert_result_equality, check_contract_subsumption,

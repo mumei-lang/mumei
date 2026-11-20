@@ -2998,6 +2998,78 @@ fn multifile_bundle_with_composite_enum_payloads_builds_as_v21() {
 }
 
 #[test]
+fn module_bundle_with_f64_arithmetic_builds_as_v22_and_rechecks() {
+    // `add` computes real IEEE 754 binary64 arithmetic on `f64`
+    // leaves (`x + y` -> `fadd`): the build, the source recheck and
+    // the LLVM snapshot recheck all carry the decode/compute/re-encode
+    // under composite v19.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "atom add(x: f64, y: f64) -> f64 requires: true; ensures: true; body: { x + y };\n\
+         atom same(x: f64, y: f64) -> bool requires: true; ensures: result == (x == y); body: { x == y };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V22);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V19
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // A v22 record re-pinned as v21 is refused: v21 keeps `f64`
+    // arithmetic out of the composite shape.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V21.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
+fn multifile_bundle_with_f64_arithmetic_builds_as_v22() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        root.path().join("math.mm"),
+        "atom add(x: f64, y: f64) -> f64 requires: true; ensures: true; body: { x + y };\n",
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "import \"math\" as m;\n\natom main() -> i64 requires: true; ensures: true; body: { 0 };\n",
+    )
+    .unwrap();
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MULTIFILE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MULTIFILE_PROFILE_V22);
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // Under a v21 pin the member's `f64` arithmetic stays refused.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MULTIFILE_PROFILE_V21.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
 fn multifile_bundle_with_nested_field_writes_builds_as_v18() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("app.mm");

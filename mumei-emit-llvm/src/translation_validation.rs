@@ -332,13 +332,14 @@ fn validate(
         if native {
             check_native_module(module.as_mut_ptr(), raw)?;
         } else {
-            check_module(module.as_mut_ptr(), model.bounded_memory, optimized)?;
+            check_module(module.as_mut_ptr(), model.bounded_memory, false, optimized)?;
         }
         compare_function(
             &context,
             raw,
             &model,
             &native_call_renames(native),
+            false,
             optimized,
         )?
     };
@@ -443,7 +444,7 @@ fn validate_module(
     // the bounded-memory whitelist — sibling members are potential call
     // targets and re-gate on their own model at comparison time.
     let any_memory = models.iter().any(|model| model.bounded_memory);
-    unsafe { check_module(module.as_mut_ptr(), any_memory, optimized)? };
+    unsafe { check_module(module.as_mut_ptr(), any_memory, false, optimized)? };
     let mut functions = Vec::new();
     let mut any_definedness = false;
     let mut any_param_domain = false;
@@ -460,6 +461,7 @@ fn validate_module(
                 function.as_value_ref(),
                 model,
                 &BTreeMap::new(),
+                false,
                 optimized,
             )?
         };
@@ -607,7 +609,12 @@ pub fn validate_native_module(
         .ok_or(ValidationError("missing source function"))?;
     let any_memory = models.iter().any(|model| model.bounded_memory);
     unsafe {
-        check_native_module_multi(module.as_mut_ptr(), user_main.as_value_ref(), any_memory)?
+        check_native_module_multi(
+            module.as_mut_ptr(),
+            user_main.as_value_ref(),
+            any_memory,
+            admission.admits_f64_arithmetic(),
+        )?
     };
     let call_renames = native_call_renames(true);
     let mut functions = Vec::new();
@@ -638,6 +645,7 @@ pub fn validate_native_module(
                 function.as_value_ref(),
                 model,
                 &call_renames,
+                admission.admits_f64_arithmetic(),
                 false,
             )?
         };
@@ -729,6 +737,7 @@ unsafe fn compare_function<'ctx>(
     raw: LLVMValueRef,
     model: &PureI64Body<'ctx>,
     call_renames: &BTreeMap<String, String>,
+    f64_arithmetic: bool,
     optimized: bool,
 ) -> Result<(Outcome, Vec<(Bool<'ctx>, Bool<'ctx>)>)> {
     // A source `while` relaxes the CFG gate only for that atom's member:
@@ -742,9 +751,12 @@ unsafe fn compare_function<'ctx>(
         model.param_shapes.len(),
         model.result_shape,
         Some(&model.result_leaf_doubles),
-        loops,
-        model.bounded_memory,
-        optimized,
+        CheckGates {
+            allow_cycles: loops,
+            bounded_memory: model.bounded_memory,
+            f64_arithmetic,
+            optimized,
+        },
     )?;
     let mut encoder = IrEncoder::new(context, call_renames, loops, optimized);
     let returns = encoder.encode(
@@ -1095,7 +1107,12 @@ unsafe fn check_module_environment(module: LLVMModuleRef) -> Result<()> {
     Ok(())
 }
 
-unsafe fn check_module(module: LLVMModuleRef, bounded_memory: bool, optimized: bool) -> Result<()> {
+unsafe fn check_module(
+    module: LLVMModuleRef,
+    bounded_memory: bool,
+    f64_arithmetic: bool,
+    optimized: bool,
+) -> Result<()> {
     check_module_environment(module)?;
     let mut member = LLVMGetFirstFunction(module);
     if member.is_null() {
@@ -1127,9 +1144,12 @@ unsafe fn check_module(module: LLVMModuleRef, bounded_memory: bool, optimized: b
             LLVMCountParams(member) as usize,
             member_result_shape(member),
             None,
-            true,
-            bounded_memory,
-            optimized,
+            CheckGates {
+                allow_cycles: true,
+                bounded_memory,
+                f64_arithmetic,
+                optimized,
+            },
         )?;
         member = LLVMGetNextFunction(member);
     }
@@ -1454,16 +1474,33 @@ unsafe fn member_result_shape(member: LLVMValueRef) -> Option<usize> {
 /// `result_shape` is the source result layout: `None` for a scalar
 /// result (an i64/i1 return), `Some(n)` for a struct result, whose
 /// return must be an admitted aggregate of exactly `n` slots.
+/// The admission gates a member check runs under: which relaxations
+/// the active profile grants the emitted IR.
+#[derive(Clone, Copy, Default)]
+struct CheckGates {
+    /// Cycles pass the CFG screen; the per-atom comparison re-gates
+    /// them against each model's loop admission.
+    allow_cycles: bool,
+    /// Bounded-memory profile: `alloca`/`store`/`load`/`getelementptr`
+    /// are admitted at their provenance-preserving positions.
+    bounded_memory: bool,
+    /// `f64` arithmetic (`fadd`/`fsub`/`fmul`/`fdiv` and `fcmp oeq`) is
+    /// admitted, decoded and encoded through the shared
+    /// `f64_arith`/`f64_eq` helpers.
+    f64_arithmetic: bool,
+    /// Post-`default<O2>` profile surface (the canonical optimizer
+    /// intrinsics and instruction shapes).
+    optimized: bool,
+}
+
 unsafe fn check_function(
     function: LLVMValueRef,
     params: usize,
     result_shape: Option<usize>,
     result_leaf_doubles: Option<&[bool]>,
-    allow_cycles: bool,
-    bounded_memory: bool,
-    optimized: bool,
+    gates: CheckGates,
 ) -> Result<()> {
-    check_function_header(function, params, optimized)?;
+    check_function_header(function, params, gates.optimized)?;
     let ret = LLVMGetReturnType(LLVMGlobalGetValueType(function));
     match (result_shape, result_leaf_doubles) {
         (None, leaf_kinds) => {
@@ -1495,7 +1532,7 @@ unsafe fn check_function(
     let mut count = 0;
     let mut colors = HashMap::new();
     while !block.is_null() {
-        if !allow_cycles {
+        if !gates.allow_cycles {
             acyclic(block, &mut colors)?;
         }
         let mut inst = LLVMGetFirstInstruction(block);
@@ -1534,7 +1571,7 @@ unsafe fn check_function(
                 if !is_callee
                     && LLVMGetTypeKind(LLVMTypeOf(value)) == LLVMTypeKind::LLVMPointerTypeKind
                 {
-                    let pointer_ok = bounded_memory
+                    let pointer_ok = gates.bounded_memory
                         && match opcode {
                             LLVMOpcode::LLVMGetElementPtr | LLVMOpcode::LLVMLoad => i == 0,
                             LLVMOpcode::LLVMStore => i == 1,
@@ -1578,7 +1615,7 @@ unsafe fn check_function(
                                     | LLVMOpcode::LLVMCall
                                     | LLVMOpcode::LLVMPHI
                             ))
-                        || constant_aggregate(value, optimized);
+                        || constant_aggregate(value, gates.optimized);
                     if !use_ok || !source_ok {
                         return Err(ValidationError("unsupported LLVM aggregate value"));
                     }
@@ -1591,7 +1628,7 @@ unsafe fn check_function(
                     // The `*.with.overflow` `{i64, i1}` is read or
                     // extended whole under the opt-o2 profiles — its
                     // leaf gates run at `extractvalue`/`insertvalue`.
-                    if !(optimized
+                    if !(gates.optimized
                         && matches!(
                             opcode,
                             LLVMOpcode::LLVMExtractValue | LLVMOpcode::LLVMInsertValue
@@ -1617,7 +1654,7 @@ unsafe fn check_function(
                     let allocated = LLVMGetAllocatedType(inst);
                     let element = LLVMGetElementType(allocated);
                     let slots = LLVMGetArrayLength2(allocated);
-                    if !bounded_memory
+                    if !gates.bounded_memory
                         || block != LLVMGetEntryBasicBlock(function)
                         || LLVMGetTypeKind(allocated) != LLVMTypeKind::LLVMArrayTypeKind
                         || LLVMGetTypeKind(element) != LLVMTypeKind::LLVMIntegerTypeKind
@@ -1655,7 +1692,7 @@ unsafe fn check_function(
                         }
                         _ => false,
                     };
-                    if !bounded_memory
+                    if !gates.bounded_memory
                         || !(2..=3).contains(&operands)
                         || !outer_zero
                         || !cell_indexed
@@ -1667,14 +1704,14 @@ unsafe fn check_function(
                 // escape provenance tracking and is rejected by the
                 // `width` check the same way an aggregate load is.
                 LLVMOpcode::LLVMLoad => {
-                    if !bounded_memory || width(LLVMTypeOf(inst))? != 64 {
+                    if !gates.bounded_memory || width(LLVMTypeOf(inst))? != 64 {
                         return Err(ValidationError("unsupported LLVM load"));
                     }
                 }
                 // Stores write an i64 cell — storing a pointer would let
                 // an array hold an untracked address.
                 LLVMOpcode::LLVMStore => {
-                    if !bounded_memory || width(LLVMTypeOf(LLVMGetOperand(inst, 0)))? != 64 {
+                    if !gates.bounded_memory || width(LLVMTypeOf(LLVMGetOperand(inst, 0)))? != 64 {
                         return Err(ValidationError("unsupported LLVM store"));
                     }
                 }
@@ -1698,7 +1735,7 @@ unsafe fn check_function(
                     }
                 }
                 LLVMOpcode::LLVMCall => {
-                    check_call(inst, optimized)?;
+                    check_call(inst, gates.optimized)?;
                 }
                 // A one-index read of an admitted aggregate — the
                 // result is an i64 leaf or an admitted aggregate
@@ -1712,7 +1749,7 @@ unsafe fn check_function(
                     // `with.overflow` result reads under opt-o2.
                     if aggregate_fields(result).is_none()
                         && width(result)? != 64
-                        && !(optimized
+                        && !(gates.optimized
                             && width(result)? == 1
                             && overflow_pair(LLVMTypeOf(LLVMGetOperand(inst, 0))))
                     {
@@ -1748,7 +1785,7 @@ unsafe fn check_function(
                         // The `{i64, i1}` `with.overflow` result may be
                         // rebuilt whole under opt-o2: index 0 takes an
                         // i64, index 1 an i1.
-                        let pair_ok = optimized
+                        let pair_ok = gates.optimized
                             && overflow_pair(inst_ty)
                             && LLVMGetNumIndices(inst) == 1
                             && match unsafe { *LLVMGetIndices(inst) } {
@@ -1770,6 +1807,32 @@ unsafe fn check_function(
                     unflagged_arithmetic(inst)?;
                     width(LLVMTypeOf(inst))?;
                 }
+                // `f64` arithmetic (`pure-i64-composite/v19`): the
+                // emitter's `fadd`/`fsub`/`fmul`/`fdiv` on `double`
+                // leaves — the operand gate above already rejects
+                // narrower float types, and the universal fast-math
+                // screen rejects flagged forms. `fdiv` is total in
+                // IEEE (x/0.0 = ±inf), no definedness obligation.
+                LLVMOpcode::LLVMFAdd
+                | LLVMOpcode::LLVMFSub
+                | LLVMOpcode::LLVMFMul
+                | LLVMOpcode::LLVMFDiv
+                    if gates.f64_arithmetic =>
+                {
+                    width(LLVMTypeOf(inst))?;
+                }
+                // `x == y` on `f64` lowers to `fcmp oeq` plus a `zext`
+                // — the only predicate the emitter produces; every
+                // other predicate stays unsupported.
+                LLVMOpcode::LLVMFCmp
+                    if gates.f64_arithmetic
+                        && LLVMGetFCmpPredicate(inst)
+                            == llvm_sys::LLVMRealPredicate::LLVMRealOEQ
+                        && width(LLVMTypeOf(inst))? == 1 =>
+                {
+                    // operands are `double` — the operand gate's width
+                    // check already proved it.
+                }
                 LLVMOpcode::LLVMICmp
                 | LLVMOpcode::LLVMZExt
                 | LLVMOpcode::LLVMTrunc
@@ -1782,7 +1845,7 @@ unsafe fn check_function(
                 // `freeze` is a `default<O2>` canonical form: it pins a
                 // poison operand to an arbitrary value — the operand
                 // itself is the sound encoding without poison.
-                LLVMOpcode::LLVMFreeze if optimized => {
+                LLVMOpcode::LLVMFreeze if gates.optimized => {
                     width(LLVMTypeOf(inst))?;
                 }
                 _ => return Err(ValidationError("unsupported LLVM instruction")),
@@ -1853,6 +1916,7 @@ unsafe fn check_native_module_multi(
     module: LLVMModuleRef,
     user_main: LLVMValueRef,
     bounded_memory: bool,
+    f64_arithmetic: bool,
 ) -> Result<()> {
     check_module_environment(module)?;
     let main = LLVMGetNamedFunction(module, c"main".as_ptr());
@@ -1882,9 +1946,12 @@ unsafe fn check_native_module_multi(
                 LLVMCountParams(member) as usize,
                 member_result_shape(member),
                 None,
-                true,
-                bounded_memory,
-                false,
+                CheckGates {
+                    allow_cycles: true,
+                    bounded_memory,
+                    f64_arithmetic,
+                    ..CheckGates::default()
+                },
             )?;
         }
         member = LLVMGetNextFunction(member);
@@ -2903,6 +2970,42 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                                     &BV::from_u64(self.ctx, 1, 1),
                                     &BV::from_u64(self.ctx, 0, 1),
                                 )
+                            }
+                            // `f64` arithmetic (`pure-i64-composite/v19`):
+                            // the leaf slots hold IEEE 754 binary64 bit
+                            // patterns — decode, compute under RNE and
+                            // re-encode through the same helper the
+                            // source side uses.
+                            LLVMOpcode::LLVMFAdd => mumei_core::semantic_contract::f64_arith(
+                                self.ctx,
+                                &a,
+                                &b,
+                                mumei_core::semantic_contract::F64Arith::Add,
+                            ),
+                            LLVMOpcode::LLVMFSub => mumei_core::semantic_contract::f64_arith(
+                                self.ctx,
+                                &a,
+                                &b,
+                                mumei_core::semantic_contract::F64Arith::Sub,
+                            ),
+                            LLVMOpcode::LLVMFMul => mumei_core::semantic_contract::f64_arith(
+                                self.ctx,
+                                &a,
+                                &b,
+                                mumei_core::semantic_contract::F64Arith::Mul,
+                            ),
+                            LLVMOpcode::LLVMFDiv => mumei_core::semantic_contract::f64_arith(
+                                self.ctx,
+                                &a,
+                                &b,
+                                mumei_core::semantic_contract::F64Arith::Div,
+                            ),
+                            // `fcmp oeq` — the sole float predicate the
+                            // shape check admits — is `fp.eq` on the
+                            // decoded operands, materialized to i1.
+                            LLVMOpcode::LLVMFCmp => {
+                                let eq = mumei_core::semantic_contract::f64_eq(self.ctx, &a, &b);
+                                eq.ite(&BV::from_u64(self.ctx, 1, 1), &BV::from_u64(self.ctx, 0, 1))
                             }
                             _ => return Err(ValidationError("unsupported LLVM value instruction")),
                         }

@@ -153,6 +153,27 @@ pub(crate) fn float_eq<'a>(ctx: &'a Context, lhs: &Float<'a>, rhs: &Float<'a>) -
     unsafe { Bool::wrap(ctx, ast) }
 }
 
+/// Decode a 64-bit bitvector as an IEEE 754 binary64 `Float` — the inverse
+/// of `ieee_bv_from_float`. The composite profile's `f64` leaf keeps its
+/// bit-pattern carrier (`pure-i64-composite/v19`); arithmetic decodes it,
+/// computes and re-encodes, so an i64/f64 slot confusion still compares
+/// different bytes rather than silently widening.
+pub(crate) fn float_from_ieee_bv<'a>(ctx: &'a Context, bits: &BV<'a>) -> Float<'a> {
+    let raw = raw_z3_context(ctx);
+    let sort = unsafe { z3_sys::Z3_mk_fpa_sort_double(raw) };
+    let ast = unsafe { z3_sys::Z3_mk_fpa_to_fp_bv(raw, bits.get_z3_ast(), sort) };
+    unsafe { Float::wrap(ctx, ast) }
+}
+
+/// Encode an IEEE 754 binary64 `Float` back to its 64-bit bitvector — the
+/// `fp.to_ieee_bv` conversion, preserving NaN payloads bit-for-bit like the
+/// emitted `fadd`'s hardware result.
+pub(crate) fn ieee_bv_from_float<'a>(ctx: &'a Context, value: &Float<'a>) -> BV<'a> {
+    let raw = raw_z3_context(ctx);
+    let ast = unsafe { z3_sys::Z3_mk_fpa_to_ieee_bv(raw, value.get_z3_ast()) };
+    unsafe { BV::wrap(ctx, ast) }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ArrayElementSort {
     Int,
