@@ -5741,6 +5741,27 @@ the i64 slot are boxed. The record gains `leaf_widths`
 (`atom → Vec<u64>`) so a v24 recheck re-derives the slot split and a
 tampered pairing fails closed.
 
+### i128/u128 leaves in enum payloads (mumei #1156)
+
+[mumei#1156](https://github.com/mumei-lang/mumei/pull/1156) extends
+the v21 two-slot carrier into enum payload positions under
+`pure-i64-composite/v22` (bundle v25). A declared payload position
+whose uniform slot type is `i128`/`u128` — directly (`A(i128)`) or
+transitively inside a payload struct — consumes two consecutive
+64-bit input slots via `SignatureSlot::EnumWideField`, which keeps
+the enclosing `enum_tag` domain (a wide payload slot binds only
+under tags whose variant declares that index) unlike the standalone
+`WideScalar`. `seed_enum_payload` pairs `lo`/`hi` into the same
+`hi.concat(lo)` `Wide`/`UWide` value in `param_env`, `CallShapes`
+and the default-slot builders; `Num` literals adapt to wide ctor,
+payload-write and branch/arm merge slots; and enum results encode
+uniformly as `[tag, lo, hi]` through `lower_composite`. Mixed-type
+positions (`A(i128), B(i64)`) stay rejected — there are no
+tag-conditional slot domains — and the general Datatype path still
+lowers only `i64`/`f64`/`Str`/`bool` payload leaves, so a wide-payload
+ctor atom encodes under v22 but cannot pass `mumei verify` source
+verification yet (the same pre-existing boundary as `i32` payloads).
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
