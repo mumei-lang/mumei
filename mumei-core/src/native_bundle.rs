@@ -1213,6 +1213,7 @@ pub fn load_pinned_module_record(
             MODULE_PROFILE_V17,
             MODULE_PROFILE_V18,
             MODULE_PROFILE_V19,
+            MODULE_PROFILE_V20,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1286,6 +1287,7 @@ pub fn load_pinned_multifile_record(
             MULTIFILE_PROFILE_V17,
             MULTIFILE_PROFILE_V18,
             MULTIFILE_PROFILE_V19,
+            MULTIFILE_PROFILE_V20,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE

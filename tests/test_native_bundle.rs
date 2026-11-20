@@ -2893,6 +2893,38 @@ fn module_bundle_with_enum_payload_writes_builds_as_v19_and_rechecks() {
 }
 
 #[test]
+fn module_bundle_with_enum_struct_fields_builds_as_v20_and_rechecks() {
+    // `pick` matches on an enum-typed struct field (`b.c`): the build,
+    // the source recheck and the LLVM snapshot recheck all carry the
+    // nested tagged-union field under composite v17.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "enum C { R, G(v: i64) }\nstruct B { i: i64, c: C }\n\
+         atom pick(b: B) -> i64 requires: b.i >= 0; ensures: result >= 0; body: { match b.c { C::R => 1, C::G(v) => if v >= 0 { v } else { 0 }, _ => 0 } };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V20);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V17
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // A v20 record re-pinned as v19 is refused: v19 keeps enum-typed
+    // struct fields out of the composite shape.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V19.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
 fn multifile_bundle_with_nested_field_writes_builds_as_v18() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("app.mm");
