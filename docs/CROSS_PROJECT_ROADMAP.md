@@ -5668,6 +5668,41 @@ on a one-field variant) now diagnose instead of panicking, and an
 arm binding that shadows an outer struct no longer destroys the
 outer field state at the merge point.
 
+### `.tag` reads and Int-tag param domains (mumei #1148)
+
+[mumei#1148](https://github.com/mumei-lang/mumei/pull/1148) admits
+`e.tag` reads on bound enum values on the general Datatype path —
+the read lowers to the variant discriminant so `e.tag == 1` and
+tag comparisons verify. An enum-typed parameter carried as the Int
+model gets its tag domain constrained to `0 <= tag < variants`, so
+constructors outside the declared variant set can no longer satisfy
+a caller's contract. Callee parameters of any type now shadow the
+caller's during contract instantiation (previously a same-named
+caller field const could be picked up instead), and match-target
+field consts resolve the caller's binding rather than the callee's
+same-named parameter.
+
+### Nested composite enum payloads (mumei #1149)
+
+[mumei#1149](https://github.com/mumei-lang/mumei/pull/1149) flattens
+nested composite payloads — `enum Ev { Move(p: Outer) }` where
+`Outer` itself holds a struct — into per-leaf bindings, so a nested
+payload reads and verifies leaf-wise instead of collapsing to an
+opaque slot. The per-atom DAG depth cap now warns instead of
+tripping an alias panic on an empty-struct `slice[0]`; deeper DAGs
+stay bounded by the declared budget.
+
+### Generic enum instances (mumei #1151)
+
+[mumei#1151](https://github.com/mumei-lang/mumei/pull/1151) resolves
+constructor and variant ownership for generic enum instances —
+`Option<i64>::Some` / `Result<T,E>::Ok` instantiate the monomorphized
+ctor and its payloads, with return types collected per instance so
+`match` binds concrete leaf types. A generic ctor reference with no
+instantiated instance fails closed (no silent integer fallback), and
+the verification cache now hashes the module's enum environment so a
+cached "verified" result cannot survive an enum declaration edit.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
