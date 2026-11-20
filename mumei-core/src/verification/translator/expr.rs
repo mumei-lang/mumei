@@ -1938,7 +1938,7 @@ pub(crate) fn expr_to_z3<'a>(
             // finite ADT (e.g. `Red` for `enum Color { Red, Green, Blue }`)
             // constructs the datatype value.
             if name.chars().next().is_some_and(|c| c.is_uppercase()) {
-                if let Some(value) = datatype::enum_ctor_apply(vc, name, &[])? {
+                if let Some(value) = datatype::enum_ctor_apply(vc, env, name, &[])? {
                     return Ok(value);
                 }
             }
@@ -3350,7 +3350,9 @@ pub(crate) fn expr_to_z3<'a>(
                                     }
                                 }
                             }
-                            if let Some(value) = datatype::enum_ctor_apply(vc, name, &ctor_args)? {
+                            if let Some(value) =
+                                datatype::enum_ctor_apply(vc, env, name, &ctor_args)?
+                            {
                                 return Ok(value);
                             }
                             // A resolved enum+variant whose construction still
@@ -4278,6 +4280,8 @@ pub(crate) fn expr_to_z3<'a>(
                         // evaluate it in an env where the pattern's
                         // bindings exist, like the arm pass below does.
                         let mut check_env = env.clone();
+                        let mut check_bound: std::collections::HashSet<String> =
+                            std::collections::HashSet::new();
                         pattern_bind_variables(
                             ctx,
                             &arm.pattern,
@@ -4285,6 +4289,7 @@ pub(crate) fn expr_to_z3<'a>(
                             &mut check_env,
                             vc,
                             decl_hint.as_deref(),
+                            &mut check_bound,
                         );
                         // The arm pass below checks the guard's arithmetic.
                         let check_i64 = vc.check_i64_overflow.replace(false);
@@ -4407,6 +4412,7 @@ pub(crate) fn expr_to_z3<'a>(
                     &mut arm_env,
                     vc,
                     decl_hint.as_deref(),
+                    &mut arm_bound,
                 );
 
                 let arm_cond = pattern_to_z3_condition(
@@ -5583,9 +5589,12 @@ pub(crate) fn expr_to_z3<'a>(
                     && vc.module_env.enums.contains_key(name)
                     && datatype::is_finite_adt(vc.module_env.get_enum(name).unwrap(), vc.module_env)
                 {
-                    if let Some(value) =
-                        datatype::enum_ctor_apply(vc, &format!("{}::{}", name, field_name), &[])?
-                    {
+                    if let Some(value) = datatype::enum_ctor_apply(
+                        vc,
+                        env,
+                        &format!("{}::{}", name, field_name),
+                        &[],
+                    )? {
                         return Ok(value);
                     }
                 }

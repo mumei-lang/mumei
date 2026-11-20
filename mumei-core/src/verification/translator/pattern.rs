@@ -44,15 +44,71 @@ pub(crate) fn pattern_to_z3_condition<'a>(
             // selectors — so a `Str` field binds as a Z3 `String` and a field
             // pattern like `"x"` can actually constrain it.
             if target.as_datatype().is_some() {
-                if let Some((sort, is_v, variant_idx)) =
+                if let Some((sort, is_v, variant_idx, enum_def)) =
                     datatype::variant_tester_condition(vc, target, variant_name)
                 {
                     let mut field_conditions: Vec<Bool> = vec![is_v];
                     // arity comes from the matched sort's accessors — the sort
                     // already disambiguates same-named variants across enums.
+                    let enum_def = Some(enum_def);
                     for (i, field_pattern) in fields.iter().enumerate() {
+                        // A struct-typed payload flattens into `width`
+                        // consecutive accessor leaves; the bound symbol is a
+                        // fresh struct handle over the selector applies.
+                        let (off, width) = enum_def
+                            .and_then(|edef| {
+                                datatype::payload_leaf_range(edef, vc.module_env, variant_idx, i)
+                            })
+                            .unwrap_or((i, 1));
+                        let sdef = enum_def.and_then(|edef| {
+                            // The pattern may bind more fields than the
+                            // variant declares — `V(a, b)` on `V(i64)` —
+                            // so index safely; an out-of-range slot falls
+                            // through to the scalar fallback const.
+                            let ft = &edef.variants[variant_idx].field_types.get(i)?.name;
+                            vc.module_env
+                                .structs
+                                .get(&vc.module_env.resolve_base_type(ft))
+                        });
+                        if let Some(sdef) = sdef {
+                            let mut leaves: Vec<(String, Dynamic)> = Vec::with_capacity(width);
+                            for j in off..off + width {
+                                let leaf =
+                                    datatype::variant_selector_apply(&sort, variant_idx, j, target)
+                                        .unwrap_or_else(|| {
+                                            Int::new_const(
+                                                ctx,
+                                                format!("__proj_{}_{}_{}", variant_leaf, i, j)
+                                                    .as_str(),
+                                            )
+                                            .into()
+                                        });
+                                leaves.push((sdef.fields[j - off].name.clone(), leaf));
+                            }
+                            let handle = crate::verification::translator::fresh_struct_handle(
+                                ctx, &sdef.name,
+                            );
+                            let handle_name = handle.decl().name();
+                            crate::verification::translator::bind_struct_fields(
+                                env,
+                                &handle_name,
+                                &leaves,
+                            );
+                            env.insert(format!("__proj_{}_{}", variant_leaf, i), handle.clone());
+                            match field_pattern {
+                                Pattern::Variable(_) | Pattern::Wildcard => {
+                                    field_conditions.push(Bool::from_bool(ctx, true));
+                                }
+                                _ => {
+                                    return Err(MumeiError::verification(format!(
+                                        "match pattern on composite payload field '{variant_name}.{i}' must be a variable or '_'"
+                                    )));
+                                }
+                            }
+                            continue;
+                        }
                         let field_sym: Dynamic =
-                            datatype::variant_selector_apply(&sort, variant_idx, i, target)
+                            datatype::variant_selector_apply(&sort, variant_idx, off, target)
                                 .unwrap_or_else(|| {
                                     Int::new_const(
                                         ctx,
@@ -188,6 +244,7 @@ pub(crate) fn pattern_bind_variables<'a>(
     env: &mut Env<'a>,
     vc: &VCtx<'a>,
     decl_hint: Option<&str>,
+    bound: &mut std::collections::HashSet<String>,
 ) {
     let module_env = vc.module_env;
     match pattern {
@@ -203,19 +260,100 @@ pub(crate) fn pattern_bind_variables<'a>(
             // selectors so the bound symbol carries the payload's real sort
             // (String/Real/Bool), not an unconstrained Int projector.
             if target.as_datatype().is_some() {
-                if let Some((sort, _is_v, variant_idx)) =
+                if let Some((sort, _is_v, variant_idx, enum_def)) =
                     datatype::variant_tester_condition(vc, target, variant_name)
                 {
                     {
+                        let enum_def = Some(enum_def);
                         for (i, field_pattern) in fields.iter().enumerate() {
-                            if i >= sort.variants[variant_idx].accessors.len() {
+                            let (off, width) = enum_def
+                                .and_then(|edef| {
+                                    datatype::payload_leaf_range(
+                                        edef,
+                                        vc.module_env,
+                                        variant_idx,
+                                        i,
+                                    )
+                                })
+                                .unwrap_or((i, 1));
+                            let sdef = enum_def.and_then(|edef| {
+                                // Over-wide patterns (`V(a, b)` on
+                                // `V(i64)`) index past the declared
+                                // fields — stay on the scalar path.
+                                let ft = &edef.variants[variant_idx].field_types.get(i)?.name;
+                                vc.module_env
+                                    .structs
+                                    .get(&vc.module_env.resolve_base_type(ft))
+                            });
+                            if let Some(sdef) = sdef {
+                                // Composite payload: bind a fresh struct
+                                // handle whose leaves are the selector
+                                // applies, under both the handle's decl
+                                // name and any bound variable name.
+                                let mut leaves: Vec<(String, Dynamic)> = Vec::with_capacity(width);
+                                for j in off..off + width {
+                                    let Some(leaf) = datatype::variant_selector_apply(
+                                        &sort,
+                                        variant_idx,
+                                        j,
+                                        target,
+                                    ) else {
+                                        continue;
+                                    };
+                                    leaves.push((sdef.fields[j - off].name.clone(), leaf));
+                                }
+                                if leaves.len() != width {
+                                    continue;
+                                }
+                                let handle = crate::verification::translator::fresh_struct_handle(
+                                    ctx, &sdef.name,
+                                );
+                                let handle_name = handle.decl().name();
+                                crate::verification::translator::bind_struct_fields(
+                                    env,
+                                    &handle_name,
+                                    &leaves,
+                                );
+                                env.insert(
+                                    format!("__proj_{}_{}", variant_leaf, i),
+                                    handle.clone(),
+                                );
+                                if let Pattern::Variable(fname) = field_pattern {
+                                    crate::verification::translator::bind_struct_fields(
+                                        env, fname, &leaves,
+                                    );
+                                    env.insert(fname.clone(), handle.clone());
+                                    // The bound name shadows any outer
+                                    // binding — its field slots
+                                    // (`{fname}_{leaf}`,
+                                    // `__struct_{fname}_{leaf}`) are
+                                    // arm-local too, so the merge must
+                                    // not fold them into the post-match
+                                    // env like assignments.
+                                    for (leaf, _) in &leaves {
+                                        bound.insert(format!("{fname}_{leaf}"));
+                                        bound.insert(
+                                            crate::verification::translator::struct_field_key(
+                                                fname, leaf,
+                                            ),
+                                        );
+                                    }
+                                }
                                 continue;
                             }
-                            let Some(field_sym) =
-                                datatype::variant_selector_apply(&sort, variant_idx, i, target)
-                            else {
-                                continue;
-                            };
+                            // A slot beyond the constructor's accessor
+                            // count (over-wide pattern) has no selector —
+                            // bind a fresh projector like the Int-tag
+                            // path does instead of panicking.
+                            let field_sym =
+                                datatype::variant_selector_apply(&sort, variant_idx, off, target)
+                                    .unwrap_or_else(|| {
+                                        Int::new_const(
+                                            ctx,
+                                            format!("__proj_{}_{}", variant_leaf, i).as_str(),
+                                        )
+                                        .into()
+                                    });
                             env.insert(format!("__proj_{}_{}", variant_leaf, i), field_sym.clone());
                             match field_pattern {
                                 Pattern::Variable(fname) => {
@@ -229,6 +367,7 @@ pub(crate) fn pattern_bind_variables<'a>(
                                         env,
                                         vc,
                                         None,
+                                        bound,
                                     );
                                 }
                                 _ => {}
@@ -286,6 +425,7 @@ pub(crate) fn pattern_bind_variables<'a>(
                                     env,
                                     vc,
                                     field_hint.as_deref(),
+                                    bound,
                                 );
                             }
                             _ => {}

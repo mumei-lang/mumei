@@ -25,8 +25,11 @@ use crate::verification::module_env::ModuleEnv;
 use crate::verification::translator::{VCtx, F64_EBITS, F64_SBITS};
 use crate::verification::types::{MumeiError, MumeiResult};
 
-/// `true` when `enum_def` is finite + non-recursive + scalar-payload only —
-/// the fragment that maps onto a Z3 `DatatypeSort`.
+/// `true` when `enum_def` is finite + non-recursive + scalar-payload only
+/// (a declared *struct* payload whose direct fields are all scalar also
+/// counts: its leaves flatten into the constructor, mirroring the trusted
+/// verifier's `pure-i64-composite/v18` layout). Enum, array and nested
+/// composite payloads keep the Int-tag path.
 pub(crate) fn is_finite_adt(enum_def: &EnumDef, module_env: &ModuleEnv) -> bool {
     // Empty enums cannot form a Z3 datatype (`DatatypeBuilder::finish`
     // asserts at least one variant) and never have a constructible value, so
@@ -39,8 +42,95 @@ pub(crate) fn is_finite_adt(enum_def: &EnumDef, module_env: &ModuleEnv) -> bool 
         variant
             .field_types
             .iter()
-            .all(|field| field_is_scalar(field.name.as_str(), module_env))
+            .all(|field| field_leaf_types(field.name.as_str(), module_env).is_some())
     })
+}
+
+/// The `(leaf_name, leaf_base_type)` pairs a payload field contributes to
+/// the Z3 constructor: a scalar field is a single unnamed leaf; a declared
+/// struct expands to its direct fields when every leaf is scalar. Enum,
+/// array and nested-composite payloads return `None` and keep the enum on
+/// the Int-tag encoding.
+fn field_leaf_types(field_type: &str, module_env: &ModuleEnv) -> Option<Vec<(String, String)>> {
+    if field_is_scalar(field_type, module_env) {
+        return Some(vec![(
+            String::new(),
+            module_env.resolve_base_type(field_type),
+        )]);
+    }
+    let base = module_env.resolve_base_type(field_type);
+    let sdef = module_env.structs.get(&base)?;
+    let mut leaves = Vec::with_capacity(sdef.fields.len());
+    for leaf in &sdef.fields {
+        if !field_is_scalar(&leaf.type_name, module_env) {
+            return None;
+        }
+        leaves.push((
+            leaf.name.clone(),
+            module_env.resolve_base_type(&leaf.type_name),
+        ));
+    }
+    Some(leaves)
+}
+
+/// `(accessor_name, sort)` pairs one declared payload field contributes to
+/// the constructor — one entry per flattened leaf. A scalar field keeps the
+/// historical `{variant}_{i}` accessor name; a struct payload names leaves
+/// `{variant}_{i}_{leaf}`.
+fn field_leaf_sorts<'a>(
+    vc: &VCtx<'a>,
+    variant_name: &str,
+    field_idx: usize,
+    field_type: &str,
+) -> Option<Vec<(String, Sort<'a>)>> {
+    let leaves = field_leaf_types(field_type, vc.module_env)?;
+    let single = leaves.len() == 1 && leaves[0].0.is_empty();
+    Some(
+        leaves
+            .into_iter()
+            .map(|(leaf_name, base)| {
+                let name = if single {
+                    format!("{variant_name}_{field_idx}")
+                } else {
+                    format!("{variant_name}_{field_idx}_{leaf_name}")
+                };
+                let sort = match lower(&base) {
+                    LoweredType::F64 if vc.ieee754_f64 => Sort::float(vc.ctx, F64_EBITS, F64_SBITS),
+                    LoweredType::F64 => Sort::real(vc.ctx),
+                    LoweredType::Str => Sort::string(vc.ctx),
+                    LoweredType::Bool => Sort::bool(vc.ctx),
+                    // `--bitvec-i64` encodes integer values as BV(64) — the
+                    // accessor sorts must match the args callers pass (a
+                    // struct param's fields are seeded BV too).
+                    _ if vc.bitvec_i64 => Sort::bitvector(vc.ctx, 64),
+                    _ => Sort::int(vc.ctx),
+                };
+                (name, sort)
+            })
+            .collect(),
+    )
+}
+
+/// `(leaf_offset, leaf_width)` of declared field `field_idx` inside
+/// variant `variant_idx`'s flattened constructor — the span
+/// `variant_selector_apply` indexes when the field carries a composite
+/// payload.
+pub(crate) fn payload_leaf_range(
+    enum_def: &EnumDef,
+    module_env: &ModuleEnv,
+    variant_idx: usize,
+    field_idx: usize,
+) -> Option<(usize, usize)> {
+    let variant = enum_def.variants.get(variant_idx)?;
+    let mut offset = 0;
+    for (i, field_type) in variant.field_types.iter().enumerate() {
+        let leaves = field_leaf_types(&field_type.name, module_env)?;
+        if i == field_idx {
+            return Some((offset, leaves.len()));
+        }
+        offset += leaves.len();
+    }
+    None
 }
 
 /// `true` when a variant field type lowers to a scalar Z3 sort. Enum, struct,
@@ -57,27 +147,6 @@ fn field_is_scalar(field_type: &str, module_env: &ModuleEnv) -> bool {
         lower(&base),
         LoweredType::I64 | LoweredType::F64 | LoweredType::Str | LoweredType::Bool
     )
-}
-
-fn field_sort<'a>(
-    ctx: &'a Context,
-    field_type: &str,
-    module_env: &ModuleEnv,
-    ieee754_f64: bool,
-) -> Option<Sort<'a>> {
-    if !field_is_scalar(field_type, module_env) {
-        return None;
-    }
-    let base = module_env.resolve_base_type(field_type);
-    Some(match lower(&base) {
-        // Mirrors `param_z3_value`: `f64` is IEEE 754 Float under the
-        // `--ieee754-f64` opt-in, exact `Real` otherwise.
-        LoweredType::F64 if ieee754_f64 => Sort::float(ctx, F64_EBITS, F64_SBITS),
-        LoweredType::F64 => Sort::real(ctx),
-        LoweredType::Str => Sort::string(ctx),
-        LoweredType::Bool => Sort::bool(ctx),
-        _ => Sort::int(ctx),
-    })
 }
 
 /// Builds (or reuses) the Z3 `DatatypeSort` for `enum_def` on `vc`'s context.
@@ -100,13 +169,10 @@ pub(crate) fn enum_datatype_sort<'a>(
         let mut names = Vec::new();
         let mut sorts = Vec::new();
         for (i, field_type) in variant.field_types.iter().enumerate() {
-            names.push(format!("{}_{}", variant.name, i));
-            sorts.push(field_sort(
-                vc.ctx,
-                field_type.name.as_str(),
-                vc.module_env,
-                vc.ieee754_f64,
-            )?);
+            for (name, sort) in field_leaf_sorts(vc, &variant.name, i, &field_type.name)? {
+                names.push(name);
+                sorts.push(sort);
+            }
         }
         let fields: Vec<(&str, DatatypeAccessor)> = names
             .iter()
@@ -179,30 +245,118 @@ pub(crate) fn resolve_enum_ctor<'a>(
     Ok(Some((enum_def, idx)))
 }
 
+/// Expand declared-arity ctor args to the constructor's flattened leaf
+/// arity: scalar fields consume their arg unchanged; a struct-typed field
+/// consumes the arg's projected leaves (`struct_fields_of_value`), so both
+/// `Event::Move(Point { x, y })` and `Event::Move(p)` reach the leaves.
+fn expand_ctor_args<'a>(
+    vc: &VCtx<'a>,
+    env: &crate::verification::types::Env<'a>,
+    variant: &crate::parser::ast::EnumVariant,
+    args: &[Dynamic<'a>],
+) -> MumeiResult<Vec<Dynamic<'a>>> {
+    let mut leaves: Vec<Dynamic> = Vec::new();
+    for (i, arg) in args.iter().enumerate() {
+        let field_type = &variant.field_types[i].name;
+        let base = vc.module_env.resolve_base_type(field_type);
+        if let Some(sdef) = vc.module_env.structs.get(&base) {
+            let Some(fields) =
+                crate::verification::translator::struct_fields_of_value(env, arg, sdef)
+            else {
+                return Err(MumeiError::type_error(format!(
+                    "enum constructor payload '{field_type}' expects a '{base}' struct value"
+                )));
+            };
+            leaves.extend(fields.into_iter().map(|(_, value)| value));
+        } else {
+            leaves.push(arg.clone());
+        }
+    }
+    Ok(leaves)
+}
+
+/// The accessor domain sorts of `enum_def.variants[idx]`'s constructor,
+/// recomputed from `field_leaf_sorts` (the same source the datatype was
+/// built with). Returned in leaf order so callers can bridge arg sorts —
+/// under `--bitvec-i64` an integer literal stays `Int` while the accessor
+/// expects `BV(64)`, and applying it raw panics inside Z3.
+fn ctor_leaf_sorts<'a>(vc: &VCtx<'a>, enum_def: &EnumDef, idx: usize) -> Option<Vec<Sort<'a>>> {
+    let variant = enum_def.variants.get(idx)?;
+    let mut sorts = Vec::new();
+    for (i, ft) in variant.field_types.iter().enumerate() {
+        sorts.extend(
+            field_leaf_sorts(vc, &variant.name, i, &ft.name)?
+                .into_iter()
+                .map(|(_, s)| s),
+        );
+    }
+    Some(sorts)
+}
+
+/// Bridge `arg` to the accessor domain sort `want`: `Int` ↔ `BV(64)`
+/// through the standard conversion points; any other mismatch fails.
+fn coerce_ctor_leaf<'a>(arg: &Dynamic<'a>, want: &Sort<'a>) -> Option<Dynamic<'a>> {
+    if arg.get_sort() == *want {
+        return Some(arg.clone());
+    }
+    match want.kind() {
+        z3::SortKind::BV => crate::verification::translator::as_bv_i64(arg).map(Into::into),
+        z3::SortKind::Int => crate::verification::translator::as_int_like(arg).map(Into::into),
+        _ => None,
+    }
+}
+
+/// Applies the constructor of `enum_def.variants[idx]` to `leaf_args`,
+/// already at the flattened leaf arity (one entry per accessor).
+pub(crate) fn enum_ctor_apply_leaves<'a>(
+    vc: &VCtx<'a>,
+    enum_def: &EnumDef,
+    idx: usize,
+    leaf_args: &[Dynamic<'a>],
+) -> Option<Dynamic<'a>> {
+    let sort = enum_datatype_sort(vc, enum_def)?;
+    if sort.variants[idx].accessors.len() != leaf_args.len() {
+        return None;
+    }
+    let want = ctor_leaf_sorts(vc, enum_def, idx)?;
+    if want.len() != leaf_args.len() {
+        return None;
+    }
+    let coerced: Vec<Dynamic> = leaf_args
+        .iter()
+        .zip(&want)
+        .map(|(arg, s)| coerce_ctor_leaf(arg, s))
+        .collect::<Option<Vec<_>>>()?;
+    let arg_refs: Vec<&dyn Ast> = coerced.iter().map(|d| d as &dyn Ast).collect();
+    Some(sort.variants[idx].constructor.apply(&arg_refs))
+}
+
 /// `Enum::Variant(args)` / `Variant(args)` construction — applies the
-/// variant's Z3 constructor to `args` (already lowered). Returns `None` when
-/// the name does not resolve to a finite-ADT variant or the arity is wrong —
-/// callers then keep the previous behaviour (unknown/atom call).
+/// variant's Z3 constructor to `args` (already lowered, at the declared
+/// arity; composite payload fields expand to their leaves). Returns `None`
+/// when the name does not resolve to a finite-ADT variant or the arity is
+/// wrong — callers then keep the previous behaviour (unknown/atom call).
 pub(crate) fn enum_ctor_apply<'a>(
     vc: &VCtx<'a>,
+    env: &crate::verification::types::Env<'a>,
     ctor_path: &str,
     args: &[Dynamic<'a>],
 ) -> MumeiResult<Option<Dynamic<'a>>> {
     let Some((enum_def, idx)) = resolve_enum_ctor(vc, ctor_path)? else {
         return Ok(None);
     };
-    let Some(sort) = enum_datatype_sort(vc, enum_def) else {
+    if enum_datatype_sort(vc, enum_def).is_none() {
         return Ok(None);
     };
     if enum_def.variants[idx].fields.len() != args.len() {
         return Ok(None);
     }
-    let arg_refs: Vec<&dyn Ast> = args.iter().map(|d| d as &dyn Ast).collect();
-    Ok(Some(sort.variants[idx].constructor.apply(&arg_refs)))
+    let leaf_args = expand_ctor_args(vc, env, &enum_def.variants[idx], args)?;
+    Ok(enum_ctor_apply_leaves(vc, enum_def, idx, &leaf_args))
 }
 
 /// Tester predicate `is-<Variant>(target)` for a `Datatype`-sorted match
-/// target. Returns `(sort, tester_bool, variant_idx)`, or `None` when no
+/// target. Returns `(sort, tester_bool, variant_idx, enum_def)`, or `None` when no
 /// finite ADT owns `variant_name` on `target`'s sort. When several enums
 /// share the variant name, the one whose datatype sort matches `target`'s
 /// wins — the name-only `find_enum_by_variant` scan would pick the wrong
@@ -211,7 +365,7 @@ pub(crate) fn variant_tester_condition<'a>(
     vc: &VCtx<'a>,
     target: &Dynamic<'a>,
     variant_name: &str,
-) -> Option<(Rc<DatatypeSort<'a>>, Bool<'a>, usize)> {
+) -> Option<(Rc<DatatypeSort<'a>>, Bool<'a>, usize, &'a EnumDef)> {
     let dt = target.as_datatype()?;
     let target_sort = dt.get_sort();
     // Qualified `E::V` pins the enum by its qualifier — a qualifier that
@@ -243,7 +397,7 @@ pub(crate) fn variant_tester_condition<'a>(
             continue;
         }
         let is_v = sort.variants[idx].tester.apply(&[&dt]).as_bool()?;
-        return Some((sort, is_v, idx));
+        return Some((sort, is_v, idx, enum_def));
     }
     None
 }
