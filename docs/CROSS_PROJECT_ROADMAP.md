@@ -6215,6 +6215,18 @@ appended elements' deps land in the root's sharers like the plain
 registers the union as a may-write on the group, and parallel-assignment
 RHS resolves `append(a[i], v)` at the pre-state group.
 
+### Field member extraction (mumei-agent #1011)
+
+[mumei-agent#1011](https://github.com/mumei-lang/mumei-agent/pull/1011)
+admits `a := s.F` on a local composite whose member is a scalar-element
+container (`[][]int64`/`map[K][]T`/`[N][]T`): `a` joins the field's
+share group like the single-level form, an array member EMBEDDING a
+collection (`[1][]int64`) shares its copied header instead of minting a
+fresh value copy, and `s.F = rhs` reseats the field onto the operand's
+backing (literal/call sources mint a backing like a local; conditional
+stores union instead of replacing). `[][][]T` members and deeper stayed
+closed at this step.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
