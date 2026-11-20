@@ -337,6 +337,11 @@ impl Monomorphizer {
                             self.collect_from_type_ref(type_ref, &atom.type_params);
                         }
                     }
+                    // 戻り値型からも収集 — `-> Wrap<i64>` は body が構築式を
+                    // 持たなくても `Wrap<i64>` インスタンスを要求する。
+                    if let Some(return_type) = &atom.return_type {
+                        self.collect_from_type_ref(&parse_type_ref(return_type), &atom.type_params);
+                    }
                     // body 内の文から収集。構文エラーは回復せず呼び出し元に
                     // 伝える（panics させない fail-closed 経路）。
                     match parse_body_expr_checked(&atom.body_expr) {

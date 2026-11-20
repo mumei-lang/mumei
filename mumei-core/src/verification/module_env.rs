@@ -314,6 +314,36 @@ impl ModuleEnv {
         // qualifier resolves by the leaf name, as before.
         if let Some((qual, leaf)) = variant_name.rsplit_once("::") {
             if let Some(qual_enum) = self.get_enum(qual) {
+                // A qualifier naming the generic declaration resolves to a
+                // `qual<...>` instance: the decl hint pins it when it names
+                // one, a sole registered instance wins, several are
+                // ambiguous (the generic def itself is not encodable).
+                let qual_enum = if qual_enum.type_params.is_empty() {
+                    qual_enum
+                } else {
+                    let hinted = decl_hint.and_then(|h| {
+                        self.get_enum(h).filter(|e| {
+                            e.name.starts_with(&format!("{qual}<"))
+                                && e.variants.iter().any(|v| v.name == leaf)
+                        })
+                    });
+                    let instances =
+                        crate::verification::support::datatype::generic_instances(self, qual, leaf);
+                    match hinted.or_else(|| (instances.len() == 1).then_some(instances[0])) {
+                        Some(e) => e,
+                        None if instances.is_empty() => qual_enum,
+                        None => {
+                            return Err(MumeiError::verification(format!(
+                                "Match arm '{variant_name}' is ambiguous: instances {} all declare '{leaf}' — qualify the concrete type",
+                                instances
+                                    .iter()
+                                    .map(|e| e.name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )));
+                        }
+                    }
+                };
                 if let Some(hint) = decl_hint {
                     if let Some(hint_enum) = self.get_enum(hint) {
                         if hint_enum.name != qual_enum.name {

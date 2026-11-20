@@ -317,7 +317,32 @@ pub(crate) fn resolve_enum_ctor<'a>(
         // Qualified `E::V` resolves `E` directly — `find_enum_by_variant`
         // would non-deterministically pick a *different* enum declaring a
         // same-named variant (`enums` is a HashMap).
-        vc.module_env.get_enum(qual)
+        let direct = vc.module_env.get_enum(qual);
+        match direct {
+            Some(def) if def.type_params.is_empty() => direct,
+            _ => {
+                // `E` names the generic declaration (or nothing):
+                // monomorphization registers concrete instances under
+                // `E<T...>`, so `Wrap::W` resolves through them. A sole
+                // instance declaring the variant wins; several are
+                // ambiguous — the caller can qualify `Wrap<i64>::W`.
+                let instances = generic_instances(vc.module_env, qual, variant_name);
+                match instances.len() {
+                    0 => direct,
+                    1 => Some(instances[0]),
+                    _ => {
+                        return Err(MumeiError::verification(format!(
+                            "Ambiguous enum constructor '{ctor_path}': instances {} all declare '{variant_name}' — qualify the instance (e.g. '{qual}<...>::{variant_name}')",
+                            instances
+                                .iter()
+                                .map(|e| e.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )));
+                    }
+                }
+            }
+        }
     } else {
         // Bare `Variant` is ambiguous when several enums declare it —
         // `enums` is a HashMap, so first-found order would make the choice
@@ -486,7 +511,15 @@ pub(crate) fn variant_tester_condition<'a>(
     let qual_enum = qual.and_then(|q| vc.module_env.get_enum(q));
     for enum_def in vc.module_env.enums.values() {
         if let Some(qe) = qual_enum {
-            if enum_def.name != qe.name {
+            // A qualifier naming a generic declaration (`Wrap`) admits any
+            // `Wrap<...>` instance — the target sort comparison below pins
+            // the concrete one (the generic def has no sort anyway).
+            let matches = if qe.type_params.is_empty() {
+                enum_def.name == qe.name
+            } else {
+                enum_def.name.starts_with(&format!("{}<", qe.name))
+            };
+            if !matches {
                 continue;
             }
         }
@@ -531,6 +564,58 @@ pub(crate) fn variant_selector_apply<'a>(
 /// only, so qualified pattern names (`Mine::Cons`) compare by the leaf.
 pub(crate) fn variant_leaf(variant_name: &str) -> &str {
     variant_name.rsplit("::").next().unwrap_or(variant_name)
+}
+
+/// Registered monomorphized instances `qual<T...>` that declare variant
+/// `leaf` — the concrete enums `Wrap::W` can mean when `Wrap` names a
+/// generic declaration. Sorted by name for deterministic ambiguity errors.
+pub(crate) fn generic_instances<'m>(
+    module_env: &'m ModuleEnv,
+    qual: &str,
+    leaf: &str,
+) -> Vec<&'m EnumDef> {
+    let prefix = format!("{qual}<");
+    let mut owners: Vec<_> = module_env
+        .enums
+        .values()
+        .filter(|e| {
+            e.name.starts_with(prefix.as_str()) && e.variants.iter().any(|v| v.name == leaf)
+        })
+        .collect();
+    owners.sort_by(|a, b| a.name.cmp(&b.name));
+    owners
+}
+
+/// The `qual<T...>` instance that owns `leaf`, chosen among the registered
+/// instances of generic enum `qual`: a `declared` type name pins it, a
+/// sole registered instance wins, several are ambiguous, zero is `None`.
+fn generic_instance_owner<'a>(
+    vc: &VCtx<'a>,
+    qual: &str,
+    leaf: &str,
+    declared: &[String],
+) -> MumeiResult<Option<&'a EnumDef>> {
+    for decl in declared {
+        if let Some(e) = vc.module_env.get_enum(decl.as_str()) {
+            if e.name.starts_with(&format!("{qual}<")) && e.variants.iter().any(|v| v.name == leaf)
+            {
+                return Ok(Some(e));
+            }
+        }
+    }
+    let instances = generic_instances(vc.module_env, qual, leaf);
+    match instances.len() {
+        0 => Ok(None),
+        1 => Ok(Some(instances[0])),
+        _ => Err(MumeiError::verification(format!(
+            "'{qual}::{leaf}' is ambiguous: instances {} all declare it — qualify the concrete type",
+            instances
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
 }
 
 pub(crate) fn variant_owners<'m>(
@@ -615,6 +700,12 @@ fn target_param_enum_name(vc: &VCtx, target: &Dynamic) -> Option<String> {
             .and_then(|p| p.type_name.as_deref())
     };
     if let Some(ty) = declared {
+        // A generic instance is itself a registered enum: keep the full
+        // `Wrap<i64>` name so `match e` binds the instance, not the
+        // generic def `type_name_base` would strip down to.
+        if vc.module_env.get_enum(ty).is_some() {
+            return Some(ty.to_string());
+        }
         return Some(type_name_base(ty).to_string());
     }
     // `let`-bound enum values record their inferred declared type in
@@ -839,7 +930,7 @@ pub(crate) fn resolve_variant_owner<'a>(
     // qualifier (module path etc.) resolves by the leaf name, as before.
     if let Some((qual, leaf)) = variant_name.rsplit_once("::") {
         if let Some(qual_enum) = vc.module_env.get_enum(qual) {
-            let declared = decl_hint
+            let declared: Vec<String> = decl_hint
                 .map(str::to_string)
                 .into_iter()
                 .chain(target_param_enum_name(vc, target))
@@ -856,9 +947,18 @@ pub(crate) fn resolve_variant_owner<'a>(
                             })
                         })
                         .map(|e| e.name.clone()),
-                );
-            for decl in declared {
-                if let Some(decl_enum) = vc.module_env.get_enum(&decl) {
+                )
+                .collect();
+            // The qualifier may name the generic declaration: `match e {
+            // Wrap::W }` on `e: Wrap<i64>` binds the concrete instance,
+            // since the generic def itself is not encodable.
+            let qual_enum = if qual_enum.type_params.is_empty() {
+                qual_enum
+            } else {
+                generic_instance_owner(vc, qual, leaf, &declared)?.unwrap_or(qual_enum)
+            };
+            for decl in &declared {
+                if let Some(decl_enum) = vc.module_env.get_enum(decl) {
                     if decl_enum.name != qual_enum.name {
                         return Err(MumeiError::verification(format!(
                             "Match arm '{variant_name}' belongs to enum '{}' but the match target is declared as '{}'",
