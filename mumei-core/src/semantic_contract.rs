@@ -189,6 +189,12 @@ pub const PURE_I64_COMPOSITE_PROFILE_V19: &str = "mumei.pure-i64-composite/v19";
 /// the literal's length, so the bound only gates admission.
 pub const PURE_I64_COMPOSITE_PROFILE_V20: &str = "mumei.pure-i64-composite/v20";
 
+/// `pure-i64-composite/v21`: `i128`/`u128` scalar leaves — a 128-bit
+/// leaf carries two consecutive 64-bit slots in the flattened
+/// signature, and the bundle record's `leaf_widths` declares the
+/// pairing so a recheck can group the slots back.
+pub const PURE_I64_COMPOSITE_PROFILE_V21: &str = "mumei.pure-i64-composite/v21";
+
 /// Maximum byte length a `Str` literal may declare under
 /// `pure-i64-composite/v13`: one cell per byte under the
 /// bounded-memory model.
@@ -274,6 +280,11 @@ pub enum RefinedAdmission {
     /// bound instead of the default `STR_BOUND`
     /// (`pure-i64-composite/v20`).
     CompositeV20,
+    /// `CompositeV21` additionally admits `i128`/`u128` leaves — each
+    /// carries two consecutive 64-bit slots in the flattened
+    /// signature and the record's `leaf_widths` declares the pairing
+    /// (`pure-i64-composite/v21`).
+    CompositeV21,
 }
 
 impl RefinedAdmission {
@@ -413,6 +424,12 @@ impl RefinedAdmission {
     pub fn admits_str_bound(self) -> bool {
         self >= Self::CompositeV20
     }
+
+    /// Whether `i128`/`u128` scalar leaves are admitted — each carries
+    /// two consecutive 64-bit slots (`pure-i64-composite/v21`).
+    pub fn admits_wide_leaves(self) -> bool {
+        self >= Self::CompositeV21
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -518,7 +535,7 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) =
+    let (items, refined, structs, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     // The bounded profile stays a single-atom contract — sibling atoms
     // only serve as call targets, which the widened profile alone admits.
@@ -539,6 +556,7 @@ pub fn extract_pure_i64_contract(
         &refined,
         &structs,
         &EnumEnv::new(),
+        false,
         false,
         false,
         false,
@@ -594,6 +612,7 @@ pub fn extract_pure_i64_module_contracts(
         enum_writes,
         f64_arith,
         str_bound_declared,
+        wide_leaves,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     // The translator-IR pin must see the same type environment the
     // verifier's certificate does — a `Port`-typed binder carries its
@@ -641,6 +660,7 @@ pub fn extract_pure_i64_module_contracts(
                 enum_writes,
                 f64_arith,
                 str_bound_declared,
+                wide_leaves,
                 &cert_env,
             )),
             // Type and struct declarations carry no per-atom contract;
@@ -677,6 +697,7 @@ pub fn module_source_profile(
         enum_writes,
         f64_arithmetic,
         str_bound_declared,
+        wide_leaves,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     Ok(fragment_profile(
         true,
@@ -697,6 +718,7 @@ pub fn module_source_profile(
         enum_writes,
         f64_arithmetic,
         str_bound_declared,
+        wide_leaves,
     ))
 }
 
@@ -719,6 +741,7 @@ type AdmittedModule = (
     RefinedEnv,
     StructEnv,
     EnumEnv,
+    bool,
     bool,
     bool,
     bool,
@@ -906,6 +929,7 @@ fn admit_pure_i64_atoms(
         )?;
     }
     let u64_leaves = uses_u64_leaves(&items);
+    let wide_leaves = uses_wide_leaves(&items);
     let f64_leaves = uses_f64_leaves(&items);
     // A declared `str_bound` pins v20 module-wide, the same
     // declaration-presence convention `has_composite_payloads`
@@ -932,6 +956,7 @@ fn admit_pure_i64_atoms(
         enum_writes_used.get(),
         f64_arithmetic_used.get(),
         str_bound_declared,
+        wide_leaves,
     ))
 }
 
@@ -1066,6 +1091,26 @@ fn uses_u64_leaves(items: &[Item]) -> bool {
     })
 }
 
+/// Whether the admitted module declares a 128-bit leaf anywhere — a
+/// parameter, a result, a struct field or an enum payload slot. Only
+/// `CompositeV21` admission ever produces one.
+fn uses_wide_leaves(items: &[Item]) -> bool {
+    let wide = |name: Option<&str>| matches!(name, Some("i128" | "u128"));
+    items.iter().any(|item| match item {
+        Item::Atom(atom) => {
+            atom.params.iter().any(|p| wide(p.type_name.as_deref()))
+                || wide(atom.return_type.as_deref())
+        }
+        Item::StructDef(def) => def.fields.iter().any(|f| wide(Some(f.type_name.as_str()))),
+        Item::EnumDef(def) => def
+            .variants
+            .iter()
+            .flat_map(|v| v.field_types.iter())
+            .any(|ty| wide(Some(ty.display_name().as_str()))),
+        _ => false,
+    })
+}
+
 /// Whether the admitted module declares an `f64` leaf anywhere — a
 /// parameter, a result, a struct field or an enum payload slot. Only
 /// `CompositeV12` admission ever produces one.
@@ -1107,9 +1152,14 @@ fn fragment_profile(
     enum_writes: bool,
     f64_arithmetic: bool,
     str_bound_declared: bool,
+    wide_leaves: bool,
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if wide_leaves {
+        // A 128-bit leaf is only ever admitted under v21 — the
+        // strongest claim the ladder makes.
+        PURE_I64_COMPOSITE_PROFILE_V21
     } else if str_bound_declared {
         // A declared `str_bound` clause is only ever admitted under
         // v20 — the strongest claim the ladder makes.
@@ -1280,6 +1330,7 @@ fn atom_contract(
     enum_writes: bool,
     f64_arithmetic: bool,
     str_bound_declared: bool,
+    wide_leaves: bool,
     cert_env: &ModuleEnv,
 ) -> Result<SemanticContract, SemanticContractError> {
     atom.span.file = source_name.to_owned();
@@ -1302,6 +1353,7 @@ fn atom_contract(
         enum_writes,
         f64_arithmetic,
         str_bound_declared,
+        wide_leaves,
     );
     let result_fields = atom
         .return_type
@@ -6078,7 +6130,7 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let (items, refined, structs, enums, _, _, _, _, _, _, _, arrays, strs, _, _, _, _, _) =
+    let (items, refined, structs, enums, _, _, _, _, _, _, _, arrays, strs, _, _, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
