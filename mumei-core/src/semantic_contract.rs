@@ -7377,6 +7377,18 @@ fn result_conjuncts_at<'ctx>(
                 SourceValue::Boolean(_) => {
                     refined_conjuncts_at(type_name, slot_value.clone(), refined, context)?
                 }
+                // A composite or nested-enum payload slot carries its
+                // own leaf/inner-tag conjuncts — recurse through the
+                // named type's own arm so refined leaves inside still
+                // bind (`pure-i64-composite/v23`).
+                SourceValue::Composite(_) | SourceValue::Enum { .. } => result_conjuncts_at(
+                    type_name,
+                    slot_value.clone(),
+                    refined,
+                    structs,
+                    enums,
+                    context,
+                )?,
                 _ => continue,
             };
             out.extend(conjuncts.iter().map(|c| carries.implies(c)));
