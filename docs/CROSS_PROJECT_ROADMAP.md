@@ -6262,6 +6262,40 @@ func F(a []int64, x int64) int64 { G(a, x); return a[0] }` →
 direct-local call result aliases the declared `return_dependencies`
 slots — `t := G(a)` joins `a`'s group.
 
+### Container builtins on bound scalar-element containers (mumei-agent #1014)
+
+[mumei-agent#1014](https://github.com/mumei-lang/mumei-agent/pull/1014)
+admits `copy(dst, src)`, `delete(m, k)`, and `clear(m)` on bound
+scalar-element containers. `copy` merges the source's share group into
+every destination holder (the connected component, never a replace),
+`delete` records a may-write on the map's group, and `clear` unions the
+group's deps. Index-expression operands (`copy(a[i], b[j])`,
+`delete(m[i], j)`) resolve through the same index target as element
+stores.
+
+### Struct-element containers (mumei-agent #1015)
+
+[mumei-agent#1015](https://github.com/mumei-lang/mumei-agent/pull/1015)
+admits `[]St`/`[N]St`/`map[K]St` locals, params, and receivers: struct
+joins the scalar-element kinds so element containers bind automatically.
+`s[i].F` field reads and writes ride the same index resolution — the
+conflated element set cannot distinguish fields, so `s[i].F = v`
+stores, inc/dec, select-receive, and parallel-assign all land on the
+element slot. A pointer member in the selector chain unions
+`indirect_writes` into the read's deps. `b := s[i]` stays closed (a
+struct embeds no collection), and `m[k].A = v` on a `map[K]St` is
+rejected by go/types as unaddressable.
+
+### Collection field off a struct element (mumei-agent #1016)
+
+[mumei-agent#1016](https://github.com/mumei-lang/mumei-agent/pull/1016)
+admits `b := s[i].F` (and `b = s[i].F`, `s[i].F.G`) where the field is
+a scalar-element container: the field's slot mints a share group under
+the root's binding id and joins it to the root's group, like `a := s.F`
+on a local composite. `s[i].F[j]` direct-index stays closed exactly as
+`st.F[j]` does — a collection field is reachable only through
+extraction — and a pure array field still copies on extract.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
