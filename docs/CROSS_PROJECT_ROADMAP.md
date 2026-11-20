@@ -5762,6 +5762,29 @@ lowers only `i64`/`f64`/`Str`/`bool` payload leaves, so a wide-payload
 ctor atom encodes under v22 but cannot pass `mumei verify` source
 verification yet (the same pre-existing boundary as `i32` payloads).
 
+### Nested enum payloads (mumei #1158)
+
+[mumei#1158](https://github.com/mumei-lang/mumei/pull/1158) admits
+enum-typed enum payloads — `A(E)` where `E` is itself an enum — under
+`pure-i64-composite/v23` (bundle v26). An enum-typed payload field is
+one `enum:{base}` leaf in `collect_field_leaves` (a
+`MAX_ENUM_PAYLOAD_NEST=8` fuel bounds `A ↔ B` cycles), maps to the
+inner enum's cached `DatatypeSort` in `field_leaf_sorts`, and widens
+`enum_slot_leaf_slots`/`enum_leaf_paths` to an inner `EnumTag` plus
+the inner payload leaf slots at depth+1. `signature_domain` keeps a
+per-level tag/gate stack rather than one mutable tag: a leaf's domain
+conjuncts are gated by its enclosing gates holding AND the tag at its
+own level sitting in its carriers, so inner constraints never leak
+onto outer variants that do not carry them and outer tags survive
+inner-tag slots. `enum_slot_eq` folds the inner tag equality in with
+the payload slots (unit-variant inner enums still compare tags),
+`result_conjuncts_at` recurses refined clauses into composite/enum
+slot values, and the fueled `is_finite_adt` walk is memoized on
+(enum, fuel) so shared inner enums stay linear. Mixed-type union
+slots, non-finite inners (recursive or array payloads) and forward
+references stay fail-closed. This lands the last of issue #983's
+five verification residuals.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
