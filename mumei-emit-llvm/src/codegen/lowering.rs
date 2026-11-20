@@ -276,10 +276,16 @@ fn declare_payload_box_alloc_failed<'a>(
 /// aggregates (struct values, enum tagged unions, array fat pointers) do not
 /// fit and are transported by address instead.
 pub(crate) fn payload_needs_box(ty: BasicTypeEnum<'_>) -> bool {
-    matches!(
-        ty,
-        BasicTypeEnum::StructType(_) | BasicTypeEnum::ArrayType(_) | BasicTypeEnum::VectorType(_)
-    )
+    match ty {
+        BasicTypeEnum::StructType(_)
+        | BasicTypeEnum::ArrayType(_)
+        | BasicTypeEnum::VectorType(_) => true,
+        // A scalar wider than the 64-bit slot truncates under
+        // `bitpreserve_cast`: box it into a heap slot like an
+        // aggregate (`pure-i64-composite/v21`).
+        BasicTypeEnum::IntType(int) => int.get_bit_width() > 64,
+        _ => false,
+    }
 }
 
 /// Encode `value` into a runtime i64 slot without losing bits. Scalars and
