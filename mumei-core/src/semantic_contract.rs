@@ -7886,18 +7886,27 @@ fn source_expr<'ctx>(
                     }
                     (_, value) => value,
                 };
-                let shape_ok = matches!(
-                    (declared_shape, &value),
-                    (
-                        ValueKind::Scalar(ScalarKind::I64),
-                        SourceValue::Integer(_) | SourceValue::Number(_)
-                    ) | (
-                        ValueKind::Scalar(ScalarKind::U64),
-                        SourceValue::Unsigned(_) | SourceValue::Number(_)
-                    ) | (ValueKind::Scalar(ScalarKind::Bool), SourceValue::Boolean(_))
-                        | (ValueKind::Scalar(ScalarKind::F64), SourceValue::Float64(_))
-                        | (ValueKind::Struct(_), SourceValue::Composite(_))
-                );
+                let shape_ok = match (declared_shape, &value) {
+                    // An enum-typed field takes an enum value of the
+                    // SAME declared enum (`pure-i64-composite/v17`) —
+                    // a different enum's value fails closed like the
+                    // field-write check does.
+                    (ValueKind::Enum(declared), SourceValue::Enum { name: written, .. }) => {
+                        declared == written
+                    }
+                    (declared_shape, value) => matches!(
+                        (declared_shape, value),
+                        (
+                            ValueKind::Scalar(ScalarKind::I64),
+                            SourceValue::Integer(_) | SourceValue::Number(_)
+                        ) | (
+                            ValueKind::Scalar(ScalarKind::U64),
+                            SourceValue::Unsigned(_) | SourceValue::Number(_)
+                        ) | (ValueKind::Scalar(ScalarKind::Bool), SourceValue::Boolean(_))
+                            | (ValueKind::Scalar(ScalarKind::F64), SourceValue::Float64(_))
+                            | (ValueKind::Struct(_), SourceValue::Composite(_))
+                    ),
+                };
                 if !shape_ok || values.insert(name, value).is_some() {
                     return Err(SemanticContractError::Unsupported("source struct literal"));
                 }
