@@ -61,7 +61,11 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                             })
                             .unwrap_or((i, 1));
                         let sdef = enum_def.and_then(|edef| {
-                            let ft = &edef.variants[variant_idx].field_types[i].name;
+                            // The pattern may bind more fields than the
+                            // variant declares — `V(a, b)` on `V(i64)` —
+                            // so index safely; an out-of-range slot falls
+                            // through to the scalar fallback const.
+                            let ft = &edef.variants[variant_idx].field_types.get(i)?.name;
                             vc.module_env
                                 .structs
                                 .get(&vc.module_env.resolve_base_type(ft))
@@ -272,7 +276,10 @@ pub(crate) fn pattern_bind_variables<'a>(
                                 })
                                 .unwrap_or((i, 1));
                             let sdef = enum_def.and_then(|edef| {
-                                let ft = &edef.variants[variant_idx].field_types[i].name;
+                                // Over-wide patterns (`V(a, b)` on
+                                // `V(i64)`) index past the declared
+                                // fields — stay on the scalar path.
+                                let ft = &edef.variants[variant_idx].field_types.get(i)?.name;
                                 vc.module_env
                                     .structs
                                     .get(&vc.module_env.resolve_base_type(ft))
@@ -318,11 +325,19 @@ pub(crate) fn pattern_bind_variables<'a>(
                                 }
                                 continue;
                             }
-                            let Some(field_sym) =
+                            // A slot beyond the constructor's accessor
+                            // count (over-wide pattern) has no selector —
+                            // bind a fresh projector like the Int-tag
+                            // path does instead of panicking.
+                            let field_sym =
                                 datatype::variant_selector_apply(&sort, variant_idx, off, target)
-                            else {
-                                continue;
-                            };
+                                    .unwrap_or_else(|| {
+                                        Int::new_const(
+                                            ctx,
+                                            format!("__proj_{}_{}", variant_leaf, i).as_str(),
+                                        )
+                                        .into()
+                                    });
                             env.insert(format!("__proj_{}_{}", variant_leaf, i), field_sym.clone());
                             match field_pattern {
                                 Pattern::Variable(fname) => {

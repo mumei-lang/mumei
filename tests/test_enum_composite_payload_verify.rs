@@ -52,6 +52,17 @@ fn composite_payloads_verify_on_datatype_path() {
 }
 
 #[test]
+fn overwide_pattern_reports_a_diagnostic_not_a_panic() {
+    let out = run_verify(&fixture("test_enum_overwide_pattern.mm"), "wide");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stderr.contains("panicked") && !stdout.contains("panicked"),
+        "an over-wide variant pattern must not panic the verifier:\n{stdout}\n{stderr}"
+    );
+}
+
+#[test]
 fn composite_payload_write_rejects_wrong_tag() {
     let out = run_verify(
         &fixture("test_enum_composite_payload_verify_negative.mm"),
