@@ -147,3 +147,15 @@ body: {
         Color::Blue(v, w) => if v + w >= 0 { v + w } else { 0 }
     }
 };
+
+// A `requires` pinning the pre-write variant must not turn into a
+// contradiction once `b.c = …` rebinding is in the body — the
+// requires-time view of a written enum field is havoc'd like a
+// scalar write (review fix for `pure-i64-composite/v17`).
+atom prepost(b: Box) -> i64
+requires: b.c == Color::Red;
+ensures: result == 1;
+body: {
+    b.c = Color::Green(1);
+    1
+};

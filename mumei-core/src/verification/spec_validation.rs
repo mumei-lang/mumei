@@ -607,6 +607,17 @@ fn havoc_written_struct_fields<'a>(
                 let fresh: Dynamic = match old.get_sort().kind() {
                     z3::SortKind::Int => Int::fresh_const(ctx, &format!("__post_{key}")).into(),
                     z3::SortKind::Bool => Bool::fresh_const(ctx, &format!("__post_{key}")).into(),
+                    // Enum-typed fields seed as the enum's datatype
+                    // (`pure-i64-composite/v17`): without the fresh
+                    // post-view, a `requires` referencing the written
+                    // field evaluates against the post-write ctor and
+                    // reads as a contradiction.
+                    z3::SortKind::Datatype => z3::ast::Datatype::new_const(
+                        ctx,
+                        format!("__post_{key}").as_str(),
+                        &old.get_sort(),
+                    )
+                    .into(),
                     // Non-scalar field slots keep the input view; no
                     // admitted field-write profile reaches them.
                     _ => continue,
