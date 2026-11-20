@@ -5948,10 +5948,14 @@ with per-record verdicts, fingerprints and performed/not-performed
 checks. Records are validated statically (closed shape, bounded list);
 the error prefix "Evidence list acceptance evaluation failed" routes
 its own exit messages so failures never fall through to the
-source-query diagnostics. Consistency conflicts between records are
-reported in `checks_not_performed` and stay out of scope for the
-aggregate — arbitration remains a consumer-side declaration, not a
-grade promotion.
+source-query diagnostics. Cross-record consistency now feeds the
+aggregate: an `accepted` verdict over records whose shared identity
+pins disagree is demoted to `inconclusive` — an affirmative
+acceptance over a contradictory set is never a silent pass — and the
+descriptor emits `consistent`, `conflict_count` and the bounded
+`conflicts` list under a `cross_record_pin_agreement` performed
+check. Arbitration remains a consumer-side declaration, not a grade
+promotion.
 
 ## No-`.mm` front door and V1 order
 
