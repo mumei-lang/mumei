@@ -341,6 +341,7 @@ impl<'a> Lexer<'a> {
             "task_group" => Token::TaskGroup,
             "task" => Token::Task,
             "max_unroll" => Token::MaxUnroll,
+            "str_bound" => Token::StrBound,
             "semantics" => Token::Semantics,
             "let" => Token::Let,
             "if" => Token::If,

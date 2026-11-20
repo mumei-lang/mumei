@@ -182,10 +182,21 @@ pub const PURE_I64_COMPOSITE_PROFILE_V18: &str = "mumei.pure-i64-composite/v18";
 /// rejected and `!=`/ordering remain outside the emitter surface.
 pub const PURE_I64_COMPOSITE_PROFILE_V19: &str = "mumei.pure-i64-composite/v19";
 
+/// `pure-i64-composite/v20`: a per-atom declared `Str` bound — the
+/// `str_bound: N;` clause raises the `Str` literal cap from the
+/// default `STR_BOUND` to the declared bound (at most
+/// `STR_BOUND_MAX`). The inline byte-cell model scales linearly in
+/// the literal's length, so the bound only gates admission.
+pub const PURE_I64_COMPOSITE_PROFILE_V20: &str = "mumei.pure-i64-composite/v20";
+
 /// Maximum byte length a `Str` literal may declare under
 /// `pure-i64-composite/v13`: one cell per byte under the
 /// bounded-memory model.
 pub const STR_BOUND: usize = 64;
+
+/// Largest `str_bound: N;` an atom may declare — the inline cell
+/// model stays bounded even for a declared bound.
+pub const STR_BOUND_MAX: usize = 1024;
 
 /// Bounded stack memory (`pure-i64-composite-bounded-memory/v1`): local
 /// fixed-size array literals, `a[i]` reads, `a[i] = v` writes and `len`
@@ -258,6 +269,11 @@ pub enum RefinedAdmission {
     CompositeV17,
     CompositeV18,
     CompositeV19,
+    /// `CompositeV20` additionally admits a per-atom declared `Str`
+    /// bound (`str_bound: N;`) — the literal cap becomes the declared
+    /// bound instead of the default `STR_BOUND`
+    /// (`pure-i64-composite/v20`).
+    CompositeV20,
 }
 
 impl RefinedAdmission {
@@ -391,6 +407,12 @@ impl RefinedAdmission {
     pub fn admits_f64_arithmetic(self) -> bool {
         self >= Self::CompositeV19
     }
+
+    /// Whether the admission covers a per-atom declared `Str` bound
+    /// (`str_bound: N;` on the atom). Only `CompositeV20` admits it.
+    pub fn admits_str_bound(self) -> bool {
+        self >= Self::CompositeV20
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -496,7 +518,7 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, _, _, _, _, _, _, _, _, _, _, _, _, _, _) =
+    let (items, refined, structs, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     // The bounded profile stays a single-atom contract — sibling atoms
     // only serve as call targets, which the widened profile alone admits.
@@ -517,6 +539,7 @@ pub fn extract_pure_i64_contract(
         &refined,
         &structs,
         &EnumEnv::new(),
+        false,
         false,
         false,
         false,
@@ -570,6 +593,7 @@ pub fn extract_pure_i64_module_contracts(
         nested_writes,
         enum_writes,
         f64_arith,
+        str_bound_declared,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     // The translator-IR pin must see the same type environment the
     // verifier's certificate does — a `Port`-typed binder carries its
@@ -616,6 +640,7 @@ pub fn extract_pure_i64_module_contracts(
                 nested_writes,
                 enum_writes,
                 f64_arith,
+                str_bound_declared,
                 &cert_env,
             )),
             // Type and struct declarations carry no per-atom contract;
@@ -651,6 +676,7 @@ pub fn module_source_profile(
         nested_writes,
         enum_writes,
         f64_arithmetic,
+        str_bound_declared,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     Ok(fragment_profile(
         true,
@@ -670,6 +696,7 @@ pub fn module_source_profile(
         nested_writes,
         enum_writes,
         f64_arithmetic,
+        str_bound_declared,
     ))
 }
 
@@ -692,6 +719,7 @@ type AdmittedModule = (
     RefinedEnv,
     StructEnv,
     EnumEnv,
+    bool,
     bool,
     bool,
     bool,
@@ -841,6 +869,7 @@ fn admit_pure_i64_atoms(
             &enums,
             admission.admits_struct_values(),
             admission.admits_enum_values(),
+            admission.admits_str_bound(),
         )?;
         // Every atom's contract is checked against the complete callee map,
         // not only the tail's: module validation compares each atom
@@ -878,6 +907,12 @@ fn admit_pure_i64_atoms(
     }
     let u64_leaves = uses_u64_leaves(&items);
     let f64_leaves = uses_f64_leaves(&items);
+    // A declared `str_bound` pins v20 module-wide, the same
+    // declaration-presence convention `has_composite_payloads`
+    // follows: consumers read the bound from the atom clause.
+    let str_bound_declared = items
+        .iter()
+        .any(|item| matches!(item, Item::Atom(atom) if atom.str_bound.is_some()));
     Ok((
         items,
         refined,
@@ -896,6 +931,7 @@ fn admit_pure_i64_atoms(
         nested_writes_used.get(),
         enum_writes_used.get(),
         f64_arithmetic_used.get(),
+        str_bound_declared,
     ))
 }
 
@@ -1070,9 +1106,14 @@ fn fragment_profile(
     nested_writes: bool,
     enum_writes: bool,
     f64_arithmetic: bool,
+    str_bound_declared: bool,
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if str_bound_declared {
+        // A declared `str_bound` clause is only ever admitted under
+        // v20 — the strongest claim the ladder makes.
+        PURE_I64_COMPOSITE_PROFILE_V20
     } else if f64_arithmetic {
         // Real `f64` arithmetic is only ever admitted under v19 — the
         // IEEE decode/compute/re-encode it requires is the strongest
@@ -1238,6 +1279,7 @@ fn atom_contract(
     nested_writes: bool,
     enum_writes: bool,
     f64_arithmetic: bool,
+    str_bound_declared: bool,
     cert_env: &ModuleEnv,
 ) -> Result<SemanticContract, SemanticContractError> {
     atom.span.file = source_name.to_owned();
@@ -1259,6 +1301,7 @@ fn atom_contract(
         nested_writes,
         enum_writes,
         f64_arithmetic,
+        str_bound_declared,
     );
     let result_fields = atom
         .return_type
@@ -1658,6 +1701,9 @@ struct KindEnv<'a> {
     /// Set when the atom applies an `f64` operator, so the module
     /// names the v19 profile only when it needs it.
     f64_arithmetic_used: &'a std::cell::Cell<bool>,
+    /// The atom's effective `Str` literal bound — `str_bound: N;`
+    /// when declared, else `STR_BOUND`.
+    str_bound: usize,
 }
 
 impl<'a> KindEnv<'a> {
@@ -1955,6 +2001,7 @@ fn call_return_kinds<'ctx>(
         merged_composites: admission.admits_merged_composites(),
         next_array_id: std::cell::Cell::new(0),
         alloc_stores: std::cell::RefCell::new(HashMap::new()),
+        str_bound: std::cell::Cell::new(STR_BOUND),
     }
 }
 
@@ -2006,6 +2053,9 @@ struct CallShapes<'ctx> {
     /// shadowed: the flat `inner` map overwrites its entry, so name
     /// lookup alone can no longer carry the update.
     alloc_stores: std::cell::RefCell<HashMap<u64, Array<'ctx>>>,
+    /// The current atom's effective `Str` literal bound — set by
+    /// `encode_atom_body` before each atom's body is encoded.
+    str_bound: std::cell::Cell<usize>,
 }
 
 impl<'ctx> CallShapes<'ctx> {
@@ -2418,6 +2468,7 @@ fn check_atom_contract(
         enum_writes_used,
         admit_f64_arithmetic,
         f64_arithmetic_used,
+        str_bound: atom.str_bound.unwrap_or(STR_BOUND),
     };
     for p in &atom.params {
         env.bind(&p.name)?;
@@ -2560,6 +2611,7 @@ fn validate_atom(
     enums: &EnumEnv,
     admit_struct_values: bool,
     admit_enum_values: bool,
+    admit_str_bound: bool,
 ) -> Result<(), SemanticContractError> {
     // A declared subrange integer result lowers to an i64 return like
     // the parameters — the emitter emits no truncation, so the checked
@@ -2629,6 +2681,8 @@ fn validate_atom(
         || atom.decreases.is_some()
         || atom.max_unroll.is_some()
         || atom.trace_id.is_some()
+        || (atom.str_bound.is_some() && !admit_str_bound)
+        || atom.str_bound.is_some_and(|n| n > STR_BOUND_MAX)
     {
         return Err(SemanticContractError::Unsupported(
             "semantic modes, assumptions or annotations outside profile",
@@ -3970,6 +4024,7 @@ fn resolve_alias(
                     enum_writes_used: &std::cell::Cell::new(false),
                     admit_f64_arithmetic: false,
                     f64_arithmetic_used: &std::cell::Cell::new(false),
+                    str_bound: STR_BOUND,
                 },
             )?,
             ScalarKind::Bool,
@@ -5393,7 +5448,7 @@ fn expression_kind(
         // byte sequence, immutable, at most `STR_BOUND` cells under
         // the bounded-memory model.
         Expr::StringLit(s)
-            if allow_wrapping_arithmetic && env.admit_str && s.len() <= STR_BOUND =>
+            if allow_wrapping_arithmetic && env.admit_str && s.len() <= env.str_bound =>
         {
             env.strs_used.set(true);
             env.arrays_used.set(true);
@@ -6023,7 +6078,7 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let (items, refined, structs, enums, _, _, _, _, _, _, _, arrays, strs, _, _, _, _) =
+    let (items, refined, structs, enums, _, _, _, _, _, _, _, arrays, strs, _, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
@@ -6088,6 +6143,9 @@ fn encode_atom_body<'ctx>(
     let mut top_writes = HashMap::new();
     let mut loop_exits = Vec::new();
     let mut call_sites = Vec::new();
+    call_returns
+        .str_bound
+        .set(atom.str_bound.unwrap_or(STR_BOUND));
     let value = match source_stmt(
         &body,
         context,
@@ -6806,6 +6864,11 @@ fn module_atom_obligations<'ctx>(
     let top = Bool::from_bool(context, true);
     let mut sink = Vec::new();
     let mut requires_exits = Vec::new();
+    // Contract literals belong to this atom's clause — the shared
+    // `str_bound` cell still holds whatever the last encoded body left.
+    call_returns
+        .str_bound
+        .set(atom.str_bound.unwrap_or(STR_BOUND));
     let requires = source_expr(
         &requires,
         context,
@@ -6878,6 +6941,11 @@ fn module_atom_obligations<'ctx>(
         let site_env = param_env(&callee.params, &site.args, context, refined, structs, enums)?;
         let callee_requires =
             parse_expression_checked(&callee.requires).map_err(|_| SemanticContractError::Parse)?;
+        // The clause belongs to the callee — its declared bound, not
+        // the caller's.
+        call_returns
+            .str_bound
+            .set(callee.str_bound.unwrap_or(STR_BOUND));
         let mut site_exits = Vec::new();
         let callee_requires = source_expr(
             &callee_requires,
@@ -6955,6 +7023,9 @@ fn module_atom_obligations<'ctx>(
         );
         let callee_ensures =
             parse_expression_checked(&callee.ensures).map_err(|_| SemanticContractError::Parse)?;
+        call_returns
+            .str_bound
+            .set(callee.str_bound.unwrap_or(STR_BOUND));
         let mut ensures_site_exits = Vec::new();
         let callee_ensures = source_expr(
             &callee_ensures,
@@ -7033,6 +7104,11 @@ fn atom_obligation<'ctx>(
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
     let top = Bool::from_bool(context, true);
     let mut sink = Vec::new();
+    // Same shared-cell convention as `module_atom_obligations`: the
+    // clause literals read this atom's declared bound.
+    call_returns
+        .str_bound
+        .set(atom.str_bound.unwrap_or(STR_BOUND));
     // A `while` inside a requires/ensures block keeps its bound: an
     // input whose contract loop never exits within `LOOP_BOUND` falls
     // outside the checked domain instead of comparing a stale value.
@@ -9286,7 +9362,7 @@ fn source_expr<'ctx>(
         // + per-element `store` writes. `elem: Str` marks the backing
         // immutable: the kind gate refuses `s[i] = v` and `s = _`.
         Expr::StringLit(s) => {
-            if s.len() > STR_BOUND {
+            if s.len() > call_returns.str_bound.get() {
                 return Err(SemanticContractError::Unsupported("str literal bound"));
             }
             let zero = BV::from_u64(ctx, 0, 64);
@@ -12663,6 +12739,173 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
                 "admitted: {why}"
             );
         }
+    }
+
+    #[test]
+    fn composite_v20_admits_a_declared_str_bound_clause() {
+        let v20 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV20)
+        };
+        let outcomes = |source: &str| {
+            refined_module_outcomes_admission(source, RefinedAdmission::CompositeV20)
+        };
+        let module = |piece: &str| format!("{piece}\n{MAIN0}");
+        let lit = |n: usize| format!("\"{}\"", "a".repeat(n));
+        for piece in [
+            // A 100-byte literal needs `str_bound: 128;` — the default
+            // `STR_BOUND` (64) would reject it.
+            format!(
+                "atom big() -> u64 requires: true; ensures: result == 97; str_bound: 128; body: {{ let s = {}; s[99] }};",
+                lit(100)
+            ),
+            // A declared bound may narrow below the default.
+            "atom tiny() -> u64 requires: true; ensures: result == 97; str_bound: 4; body: { let s = \"abc\"; s[0] };".to_string(),
+        ] {
+            let source = module(&piece);
+            match v20(&source) {
+                Ok(cs) => assert!(
+                    cs.iter()
+                        .all(|c| c.profile == PURE_I64_COMPOSITE_PROFILE_V20),
+                    "{piece}"
+                ),
+                Err(e) => panic!("{piece}: {e:?}"),
+            }
+            match std::panic::catch_unwind(|| outcomes(&source)) {
+                Ok(res) => assert!(
+                    res.iter().all(|r| *r == z3::SatResult::Unsat),
+                    "{piece}"
+                ),
+                Err(_) => panic!("outcomes failed for: {piece}"),
+            }
+        }
+        // A declared bound below the literal's length still fails
+        // closed — the bound is the cap, not a hint.
+        let over_bound = module(&format!(
+            "atom over() -> u64 requires: true; ensures: true; str_bound: 8; body: {{ let s = {}; s[0] }};",
+            lit(9)
+        ));
+        assert!(v20(&over_bound).is_err());
+        // The default `STR_BOUND` applies without the clause: a
+        // 65-byte literal is outside the fragment.
+        let over_default = module(&format!(
+            "atom d() -> u64 requires: true; ensures: true; body: {{ let s = {}; s[0] }};",
+            lit(65)
+        ));
+        assert!(v20(&over_default).is_err());
+        // Above `STR_BOUND_MAX` the clause itself is refused, under
+        // every admission.
+        let too_big =
+            module("atom m() -> i64 requires: true; ensures: true; str_bound: 2048; body: { 0 };");
+        for admission in [
+            RefinedAdmission::CompositeV20,
+            RefinedAdmission::CompositeV19,
+        ] {
+            assert!(
+                extract_pure_i64_module_contracts(&too_big, "m.mm", None, admission).is_err(),
+                "{admission:?}"
+            );
+        }
+        // The clause is v20-only: a narrower profile refuses it even
+        // when the bound itself is small.
+        let declared =
+            module("atom m() -> i64 requires: true; ensures: true; str_bound: 8; body: { 0 };");
+        assert!(extract_pure_i64_module_contracts(
+            &declared,
+            "m.mm",
+            None,
+            RefinedAdmission::CompositeV19
+        )
+        .is_err());
+        // Declaring the clause pins v20 even when no `Str` literal is
+        // used — the declaration-presence convention.
+        assert_eq!(
+            module_source_profile(&declared, RefinedAdmission::CompositeV20).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V20
+        );
+        // No clause and no `Str` literal keeps the wrapping profile —
+        // the declaration alone is what pins v20.
+        assert_eq!(
+            module_source_profile(
+                &module("atom m() -> i64 requires: true; ensures: true; body: { 0 };"),
+                RefinedAdmission::CompositeV20
+            )
+            .unwrap(),
+            PURE_I64_WRAPPING_PROFILE
+        );
+    }
+
+    #[test]
+    fn composite_v20_contract_literals_use_the_clause_atom_bound() {
+        // A `requires`/`ensures` literal belongs to the atom that
+        // declares the clause: with a later atom leaving `str_bound`
+        // unset the shared cell would otherwise hold the default
+        // `STR_BOUND` when the first atom's contract is checked —
+        // a declared 100-byte clause literal must not be measured
+        // against 64.
+        let lit = format!("\"{}\"", "a".repeat(100));
+        let requires_case = format!(
+            "atom big(x: i64) -> i64 requires: len({lit}) == 100; ensures: result == x; str_bound: 128; body: {{ x }};\n\
+             atom main() -> i64 requires: true; ensures: result == 0; body: {{ 0 }};"
+        );
+        let ensures_case = format!(
+            "atom big(x: i64) -> i64 requires: true; ensures: len({lit}) == 100 || result == x; str_bound: 128; body: {{ x }};\n\
+             atom main() -> i64 requires: true; ensures: result == 0; body: {{ 0 }};"
+        );
+        // Contract expressions are encoded inside
+        // `module_atom_obligations`, which reads the shared cell —
+        // declaration extraction alone never exercises the bug, so
+        // these cases go through the full obligation encode. A `Str`
+        // literal inside a clause is always rejected downstream
+        // ("array value in a scalar position"); the bound check runs
+        // first, so which error fires tells us which bound the cell
+        // held: honoring the clause atom's bound 128 reaches the
+        // scalar-position rejection, while a stale 64 (the bug)
+        // stops earlier at "str literal bound".
+        let encode_err = |source: &String| {
+            let mut config = z3::Config::new();
+            config.set_timeout_msec(crate::verification::VerificationConfig::default().timeout_ms);
+            let context = z3::Context::new(&config);
+            let result = encode_pure_i64_module_obligations(
+                source,
+                &context,
+                RefinedAdmission::CompositeV20,
+            );
+            match result {
+                Ok(_) => String::new(),
+                Err(e) => format!("{e}"),
+            }
+        };
+        for source in [requires_case, ensures_case] {
+            let err = encode_err(&source);
+            assert!(err.contains("scalar position"), "{source}: {err}");
+        }
+        // Same cell through the call-site path: the callee's own
+        // clause must be encoded under the callee's declared 128,
+        // not the caller's default 64 — a leaked 64 trips the bound
+        // check before the scalar-position rejection can fire.
+        let callee_bound_case = format!(
+            "atom callee() -> i64 requires: len({lit}) == 100; ensures: result == 0; str_bound: 128; body: {{ 0 }};\n\
+             atom main() -> i64 requires: true; ensures: result == 0; body: {{ callee() }};"
+        );
+        let err = encode_err(&callee_bound_case);
+        assert!(
+            err.contains("scalar position"),
+            "{callee_bound_case}: {err}"
+        );
+        // And the inverse still fails closed at extraction: a callee
+        // with no declared bound cannot use the 100-byte literal, no
+        // matter what the caller declares.
+        let callee_default_case = format!(
+            "atom callee() -> i64 requires: len({lit}) == 100; ensures: result == 0; body: {{ 0 }};\n\
+             atom main() -> i64 requires: true; ensures: result == 0; str_bound: 128; body: {{ callee() }};"
+        );
+        assert!(extract_pure_i64_module_contracts(
+            &callee_default_case,
+            "m.mm",
+            None,
+            RefinedAdmission::CompositeV20
+        )
+        .is_err());
     }
 }
 

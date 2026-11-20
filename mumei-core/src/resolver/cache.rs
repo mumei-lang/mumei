@@ -207,6 +207,11 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
         hasher.update(b"|max_unroll:");
         hasher.update(max.to_string().as_bytes());
     }
+    // str_bound も含める（composite admission の変更を検出）
+    if let Some(bound) = atom.str_bound {
+        hasher.update(b"|str_bound:");
+        hasher.update(bound.to_string().as_bytes());
+    }
     format!("{:x}", hasher.finalize())
 }
 

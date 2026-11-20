@@ -39,6 +39,7 @@ pub enum Token {
     Invariant,
     Decreases,
     MaxUnroll,
+    StrBound,
     /// `semantics:` clause selecting the verification encoding of an atom
     /// (currently only `bitvec`).
     Semantics,
@@ -194,6 +195,7 @@ impl std::fmt::Display for Token {
             Token::Invariant => write!(f, "invariant"),
             Token::Decreases => write!(f, "decreases"),
             Token::MaxUnroll => write!(f, "max_unroll"),
+            Token::StrBound => write!(f, "str_bound"),
             Token::Semantics => write!(f, "semantics"),
             Token::Effects => write!(f, "effects"),
             Token::Resources => write!(f, "resources"),

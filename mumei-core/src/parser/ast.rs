@@ -774,6 +774,10 @@ pub struct Atom {
     pub is_async: bool,
     pub trust_level: TrustLevel,
     pub max_unroll: Option<usize>,
+    /// Per-atom `Str` literal bound (`str_bound: N;`) — the maximum
+    /// byte length a `let`-bound string literal may declare under the
+    /// composite profiles. `None` keeps the default `STR_BOUND`.
+    pub str_bound: Option<usize>,
     pub invariant: Option<String>,
     pub effects: Vec<Effect>,
     /// Plan 18: Explicit return type annotation (e.g., `-> Str`). Defaults to None (i64).
