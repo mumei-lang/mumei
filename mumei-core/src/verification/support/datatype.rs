@@ -364,19 +364,31 @@ pub(crate) fn enum_value_leaf_domain<'a>(vc: &VCtx<'a>, value: &Dynamic<'a>) -> 
                 .map(|s| s.sort == target_sort)
                 .unwrap_or(false)
     })?;
-    enum_leaf_domain_for(vc, enum_def, value, MAX_ENUM_PAYLOAD_NEST)
+    let mut budget = MAX_ENUM_DOMAIN_NODES;
+    enum_leaf_domain_for(vc, enum_def, value, MAX_ENUM_PAYLOAD_NEST, &mut budget)
 }
+
+/// Total conjunction nodes [`enum_leaf_domain_for`] may emit for one
+/// enum value. The `enum:`-leaf walk multiplies variant counts level by
+/// level (V outer × V inner × ...), so a declared nesting shape like 16
+/// variants over 8 levels would otherwise mint ~4 billion conjuncts
+/// before the solver ever sees a query. Past the cap the walk simply
+/// stops descending — a dropped domain assumption only weakens what the
+/// proof may assume, never what it may claim.
+const MAX_ENUM_DOMAIN_NODES: usize = 1024;
 
 /// The per-variant conjunction [`enum_value_leaf_domain`] builds for a
 /// value already pinned to `enum_def`. An `enum:`-marked leaf is a single
 /// inner-datatype accessor — `as_int()` cannot see it — so the walk
 /// recurses into the inner enum's own leaf bounds, fueled by
-/// `MAX_ENUM_PAYLOAD_NEST` like the admission-time flattening.
+/// `MAX_ENUM_PAYLOAD_NEST` like the admission-time flattening and
+/// charged against `budget` per emitted node and per descent.
 fn enum_leaf_domain_for<'a>(
     vc: &VCtx<'a>,
     enum_def: &crate::parser::EnumDef,
     value: &Dynamic<'a>,
     fuel: u8,
+    budget: &mut usize,
 ) -> Option<Bool<'a>> {
     let dt = value.as_datatype()?;
     let sort = enum_datatype_sort(vc, enum_def)?;
@@ -388,11 +400,14 @@ fn enum_leaf_domain_for<'a>(
             for (_leaf_name, base) in field_leaf_types(&field.name, vc.module_env)? {
                 let sel = variant_selector_apply(&sort, vidx, accessor_idx, value);
                 if let Some(inner_name) = base.strip_prefix("enum:") {
-                    let inner = (fuel > 0)
+                    let inner = (fuel > 0 && *budget > 0)
                         .then(|| vc.module_env.enums.get(inner_name))
                         .flatten();
                     if let (Some(sel), Some(inner)) = (sel, inner) {
-                        if let Some(bound) = enum_leaf_domain_for(vc, inner, &sel, fuel - 1) {
+                        *budget -= 1;
+                        if let Some(bound) = enum_leaf_domain_for(vc, inner, &sel, fuel - 1, budget)
+                        {
+                            *budget = budget.saturating_sub(1);
                             bounds.push(bound);
                         }
                     }
@@ -400,6 +415,7 @@ fn enum_leaf_domain_for<'a>(
                     .and_then(|sel| sel.as_int())
                     .and_then(|sel| int_leaf_bound(vc.ctx, base.as_str(), &sel))
                 {
+                    *budget = budget.saturating_sub(1);
                     bounds.push(bound);
                 }
                 accessor_idx += 1;
@@ -410,6 +426,7 @@ fn enum_leaf_domain_for<'a>(
         }
         let bound_refs: Vec<&Bool> = bounds.iter().collect();
         let is_v = sort.variants[vidx].tester.apply(&[&dt]).as_bool()?;
+        *budget = budget.saturating_sub(1);
         conjuncts.push(is_v.implies(&Bool::and(vc.ctx, &bound_refs)));
     }
     if conjuncts.is_empty() {
