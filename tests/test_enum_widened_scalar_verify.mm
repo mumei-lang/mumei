@@ -107,3 +107,59 @@ body: {
         _ => 1
     }
 }
+
+// Payload-name registrations stop at the arm: the coverage pass binds
+// `W::A(x)` for its guard, but after the match the outer `x` is still
+// the declared `i64` — `x + y` must not trip the u64 mixing rule.
+atom shadow_scope(e: W, y: i64) -> i64
+requires: true;
+ensures: result == 1;
+body: {
+    let x = y;
+    let m = match e {
+        W::A(x) if x >= 0 => x,
+        _ => 0
+    };
+    if x + y == y + y { 1 } else { 0 }
+}
+
+// Deeper nesting: the domain walk descends four `enum:` levels — the
+// emitted-conjunct budget keeps the bound, not the recursion depth.
+enum N4 {
+    A(u64),
+    B
+}
+
+enum N3 {
+    W(N4),
+    Z
+}
+
+enum N2 {
+    W(N3),
+    Z
+}
+
+enum N1 {
+    W(N2),
+    Z
+}
+
+atom deep_chain(e: N1) -> i64
+requires: true;
+ensures: result == 1;
+body: {
+    match e {
+        N1::W(a) => match a {
+            N2::W(b) => match b {
+                N3::W(c) => match c {
+                    N4::A(x) => if x >= 0 { 1 } else { 0 },
+                    _ => 1
+                },
+                _ => 1
+            },
+            _ => 1
+        },
+        _ => 1
+    }
+}

@@ -4292,6 +4292,13 @@ pub(crate) fn expr_to_z3<'a>(
             {
                 let mut arm_conditions: Vec<Bool> = Vec::new();
                 for arm in arms {
+                    // This coverage pass binds payload names only to make
+                    // guards resolvable — the registrations must not leak
+                    // past the arm: a payload `x` shadowing an outer `i64`
+                    // `x` would leave the outer var typed `u64` after the
+                    // match. Snapshot/restore per arm like the arm pass
+                    // below does.
+                    let int_types_before_check = vc.local_int_types.borrow().clone();
                     let cond = pattern_to_z3_condition(
                         ctx,
                         &arm.pattern,
@@ -4329,6 +4336,7 @@ pub(crate) fn expr_to_z3<'a>(
                     } else {
                         cond
                     };
+                    *vc.local_int_types.borrow_mut() = int_types_before_check;
                     arm_conditions.push(full_cond);
                 }
 
