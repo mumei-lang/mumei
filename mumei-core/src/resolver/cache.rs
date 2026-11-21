@@ -54,7 +54,10 @@ use std::path::Path;
 /// the emitted IR uses — #781) instead of Z3's Euclidean `div`: a
 /// clause like `-7 / 2 == -4` that verified under version 18 is now
 /// refuted, so every int-model verdict must be re-derived.
-pub const VERIFIER_POLICY_VERSION: u32 = 19;
+/// Version 20 models tag-gated direct enum payload reads (`e.port`,
+/// `b.e.port`, `e.p.inner.x`) as datatype selectors instead of flattened-key
+/// or unconstrained values, so cached verdicts must be re-derived.
+pub const VERIFIER_POLICY_VERSION: u32 = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -2462,7 +2465,7 @@ body: { p.a };\n";
         let baseline = proof_hash_for(source, "g");
         assert_eq!(
             baseline,
-            "8a7e844ac62a469f28b48b954a7b6fc2d3684c45edfbc8c2a872495e789c94a7"
+            "a26c5c4b528b90fa4953f5573334d3f123c038e5b2ead1cb837099722afe6813"
         );
         let changed = proof_hash_for(
             &source.replace(
@@ -2475,7 +2478,7 @@ body: { p.a };\n";
     }
 
     #[test]
-    fn effect_free_proof_hash_matches_develop() {
+    fn effect_free_proof_hash_matches_policy_version_20() {
         let hash = proof_hash_for(
             "atom main(x: i64) -> i64\n\
              requires: true;\n\
@@ -2486,7 +2489,7 @@ body: { p.a };\n";
 
         assert_eq!(
             hash,
-            "c9e77d06d1aa97f4b2935e9733093aaeeac671635ccd1722baa526d1e40d5ced"
+            "e93f85b592232909093acb03c42576f4ae11eb810901123221facad0b2279012"
         );
     }
 }
