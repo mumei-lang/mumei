@@ -3537,7 +3537,7 @@ entry:
             atom computed(x: f64, y: f64) -> f64 requires: true; ensures: true; body: { callee(x + y) };\n\
             atom mixed_callee(i: i64, x: f64) -> f64 requires: true; ensures: true; body: { x };\n\
             atom mixed_caller(i: i64, x: f64) -> f64 requires: true; ensures: true; body: { mixed_callee(i, x) };\n\
-            atom twice(x: f64, y: f64) -> f64 requires: true; ensures: true; body: { callee(x + y); callee(x + y) };";
+            atom twice(x: f64) -> f64 requires: true; ensures: true; body: { callee(x); callee(x) };";
         let admission = RefinedAdmission::CompositeV19;
         let caller = source_model_named_with_admission(source, "caller", &context, admission);
         let computed = source_model_named_with_admission(source, "computed", &context, admission);
@@ -3622,44 +3622,67 @@ entry:
             FunctionOutcome::Equivalent
         );
 
-        let mut nan_payload_caller = twice;
+        let nan_payload_caller = twice;
         assert_eq!(nan_payload_caller.call_sites.len(), 2);
         assert_eq!(
             nan_payload_caller.call_sites[0].arg_leaf_doubles,
             vec![true]
         );
-        let computed_argument = &nan_payload_caller.call_sites[0].args[0];
-        nan_payload_caller
-            .param_domain
-            .push(mumei_core::semantic_contract::f64_is_nan(
-                &context,
-                computed_argument,
-            ));
-        let two_payloads = [
+        assert_eq!(
+            nan_payload_caller.call_sites[1].arg_leaf_doubles,
+            vec![true]
+        );
+        let quiets_signaling_nan = [
             0x41, 0x54, // pushq %r12
-            0xf2, 0x0f, 0x58, 0xc1, // addsd %xmm1, %xmm0
             0x66, 0x49, 0x0f, 0x7e, 0xc4, // movq %xmm0, %r12
             0xe8, 0x00, 0x00, 0x00, 0x00, // callq callee
             0x4c, 0x89, 0xe0, // movq %r12, %rax
-            0x48, 0x83, 0xc8, 0x01, // orq $1, %rax
+            0x66, 0x48, 0x0f, 0x6e, 0xc0, // movq %rax, %xmm0
+            0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x80, // movabsq $-0x8000000000000000, %rax
+            0x66, 0x48, 0x0f, 0x6e, 0xc8, // movq %rax, %xmm1
+            0xf2, 0x0f, 0x58, 0xc1, // addsd %xmm1, %xmm0
+            0xe8, 0x00, 0x00, 0x00, 0x00, // callq callee
+            0x41, 0x5c, // popq %r12
+            0xc3,
+        ];
+        let exact_plain_x = [
+            0x41, 0x54, // pushq %r12
+            0x66, 0x49, 0x0f, 0x7e, 0xc4, // movq %xmm0, %r12
+            0xe8, 0x00, 0x00, 0x00, 0x00, // callq callee
+            0x4c, 0x89, 0xe0, // movq %r12, %rax
             0x66, 0x48, 0x0f, 0x6e, 0xc0, // movq %rax, %xmm0
             0xe8, 0x00, 0x00, 0x00, 0x00, // callq callee
             0x41, 0x5c, // popq %r12
             0xc3,
         ];
-        let mut twice_targets = helper_call_targets(&[12, 29]);
+        let mut twice_targets = helper_call_targets(&[8, 40]);
         for target in twice_targets.values_mut() {
             target.name = "callee".to_owned();
         }
         assert_eq!(
             check_function(
-                &two_payloads,
+                &quiets_signaling_nan,
                 0,
                 &nan_payload_caller,
                 &twice_targets,
                 &context,
             ),
             FunctionOutcome::OutsideProfile("call_arguments")
+        );
+        let mut plain_x_targets = helper_call_targets(&[8, 21]);
+        for target in plain_x_targets.values_mut() {
+            target.name = "callee".to_owned();
+        }
+        assert_eq!(
+            check_function(
+                &exact_plain_x,
+                0,
+                &nan_payload_caller,
+                &plain_x_targets,
+                &context,
+            ),
+            FunctionOutcome::Equivalent
         );
 
         let tail_call = [0xe9, 0x00, 0x00, 0x00, 0x00]; // jmp callee
