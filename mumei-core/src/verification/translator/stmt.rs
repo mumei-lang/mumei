@@ -475,7 +475,12 @@ fn struct_field_path_exists(
         else {
             return false;
         };
-        let Some(nested_type) = canonical_struct_type(vc, &field.type_name) else {
+        let resolved_field_type = vc.module_env.resolve_base_type(&field.type_name);
+        if resolved_field_type.trim().starts_with('[') || resolved_field_type.trim().ends_with("[]")
+        {
+            return false;
+        }
+        let Some(nested_type) = canonical_struct_type(vc, &resolved_field_type) else {
             return false;
         };
         let Some(nested) = vc.module_env.get_struct(&nested_type) else {

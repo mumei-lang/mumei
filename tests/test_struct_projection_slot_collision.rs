@@ -41,6 +41,12 @@ fn user_locals_cannot_collide_with_struct_projection_slots() {
         expected.len(),
         "each collision must have exactly one diagnostic:\n{payload:#}"
     );
+    assert!(
+        !diagnostics.iter().any(|entry| {
+            entry["atom"].as_str() == Some("array_element_field_name_is_not_a_projection_slot")
+        }),
+        "array element fields are not projection slots:\n{payload:#}"
+    );
     for atom in expected {
         let errors: Vec<_> = diagnostics
             .iter()

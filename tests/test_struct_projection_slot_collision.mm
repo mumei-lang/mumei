@@ -40,3 +40,20 @@ body: {
     let p_x = p;
     0
 };
+
+struct ArrayItem {
+    x: i64
+}
+
+struct ArrayP {
+    items: [ArrayItem]
+}
+
+atom array_element_field_name_is_not_a_projection_slot(items: [ArrayItem]) -> i64
+requires: true;
+ensures: result == 0;
+body: {
+    let q = ArrayP { items: items };
+    let q_items_x = 1;
+    0
+};
