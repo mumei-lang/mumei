@@ -70,6 +70,17 @@ fn observation_invocation_envelope() -> serde_json::Value {
     })
 }
 
+/// Record the running consumer binary's compile-time target as an observation
+/// of where the invocation ran, never a claim. No host facts are pinned or
+/// compared; libc, loader, kernel and CPU-feature details are not recorded.
+fn observation_host() -> serde_json::Value {
+    serde_json::json!({
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "family": std::env::consts::FAMILY,
+    })
+}
+
 /// Which standard output channel an observation drains and digests.
 #[derive(Clone, Copy)]
 enum ObservedChannel {
@@ -963,6 +974,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                                 "scope": RUNTIME_OBSERVATION_RECHECK_SCOPE,
                                 "build_id": expected_build_id,
                                 "invocation": observation_invocation_envelope(),
+                                "host": observation_host(),
                                 "observations": {
                                     "exit_status": observation.exit_status,
                                     "stdout_sha256": observation.stdout_sha256,
@@ -1376,6 +1388,7 @@ fn write_native_acceptance(
             .contains(&"runtime_observation_semantics")
         {
             value["invocation"] = observation_invocation_envelope();
+            value["host"] = observation_host();
         }
         // Optional binding: sha256 of the accepted record's bytes lets a
         // holder prove WHICH record this descriptor evaluated, without the
@@ -2725,7 +2738,7 @@ mod tests {
     }
 
     #[test]
-    fn observation_envelope_is_only_in_runtime_observation_acceptance() {
+    fn observation_envelope_and_host_are_only_in_runtime_observation_acceptance() {
         let runtime_acceptances = [
             &MULTIFILE_RUNTIME_OBSERVATION_ACCEPTANCE,
             &MULTIFILE_RUNTIME_OBSERVATION_ACCEPTANCE_ARGV_UNPINNED,
@@ -2746,6 +2759,8 @@ mod tests {
             assert_eq!(descriptor["invocation"], observation_invocation_envelope());
             assert_eq!(descriptor["invocation"]["timeout_ms"], 30000);
             assert_eq!(descriptor["invocation"]["channel_cap_bytes"], 65536);
+            assert_eq!(descriptor["host"], observation_host());
+            assert_eq!(descriptor["host"]["os"], std::env::consts::OS);
 
             let mut text_output = Vec::new();
             write_native_acceptance(
@@ -2775,6 +2790,7 @@ mod tests {
             .unwrap();
             let descriptor: serde_json::Value = serde_json::from_slice(&json_output).unwrap();
             assert!(descriptor.get("invocation").is_none());
+            assert!(descriptor.get("host").is_none());
 
             let mut text_output = Vec::new();
             write_native_acceptance(

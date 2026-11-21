@@ -680,7 +680,7 @@ fn runtime_observations_are_rechecked_on_one_invocation() {
     assert_success(&json);
     assert!(json.stdout.ends_with(b"\n"));
     let descriptor: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-    assert_eq!(descriptor.as_object().unwrap().len(), 8);
+    assert_eq!(descriptor.as_object().unwrap().len(), 9);
     assert_eq!(descriptor["schema_version"], "mumei.runtime-observation/v1");
     assert_eq!(descriptor["verdict"], "observed_matching");
     assert_eq!(
@@ -697,6 +697,14 @@ fn runtime_observations_are_rechecked_on_one_invocation() {
             "channel_cap_bytes": 65536,
             "environment": "inherited_unpinned",
             "working_directory": "inherited_unpinned",
+        })
+    );
+    assert_eq!(
+        descriptor["host"],
+        serde_json::json!({
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "family": std::env::consts::FAMILY,
         })
     );
     assert_eq!(
@@ -819,6 +827,14 @@ fn runtime_observations_are_accepted_on_one_invocation() {
         })
     );
     assert_eq!(
+        descriptor["host"],
+        serde_json::json!({
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "family": std::env::consts::FAMILY,
+        })
+    );
+    assert_eq!(
         descriptor["checks_performed"],
         serde_json::json!([
             "bundle_identity_binding",
@@ -908,6 +924,7 @@ fn stderr_acceptance_emits_the_observation_descriptor() {
     let descriptor: serde_json::Value = serde_json::from_slice(&accept.stdout).unwrap();
     assert_eq!(descriptor["accepted"], true);
     assert!(descriptor.get("invocation").is_none());
+    assert!(descriptor.get("host").is_none());
     assert!(
         descriptor["checks_performed"]
             .as_array()
