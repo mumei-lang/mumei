@@ -3090,11 +3090,16 @@ masked immediate, implicit-one, and `%cl`-count shifts, and `or` logical flags.
 The division slice adds `cqto`/`cltd`, register `idivq`/`divq`/`divl`, and
 one-operand `imulq` high-half products. A division is accepted only when each
 path proves the divisor is nonzero and the quotient fits; otherwise it is
-`division_trap`. Masked-zero shifts preserve the prior flags; nonzero shifts
-model only the result zero flag, and an undecided symbolic count makes flags
-unknown. These are bounded proof obligations, not a runtime no-trap or ABI
-claim. The x86-64 integer-register convention and callee-saved
-preservation are assumed, not verified. The C `main` wrapper, CRT/startup
+`division_trap`. The unary slice adds register `inc{l,q}`, `dec{l,q}`,
+`neg{l,q}`, and `not{l,q}`, plus base-and-index `leaq` forms with implicit
+unit scale and displacement. Increment/decrement flags model only the zero
+flag; negation models subtract-from-zero flags, and `not` preserves flags.
+Memory-operand unary forms remain unsupported. Masked-zero shifts preserve
+the prior flags; nonzero shifts model only the result zero flag, and an
+undecided symbolic count makes flags unknown. These are bounded proof
+obligations, not a runtime no-trap or ABI claim. The x86-64 integer-register
+convention and callee-saved preservation are assumed, not verified. The C
+`main` wrapper, CRT/startup
 code, loader, libc and runtime are not covered. Full object-code TV remains
 the deeper endpoint.
 
