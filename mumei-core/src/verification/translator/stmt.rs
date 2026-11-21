@@ -452,9 +452,7 @@ fn record_binding_struct_type(vc: &VCtx, var: &str, value: &Expr) {
         Expr::StructInit { type_name, .. } => Some(type_name.clone()),
         _ => crate::verification::support::datatype::declared_type_of_expr(vc, value),
     }
-    .map(|ty| vc.module_env.resolve_base_type(&ty))
-    .map(|ty| crate::verification::support::datatype::type_name_base(&ty).to_string())
-    .filter(|ty| vc.module_env.get_struct(ty).is_some());
+    .and_then(|ty| canonical_struct_type(vc, &ty));
     match ty {
         Some(name) => {
             vc.local_struct_types
@@ -465,6 +463,12 @@ fn record_binding_struct_type(vc: &VCtx, var: &str, value: &Expr) {
             vc.local_struct_types.borrow_mut().remove(var);
         }
     }
+}
+
+fn canonical_struct_type(vc: &VCtx, type_name: &str) -> Option<String> {
+    let resolved = vc.module_env.resolve_base_type(type_name);
+    let base = crate::verification::support::datatype::type_name_base(&resolved).to_string();
+    vc.module_env.get_struct(&base).map(|_| base)
 }
 
 /// Parameter count of a `LocalLambda`, following `Ite` branches — a call
@@ -1445,24 +1449,17 @@ pub(crate) fn stmt_to_z3<'a>(
             // reads through the new binding would see the stale slots.
             if let Some(existing) =
                 crate::verification::support::datatype::binding_declared_type(vc, var)
+                    .and_then(|ty| canonical_struct_type(vc, &ty))
             {
-                if vc.module_env.get_struct(&existing).is_some() {
-                    let new_ty = match value.as_ref() {
-                        Expr::StructInit { type_name, .. } => Some(type_name.clone()),
-                        _ => {
-                            crate::verification::support::datatype::declared_type_of_expr(vc, value)
-                                .map(|t| {
-                                    crate::verification::support::datatype::type_name_base(&t)
-                                        .to_string()
-                                })
-                                .filter(|t| vc.module_env.get_struct(t).is_some())
-                        }
-                    };
-                    if new_ty.as_deref() != Some(existing.as_str()) {
-                        return Err(MumeiError::type_error(format!(
-                            "let '{var}' shadows a struct binding with a different type — rename the local"
-                        )));
-                    }
+                let new_ty = match value.as_ref() {
+                    Expr::StructInit { type_name, .. } => canonical_struct_type(vc, type_name),
+                    _ => crate::verification::support::datatype::declared_type_of_expr(vc, value)
+                        .and_then(|ty| canonical_struct_type(vc, &ty)),
+                };
+                if new_ty.as_deref() != Some(existing.as_str()) {
+                    return Err(MumeiError::type_error(format!(
+                        "let '{var}' shadows a struct binding with a different type — rename the local"
+                    )));
                 }
             }
             let val = expr_to_z3(vc, value, env, solver_opt)?;

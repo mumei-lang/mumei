@@ -131,6 +131,47 @@ fn aliased_struct_payloads_preserve_unsigned_leaf_semantics() {
 }
 
 #[test]
+fn alias_typed_struct_payload_rebinds_use_canonical_nominal_types() {
+    let output = run_verify(
+        "test_enum_payload_struct_value_alias_rebind.mm",
+        &["--json", "--disable-spurious-detection"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "a rebind to a different struct type must be rejected:\n{stdout}\n{stderr}"
+    );
+    let json_start = stdout
+        .find('{')
+        .unwrap_or_else(|| panic!("verify --json emitted no JSON:\n{stdout}\n{stderr}"));
+    let payload: serde_json::Value = serde_json::from_str(&stdout[json_start..])
+        .unwrap_or_else(|err| panic!("{err}: invalid verify JSON:\n{stdout}\n{stderr}"));
+    let diagnostics = payload["diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("verify JSON has no diagnostics array:\n{payload:#}"));
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|entry| entry["code"] == "failed" && entry["severity"] == "error")
+        .collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "only the different-type rebind should fail:\n{payload:#}"
+    );
+    assert_eq!(
+        errors[0]["atom"], "different_type_rebind_is_rejected",
+        "the alias-equivalent rebind must be accepted:\n{payload:#}"
+    );
+    assert!(
+        errors[0]["message"].as_str().is_some_and(
+            |message| message.contains("shadows a struct binding with a different type")
+        ),
+        "the different-type rebind failed for the wrong reason:\n{payload:#}"
+    );
+}
+
+#[test]
 fn struct_valued_enum_payload_negatives_are_attributed_per_atom() {
     let output = run_verify(
         "test_enum_payload_struct_value_negative.mm",
