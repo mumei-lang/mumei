@@ -191,7 +191,7 @@ fn struct_valued_enum_payload_negatives_are_attributed_per_atom() {
     let diagnostics = payload["diagnostics"]
         .as_array()
         .unwrap_or_else(|| panic!("verify JSON has no diagnostics array:\n{payload:#}"));
-    let cases: [(&str, Option<&str>); 8] = [
+    let cases: [(&str, Option<&str>); 11] = [
         (
             "bad_wrong_leaf",
             Some("Postcondition (ensures) is not satisfied"),
@@ -224,7 +224,20 @@ fn struct_valued_enum_payload_negatives_are_attributed_per_atom() {
             "bad_ambiguous_owner",
             Some("Postcondition (ensures) is not satisfied"),
         ),
+        (
+            "bad_both_unproven_rebind",
+            Some("Postcondition (ensures) is not satisfied"),
+        ),
+        (
+            "bad_both_unproven_rebind_assign",
+            Some("Postcondition (ensures) is not satisfied"),
+        ),
+        (
+            "bad_both_unproven_nested_rebind",
+            Some("Postcondition (ensures) is not satisfied"),
+        ),
     ];
+    let expected_errors = cases.len();
     for (atom, expected_message) in cases {
         let atom_errors: Vec<_> = diagnostics
             .iter()
@@ -248,6 +261,14 @@ fn struct_valued_enum_payload_negatives_are_attributed_per_atom() {
             );
         }
     }
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|entry| entry["code"] == "failed" && entry["severity"] == "error")
+            .count(),
+        expected_errors,
+        "negative fixture has unrelated resolution errors:\n{payload:#}"
+    );
 }
 
 #[test]

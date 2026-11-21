@@ -278,39 +278,31 @@ fn havoc_vars<'a>(vc: &VCtx<'a>, env: &mut Env<'a>, vars: &std::collections::Has
             // binding-keyed slots and mirror them under the fresh
             // handle's name, or `q.f` resolves to the pre-loop
             // projection (or fails to resolve at all).
-            if let Some(sdef) =
+            if let Some(struct_type) =
                 crate::verification::support::datatype::binding_declared_type(vc, name)
-                    .and_then(|type_name| vc.module_env.get_struct(&type_name))
+                    .and_then(|ty| canonical_struct_type(vc, &ty))
             {
-                let slot_keys: std::collections::HashSet<String> = sdef
-                    .fields
-                    .iter()
-                    .flat_map(|field| {
-                        [
-                            format!("{name}_{}", field.name),
-                            format!("__struct_{name}_{}", field.name),
-                        ]
-                    })
-                    .filter(|key| env.contains_key(key))
-                    .collect();
-                havoc_vars(vc, env, &slot_keys);
-                let handle_name = env.get(name).and_then(|handle| {
-                    (handle.kind() == z3::AstKind::App
-                        && handle.decl().kind() == z3::DeclKind::UNINTERPRETED)
-                        .then(|| handle.decl().name())
-                });
-                if let Some(handle_name) = handle_name {
-                    let values: Vec<(String, Dynamic)> = sdef
-                        .fields
-                        .iter()
-                        .filter_map(|field| {
-                            env.get(&format!("__struct_{name}_{}", field.name))
-                                .or_else(|| env.get(&format!("{name}_{}", field.name)))
-                                .map(|value| (field.name.clone(), value.clone()))
-                        })
-                        .collect();
-                    if !values.is_empty() {
-                        bind_struct_fields(env, &handle_name, &values);
+                if let Some(sdef) = vc.module_env.get_struct(&struct_type) {
+                    let slot_keys = struct_binding_slot_keys(vc, name, sdef, env);
+                    havoc_vars(vc, env, &slot_keys);
+                    let handle_name = env.get(name).and_then(|handle| {
+                        (handle.kind() == z3::AstKind::App
+                            && handle.decl().kind() == z3::DeclKind::UNINTERPRETED)
+                            .then(|| handle.decl().name())
+                    });
+                    if let Some(handle_name) = handle_name {
+                        let values: Vec<(String, Dynamic)> = sdef
+                            .fields
+                            .iter()
+                            .filter_map(|field| {
+                                env.get(&format!("__struct_{name}_{}", field.name))
+                                    .or_else(|| env.get(&format!("{name}_{}", field.name)))
+                                    .map(|value| (field.name.clone(), value.clone()))
+                            })
+                            .collect();
+                        if !values.is_empty() {
+                            bind_struct_fields(env, &handle_name, &values);
+                        }
                     }
                 }
             }
@@ -469,6 +461,82 @@ fn canonical_struct_type(vc: &VCtx, type_name: &str) -> Option<String> {
     let resolved = vc.module_env.resolve_base_type(type_name);
     let base = crate::verification::support::datatype::type_name_base(&resolved).to_string();
     vc.module_env.get_struct(&base).map(|_| base)
+}
+
+fn struct_binding_slot_keys<'a>(
+    vc: &VCtx<'a>,
+    binding: &str,
+    sdef: &crate::parser::ast::StructDef,
+    env: &Env<'a>,
+) -> std::collections::HashSet<String> {
+    fn collect<'a>(
+        vc: &VCtx<'a>,
+        binding: &str,
+        sdef: &crate::parser::ast::StructDef,
+        env: &Env<'a>,
+        depth: usize,
+        keys: &mut std::collections::HashSet<String>,
+    ) {
+        const MAX_NESTED_DEPTH: usize = 16;
+        for field in &sdef.fields {
+            let direct_key = format!("{binding}_{}", field.name);
+            let struct_key = struct_field_key(binding, &field.name);
+            for key in [direct_key.clone(), struct_key] {
+                if env.contains_key(&key) {
+                    keys.insert(key);
+                }
+            }
+            let resolved = vc.module_env.resolve_base_type(&field.type_name);
+            if depth < MAX_NESTED_DEPTH
+                && !resolved.trim().starts_with('[')
+                && !resolved.trim().ends_with("[]")
+            {
+                if let Some(nested_type) = canonical_struct_type(vc, &resolved) {
+                    if let Some(nested) = vc.module_env.get_struct(&nested_type) {
+                        collect(vc, &direct_key, nested, env, depth + 1, keys);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut keys = std::collections::HashSet::new();
+    collect(vc, binding, sdef, env, 0, &mut keys);
+    keys
+}
+
+fn rebind_struct_binding_slots<'a>(
+    vc: &VCtx<'a>,
+    binding: &str,
+    value: &Dynamic<'a>,
+    env: &mut Env<'a>,
+) {
+    let Some(struct_type) =
+        crate::verification::support::datatype::binding_declared_type(vc, binding)
+            .and_then(|ty| canonical_struct_type(vc, &ty))
+    else {
+        return;
+    };
+    let Some(sdef) = vc.module_env.get_struct(&struct_type) else {
+        return;
+    };
+
+    let slot_keys = struct_binding_slot_keys(vc, binding, sdef, env);
+    let fields = nested_field_bindings(env, value);
+    let mut rebound = std::collections::HashSet::new();
+    for (field, _) in &fields {
+        rebound.insert(format!("{binding}_{field}"));
+        rebound.insert(struct_field_key(binding, field));
+    }
+    if !fields.is_empty() {
+        bind_struct_fields(env, binding, &fields);
+    }
+
+    let unbound: std::collections::HashSet<String> =
+        slot_keys.difference(&rebound).cloned().collect();
+    if !unbound.is_empty() {
+        havoc_vars(vc, env, &unbound);
+    }
 }
 
 /// Parameter count of a `LocalLambda`, following `Ite` branches — a call
@@ -1469,6 +1537,7 @@ pub(crate) fn stmt_to_z3<'a>(
             record_binding_lambda(vc, var, value, env, solver_opt);
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
+            rebind_struct_binding_slots(vc, var, &val, env);
             wire_array_slots(vc, var, Some(value), &val, env);
             profile_solver_assertion(vc, &format!("let_{}", var), None);
             Ok(val)
@@ -1524,6 +1593,7 @@ pub(crate) fn stmt_to_z3<'a>(
             record_binding_lambda(vc, var, value, env, solver_opt);
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
+            rebind_struct_binding_slots(vc, var, &val, env);
             wire_array_slots(vc, var, Some(value), &val, env);
             profile_solver_assertion(vc, &format!("assign_{}", var), None);
             Ok(val)

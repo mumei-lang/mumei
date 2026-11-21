@@ -60,7 +60,10 @@ use std::path::Path;
 /// Version 21 materializes struct-valued named enum payload reads (`e.p`,
 /// `e.p.inner`) as struct handles over datatype selectors when each owning tag
 /// is proven, so cached verdicts must be re-derived.
-pub const VERIFIER_POLICY_VERSION: u32 = 21;
+/// Version 22 havocs stale binding-keyed struct projections when rebinding to
+/// a value whose enum payload tag is unproven, so cached verdicts must be
+/// re-derived.
+pub const VERIFIER_POLICY_VERSION: u32 = 22;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -2468,7 +2471,7 @@ body: { p.a };\n";
         let baseline = proof_hash_for(source, "g");
         assert_eq!(
             baseline,
-            "86995073c9e8bcd238280073da798116daf0566d90075d0d3ad2e9b1b61ecc0b"
+            "86755a3a3688f831c9e4f076e1da6e98c53a026ffd155b531510b040eb6d59fa"
         );
         let changed = proof_hash_for(
             &source.replace(
@@ -2481,7 +2484,7 @@ body: { p.a };\n";
     }
 
     #[test]
-    fn effect_free_proof_hash_matches_policy_version_21() {
+    fn effect_free_proof_hash_matches_policy_version_22() {
         let hash = proof_hash_for(
             "atom main(x: i64) -> i64\n\
              requires: true;\n\
@@ -2492,7 +2495,7 @@ body: { p.a };\n";
 
         assert_eq!(
             hash,
-            "68ef1b1451596b4643abfb06218b0b0edcdaa8b343095838a242fdefcedf00f6"
+            "c3f76517f88cd04f91944b642256a31c176e5c1ced830e4d284fa6627b2e529e"
         );
     }
 }

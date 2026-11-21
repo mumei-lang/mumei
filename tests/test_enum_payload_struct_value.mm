@@ -141,3 +141,55 @@ body: {
     let e = SafeEv::Store(SafeP { x: 1, y: 2 });
     get_safe_x(e.p)
 };
+
+atom tag_proven_payload_rebind(e: Ev, e2: Ev, v1: i64, v2: i64) -> i64
+requires: match e {
+    Ev::Move(p) => p.inner.x == v1,
+    _ => false
+} && match e2 {
+    Ev::Move(p) => p.inner.x == v2,
+    _ => false
+};
+ensures: result == v2;
+body: {
+    let q = e.p;
+    let old = q.inner.x;
+    let q = e2.p;
+    q.inner.x
+};
+
+atom tag_proven_payload_assign_rebind(e: Ev, e2: Ev, v1: i64, v2: i64) -> i64
+requires: match e {
+    Ev::Move(p) => p.inner.x == v1,
+    _ => false
+} && match e2 {
+    Ev::Move(p) => p.inner.x == v2,
+    _ => false
+};
+ensures: result == v2;
+body: {
+    let q = e.p;
+    let old = q.inner.x;
+    q = e2.p;
+    q.inner.x
+};
+
+atom plain_struct_variable_rebind(p1: P, p2: P, v: i64) -> i64
+requires: p2.inner.x == v;
+ensures: result == v;
+body: {
+    let q = p1;
+    let old = q.inner.x;
+    let q = p2;
+    q.inner.x
+};
+
+atom struct_init_rebind(v1: i64, v2: i64) -> i64
+requires: true;
+ensures: result == v2;
+body: {
+    let q = P { inner: Inner { x: v1, y: 2 }, z: 3 };
+    let old = q.inner.x;
+    let q = P { inner: Inner { x: v2, y: 4 }, z: 5 };
+    q.inner.x
+};

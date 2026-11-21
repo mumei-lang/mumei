@@ -29,6 +29,15 @@ enum Ambiguous {
     Stop
 }
 
+struct FlatP {
+    x: i64
+}
+
+enum FlatEv {
+    Move(p: FlatP),
+    Stop
+}
+
 atom get_p(p: P) -> i64
 requires: true;
 ensures: result == p.inner.x;
@@ -104,3 +113,33 @@ requires: match e {
 };
 ensures: result == v;
 body: e.p.inner.x;
+
+atom bad_both_unproven_rebind(e: FlatEv, e2: FlatEv) -> i64
+requires: true;
+ensures: result == 0;
+body: {
+    let q = e.p;
+    let a = q.x;
+    let q = e2.p;
+    q.x - a
+};
+
+atom bad_both_unproven_rebind_assign(e: FlatEv, e2: FlatEv) -> i64
+requires: true;
+ensures: result == 0;
+body: {
+    let q = e.p;
+    let a = q.x;
+    q = e2.p;
+    q.x - a
+};
+
+atom bad_both_unproven_nested_rebind(e: Ev, e2: Ev) -> i64
+requires: true;
+ensures: result == 0;
+body: {
+    let q = e.p;
+    let a = q.inner.x;
+    let q = e2.p;
+    q.inner.x - a
+};
