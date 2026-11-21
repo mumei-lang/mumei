@@ -4136,6 +4136,8 @@ fn recheck_machine_tv_accept_object_f64_module_bundle() {
         "atom fadd(x: f64, y: f64) -> f64 requires: true; ensures: true; body: { x * y + x };\n\
          atom feq(x: f64, y: f64) -> bool requires: true; ensures: result == (x == y); body: { x == y };\n\
          atom mixed(x: i64, y: f64) -> f64 requires: true; ensures: true; body: { y };\n\
+         atom callee(x: f64) -> f64 requires: true; ensures: true; body: { x };\n\
+         atom caller(x: f64) -> f64 requires: true; ensures: true; body: { callee(x) };\n\
          atom main() -> i64 requires: true; ensures: true; body: { 0 };",
     );
     let record = module_record(&bundle);
@@ -4154,7 +4156,7 @@ fn recheck_machine_tv_accept_object_f64_module_bundle() {
         machine_tv["register_convention_assumed"],
         "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_result_rax_or_xmm0"
     );
-    for function in ["fadd", "feq", "mixed"] {
+    for function in ["fadd", "feq", "mixed", "callee", "caller"] {
         assert_eq!(
             machine_tv["functions"][function]["outcome"],
             "equivalent_within_profile"
