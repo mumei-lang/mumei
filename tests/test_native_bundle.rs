@@ -83,6 +83,19 @@ fn consume(action: &str, source: &Path, bundle: &Path, id: &str) -> Output {
     cli(&args)
 }
 
+fn recheck_object(source: &Path, bundle: &Path, id: &str, json: bool) -> Output {
+    consume(
+        if json {
+            "recheck-object --json"
+        } else {
+            "recheck-object"
+        },
+        source,
+        bundle,
+        id,
+    )
+}
+
 fn repin(bundle: &Path, source: Option<&str>) -> String {
     let mut record: native_bundle::NativeBundleRecord =
         serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
@@ -123,6 +136,96 @@ fn repin(bundle: &Path, source: Option<&str>) -> String {
     let bytes = serde_json::to_vec(&record).unwrap();
     fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
     native_bundle::sha256(&bytes)
+}
+
+#[test]
+fn recheck_object_reports_single_bundle_symbol_surface() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+
+    let text = recheck_object(&source, &bundle, &id, false);
+    assert_success(&text);
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains(
+        "Native object symbol surface corresponds to the pinned LLVM IR: 2 defined functions."
+    ));
+
+    let output = recheck_object(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(descriptor.as_object().unwrap().len(), 7);
+    assert_eq!(
+        descriptor["schema_version"],
+        "mumei.object-symbol-correspondence/v1"
+    );
+    assert_eq!(
+        descriptor["scope"],
+        "artifact_reproduction_and_object_symbol_surface_only/no_instruction_abi_or_runtime_semantics"
+    );
+    assert_eq!(
+        descriptor["defined_functions"],
+        serde_json::json!(["__mumei_user_main", "main"])
+    );
+    assert_eq!(descriptor["external_references"], serde_json::json!([]));
+    assert_eq!(
+        descriptor["checks_performed"],
+        serde_json::json!([
+            "toolchain_object_executable_reproduction",
+            "object_symbol_correspondence",
+        ])
+    );
+    assert_eq!(
+        descriptor["checks_not_performed"],
+        serde_json::json!([
+            "optimizer_semantics",
+            "raw_link_argument_vector_reproduction",
+            "abi_runtime_semantics",
+            "os_exit_status_observation",
+            "os_stdout_observation",
+            "os_stderr_observation",
+            "runtime_observation_semantics",
+        ])
+    );
+}
+
+#[test]
+fn recheck_object_reports_module_and_multifile_symbol_surfaces() {
+    let module_root = tempfile::tempdir().unwrap();
+    let (module_source, module_bundle, module_id) = build_source(module_root.path(), MODULE);
+    let module = recheck_object(&module_source, &module_bundle, &module_id, true);
+    assert_success(&module);
+    let module_descriptor: serde_json::Value = serde_json::from_slice(&module.stdout).unwrap();
+    assert_eq!(
+        module_descriptor["defined_functions"],
+        serde_json::json!(["__mumei_user_main", "helper", "main"])
+    );
+    assert_eq!(
+        module_descriptor["external_references"],
+        serde_json::json!([])
+    );
+
+    let multifile_root = tempfile::tempdir().unwrap();
+    let (multifile_source, multifile_bundle, multifile_id) = build_multifile(multifile_root.path());
+    let multifile = recheck_object(&multifile_source, &multifile_bundle, &multifile_id, true);
+    assert_success(&multifile);
+    let multifile_descriptor: serde_json::Value =
+        serde_json::from_slice(&multifile.stdout).unwrap();
+    assert_eq!(
+        multifile_descriptor["defined_functions"],
+        serde_json::json!(["__mumei_user_main", "helper", "main"])
+    );
+}
+
+#[test]
+fn recheck_object_rejects_wrong_expected_build_id_like_artifact_recheck() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, _) = build(root.path());
+    let wrong_id = "0".repeat(64);
+    let output = recheck_object(&source, &bundle, &wrong_id, true);
+    let artifact = consume("recheck-artifact", &source, &bundle, &wrong_id);
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), artifact.status.code());
+    assert!(output.stdout.is_empty());
 }
 
 #[test]
