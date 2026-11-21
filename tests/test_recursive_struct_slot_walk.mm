@@ -21,7 +21,7 @@ body: {
 
 struct RecursiveAmbiguous {
     a: RecursiveAmbiguous,
-    a_a: RecursiveAmbiguous,
+    aa: RecursiveAmbiguous,
     value: i64
 }
 

@@ -1,3 +1,10 @@
+### Unreleased: reject within-struct flattened projection path collisions
+
+- Atom verification rejects structs whose distinct field chains flatten to the
+  same projection name, including collisions inside nested structs and enum
+  payloads. `VERIFIER_POLICY_VERSION` is bumped 26 → 27 so cached verdicts are
+  re-derived.
+
 ### Unreleased: root-keyed struct-field array lengths
 
 - Array lengths now follow their tracked Z3 array roots, so distinct struct

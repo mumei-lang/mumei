@@ -17,19 +17,6 @@ struct Holder {
     a: Outer
 }
 
-struct A {
-    b_c: i64
-}
-
-struct B {
-    c: i64
-}
-
-struct O {
-    a: A,
-    a_b: B
-}
-
 atom ordinary_deep_rhs_once() -> i64
 requires: true;
 ensures: result == 2;
@@ -47,14 +34,6 @@ body: {
     let o = Holder { a: Outer { inner: Inner { x: 1, y: 2 }, z: 3 } };
     o.a.inner = Inner { x: v, y: v };
     o.a.inner.x
-}
-
-atom colliding_deep_field_tail(v: i64) -> i64
-requires: true;
-ensures: result == v;
-body: {
-    let o = O { a: A { b_c: 1 }, a_b: B { c: 7 } };
-    o.a.b_c = v
 }
 
 enum Event {

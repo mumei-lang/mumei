@@ -108,10 +108,6 @@ fn invalid_deep_enum_payload_writes_fail_closed() {
             "Postcondition (ensures) is not satisfied",
         ),
         (
-            "bad_colliding_deep_field_returns_sibling",
-            "Postcondition (ensures) is not satisfied",
-        ),
-        (
             "bad_deep_write_rebinds_base",
             "field write 'o.inner.x' value must not rebind 'o'",
         ),

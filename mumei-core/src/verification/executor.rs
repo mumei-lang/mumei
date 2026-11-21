@@ -696,6 +696,7 @@ fn verify_inner_impl(
     } = options;
     let timeout_ms = orchestration_timeout_ms_from_env().unwrap_or(timeout_ms);
     let atom = &hir_atom.atom;
+    reject_struct_projection_path_collisions(module_env, atom)?;
     reject_parameter_projection_slot_collisions(module_env, atom)?;
     reject_resource_state_shadowing(atom, &hir_atom.body_stmt, module_env)?;
     if let Some(value) = unsupported_semantics_value(atom) {

@@ -69,7 +69,7 @@ use std::path::Path;
 /// Version 24 keeps array types out of canonical struct binding detection,
 /// preventing array element fields from becoming struct projection slots, so
 /// cached verdicts must be re-derived.
-pub const VERIFIER_POLICY_VERSION: u32 = 26;
+pub const VERIFIER_POLICY_VERSION: u32 = 27;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -1011,6 +1011,8 @@ fn hash_struct_contract(hasher: &mut Sha256, name: &str, module_env: &ModuleEnv)
             hasher.update(f.name.as_bytes());
             hasher.update(b":");
             hasher.update(f.type_name.as_bytes());
+            hasher.update(b":resolved:");
+            hasher.update(module_env.resolve_base_type(&f.type_name).as_bytes());
             if let Some(constraint) = &f.constraint {
                 hasher.update(b"|field_constraint:");
                 hasher.update(name.as_bytes());
@@ -2120,6 +2122,49 @@ body: { getx(Pair { a: 1, b: 2 }) };
     }
 
     #[test]
+    fn struct_field_alias_base_change_invalidates_the_proof_hash() {
+        fn hash(source: &str) -> String {
+            let items = parse_module(source);
+            let mut module_env = ModuleEnv::default();
+            let mut main = None;
+            for item in items {
+                match item {
+                    Item::Atom(atom) => main = Some(atom),
+                    Item::StructDef(sdef) => {
+                        module_env.structs.insert(sdef.name.clone(), sdef);
+                    }
+                    Item::TypeDef(refined) => module_env.register_type(&refined),
+                    _ => {}
+                }
+            }
+            compute_proof_hash(&main.expect("main atom parsed"), &module_env)
+        }
+
+        let before = hash(
+            "struct Inner { x: i64 }\n\
+             type U = i64;\n\
+             type T = U;\n\
+             struct S { inner: T, inner_x: i64 }\n\
+             atom main(s: S) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: 0;\n",
+        );
+        let after = hash(
+            "struct Inner { x: i64 }\n\
+             type U = Inner;\n\
+             type T = U;\n\
+             struct S { inner: T, inner_x: i64 }\n\
+             atom main(s: S) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: 0;\n",
+        );
+
+        assert_ne!(before, after);
+    }
+
+    #[test]
     fn callee_semantics_change_invalidates_the_proof_hash() {
         let getx_default =
             "trusted atom getx(p: Pair) -> i64\nrequires: true;\nensures: true;\nbody: { p.a };\n";
@@ -2477,7 +2522,7 @@ body: { p.a };\n";
         let baseline = proof_hash_for(source, "g");
         assert_eq!(
             baseline,
-            "1f86c924806c5d8bb20a81b9eac709b368e6e2eb024a1ccfd61aa25249a4b7b4"
+            "30c1ac15d3aea254a4014c4f9d82055330a70169f5f67495e7d53fb77dcfdc64"
         );
         let changed = proof_hash_for(
             &source.replace(
@@ -2490,7 +2535,7 @@ body: { p.a };\n";
     }
 
     #[test]
-    fn effect_free_proof_hash_matches_policy_version_26() {
+    fn effect_free_proof_hash_matches_policy_version_27() {
         let hash = proof_hash_for(
             "atom main(x: i64) -> i64\n\
              requires: true;\n\
@@ -2501,7 +2546,7 @@ body: { p.a };\n";
 
         assert_eq!(
             hash,
-            "247bb9e4dcae5ab18095cdb3b000ac6cb1e7e91798e53339210f57343d6c984a"
+            "bbdf5e18ff5930832557661eed5855da65675ea6f947627cfd670a33281ca880"
         );
     }
 }
