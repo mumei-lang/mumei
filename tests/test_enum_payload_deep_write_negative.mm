@@ -15,6 +15,19 @@ struct Outer {
     z: i64
 }
 
+struct A {
+    b_c: i64
+}
+
+struct B {
+    c: i64
+}
+
+struct O {
+    a: A,
+    a_b: B
+}
+
 struct InBox {
     inner: Inner,
     invariant: self.inner.x >= 0

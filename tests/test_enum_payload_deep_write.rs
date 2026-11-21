@@ -50,15 +50,22 @@ fn invalid_deep_enum_payload_writes_fail_closed() {
     let out = run_verify(
         &fixture("test_enum_payload_deep_write_negative.mm"),
         "negative",
-        &[],
+        &["--json", "--disable-spurious-detection"],
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let combined = format!("{stdout}\n{stderr}");
     assert!(
         !out.status.success(),
-        "invalid deep enum payload writes must fail:\n{combined}"
+        "invalid deep enum payload writes must fail:\n{stdout}\n{stderr}"
     );
+    let json_start = stdout
+        .find('{')
+        .unwrap_or_else(|| panic!("verify --json emitted no JSON:\n{stdout}\n{stderr}"));
+    let payload: serde_json::Value = serde_json::from_str(&stdout[json_start..])
+        .unwrap_or_else(|err| panic!("{err}: invalid verify JSON:\n{stdout}\n{stderr}"));
+    let diagnostics = payload["diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("verify JSON has no diagnostics array:\n{payload:#}"));
     for (atom, diagnostic) in [
         ("bad_wrong_tag", "requires 'e' to hold variant 'Move'"),
         ("bad_unknown_tag", "requires 'e' to hold variant 'Move'"),
@@ -109,9 +116,23 @@ fn invalid_deep_enum_payload_writes_fail_closed() {
             "field write 'o.inner.x' value must not rebind 'o'",
         ),
     ] {
+        let atom_diagnostics: Vec<_> = diagnostics
+            .iter()
+            .filter(|entry| entry["atom"].as_str() == Some(atom))
+            .collect();
+        let matching = atom_diagnostics
+            .iter()
+            .filter(|entry| {
+                entry["code"] == "failed"
+                    && entry["severity"] == "error"
+                    && entry["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains(diagnostic))
+            })
+            .count();
         assert!(
-            combined.contains(atom) && combined.contains(diagnostic),
-            "expected {atom} to fail with '{diagnostic}':\n{combined}"
+            matching == 1,
+            "expected exactly one diagnostic for atom '{atom}' containing '{diagnostic}', found {matching} in:\n{payload:#}"
         );
     }
 }
