@@ -558,6 +558,21 @@ pub(crate) enum EvidenceCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Validate one scheduled evidence-check acceptance representation only
+    #[command(
+        long_about = "Core validates the closed representation and producer consistency of a scheduled evidence-check acceptance. `accepted` records the producer's binding of a declared check outcome to its current candidate, never Core Evidence acceptance. `candidate_match` is not rechecked because Core has no attempt-sequence snapshot. No Core check is rerun and no grade is promoted."
+    )]
+    CheckAttemptAcceptance {
+        /// Regular mumei.evidence-check-acceptance/v1 JSON file (at most 65,536 bytes)
+        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        input: Option<String>,
+        /// Read one evidence-check acceptance from standard input (at most 65,536 bytes)
+        #[arg(long)]
+        stdin: bool,
+        /// Print a static representation-only diagnostic; no Core check rerun or grade promotion
+        #[arg(long)]
+        json: bool,
+    },
     /// Normalize one declared requirement against one Evidence record into a bounded verdict; no tool execution or proof acceptance
     Accept {
         /// Regular Evidence v1 JSON record file (at most 65,536 bytes); not a native report envelope or proof certificate

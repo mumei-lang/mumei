@@ -8,18 +8,16 @@
 //! adapter execution, claim-truth check, resource enforcement, or grade
 //! promotion.
 
+use crate::evidence_check_acceptance::{self, RepresentationError as EvidenceCheckError};
 use crate::strict_json::{
     self, boolean_field, field, is_integer, nullable_string_field, object, require_keys,
     string_field, unsigned_field, Error as StrictJsonError, JsonValue,
 };
-use std::collections::BTreeMap;
 use std::fmt;
 
 pub const MAX_INPUT_BYTES: usize = 65_536;
 const MAX_ATTEMPTS: u64 = 8;
 const SCHEDULE_SCHEMA_VERSION: &str = "mumei.attempt-schedule/v1";
-const EVIDENCE_CHECK_SCHEMA_VERSION: &str = "mumei.verifier-evidence-check/v1";
-const EVIDENCE_ACCEPTANCE_SCHEMA_VERSIONS: &[&str] = &["mumei.evidence-check-acceptance/v1"];
 const TOP_LEVEL_KEYS: &[&str] = &[
     "schema_version",
     "outcome",
@@ -39,14 +37,6 @@ const ATTEMPT_KEYS: &[&str] = &[
     "exit_code",
     "reported_outcome",
 ];
-const EVIDENCE_CHECK_KEYS: &[&str] = &[
-    "schema_version",
-    "request_fingerprint",
-    "attempt_number",
-    "output_fingerprint",
-    "outcome",
-];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepresentationError {
     InputTooLarge,
@@ -142,9 +132,19 @@ pub fn decode(bytes: &[u8]) -> Result<Schedule, RepresentationError> {
         validate_attempt(attempt, index)?;
     }
 
-    let evidence_check = validate_evidence_check(field(root, "evidence_check")?)?;
-    let evidence_acceptance =
-        validate_evidence_acceptance(field(root, "evidence_acceptance")?, evidence_check)?;
+    let evidence_check = match field(root, "evidence_check")? {
+        JsonValue::Null => None,
+        value => Some(
+            evidence_check_acceptance::validate_check(value).map_err(map_evidence_check_error)?,
+        ),
+    };
+    let evidence_acceptance = match field(root, "evidence_acceptance")? {
+        JsonValue::Null => None,
+        value => Some(
+            evidence_check_acceptance::validate_acceptance(value)
+                .map_err(map_evidence_check_error)?,
+        ),
+    };
 
     let selected = outcome == ScheduleOutcome::Selected;
     if selected != selected_adapter_id.is_some() {
@@ -160,21 +160,29 @@ pub fn decode(bytes: &[u8]) -> Result<Schedule, RepresentationError> {
         {
             return Err(RepresentationError::InconsistentSchedule);
         }
-        if let Some(check) = evidence_check {
+        if let Some(check) = &evidence_check {
             if nullable_string_field(last_attempt, "request_fingerprint")?
-                != Some(string_field(check, "request_fingerprint")?)
+                != Some(check.request_fingerprint.as_str())
             {
                 return Err(RepresentationError::InconsistentSchedule);
             }
         }
     }
-    if !selected && (evidence_check.is_some() || evidence_acceptance) {
+    if let Some(acceptance) = &evidence_acceptance {
+        let Some(check) = &evidence_check else {
+            return Err(RepresentationError::InconsistentSchedule);
+        };
+        if acceptance.request_fingerprint != check.request_fingerprint
+            || acceptance.attempt_number != check.attempt_number
+            || acceptance.output_fingerprint != check.output_fingerprint
+            || acceptance.outcome != check.outcome
+        {
+            return Err(RepresentationError::InconsistentSchedule);
+        }
+    }
+    if !selected && (evidence_check.is_some() || evidence_acceptance.is_some()) {
         return Err(RepresentationError::InconsistentSchedule);
     }
-    if evidence_acceptance && evidence_check.is_none() {
-        return Err(RepresentationError::InconsistentSchedule);
-    }
-
     Ok(Schedule {
         outcome,
         attempt_count: attempts.len(),
@@ -229,58 +237,13 @@ fn validate_attempt(value: &JsonValue, index: usize) -> Result<(), Representatio
     Ok(())
 }
 
-fn validate_evidence_check(
-    value: &JsonValue,
-) -> Result<Option<&BTreeMap<String, JsonValue>>, RepresentationError> {
-    let JsonValue::Object(check) = value else {
-        return if matches!(value, JsonValue::Null) {
-            Ok(None)
-        } else {
-            Err(RepresentationError::InvalidValue)
-        };
-    };
-    require_keys(check, EVIDENCE_CHECK_KEYS)?;
-    if string_field(check, "schema_version")? != EVIDENCE_CHECK_SCHEMA_VERSION
-        || !valid_fingerprint(string_field(check, "request_fingerprint")?)
-        || unsigned_field(check, "attempt_number")? == 0
-        || !valid_fingerprint(string_field(check, "output_fingerprint")?)
-        || !matches!(
-            string_field(check, "outcome")?,
-            "valid" | "failed" | "cancelled" | "accepted" | "rejected" | "inconclusive"
-        )
-    {
-        return Err(RepresentationError::InvalidValue);
+fn map_evidence_check_error(error: EvidenceCheckError) -> RepresentationError {
+    match error {
+        EvidenceCheckError::InputTooLarge => RepresentationError::InvalidValue,
+        EvidenceCheckError::InvalidShape => RepresentationError::InvalidShape,
+        EvidenceCheckError::InvalidValue => RepresentationError::InvalidValue,
+        EvidenceCheckError::InconsistentAcceptance => RepresentationError::InconsistentSchedule,
     }
-    Ok(Some(check))
-}
-
-fn validate_evidence_acceptance(
-    value: &JsonValue,
-    evidence_check: Option<&BTreeMap<String, JsonValue>>,
-) -> Result<bool, RepresentationError> {
-    let JsonValue::Object(acceptance) = value else {
-        return if matches!(value, JsonValue::Null) {
-            Ok(false)
-        } else {
-            Err(RepresentationError::InvalidValue)
-        };
-    };
-    let schema_version = string_field(acceptance, "schema_version")?;
-    if !EVIDENCE_ACCEPTANCE_SCHEMA_VERSIONS.contains(&schema_version) {
-        return Err(RepresentationError::InvalidValue);
-    }
-    let evidence_check = evidence_check.ok_or(RepresentationError::InconsistentSchedule)?;
-    if string_field(acceptance, "request_fingerprint")?
-        != string_field(evidence_check, "request_fingerprint")?
-        || unsigned_field(acceptance, "attempt_number")?
-            != unsigned_field(evidence_check, "attempt_number")?
-        || string_field(acceptance, "output_fingerprint")?
-            != string_field(evidence_check, "output_fingerprint")?
-        || string_field(acceptance, "outcome")? != string_field(evidence_check, "outcome")?
-    {
-        return Err(RepresentationError::InconsistentSchedule);
-    }
-    Ok(true)
 }
 
 fn valid_label(label: &str) -> bool {
