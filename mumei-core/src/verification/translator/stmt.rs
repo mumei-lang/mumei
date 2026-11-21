@@ -463,6 +463,101 @@ fn canonical_struct_type(vc: &VCtx, type_name: &str) -> Option<String> {
     vc.module_env.get_struct(&base).map(|_| base)
 }
 
+fn struct_field_path_exists(
+    vc: &VCtx,
+    sdef: &crate::parser::ast::StructDef,
+    path: &str,
+    visiting: &mut std::collections::HashSet<(String, String)>,
+) -> bool {
+    let key = (sdef.name.clone(), path.to_string());
+    if !visiting.insert(key.clone()) {
+        return false;
+    }
+    let found = sdef.fields.iter().any(|field| {
+        if path == field.name {
+            return true;
+        }
+        let Some(rest) = path
+            .strip_prefix(&field.name)
+            .and_then(|suffix| suffix.strip_prefix('_'))
+        else {
+            return false;
+        };
+        let Some(nested_type) = canonical_struct_type(vc, &field.type_name) else {
+            return false;
+        };
+        let Some(nested) = vc.module_env.get_struct(&nested_type) else {
+            return false;
+        };
+        struct_field_path_exists(vc, nested, rest, visiting)
+    });
+    visiting.remove(&key);
+    found
+}
+
+fn is_struct_projection_slot_name(
+    vc: &VCtx,
+    binding: &str,
+    sdef: &crate::parser::ast::StructDef,
+    name: &str,
+) -> bool {
+    [
+        format!("{binding}_"),
+        format!("{}{}_", STRUCT_FIELD_PREFIX, binding),
+    ]
+    .iter()
+    .filter_map(|prefix| name.strip_prefix(prefix))
+    .any(|path| struct_field_path_exists(vc, sdef, path, &mut std::collections::HashSet::new()))
+}
+
+fn reject_struct_projection_slot_collisions(
+    vc: &VCtx,
+    var: &str,
+    value: &Expr,
+    env: &Env<'_>,
+) -> MumeiResult<()> {
+    let active_struct_types = vc.local_struct_types.borrow().clone();
+    for (binding, type_name) in &active_struct_types {
+        if binding == var || !env.contains_key(binding) {
+            continue;
+        }
+        let Some(sdef) = vc
+            .module_env
+            .get_struct(&canonical_struct_type(vc, type_name).unwrap_or_default())
+        else {
+            continue;
+        };
+        if is_struct_projection_slot_name(vc, binding, sdef, var) {
+            return Err(MumeiError::type_error(format!(
+                "local '{var}' collides with a field projection slot for struct binding '{binding}'; rename the local"
+            )));
+        }
+    }
+
+    let new_struct_type = match value {
+        Expr::StructInit { type_name, .. } => Some(type_name.clone()),
+        _ => crate::verification::support::datatype::declared_type_of_expr(vc, value),
+    }
+    .and_then(|type_name| canonical_struct_type(vc, &type_name));
+    let Some(new_struct_type) = new_struct_type else {
+        return Ok(());
+    };
+    if active_struct_types.contains_key(var) {
+        return Ok(());
+    }
+    let Some(sdef) = vc.module_env.get_struct(&new_struct_type) else {
+        return Ok(());
+    };
+    for name in env.keys() {
+        if is_struct_projection_slot_name(vc, var, sdef, name) {
+            return Err(MumeiError::type_error(format!(
+                "field projection slot '{name}' for local struct '{var}' collides with an existing local; rename the local"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn struct_binding_slot_keys<'a>(
     vc: &VCtx<'a>,
     binding: &str,
@@ -1509,6 +1604,7 @@ pub(crate) fn stmt_to_z3<'a>(
     let ctx = vc.ctx;
     match stmt {
         Stmt::Let { var, value, .. } => {
+            reject_struct_projection_slot_collisions(vc, var, value, env)?;
             // A `let` may re-bind a composite name only to a value of
             // the SAME struct type (a full re-init overwrites every
             // `q_f`/`__struct_q_f` slot, so no stale value survives).
@@ -1586,6 +1682,7 @@ pub(crate) fn stmt_to_z3<'a>(
                 profile_solver_assertion(vc, &format!("assign_{}", var), None);
                 return Ok(val);
             }
+            reject_struct_projection_slot_collisions(vc, var, value, env)?;
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             record_binding_enum_type(vc, var, value);
             record_binding_int_type(vc, var, value);
