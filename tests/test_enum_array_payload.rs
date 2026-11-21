@@ -84,13 +84,14 @@ fn generic_enum_and_struct_payloads_verify_in_both_integer_modes() {
 
 #[test]
 fn unsupported_or_unsafe_enum_array_uses_fail_closed_in_both_modes() {
-    const EXPECTED_FAILURES: [&str; 10] = [
+    const EXPECTED_FAILURES: [&str; 11] = [
         "false_length_claim",
         "out_of_bounds_payload_read",
         "independent_payload_lengths",
         "different_direct_payload_roots_keep_lengths_separate",
         "stale_array_constructor_uses_updated_elements",
         "stale_array_tagged_write_uses_updated_elements",
+        "match_tail_uses_outer_shadowed_length",
         "array_inside_struct_payload",
         "nested_array_payload",
         "struct_array_payload",

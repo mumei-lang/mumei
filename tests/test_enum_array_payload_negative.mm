@@ -112,6 +112,18 @@ body: {
     }
 };
 
+atom match_tail_uses_outer_shadowed_length(ys: [i64], xs: [i64]) -> i64
+requires: len(ys) == 5 && len(xs) == 3;
+ensures: result == 5;
+body: {
+    let e = Ev::Data(xs);
+    let r = match e {
+        Ev::Data(ys) => ys,
+        Ev::Idle => xs
+    };
+    len(r)
+};
+
 atom array_inside_struct_payload(values: [i64]) -> i64
 requires: true;
 ensures: result == 0;

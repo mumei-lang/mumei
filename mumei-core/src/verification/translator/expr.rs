@@ -5032,6 +5032,14 @@ pub(crate) fn expr_to_z3<'a>(
                 *vc.local_array_elem_types.borrow_mut() = array_elem_types_before_arm;
                 let body_val = body_val?;
                 *vc.local_int_types.borrow_mut() = int_types_before_arm.clone();
+                for key in arm_bound
+                    .iter()
+                    .filter(|key| key.starts_with("__array_len#"))
+                {
+                    if let Some(len) = arm_env.get(key) {
+                        env.insert(key.clone(), len.clone());
+                    }
+                }
                 arm_states.push((full_cond.clone(), arm_env, arm_bound));
                 arm_results.push((full_cond.clone(), body_val));
                 accumulated_negations.push(full_cond.not());

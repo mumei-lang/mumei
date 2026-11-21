@@ -1111,9 +1111,15 @@ pub(crate) fn tail_len_expr<'a>(
                     depth + 1,
                     solver_opt,
                 ),
-                None if sc.env_is_current(src) => {
-                    array_len_value(vc.ctx, env, src, vc.bitvec_i64, solver_opt)
-                }
+                None if sc.env_is_current(src) => val_node
+                    .as_array()
+                    .and_then(|arr| {
+                        let root = array_root_value(&arr);
+                        env.get(&array_value_len_key(&root)).cloned()
+                    })
+                    .unwrap_or_else(|| {
+                        array_len_value(vc.ctx, env, src, vc.bitvec_i64, solver_opt)
+                    }),
                 None => array_value_len_or_fresh(vc, env, val_node, solver_opt),
             },
             None => array_len_value(vc.ctx, env, src, vc.bitvec_i64, solver_opt),
