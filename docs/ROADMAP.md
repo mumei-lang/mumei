@@ -3063,13 +3063,16 @@ host is pinned or compared, and the producer host, libc/loader/kernel
 versions and CPU features are unrecorded, so the scope is some host of
 that OS/architecture, not an attested environment (design-memo Option D
 folded into Option A).
-The second bounded C10 Option B step extends `native-bundle recheck-object`
-from public function-symbol comparison to direct call-edge correspondence:
-each externally visible IR function's direct callees must match the object's
-call-relocation targets in that function's byte range. Local/private functions
-and indirect calls are inconclusive; there is no instruction-selection,
-register-allocation, relocation-arithmetic, linker, ABI or runtime claim. Full
-object-code translation validation remains the deep endpoint.
+The third bounded C10 Option B step extends `native-bundle recheck-object` to
+compare the reproduced object's public function symbols and direct call edges
+with the pinned IR, then compare each program function's size and bytes with
+its linked executable placement. Supported four-byte x86-64 `PLT32`/`PC32`
+fields must contain the resolved PC-relative target values. CRT/startup code,
+the dynamic loader, libc, external symbols, non-call relocations and
+instruction semantics are not checked; this is not general linker-semantics or
+ABI validation. Local/private definitions, indirect calls and unsupported or
+unresolvable relocations are inconclusive. Full object-code translation
+validation remains the deep endpoint.
 Sibling descriptors now name the exit-status observation only as
 `os_exit_status_observation` (formerly bare `os_exit_status` in
 non-exit-status `checks_not_performed` lists).
