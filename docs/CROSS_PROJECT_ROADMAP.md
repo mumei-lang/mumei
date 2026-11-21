@@ -6150,6 +6150,19 @@ listing and the canonical contract table document the argument;
 acceptance remains a recorded dispatch observation, never a grade
 promotion.
 
+### C11 Core attempt-schedule representation check (mumei)
+
+`mumei evidence check-schedule <input> | --stdin [--json]` applies a
+bounded, strict representation gate and schedule-consistency check to
+`mumei.attempt-schedule/v1`. It does not execute an adapter: `selected`
+names only a manifest-declared-success exit, never acceptance.
+`reported_outcome` remains the adapter's self-report, not result polarity
+or a verdict. Manifest-declared argv/stdin/memory bounds are not attested;
+embedded `evidence_acceptance` is carried, not re-judged.
+
+C11 stays partial; Evidence acceptance of adapter claims, C12's demand
+gate and grade promotion are unchanged.
+
 ### Claim Book promotable gate (mumei #1172)
 
 [mumei#1172](https://github.com/mumei-lang/mumei/pull/1172) turns the

@@ -1,3 +1,11 @@
+### Unreleased: Core attempt-schedule representation check
+
+- `mumei evidence check-schedule <input> | --stdin [--json]` validates the
+  static shape and consistency of `mumei.attempt-schedule/v1`. It does not
+  execute adapters, establish that an adapter's self-reported outcome is
+  true, attest manifest-declared resource bounds, re-judge embedded
+  evidence acceptance or promote a grade.
+
 ### Unreleased: integer `/` truncates toward zero
 
 - The verifier's int model now divides like the emitted `sdiv` (and
