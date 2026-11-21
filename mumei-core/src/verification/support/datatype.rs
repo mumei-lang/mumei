@@ -685,8 +685,7 @@ fn expand_ctor_args<'a>(
     env: &mut crate::verification::types::Env<'a>,
     variant: &crate::parser::ast::EnumVariant,
     args: &[Dynamic<'a>],
-    arg_exprs: &[crate::parser::ast::Expr],
-    solver_opt: Option<&Solver<'a>>,
+    array_payload_snapshots: &[Option<ArrayPayloadSnapshot<'a>>],
 ) -> MumeiResult<Vec<Dynamic<'a>>> {
     let mut leaves: Vec<Dynamic> = Vec::new();
     for (i, arg) in args.iter().enumerate() {
@@ -698,30 +697,18 @@ fn expand_ctor_args<'a>(
             )));
         };
         if array_payload_element_type(&field_leaves).is_some() {
-            let array_arg = arg_exprs
-                .get(i)
-                .and_then(|expr| match expr {
-                    crate::parser::ast::Expr::Variable(name) => env
-                        .get(&format!("__z3_arr_{name}"))
-                        .and_then(|value| value.as_array())
-                        .map(Into::into),
-                    _ => None,
-                })
-                .unwrap_or_else(|| arg.clone());
-            if array_arg.as_array().is_none() {
+            let Some(snapshot) = array_payload_snapshots.get(i).and_then(Option::as_ref) else {
+                return Err(MumeiError::type_error(format!(
+                    "enum constructor payload '{field_type}' expects an array value"
+                )));
+            };
+            if snapshot.array.as_array().is_none() {
                 return Err(MumeiError::type_error(format!(
                     "enum constructor payload '{field_type}' expects an array value"
                 )));
             }
-            let len = crate::verification::translator::z3_types::array_len_for_expr(
-                vc,
-                env,
-                arg_exprs.get(i),
-                &array_arg,
-                solver_opt,
-            );
-            leaves.push(array_arg);
-            leaves.push(len);
+            leaves.push(snapshot.array.clone());
+            leaves.push(snapshot.len.clone());
             continue;
         }
         if vc.module_env.structs.contains_key(&base) {
@@ -736,6 +723,11 @@ fn expand_ctor_args<'a>(
         }
     }
     Ok(leaves)
+}
+
+pub(crate) struct ArrayPayloadSnapshot<'a> {
+    pub array: Dynamic<'a>,
+    pub len: Dynamic<'a>,
 }
 
 /// The accessor domain sorts of `enum_def.variants[idx]`'s constructor,
@@ -804,8 +796,7 @@ pub(crate) fn enum_ctor_apply<'a>(
     env: &mut crate::verification::types::Env<'a>,
     ctor_path: &str,
     args: &[Dynamic<'a>],
-    arg_exprs: &[crate::parser::ast::Expr],
-    solver_opt: Option<&Solver<'a>>,
+    array_payload_snapshots: &[Option<ArrayPayloadSnapshot<'a>>],
 ) -> MumeiResult<Option<Dynamic<'a>>> {
     let Some((enum_def, idx)) = resolve_enum_ctor(vc, ctor_path)? else {
         return Ok(None);
@@ -821,8 +812,7 @@ pub(crate) fn enum_ctor_apply<'a>(
         env,
         &enum_def.variants[idx],
         args,
-        arg_exprs,
-        solver_opt,
+        array_payload_snapshots,
     )?;
     Ok(enum_ctor_apply_leaves(vc, enum_def, idx, &leaf_args))
 }

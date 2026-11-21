@@ -11,6 +11,11 @@ enum Ev {
     Idle
 }
 
+enum SideEffectEv {
+    Pair(xs: [i64], k: i64),
+    Idle
+}
+
 enum NestedArray {
     Data(xs: [[i64]]),
     Idle
@@ -91,6 +96,18 @@ body: {
     match e {
         Ev::Data(ys) => ys[0],
         Ev::Idle => 0
+    }
+};
+
+atom later_argument_mutation_does_not_change_array_payload() -> i64
+requires: true;
+ensures: result == 9;
+body: {
+    let xs = [1];
+    let e = SideEffectEv::Pair(xs, { xs[0] = 9; 0 });
+    match e {
+        SideEffectEv::Pair(ys, _) => ys[0],
+        SideEffectEv::Idle => 0
     }
 };
 

@@ -2400,8 +2400,7 @@ pub(crate) fn expr_to_z3<'a>(
             // finite ADT (e.g. `Red` for `enum Color { Red, Green, Blue }`)
             // constructs the datatype value.
             if name.chars().next().is_some_and(|c| c.is_uppercase()) {
-                if let Some(value) = datatype::enum_ctor_apply(vc, env, name, &[], &[], solver_opt)?
-                {
+                if let Some(value) = datatype::enum_ctor_apply(vc, env, name, &[], &[])? {
                     return Ok(value);
                 }
             }
@@ -3777,9 +3776,49 @@ pub(crate) fn expr_to_z3<'a>(
                         // datatype constructor.
                         if name.contains("::") || vc.module_env.find_enum_by_variant(name).is_some()
                         {
-                            let mut ctor_args = Vec::new();
-                            for arg in args {
-                                ctor_args.push(expr_to_z3(vc, arg, env, solver_opt)?);
+                            let enum_ctor = datatype::resolve_enum_ctor(vc, name)?;
+                            let mut ctor_args = Vec::with_capacity(args.len());
+                            let mut array_payload_snapshots = Vec::with_capacity(args.len());
+                            for (i, arg) in args.iter().enumerate() {
+                                let arg_z3 = expr_to_z3(vc, arg, env, solver_opt)?;
+                                let is_array_payload = enum_ctor
+                                    .and_then(|(enum_def, idx)| enum_def.variants.get(idx))
+                                    .and_then(|variant| variant.field_types.get(i))
+                                    .is_some_and(|field_type| {
+                                        let field_type =
+                                            datatype::payload_field_type_name(field_type);
+                                        datatype::field_leaf_types(&field_type, vc.module_env)
+                                            .is_some_and(|leaves| {
+                                                datatype::array_payload_element_type(&leaves)
+                                                    .is_some()
+                                            })
+                                    });
+                                let snapshot = if is_array_payload {
+                                    let array = match arg {
+                                        Expr::Variable(name) => env
+                                            .get(&format!("__z3_arr_{name}"))
+                                            .and_then(|value| value.as_array())
+                                            .map(Into::into)
+                                            .unwrap_or_else(|| arg_z3.clone()),
+                                        _ => arg_z3.clone(),
+                                    };
+                                    if array.as_array().is_some() {
+                                        let len = super::z3_types::array_len_for_expr(
+                                            vc,
+                                            env,
+                                            Some(arg),
+                                            &array,
+                                            solver_opt,
+                                        );
+                                        Some(datatype::ArrayPayloadSnapshot { array, len })
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
+                                ctor_args.push(arg_z3);
+                                array_payload_snapshots.push(snapshot);
                             }
                             // A payload argument must satisfy the declared
                             // field type — `Chan::Tcp(0)` with `p: Port`
@@ -3787,8 +3826,7 @@ pub(crate) fn expr_to_z3<'a>(
                             // not a value a later match may assume the
                             // refined bounds on (the same contract a caller
                             // satisfies for a refined callee parameter).
-                            if let (Some(solver), Some((enum_def, vidx))) =
-                                (solver_opt, datatype::resolve_enum_ctor(vc, name)?)
+                            if let (Some(solver), Some((enum_def, vidx))) = (solver_opt, enum_ctor)
                             {
                                 let variant_def = &enum_def.variants[vidx];
                                 for (i, arg_z3) in ctor_args.iter().enumerate() {
@@ -3843,7 +3881,11 @@ pub(crate) fn expr_to_z3<'a>(
                                 }
                             }
                             if let Some(value) = datatype::enum_ctor_apply(
-                                vc, env, name, &ctor_args, args, solver_opt,
+                                vc,
+                                env,
+                                name,
+                                &ctor_args,
+                                &array_payload_snapshots,
                             )? {
                                 return Ok(value);
                             }
@@ -6140,7 +6182,6 @@ pub(crate) fn expr_to_z3<'a>(
                         &format!("{}::{}", name, field_name),
                         &[],
                         &[],
-                        solver_opt,
                     )? {
                         return Ok(value);
                     }
