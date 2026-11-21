@@ -2052,9 +2052,12 @@ leaves. These are local value updates, not memory modeling; LLVM stack-memory
 lowering remains outside the profile. Enum signatures, enum values, enum
 scalar operations and enum payload writes remain fail-closed. An enum `match`
 path that does not set an enum-use flag remains closed by the separate
-enum-signature gate. Structs with five or more leaves, i128/u128 struct
-leaves, bounded memory, and tail calls with struct arguments or results also
-remain outside the profile. When an equivalent function uses a struct
+enum-signature gate. Function-signature and direct-call aggregates used as
+parameters or results with five or more leaves remain outside the profile.
+Local struct values inside a body are not subject to this aggregate limit
+because the source model flattens them. i128/u128 struct leaves, bounded
+memory, and tail calls with struct arguments or results also remain outside
+the profile. When an equivalent function uses a struct
 aggregate, the descriptor performs `machine_code_composite_register_aggregate_tv`.
 Aggregates wider than two leaves use the convention suffix
 `_llvm_first_class_aggregates_split_into_registers_result_rax_rdx_rcx_xmm0_xmm1`

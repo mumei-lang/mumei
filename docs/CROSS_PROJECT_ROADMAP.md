@@ -9069,9 +9069,12 @@ the modeled register leaves. These are local value updates, not memory
 modeling; LLVM stack-memory lowering remains outside the profile. Enum
 signatures, enum values, enum scalar operations and enum payload writes stay
 fail-closed; enum `match` paths without an enum-use flag remain closed by the
-separate enum-signature gate. F64 tail calls, structs with five or more
-leaves, i128/u128 struct leaves and bounded memory remain fail-closed.
-Equivalent functions using struct signatures or direct calls report
+separate enum-signature gate. F64 tail calls remain fail-closed. Function-signature and direct-call
+aggregates used as parameters or results with five or more leaves remain
+fail-closed. Local struct values inside a body are not subject to this
+aggregate limit because the source model flattens them. i128/u128 struct leaves
+and bounded memory remain fail-closed. Equivalent functions using struct
+signatures or direct calls report
 `machine_code_composite_register_aggregate_tv`. Aggregates wider than
 two leaves use
 `_llvm_first_class_aggregates_split_into_registers_result_rax_rdx_rcx_xmm0_xmm1`
