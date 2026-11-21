@@ -695,8 +695,8 @@ fn runtime_observations_are_rechecked_on_one_invocation() {
             "stdin": "closed",
             "timeout_ms": 30000,
             "channel_cap_bytes": 65536,
-            "environment": "inherited_unpinned",
-            "working_directory": "inherited_unpinned",
+            "environment": "empty",
+            "working_directory": "executable_directory",
         })
     );
     assert_eq!(
@@ -822,8 +822,8 @@ fn runtime_observations_are_accepted_on_one_invocation() {
             "stdin": "closed",
             "timeout_ms": 30000,
             "channel_cap_bytes": 65536,
-            "environment": "inherited_unpinned",
-            "working_directory": "inherited_unpinned",
+            "environment": "empty",
+            "working_directory": "executable_directory",
         })
     );
     assert_eq!(

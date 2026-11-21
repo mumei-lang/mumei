@@ -3906,11 +3906,16 @@ bounded to the one OS-level invocation and claims no runtime/ABI,
 process-semantics or historical-execution proof. Both JSON descriptors
 include the same envelope: `argv: []`, `stdin: "closed"`,
 `timeout_ms: 30000`, `channel_cap_bytes: 65536`,
-`environment: "inherited_unpinned"` and
-`working_directory: "inherited_unpinned"`. Multiple invocations,
-non-empty argv, stdin bytes, pinned environment/cwd and CPU/memory
-limits are unsupported and unclaimed; only the timeout and per-channel
-cap are enforced. Composition landed via `accept-observations`; this raw
+`environment: "empty"` and
+`working_directory: "executable_directory"`. Multiple invocations,
+non-empty argv, stdin bytes and CPU/memory limits are unsupported and
+unclaimed; only the timeout and per-channel cap are enforced. Every native
+observation uses this policy, including build-time pins, per-channel
+`recheck-*`/`accept-*`, and the paired runtime-observation commands. The
+record does not pin the envelope: older bundles' build-time pins used
+inherited environment/cwd but are now rechecked under the pinned
+environment and cwd; a match is claimed and a mismatch fails closed.
+Composition landed via `accept-observations`; this raw
 descriptor is not an Agent performer, while Agent's
 `native-observations-accept` route (mumei-agent#1039) performs
 `runtime_observation_semantics` from the `accept-observations` descriptor.
