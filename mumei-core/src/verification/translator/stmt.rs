@@ -187,7 +187,12 @@ fn collect_expr_assigned_vars(
 
 /// Rebind each name in `vars` to a fresh unconstrained constant of its
 /// existing sort.
-fn havoc_vars<'a>(vc: &VCtx<'a>, env: &mut Env<'a>, vars: &std::collections::HashSet<String>) {
+fn havoc_vars<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    vars: &std::collections::HashSet<String>,
+    solver_opt: Option<&Solver<'a>>,
+) {
     static HAVOC_UID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let ctx = vc.ctx;
     for name in vars {
@@ -263,14 +268,19 @@ fn havoc_vars<'a>(vc: &VCtx<'a>, env: &mut Env<'a>, vars: &std::collections::Has
             // binding — otherwise `a[i]` reads the pre-loop store chain.
             let arr_key = format!("__z3_arr_{name}");
             if env.contains_key(&arr_key) {
-                env.insert(arr_key, fresh);
+                env.insert(arr_key.clone(), fresh);
             }
             let len_key = array_len_key(name);
             if env.contains_key(&len_key) {
-                env.insert(
-                    len_key,
-                    Int::fresh_const(ctx, &array_len_key(&format!("__havoc_{name}_{uid}"))).into(),
-                );
+                let len = env
+                    .get(&arr_key)
+                    .and_then(|value| value.as_array())
+                    .map(|array| array_len_for_value(vc, env, &array, solver_opt))
+                    .unwrap_or_else(|| {
+                        Int::fresh_const(ctx, &array_len_key(&format!("__havoc_{name}_{uid}")))
+                            .into()
+                    });
+                env.insert(len_key, len);
             }
             // A struct binding's field projections are separate env
             // keys keyed on the binding (`q_x`, `__struct_q_x`) and on
@@ -284,7 +294,7 @@ fn havoc_vars<'a>(vc: &VCtx<'a>, env: &mut Env<'a>, vars: &std::collections::Has
             {
                 if let Some(sdef) = vc.module_env.get_struct(&struct_type) {
                     let slot_keys = struct_binding_slot_keys(vc.module_env, name, sdef, env);
-                    havoc_vars(vc, env, &slot_keys);
+                    havoc_vars(vc, env, &slot_keys, solver_opt);
                     if let Some(handle) = env.get(name).cloned() {
                         bind_havoced_struct_fields_to_handle(
                             vc,
@@ -370,7 +380,7 @@ fn check_while_invariant<'a>(
 
         let mut step_env = env.clone();
         let modified_set: std::collections::HashSet<String> = modified.iter().cloned().collect();
-        havoc_vars(vc, &mut step_env, &modified_set);
+        havoc_vars(vc, &mut step_env, &modified_set, Some(solver));
         let step = (|| -> MumeiResult<SatResult> {
             let inv_h = expr_to_z3(vc, invariant, &mut step_env, None)?
                 .as_bool()
@@ -876,6 +886,7 @@ fn rebind_struct_binding_slots<'a>(
     binding: &str,
     value: &Dynamic<'a>,
     env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
 ) {
     let Some(struct_type) =
         crate::verification::support::datatype::binding_declared_type(vc, binding)
@@ -901,7 +912,7 @@ fn rebind_struct_binding_slots<'a>(
     let unbound: std::collections::HashSet<String> =
         slot_keys.difference(&rebound).cloned().collect();
     if !unbound.is_empty() {
-        havoc_vars(vc, env, &unbound);
+        havoc_vars(vc, env, &unbound, solver_opt);
     }
 }
 
@@ -1904,7 +1915,7 @@ pub(crate) fn stmt_to_z3<'a>(
             record_binding_lambda(vc, var, value, env, solver_opt);
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
-            rebind_struct_binding_slots(vc, var, &val, env);
+            rebind_struct_binding_slots(vc, var, &val, env, solver_opt);
             wire_array_slots(vc, var, Some(value), &val, env, solver_opt);
             profile_solver_assertion(vc, &format!("let_{}", var), None);
             Ok(val)
@@ -1961,7 +1972,7 @@ pub(crate) fn stmt_to_z3<'a>(
             record_binding_lambda(vc, var, value, env, solver_opt);
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
-            rebind_struct_binding_slots(vc, var, &val, env);
+            rebind_struct_binding_slots(vc, var, &val, env, solver_opt);
             wire_array_slots(vc, var, Some(value), &val, env, solver_opt);
             profile_solver_assertion(vc, &format!("assign_{}", var), None);
             Ok(val)
@@ -2176,7 +2187,7 @@ pub(crate) fn stmt_to_z3<'a>(
                     let int_types_snapshot = vc.local_int_types.borrow().clone();
                     let lambdas_snapshot = vc.local_lambdas.borrow().clone();
                     let mut step_env = env.clone();
-                    havoc_vars(vc, &mut step_env, &modified);
+                    havoc_vars(vc, &mut step_env, &modified, Some(solver));
                     let marks = obligation_marks(vc);
                     let inv_h = expr_to_z3(vc, &effective_invariant, &mut step_env, None)?
                         .as_bool()
@@ -2215,7 +2226,7 @@ pub(crate) fn stmt_to_z3<'a>(
                     let int_types_snapshot = vc.local_int_types.borrow().clone();
                     let lambdas_snapshot = vc.local_lambdas.borrow().clone();
                     let mut term_env = env.clone();
-                    havoc_vars(vc, &mut term_env, &modified);
+                    havoc_vars(vc, &mut term_env, &modified, Some(solver));
                     let marks = obligation_marks(vc);
                     let inv_h = expr_to_z3(vc, invariant, &mut term_env, None)?
                         .as_bool()
@@ -2280,7 +2291,7 @@ pub(crate) fn stmt_to_z3<'a>(
                 // `ensures` check see exit facts (previously env kept
                 // pre-loop bindings and no exit facts reached the solver).
                 let mut post_env = env.clone();
-                havoc_vars(vc, &mut post_env, &modified);
+                havoc_vars(vc, &mut post_env, &modified, Some(solver));
                 let marks = obligation_marks(vc);
                 let inv_post = expr_to_z3(vc, invariant, &mut post_env, None)?
                     .as_bool()

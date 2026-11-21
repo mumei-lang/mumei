@@ -2108,9 +2108,25 @@ fn verify_inner_impl(
     datatype::assert_enum_value_domains(&vc, &solver, &env);
 
     // 2c. 全パラメータに対して配列長シンボルを事前生成
-    #[allow(clippy::map_entry)]
     for param in &atom.params {
         let len_name = array_len_key(&param.name);
+        let root_len_name = array_root_len_key(&param.name);
+        let is_array = param.type_name.as_deref().is_some_and(|type_name| {
+            let resolved = module_env.resolve_base_type(type_name);
+            resolved.trim_start().starts_with('[') || resolved.trim_end().ends_with("[]")
+        });
+        if is_array {
+            let len = env
+                .get(&root_len_name)
+                .or_else(|| env.get(&len_name))
+                .cloned()
+                .unwrap_or_else(|| {
+                    array_root_len_value(&ctx, &mut env, &param.name, bitvec_i64, Some(&solver))
+                });
+            env.insert(root_len_name, len.clone());
+            env.insert(len_name, len);
+            continue;
+        }
         if env.contains_key(&len_name) {
             continue;
         }

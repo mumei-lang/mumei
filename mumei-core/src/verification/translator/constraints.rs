@@ -152,12 +152,15 @@ pub(crate) fn check_contract_subsumption<'a>(
             .as_deref()
             .is_some_and(|type_name| type_name.trim_start().starts_with('['))
         {
-            let len = array_len_symbol(ctx, &format!("__sub_len_{}", param.name), vc.bitvec_i64);
+            let root_name = format!("__sub_{}", param.name);
+            let len = array_root_len_symbol(ctx, &root_name, vc.bitvec_i64);
             if let Some(nonneg) = nonneg_constraint(ctx, &len) {
                 array_len_constraints.push(nonneg);
             }
             concrete_env.insert(array_len_key(&param.name), len.clone());
+            concrete_env.insert(array_root_len_key(&root_name), len.clone());
             contract_env.insert(array_len_key(&format!("arg{i}")), len.clone());
+            contract_env.insert(array_root_len_key(&root_name), len.clone());
             if i == 0 {
                 contract_env.insert(array_len_key("x"), len.clone());
             } else if i == 1 {

@@ -547,6 +547,23 @@ pub(crate) fn array_len_key(name: &str) -> String {
     format!("len#{name}")
 }
 
+pub(crate) fn array_root_len_key(name: &str) -> String {
+    format!("len#root#{name}")
+}
+
+pub(crate) fn array_root_len_symbol<'a>(
+    ctx: &'a Context,
+    name: &str,
+    bitvec_i64: bool,
+) -> Dynamic<'a> {
+    let len_name = array_root_len_key(name);
+    if bitvec_i64 {
+        BV::new_const(ctx, len_name.as_str(), I64_BITS).into()
+    } else {
+        Int::new_const(ctx, len_name.as_str()).into()
+    }
+}
+
 /// `value >= 0`, signed in the bit-vector encoding.
 pub(crate) fn nonneg_constraint<'a>(ctx: &'a Context, value: &Dynamic<'a>) -> Option<Bool<'a>> {
     if let Some(bv) = value.as_bv() {
@@ -595,6 +612,25 @@ pub(crate) fn array_len_value<'a>(
     len
 }
 
+pub(crate) fn array_root_len_value<'a>(
+    ctx: &'a Context,
+    env: &mut Env<'a>,
+    root: &str,
+    bitvec_i64: bool,
+    solver_opt: Option<&Solver<'a>>,
+) -> Dynamic<'a> {
+    let len_name = array_root_len_key(root);
+    if let Some(existing) = env.get(&len_name) {
+        return existing.clone();
+    }
+    let len = array_root_len_symbol(ctx, root, bitvec_i64);
+    if let (Some(solver), Some(nonneg)) = (solver_opt, nonneg_constraint(ctx, &len)) {
+        solver.assert(&nonneg);
+    }
+    env.insert(len_name, len.clone());
+    len
+}
+
 fn fresh_array_len<'a>(vc: &VCtx<'a>, solver_opt: Option<&Solver<'a>>) -> Dynamic<'a> {
     let len: Dynamic = if vc.bitvec_i64 {
         BV::fresh_const(vc.ctx, &array_len_key("fresh"), I64_BITS).into()
@@ -621,7 +657,7 @@ pub(crate) fn array_len_for_value<'a>(
         && root.decl().kind() == z3::DeclKind::UNINTERPRETED
         && root.num_children() == 0
     {
-        return array_len_value(
+        return array_root_len_value(
             vc.ctx,
             env,
             &root.decl().name().to_string(),

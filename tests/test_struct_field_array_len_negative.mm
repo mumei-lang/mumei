@@ -35,6 +35,15 @@ atom len_match_branch_confusion(tag: i64, b: Box, c: Box) -> i64
     ensures: result > 5;
     body: len(match tag { 0 => c.values, _ => c.values })
 
+atom len_field_length_stays_with_original_root(xs: [i64], b: Box) -> bool
+    requires: len(xs) == 3;
+    ensures: len(b.values) == 1;
+    body: {
+        b.values = xs;
+        xs = [1];
+        true
+    }
+
 atom len_field_conflicts_with_parameter_name(b: Box, len_b_values: i64) -> bool
     requires: true;
     ensures: len(b.values) == len_b_values;

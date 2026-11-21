@@ -3336,7 +3336,7 @@ pub(crate) fn expr_to_z3<'a>(
                                     rec_args,
                                 )
                             } else {
-                                array_len_symbol(ctx, &result_name, vc.bitvec_i64)
+                                array_root_len_symbol(ctx, &result_name, vc.bitvec_i64)
                             };
                             // Array lengths are nonneg regardless of the
                             // callee's ensures — `array_len_value` asserts
@@ -3350,6 +3350,9 @@ pub(crate) fn expr_to_z3<'a>(
                                 result_z3.get_z3_ast() as usize,
                                 (len_sym.clone(), result_z3.clone()),
                             );
+                            if rec_signature.is_none() {
+                                env.insert(array_root_len_key(&result_name), len_sym.clone());
+                            }
                             len_sym
                         });
 
