@@ -3045,6 +3045,9 @@ observations match in one invocation; it is the only descriptor that
 performs `runtime_observation_semantics`. Agent-side performer
 registration is a follow-up. See the [runtime-observation acceptance
 boundary](VERIFICATION_NATIVE.md#pinned-executable-runtime-observation-acceptance).
+Sibling descriptors now name the exit-status observation only as
+`os_exit_status_observation` (formerly bare `os_exit_status` in
+non-exit-status `checks_not_performed` lists).
 General optimizer/ABI/runtime assurance and producer authenticity stay
 open — the records now pin the intra-source call graph as
 `source_dependencies_sha256`, the canonical JSON of the Claim Book

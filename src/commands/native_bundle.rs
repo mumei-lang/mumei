@@ -1144,42 +1144,42 @@ struct NativeAcceptance {
 const EVIDENCE_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
     scope: "native_bundle_identity_source_llvm_and_saved_evidence_consistency",
     performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "saved_evidence_consistency"],
-    not_performed: &["producer_authenticity", "historical_execution", "object_linker_artifact_recheck", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "os_stdout_observation", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
+    not_performed: &["producer_authenticity", "historical_execution", "object_linker_artifact_recheck", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status_observation", "os_stdout_observation", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
     text: "Native Evidence accepted within the pinned bundle/source/LLVM profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, saved report consistent.\nAcceptance scope excludes producer authenticity, historical execution, artifact/object/linker recheck, optimizer/ABI/runtime/OS semantics, grade and Lean promotion.\n",
 };
 
 const MULTIFILE_EVIDENCE_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
     scope: "native_multifile_bundle_identity_merge_source_llvm_and_saved_evidence_consistency",
     performed: &["bundle_identity_binding", "pinned_member_merge_rederivation", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "saved_evidence_consistency"],
-    not_performed: &["producer_authenticity", "historical_execution", "object_linker_artifact_recheck", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "os_stdout_observation", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
+    not_performed: &["producer_authenticity", "historical_execution", "object_linker_artifact_recheck", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status_observation", "os_stdout_observation", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
     text: "Native multifile Evidence accepted within the pinned bundle/source/LLVM profile: identities bound, import closure re-merged from pinned members, source postcondition and LLVM snapshot freshly rechecked, saved report consistent.\nAcceptance scope excludes producer authenticity, historical execution, artifact/object/linker recheck, optimizer/ABI/runtime/OS semantics, grade and Lean promotion.\n",
 };
 
 const MULTIFILE_ARTIFACT_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
     scope: "native_multifile_bundle_source_llvm_and_toolchain_artifact_reproduction",
     performed: &["bundle_identity_binding", "pinned_member_merge_rederivation", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "canonical_link_argument_vector_reproduction"],
-    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "os_stdout_observation", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
+    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status_observation", "os_stdout_observation", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
     text: "Native multifile artifact accepted within the pinned bundle/toolchain profile: identities bound, import closure re-merged from pinned members, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, canonical link argument vector re-derived.\nAcceptance scope excludes producer authenticity, historical execution, raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/OS exit-status/stdout/stderr semantics, grade and Lean promotion.\n",
 };
 
 const MULTIFILE_ARTIFACT_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance = NativeAcceptance {
     scope: "native_multifile_bundle_source_llvm_and_toolchain_artifact_reproduction",
     performed: &["bundle_identity_binding", "pinned_member_merge_rederivation", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction"],
-    not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "os_stdout_observation", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
+    not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status_observation", "os_stdout_observation", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
     text: "Native multifile artifact accepted within the pinned bundle/toolchain profile: identities bound, import closure re-merged from pinned members, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically.\nAcceptance scope excludes producer authenticity, historical execution, canonical link argument-vector reproduction (the record pins no canonical argv), raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/OS exit-status/stdout/stderr semantics, grade and Lean promotion.\n",
 };
 
 const ARTIFACT_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
     scope: "native_bundle_source_llvm_and_toolchain_artifact_reproduction",
     performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "canonical_link_argument_vector_reproduction"],
-    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "os_stdout_observation", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
+    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status_observation", "os_stdout_observation", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
     text: "Native artifact accepted within the pinned bundle/toolchain profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, canonical link argument vector re-derived.\nAcceptance scope excludes producer authenticity, historical execution, raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/OS exit-status/stdout/stderr semantics, grade and Lean promotion.\n",
 };
 
 const ARTIFACT_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance = NativeAcceptance {
     scope: "native_bundle_source_llvm_and_toolchain_artifact_reproduction",
     performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction"],
-    not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "os_stdout_observation", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
+    not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status_observation", "os_stdout_observation", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
     text: "Native artifact accepted within the pinned bundle/toolchain profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically.\nAcceptance scope excludes producer authenticity, historical execution, canonical link argument-vector reproduction (the record pins no canonical argv), raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/OS exit-status/stdout/stderr semantics, grade and Lean promotion.\n",
 };
 
@@ -1226,28 +1226,28 @@ const EXIT_STATUS_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance = NativeAcceptance 
 const MULTIFILE_STDOUT_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
     scope: "native_multifile_bundle_source_llvm_toolchain_reproduction_and_os_stdout_observation",
     performed: &["bundle_identity_binding", "pinned_member_merge_rederivation", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "canonical_link_argument_vector_reproduction", "os_stdout_observation"],
-    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
+    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status_observation", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
     text: "Native multifile artifact accepted within the pinned bundle/toolchain profile: identities bound, import closure re-merged from pinned members, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, canonical link argument vector re-derived, reproduced executable's stdout digest observed matching the record pin.\nAcceptance scope excludes producer authenticity, historical execution (one run is an observation, not a history), OS exit-status observation, stderr observation, raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/process semantics, grade and Lean promotion.\n",
 };
 
 const MULTIFILE_STDOUT_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance = NativeAcceptance {
     scope: "native_multifile_bundle_source_llvm_toolchain_reproduction_and_os_stdout_observation",
     performed: &["bundle_identity_binding", "pinned_member_merge_rederivation", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "os_stdout_observation"],
-    not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
+    not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status_observation", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
     text: "Native multifile artifact accepted within the pinned bundle/toolchain profile: identities bound, import closure re-merged from pinned members, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, reproduced executable's stdout digest observed matching the record pin.\nAcceptance scope excludes producer authenticity, historical execution (one run is an observation, not a history), OS exit-status observation, stderr observation, canonical link argument-vector reproduction (the record pins no canonical argv), raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/process semantics, grade and Lean promotion.\n",
 };
 
 const STDOUT_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
     scope: "native_bundle_source_llvm_toolchain_reproduction_and_os_stdout_observation",
     performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "canonical_link_argument_vector_reproduction", "os_stdout_observation"],
-    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
+    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status_observation", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
     text: "Native artifact accepted within the pinned bundle/toolchain profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, canonical link argument vector re-derived, reproduced executable's stdout digest observed matching the record pin.\nAcceptance scope excludes producer authenticity, historical execution (one run is an observation, not a history), OS exit-status observation, stderr observation, raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/process semantics, grade and Lean promotion.\n",
 };
 
 const STDOUT_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance = NativeAcceptance {
     scope: "native_bundle_source_llvm_toolchain_reproduction_and_os_stdout_observation",
     performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "os_stdout_observation"],
-    not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
+    not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status_observation", "os_stderr_observation", "grade_promotion", "lean_kernel_checks"],
     text: "Native artifact accepted within the pinned bundle/toolchain profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, reproduced executable's stdout digest observed matching the record pin.\nAcceptance scope excludes producer authenticity, historical execution (one run is an observation, not a history), OS exit-status observation, stderr observation, canonical link argument-vector reproduction (the record pins no canonical argv), raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/process semantics, grade and Lean promotion.\n",
 };
 
@@ -1260,28 +1260,28 @@ const STDOUT_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance = NativeAcceptance {
 const MULTIFILE_STDERR_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
     scope: "native_multifile_bundle_source_llvm_toolchain_reproduction_and_os_stderr_observation",
     performed: &["bundle_identity_binding", "pinned_member_merge_rederivation", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "canonical_link_argument_vector_reproduction", "os_stderr_observation"],
-    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "os_stdout_observation", "grade_promotion", "lean_kernel_checks"],
+    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status_observation", "os_stdout_observation", "grade_promotion", "lean_kernel_checks"],
     text: "Native multifile artifact accepted within the pinned bundle/toolchain profile: identities bound, import closure re-merged from pinned members, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, canonical link argument vector re-derived, reproduced executable's stderr digest observed matching the record pin.\nAcceptance scope excludes producer authenticity, historical execution (one run is an observation, not a history), OS exit-status observation, stdout observation, raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/process semantics, grade and Lean promotion.\n",
 };
 
 const MULTIFILE_STDERR_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance = NativeAcceptance {
     scope: "native_multifile_bundle_source_llvm_toolchain_reproduction_and_os_stderr_observation",
     performed: &["bundle_identity_binding", "pinned_member_merge_rederivation", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "os_stderr_observation"],
-    not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "os_stdout_observation", "grade_promotion", "lean_kernel_checks"],
+    not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status_observation", "os_stdout_observation", "grade_promotion", "lean_kernel_checks"],
     text: "Native multifile artifact accepted within the pinned bundle/toolchain profile: identities bound, import closure re-merged from pinned members, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, reproduced executable's stderr digest observed matching the record pin.\nAcceptance scope excludes producer authenticity, historical execution (one run is an observation, not a history), OS exit-status observation, stdout observation, canonical link argument-vector reproduction (the record pins no canonical argv), raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/process semantics, grade and Lean promotion.\n",
 };
 
 const STDERR_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
     scope: "native_bundle_source_llvm_toolchain_reproduction_and_os_stderr_observation",
     performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "canonical_link_argument_vector_reproduction", "os_stderr_observation"],
-    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "os_stdout_observation", "grade_promotion", "lean_kernel_checks"],
+    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status_observation", "os_stdout_observation", "grade_promotion", "lean_kernel_checks"],
     text: "Native artifact accepted within the pinned bundle/toolchain profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, canonical link argument vector re-derived, reproduced executable's stderr digest observed matching the record pin.\nAcceptance scope excludes producer authenticity, historical execution (one run is an observation, not a history), OS exit-status observation, stdout observation, raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/process semantics, grade and Lean promotion.\n",
 };
 
 const STDERR_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance = NativeAcceptance {
     scope: "native_bundle_source_llvm_toolchain_reproduction_and_os_stderr_observation",
     performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "os_stderr_observation"],
-    not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "os_stdout_observation", "grade_promotion", "lean_kernel_checks"],
+    not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status_observation", "os_stdout_observation", "grade_promotion", "lean_kernel_checks"],
     text: "Native artifact accepted within the pinned bundle/toolchain profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, reproduced executable's stderr digest observed matching the record pin.\nAcceptance scope excludes producer authenticity, historical execution (one run is an observation, not a history), OS exit-status observation, stdout observation, canonical link argument-vector reproduction (the record pins no canonical argv), raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/process semantics, grade and Lean promotion.\n",
 };
 
@@ -2708,28 +2708,67 @@ mod tests {
     }
 
     #[test]
-    fn runtime_observation_acceptance_checks_are_disjoint_and_same_run() {
-        let runtime_checks = [
-            "os_exit_status_observation",
-            "os_stdout_observation",
-            "os_stderr_observation",
-            "runtime_observation_semantics",
-        ];
+    fn native_acceptance_descriptors_use_canonical_runtime_check_names() {
         let acceptances = [
+            &EVIDENCE_ACCEPTANCE,
+            &MULTIFILE_EVIDENCE_ACCEPTANCE,
+            &MULTIFILE_ARTIFACT_ACCEPTANCE,
+            &MULTIFILE_ARTIFACT_ACCEPTANCE_ARGV_UNPINNED,
+            &ARTIFACT_ACCEPTANCE,
+            &ARTIFACT_ACCEPTANCE_ARGV_UNPINNED,
+            &MULTIFILE_EXIT_STATUS_ACCEPTANCE,
+            &MULTIFILE_EXIT_STATUS_ACCEPTANCE_ARGV_UNPINNED,
+            &EXIT_STATUS_ACCEPTANCE,
+            &EXIT_STATUS_ACCEPTANCE_ARGV_UNPINNED,
+            &MULTIFILE_STDOUT_ACCEPTANCE,
+            &MULTIFILE_STDOUT_ACCEPTANCE_ARGV_UNPINNED,
+            &STDOUT_ACCEPTANCE,
+            &STDOUT_ACCEPTANCE_ARGV_UNPINNED,
+            &MULTIFILE_STDERR_ACCEPTANCE,
+            &MULTIFILE_STDERR_ACCEPTANCE_ARGV_UNPINNED,
+            &STDERR_ACCEPTANCE,
+            &STDERR_ACCEPTANCE_ARGV_UNPINNED,
             &MULTIFILE_RUNTIME_OBSERVATION_ACCEPTANCE,
             &MULTIFILE_RUNTIME_OBSERVATION_ACCEPTANCE_ARGV_UNPINNED,
             &RUNTIME_OBSERVATION_ACCEPTANCE,
             &RUNTIME_OBSERVATION_ACCEPTANCE_ARGV_UNPINNED,
         ];
+        // Update this literal when adding a NativeAcceptance descriptor.
+        assert_eq!(acceptances.len(), 22);
+        let canonical_runtime_checks = [
+            "os_exit_status_observation",
+            "os_stdout_observation",
+            "os_stderr_observation",
+            "runtime_observation_semantics",
+        ];
+        let runtime_observation_acceptances = [
+            &MULTIFILE_RUNTIME_OBSERVATION_ACCEPTANCE,
+            &MULTIFILE_RUNTIME_OBSERVATION_ACCEPTANCE_ARGV_UNPINNED,
+            &RUNTIME_OBSERVATION_ACCEPTANCE,
+            &RUNTIME_OBSERVATION_ACCEPTANCE_ARGV_UNPINNED,
+        ];
+
         for acceptance in acceptances {
-            for check in runtime_checks {
-                assert!(acceptance.performed.contains(&check));
+            for check in acceptance.performed.iter().chain(acceptance.not_performed) {
+                assert_ne!(*check, "os_exit_status");
+                if (check.starts_with("os_") && check.ends_with("_observation"))
+                    || *check == "runtime_observation_semantics"
+                {
+                    assert!(
+                        canonical_runtime_checks.contains(check),
+                        "unknown runtime observation check: {check}"
+                    );
+                }
             }
             for check in acceptance.performed {
                 assert!(!acceptance.not_performed.contains(check));
             }
-            assert!(!acceptance.performed.contains(&"os_exit_status"));
-            assert!(!acceptance.not_performed.contains(&"os_exit_status"));
+        }
+
+        for acceptance in runtime_observation_acceptances {
+            for check in canonical_runtime_checks {
+                assert!(acceptance.performed.contains(&check));
+            }
         }
     }
 

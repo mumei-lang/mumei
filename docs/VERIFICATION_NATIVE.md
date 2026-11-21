@@ -1764,7 +1764,7 @@ emits the anonymous acceptance descriptor (`--json` gives the
 `os_exit_status_observation` moved into `checks_performed`. The name is
 deliberately the observation — `historical_execution`, ABI, runtime and
 process semantics stay in `checks_not_performed`, and `accept-artifact`
-keeps `os_exit_status` excluded since it performs no execution. A
+keeps `os_exit_status_observation` excluded since it performs no execution. A
 mismatched status fails closed (exit 1); every unevaluable case exits 3
 with no descriptor.
 
@@ -1806,7 +1806,7 @@ not compare the exit status.
 `mumei native-bundle accept-stdout` is the acceptance face: it runs the
 identical chain and, on a matching observation, emits the anonymous
 acceptance descriptor with `os_stdout_observation` in `checks_performed`
-and `os_exit_status`, `os_stderr_observation`, `historical_execution`,
+and `os_exit_status_observation`, `os_stderr_observation`, `historical_execution`,
 optimizer/ABI/runtime semantics, grade and Lean in
 `checks_not_performed`. Every unevaluable case exits 3 with no
 descriptor; a mismatched digest exits 1.
@@ -1851,7 +1851,7 @@ stdout or historical-execution claim; this command observes stderr only.
 `mumei native-bundle accept-stderr` is the acceptance face: it runs the
 identical chain and, on a matching observation, emits the anonymous
 acceptance descriptor with `os_stderr_observation` in
-`checks_performed` and `os_exit_status`, `os_stdout_observation`,
+`checks_performed` and `os_exit_status_observation`, `os_stdout_observation`,
 `historical_execution`, optimizer/ABI/runtime semantics, grade and Lean
 in `checks_not_performed`. Every unevaluable case exits 3 with no
 descriptor; a mismatched digest exits 1.
@@ -1932,6 +1932,9 @@ its channel observation separately, so those descriptors cannot claim
 that all channels matched in the same invocation. The descriptor is not
 reusable Evidence or a certificate. The Agent-side performer registration
 in `RUNTIME_CHECK_VOCABULARY` (mumei-agent#1034) is a follow-up.
+These descriptors name the exit-status observation only as
+`os_exit_status_observation` (formerly bare `os_exit_status` in the
+not-performed lists of the non-exit-status descriptors).
 
 ### First native consumer Evidence producer
 
