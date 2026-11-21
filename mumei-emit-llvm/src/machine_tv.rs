@@ -64,6 +64,7 @@ enum ResultWidth {
     I64,
     I32,
     F64,
+    I128,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,6 +257,7 @@ pub fn check_entry_wrapper_with_preservation(
 ) -> (FunctionOutcome, Option<CalleeSavedPreservation>) {
     let value = BV::fresh_const(context, "entry_wrapper_user_main_result", 64);
     let mut model = PureI64Body::synthetic_scalar("main", value.clone());
+    model.result_leaf_doubles = vec![false];
     model.call_sites.push(CallSite {
         callee: "main".to_owned(),
         args: Vec::new(),
@@ -313,6 +315,11 @@ fn check_function_with_result_width<'ctx>(
     }
     let result_width = if result_width == ResultWidth::I64 && model_result_is_double(model) {
         ResultWidth::F64
+    } else if result_width == ResultWidth::I64
+        && model.result_shape.is_none()
+        && model.value.get_size() == 128
+    {
+        ResultWidth::I128
     } else {
         result_width
     };
@@ -445,13 +452,27 @@ pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
             .iter()
             .zip(&model.param_leaf_doubles)
             .all(|(shape, leaves)| match shape {
-                None => leaves.len() == 1,
+                None => {
+                    leaves.len() == 1
+                        || (model.has_wide_scalar_features
+                            && leaves.len() == 2
+                            && leaves.iter().all(|is_double| !*is_double))
+                }
                 Some(count) => {
                     (1..=MAX_AGGREGATE_LEAF_COUNT).contains(count) && leaves.len() == *count
                 }
             });
     let result_shape_supported = match model.result_shape {
-        None => model.result_leaf_doubles.len() <= 1 && model.value.get_size() == 64,
+        None => {
+            (model.result_leaf_doubles.len() <= 1 && model.value.get_size() == 64)
+                || (model.has_wide_scalar_features
+                    && model.result_leaf_doubles.len() == 2
+                    && model
+                        .result_leaf_doubles
+                        .iter()
+                        .all(|is_double| !*is_double)
+                    && model.value.get_size() == 128)
+        }
         Some(count) => {
             (1..=MAX_AGGREGATE_LEAF_COUNT).contains(&count)
                 && model.result_leaf_doubles.len() == count
@@ -464,14 +485,30 @@ pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
         && parameter_shapes_supported
         && result_shape_supported
         && model.call_sites.iter().all(|site| {
-            (site.result.get_size() == 64 || site.has_composite_arguments_or_result)
+            (site.result.get_size() == 64
+                || site.has_composite_arguments_or_result
+                || (model.has_wide_scalar_features
+                    && site.result.get_size() == 128
+                    && site.result_shape == (CallValueShape::Scalar { leaf_count: 2 })))
                 && call_site_shapes_are_consistent(site)
         })
         && !model.has_post_writes()
         && !model.has_composite_features_beyond_struct_values
         && !model.has_enum_signature
-        && !model.has_wide_scalar_features
+        && !wide_composite_values(model)
         && !model.bounded_memory
+}
+
+fn wide_composite_values(model: &PureI64Body<'_>) -> bool {
+    model.has_wide_scalar_features
+        && (model.param_shapes.iter().any(Option::is_some)
+            || model.result_shape.is_some()
+            || model.call_sites.iter().any(|site| {
+                site.argument_shapes
+                    .iter()
+                    .any(|shape| matches!(shape, CallValueShape::Struct { .. }))
+                    || matches!(site.result_shape, CallValueShape::Struct { .. })
+            }))
 }
 
 const MAX_AGGREGATE_LEAF_COUNT: usize = 4;
@@ -514,6 +551,10 @@ fn call_site_shapes_are_consistent(site: &CallSite<'_>) -> bool {
             {
                 return false;
             }
+        } else if matches!(shape, CallValueShape::Scalar { leaf_count: 2 })
+            && leaf_doubles.iter().any(|is_double| *is_double)
+        {
+            return false;
         }
         argument_leaf_count = end;
     }
@@ -531,6 +572,12 @@ fn call_site_shapes_are_consistent(site: &CallSite<'_>) -> bool {
     match site.result_shape {
         CallValueShape::Scalar { leaf_count: 1 }
             if site.result_is_double != site.result_leaf_doubles[0] =>
+        {
+            return false;
+        }
+        CallValueShape::Scalar { leaf_count: 2 }
+            if site.result_is_double
+                || site.result_leaf_doubles.iter().any(|is_double| *is_double) =>
         {
             return false;
         }
@@ -643,6 +690,7 @@ fn assert_path_equivalence_query<'ctx>(
             ResultWidth::I64 => model.value._eq(return_value),
             ResultWidth::I32 => model.value.extract(31, 0)._eq(&return_value.extract(31, 0)),
             ResultWidth::F64 => f64_values_match(context, &model.value, return_value),
+            ResultWidth::I128 => model.value._eq(return_value),
         }
     };
     let mut equivalent_terms: Vec<&Bool> = path.call_argument_obligations.iter().collect();
@@ -765,6 +813,12 @@ enum FlagState<'ctx> {
         right: BV<'ctx>,
         width: u32,
     },
+    Arithmetic {
+        value: BV<'ctx>,
+        carry: Bool<'ctx>,
+        overflow: Bool<'ctx>,
+        width: u32,
+    },
     FloatCompare {
         left: BV<'ctx>,
         right: BV<'ctx>,
@@ -833,6 +887,10 @@ fn lift<'ctx>(
             {
                 return Err(FunctionOutcome::OutsideProfile("argument_count"));
             }
+        } else if leaves.len() == 2
+            && integer_argument_index.saturating_add(2) > ARGUMENT_REGISTERS.len()
+        {
+            return Err(FunctionOutcome::OutsideProfile("argument_count"));
         }
         for is_double in leaves {
             if *is_double {
@@ -986,6 +1044,12 @@ fn lift<'ctx>(
             {
                 lift_imul_high(instruction, &mut state.registers)?;
                 state.flags = FlagState::Unknown;
+            } else if instruction.mnemonic == "mulq" {
+                if model.has_wide_scalar_features {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                }
+                lift_mul_high(instruction, &mut state.registers)?;
+                state.flags = FlagState::Unknown;
             } else if instruction.mnemonic == "callq" {
                 lift_call(
                     instruction,
@@ -1021,11 +1085,13 @@ fn lift<'ctx>(
                 if !lift_neg(&operands, &mut state.registers, width) {
                     return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
                 }
-                state.flags = FlagState::Compare {
-                    left: BV::from_u64(context, 0, width),
-                    right,
-                    width,
-                };
+                state.flags = arithmetic_flags(
+                    &BV::from_u64(context, 0, width),
+                    &right,
+                    None,
+                    true,
+                    context,
+                );
             } else if instruction.mnemonic == "pushq" {
                 if !state.rsp_is_known || state.rsp_offset % 8 != 0 {
                     return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
@@ -1123,6 +1189,7 @@ fn lift<'ctx>(
                     &integer_argument_indices,
                     &arguments,
                 )?;
+                state.flags = FlagState::Unknown;
             } else if matches!(instruction.mnemonic.as_str(), "addq" | "subq")
                 && split_operands(&instruction.operands)
                     .get(1)
@@ -1140,20 +1207,62 @@ fn lift<'ctx>(
             } else if matches!(instruction.mnemonic.as_str(), "testb" | "testl" | "testq") {
                 let width = instruction_width(&instruction.mnemonic)?;
                 state.flags = test_flags(&instruction.operands, &state.registers, context, width)?;
-            } else if matches!(instruction.mnemonic.as_str(), "subl" | "subq") {
+            } else if matches!(
+                instruction.mnemonic.as_str(),
+                "addl" | "addq" | "subl" | "subq"
+            ) {
                 let width = instruction_width(&instruction.mnemonic)?;
                 let (left, right) =
                     binary_operands(&instruction.operands, &state.registers, context, width)?;
+                let is_subtraction = instruction.mnemonic.starts_with("sub");
+                let operation = if is_subtraction {
+                    BinaryOp::Sub
+                } else {
+                    BinaryOp::Add
+                };
                 if !lift_binary(
                     &split_operands(&instruction.operands),
                     &mut state.registers,
                     context,
                     width,
-                    BinaryOp::Sub,
+                    operation,
                 ) {
                     return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
                 }
-                state.flags = FlagState::Compare { left, right, width };
+                state.flags = arithmetic_flags(&left, &right, None, is_subtraction, context);
+            } else if matches!(instruction.mnemonic.as_str(), "adcq" | "sbbq") {
+                let carry_in = match &state.flags {
+                    FlagState::Compare { left, right, .. } => left.bvult(right),
+                    FlagState::Arithmetic { carry, .. } => carry.clone(),
+                    _ => return Err(FunctionOutcome::OutsideProfile("unsupported_flags")),
+                };
+                let width = instruction_width(&instruction.mnemonic)?;
+                let (left, right) =
+                    binary_operands(&instruction.operands, &state.registers, context, width)?;
+                let is_subtraction = instruction.mnemonic == "sbbq";
+                let operands = split_operands(&instruction.operands);
+                let [_, destination] = operands.as_slice() else {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                };
+                let (index, destination_width) = parse_register(destination)
+                    .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+                if destination_width != width || index == 4 {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                }
+                let carry_value = carry_in.ite(
+                    &BV::from_u64(context, 1, width),
+                    &BV::from_u64(context, 0, width),
+                );
+                let value = if is_subtraction {
+                    left.bvsub(&right).bvsub(&carry_value)
+                } else {
+                    left.bvadd(&right).bvadd(&carry_value)
+                };
+                if !write_register(&mut state.registers, index, value.clone(), width) {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                }
+                state.flags =
+                    arithmetic_flags(&left, &right, Some(&carry_in), is_subtraction, context);
             } else if matches!(instruction.mnemonic.as_str(), "xorl" | "xorq") {
                 let width = instruction_width(&instruction.mnemonic)?;
                 state.flags = lift_bitwise_flags(
@@ -1519,6 +1628,17 @@ fn condition_for_flags<'ctx>(
                 left.bvult(right),
             )
         }
+        FlagState::Arithmetic {
+            value,
+            carry,
+            overflow,
+            width,
+        } => {
+            let zero = value._eq(&BV::from_u64(context, 0, *width));
+            let sign = most_significant_bit(value, *width, context);
+            let signed_less = sign._eq(overflow).not();
+            (zero, sign, signed_less, carry.clone())
+        }
         FlagState::Result { value, width } => {
             let zero = value._eq(&BV::from_u64(context, 0, *width));
             let sign = most_significant_bit(value, *width, context);
@@ -1551,6 +1671,76 @@ fn condition_for_flags<'ctx>(
         "ns" => sign.not(),
         _ => return Err(FunctionOutcome::OutsideProfile("unsupported_instruction")),
     })
+}
+
+fn arithmetic_flags<'ctx>(
+    left: &BV<'ctx>,
+    right: &BV<'ctx>,
+    carry_in: Option<&Bool<'ctx>>,
+    is_subtraction: bool,
+    context: &'ctx Context,
+) -> FlagState<'ctx> {
+    let width = left.get_size();
+    let carry_wide = carry_in
+        .map(|carry| {
+            carry.ite(
+                &BV::from_u64(context, 1, width + 1),
+                &BV::from_u64(context, 0, width + 1),
+            )
+        })
+        .unwrap_or_else(|| BV::from_u64(context, 0, width + 1));
+    let carry_narrow = carry_in
+        .map(|carry| {
+            carry.ite(
+                &BV::from_u64(context, 1, width),
+                &BV::from_u64(context, 0, width),
+            )
+        })
+        .unwrap_or_else(|| BV::from_u64(context, 0, width));
+    let value = match (is_subtraction, carry_in) {
+        (true, Some(_)) => left.bvsub(right).bvsub(&carry_narrow),
+        (false, Some(_)) => left.bvadd(right).bvadd(&carry_narrow),
+        (true, None) => left.bvsub(right),
+        (false, None) => left.bvadd(right),
+    };
+    let unsigned = if is_subtraction {
+        if let Some(carry) = carry_in {
+            Bool::or(
+                context,
+                &[
+                    &left.bvult(right),
+                    &Bool::and(context, &[carry, &left._eq(right)]),
+                ],
+            )
+        } else {
+            left.bvult(right)
+        }
+    } else {
+        let full = left
+            .zero_ext(1)
+            .bvadd(&right.zero_ext(1))
+            .bvadd(&carry_wide);
+        full.extract(width, width)._eq(&BV::from_u64(context, 1, 1))
+    };
+    let signed = match (is_subtraction, carry_in) {
+        (true, Some(_)) => left
+            .sign_ext(1)
+            .bvsub(&right.sign_ext(1))
+            .bvsub(&carry_wide),
+        (false, Some(_)) => left
+            .sign_ext(1)
+            .bvadd(&right.sign_ext(1))
+            .bvadd(&carry_wide),
+        (true, None) => left.sign_ext(1).bvsub(&right.sign_ext(1)),
+        (false, None) => left.sign_ext(1).bvadd(&right.sign_ext(1)),
+    };
+    let overflow = signed._eq(&value.sign_ext(1)).not();
+    FlagState::Arithmetic {
+        value,
+        carry: unsigned,
+        overflow,
+        width,
+    }
 }
 
 fn most_significant_bit<'ctx>(value: &BV<'ctx>, width: u32, context: &'ctx Context) -> Bool<'ctx> {
@@ -1599,6 +1789,10 @@ fn finish_path<'ctx>(
                 }
             })
             .collect()
+    } else if model.value.get_size() == 128 {
+        vec![state.registers[2]
+            .extract(63, 0)
+            .concat(&state.registers[0].extract(63, 0))]
     } else {
         vec![if model_result_is_double(model) {
             state.xmm_registers[0].extract(63, 0)
@@ -1922,15 +2116,13 @@ fn lift_rsp_adjustment<'ctx>(
     ) {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    state.flags = if instruction.mnemonic == "subq" {
-        FlagState::Compare {
-            left: previous_rsp,
-            right: BV::from_u64(context, amount, 64),
-            width: 64,
-        }
-    } else {
-        FlagState::Unknown
-    };
+    state.flags = arithmetic_flags(
+        &previous_rsp,
+        &BV::from_u64(context, amount, 64),
+        None,
+        instruction.mnemonic == "subq",
+        context,
+    );
     Ok(())
 }
 
@@ -2089,7 +2281,7 @@ fn lift_stack_argument_add<'ctx>(
 
 fn call_value_shape_supported(shape: CallValueShape) -> bool {
     match shape {
-        CallValueShape::Scalar { leaf_count } => leaf_count == 1,
+        CallValueShape::Scalar { leaf_count } => matches!(leaf_count, 1 | 2),
         CallValueShape::Struct {
             leaf_count,
             has_enum: false,
@@ -2271,6 +2463,27 @@ fn lift_call<'ctx>(
             CallValueShape::Enum { .. } => {
                 return Err(FunctionOutcome::OutsideProfile("call_arguments"));
             }
+            CallValueShape::Scalar { leaf_count: 2 } => {
+                let leaf_end = leaf_index
+                    .checked_add(2)
+                    .ok_or(FunctionOutcome::OutsideProfile("call_arguments"))?;
+                let Some(leaf_doubles) = call_site.arg_leaf_doubles.get(leaf_index..leaf_end)
+                else {
+                    return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+                };
+                if leaf_doubles.iter().any(|is_double| *is_double)
+                    || integer_argument_index.saturating_add(2) > ARGUMENT_REGISTERS.len()
+                {
+                    return Err(FunctionOutcome::OutsideProfile("argument_count"));
+                }
+                for offset in 0..2 {
+                    let register_index = ARGUMENT_REGISTERS[integer_argument_index];
+                    call_state
+                        .argument_obligations
+                        .push(call_site.args[leaf_index + offset]._eq(&registers[register_index]));
+                    integer_argument_index += 1;
+                }
+            }
             CallValueShape::Scalar { .. } => {
                 let argument = &call_site.args[leaf_index];
                 if call_site.arg_leaf_doubles[leaf_index] {
@@ -2361,6 +2574,10 @@ fn apply_call_result_and_clobbers<'ctx>(
             xmm_registers[0] = upper.concat(&result);
         }
         CallValueShape::Scalar { leaf_count: 1 } => registers[0] = result,
+        CallValueShape::Scalar { leaf_count: 2 } if result.get_size() == 128 => {
+            registers[0] = result.extract(63, 0);
+            registers[2] = result.extract(127, 64);
+        }
         CallValueShape::Struct {
             leaf_count,
             has_enum: false,
@@ -2793,6 +3010,22 @@ fn lift_imul_high<'ctx>(
     let source = register_value(operand, registers, 64)
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
     let product = registers[0].sign_ext(64).bvmul(&source.sign_ext(64));
+    registers[0] = product.extract(63, 0);
+    registers[2] = product.extract(127, 64);
+    Ok(())
+}
+
+fn lift_mul_high<'ctx>(
+    instruction: &Instruction,
+    registers: &mut [BV<'ctx>],
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [operand] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let source = register_value(operand, registers, 64)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let product = registers[0].zero_ext(64).bvmul(&source.zero_ext(64));
     registers[0] = product.extract(63, 0);
     registers[2] = product.extract(127, 64);
     Ok(())
@@ -4704,7 +4937,7 @@ entry:
     }
 
     #[test]
-    fn unsupported_memory_composite_and_non_i64_body_features_fail_closed() {
+    fn unsupported_memory_and_composite_features_fail_closed() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
         config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
@@ -4736,10 +4969,9 @@ entry:
 
         let mut non_i64_model = source_model(source, &context);
         non_i64_model.has_non_i64_scalar_features = true;
-        non_i64_model.has_wide_scalar_features = true;
         assert_eq!(
             check_function(&bytes, 0, &non_i64_model, &BTreeMap::new(), &context),
-            FunctionOutcome::OutsideProfile("unsupported_signature")
+            FunctionOutcome::Equivalent
         );
     }
 
@@ -4924,9 +5156,168 @@ entry:
             RefinedAdmission::CompositeV21,
         );
         assert!(wide_model.has_wide_scalar_features);
+        assert_eq!(wide_model.inputs.len(), 2);
+        assert!(wide_model.inputs.iter().all(|input| input.get_size() == 64));
+        assert!(wide_model.param_domain.is_empty());
+        assert_eq!(wide_model.value.get_size(), 128);
+        assert!(supports_signature(&wide_model));
+    }
+
+    #[test]
+    fn i128_u128_machine_tv_models_two_gpr_scalar_values() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = |name| {
+            let source = match name {
+                "add" => {
+                    "atom add(x: i128, y: i128) -> i128 requires: true; ensures: true; body: { x + y };"
+                }
+                "sub" => {
+                    "atom sub(x: i128, y: i128) -> i128 requires: true; ensures: true; body: { x - y };"
+                }
+                "neg" => "atom neg(x: i128) -> i128 requires: true; ensures: true; body: { -x };",
+                "mul" => {
+                    "atom mul(x: i128, y: i128) -> i128 requires: true; ensures: true; body: { x * y };"
+                }
+                "slt" => {
+                    "atom slt(x: i128, y: i128) -> bool requires: true; ensures: true; body: { x < y };"
+                }
+                "ult" => {
+                    "atom ult(x: u128, y: u128) -> bool requires: true; ensures: true; body: { x < y };"
+                }
+                "copy" => "atom copy(x: i128) -> i128 requires: true; ensures: true; body: { x };",
+                "callee" => {
+                    "atom callee(x: i128) -> i128 requires: true; ensures: true; body: { x + 1 };"
+                }
+                "caller" => {
+                    "atom callee(x: i128) -> i128 requires: true; ensures: true; body: { x + 1 };\n\
+                     atom caller(x: i128) -> i128 requires: true; ensures: true; body: { callee(x) };"
+                }
+                "divide" => {
+                    "atom divide(x: i128, y: i128) -> i128 requires: y != 0; ensures: true; body: { x / y };"
+                }
+                "udivide" => {
+                    "atom udivide(x: u128, y: u128) -> u128 requires: y != 0; ensures: true; body: { x / y };"
+                }
+                "after_five" => {
+                    "atom after_five(a: i64, b: i64, c: i64, d: i64, e: i64, x: i128) -> i64 requires: true; ensures: true; body: { 0 };"
+                }
+                _ => unreachable!(),
+            };
+            source_model_named_with_admission(
+                source,
+                name,
+                &context,
+                RefinedAdmission::CompositeV21,
+            )
+        };
+        let add_model = model("add");
+        assert!(add_model.has_wide_scalar_features);
+        assert_eq!(add_model.inputs.len(), 4);
+        assert!(add_model.inputs.iter().all(|input| input.get_size() == 64));
+        assert!(add_model.param_domain.is_empty());
+        assert_eq!(add_model.value.get_size(), 128);
+        assert!(supports_signature(&add_model));
+
+        let ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i128 @add(i128 %x, i128 %y) {
+  %r = add i128 %x, %y
+  ret i128 %r
+}
+define i128 @sub(i128 %x, i128 %y) {
+  %r = sub i128 %x, %y
+  ret i128 %r
+}
+define i128 @neg(i128 %x) {
+  %r = sub i128 0, %x
+  ret i128 %r
+}
+define i128 @mul(i128 %x, i128 %y) {
+  %r = mul i128 %x, %y
+  ret i128 %r
+}
+define i64 @slt(i128 %x, i128 %y) {
+  %c = icmp slt i128 %x, %y
+  %r = zext i1 %c to i64
+  ret i64 %r
+}
+define i64 @ult(i128 %x, i128 %y) {
+  %c = icmp ult i128 %x, %y
+  %r = zext i1 %c to i64
+  ret i64 %r
+}
+define i128 @copy(i128 %x) {
+  ret i128 %x
+}
+define i128 @callee(i128 %x) {
+  %r = add i128 %x, 1
+  ret i128 %r
+}
+define i128 @caller(i128 %x) {
+  %r = call i128 @callee(i128 %x)
+  ret i128 %r
+}
+define i128 @divide(i128 %x, i128 %y) {
+  %r = sdiv i128 %x, %y
+  ret i128 %r
+}
+define i128 @udivide(i128 %x, i128 %y) {
+  %r = udiv i128 %x, %y
+  ret i128 %r
+}
+define i64 @after_five(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i128 %x) {
+  ret i64 0
+}
+"#;
+        for name in [
+            "add", "sub", "neg", "slt", "ult", "copy", "callee", "caller",
+        ] {
+            let (address, bytes, targets) = compiled_function_with_targets(ir, name);
+            assert_eq!(
+                check_function(&bytes, address, &model(name), &targets, &context),
+                FunctionOutcome::Equivalent,
+                "{name}"
+            );
+        }
+        let (address, bytes, targets) = compiled_function_with_targets(ir, "mul");
         assert_eq!(
-            check_function(&[0xc3], 0, &wide_model, &BTreeMap::new(), &context),
-            FunctionOutcome::OutsideProfile("unsupported_signature")
+            check_function(&bytes, address, &model("mul"), &targets, &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+
+        let (address, mut add_bytes, targets) = compiled_function_with_targets(ir, "add");
+        let adc_offset = add_bytes
+            .windows(3)
+            .position(|bytes| bytes == [0x48, 0x11, 0xce])
+            .unwrap();
+        add_bytes[adc_offset + 1] = 0x01;
+        assert_eq!(
+            check_function(&add_bytes, address, &model("add"), &targets, &context),
+            FunctionOutcome::Different
+        );
+
+        let (address, _bytes, targets) = compiled_function_with_targets(ir, "copy");
+        let swapped_result = [0x48, 0x89, 0xf0, 0x48, 0x89, 0xfa, 0xc3];
+        assert_eq!(
+            check_function(&swapped_result, address, &model("copy"), &targets, &context,),
+            FunctionOutcome::Different
+        );
+        let (address, bytes, targets) = compiled_function_with_targets(ir, "divide");
+        assert_eq!(
+            check_function(&bytes, address, &model("divide"), &targets, &context),
+            FunctionOutcome::OutsideProfile("call_order")
+        );
+        let (address, bytes, targets) = compiled_function_with_targets(ir, "udivide");
+        assert_eq!(
+            check_function(&bytes, address, &model("udivide"), &targets, &context),
+            FunctionOutcome::OutsideProfile("call_order")
+        );
+        let (address, bytes, targets) = compiled_function_with_targets(ir, "after_five");
+        assert_eq!(
+            check_function(&bytes, address, &model("after_five"), &targets, &context),
+            FunctionOutcome::OutsideProfile("argument_count")
         );
     }
 
@@ -6656,7 +7047,7 @@ entry:
             "atom helper(x: i64) -> i64 requires: true; ensures: true; body: { x + 1 };",
             &context,
         );
-        let bytes = [0x48, 0x83, 0xc7, 0x01, 0x74, 0x01, 0xc3, 0xc3];
+        let bytes = [0x48, 0xf7, 0xe7, 0x74, 0x01, 0xc3, 0xc3];
         assert_eq!(
             check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("unsupported_flags")

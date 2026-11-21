@@ -4599,6 +4599,8 @@ fn module_bundle_with_i128_leaves_builds_as_v24_and_rechecks() {
         root.path(),
         "atom add(x: i128, y: i128) -> i128 requires: true; ensures: result == x + y; body: { x + y };\n\
          atom lt(a: u128, b: u128) -> bool requires: true; ensures: result == (a < b); body: { a < b };\n\
+         atom callee(x: i128) -> i128 requires: true; ensures: result == x + 1; body: { x + 1 };\n\
+         atom caller(x: i128) -> i128 requires: true; ensures: result == callee(x); body: { callee(x) };\n\
          atom main() -> i64 requires: true; ensures: true; body: { 0 };",
     );
     let record = module_record(&bundle);
@@ -4610,10 +4612,33 @@ fn module_bundle_with_i128_leaves_builds_as_v24_and_rechecks() {
     // The pinned pairing names every atom's declared leaf widths.
     assert_eq!(record["leaf_widths"]["add"], serde_json::json!([128, 128]));
     assert_eq!(record["leaf_widths"]["lt"], serde_json::json!([128, 128]));
+    assert_eq!(record["leaf_widths"]["callee"], serde_json::json!([128]));
+    assert_eq!(record["leaf_widths"]["caller"], serde_json::json!([128]));
     assert_eq!(record["leaf_widths"]["main"], serde_json::json!([]));
     assert_success(&check(&source, &bundle, &id));
     assert_success(&recheck(&source, &bundle, &id));
     assert_success(&recheck_llvm(&source, &bundle, &id));
+    let machine_tv = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&machine_tv);
+    let machine_tv: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
+    assert_eq!(
+        machine_tv["register_convention_assumed"],
+        "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_128_bit_scalars_in_consecutive_gpr_pairs_low_first_result_rax_rdx"
+    );
+    for function in ["add", "lt", "callee", "caller"] {
+        assert_eq!(
+            machine_tv["functions"][function]["outcome"],
+            "equivalent_within_profile"
+        );
+    }
+    let accepted = accept_object(&source, &bundle, &id, true);
+    assert_success(&accepted);
+    let accepted: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(accepted["accepted"], true);
+    assert_eq!(
+        accepted["register_convention_assumed"],
+        machine_tv["register_convention_assumed"]
+    );
     // A v24 record re-pinned as v23 is refused — v23 keeps the wide
     // leaf out of the composite shape.
     let mut record = module_record(&bundle);

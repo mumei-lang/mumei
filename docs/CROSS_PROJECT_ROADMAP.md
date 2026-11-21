@@ -9064,7 +9064,7 @@ C-ABI aggregate classification; SysV memory-class passing is not validated.
 F64 struct-call arguments use NaN-aware Query A matching plus a per-path
 exact-bit Query B obligation, whose failure is `call_arguments`, never
 `different`. F64 tail calls, enum signatures/call sites, structs with five
-or more leaves, i128/u128 leaves, post-writes, and bounded memory remain
+or more leaves, i128/u128 struct leaves, post-writes, and bounded memory remain
 fail-closed. Equivalent functions using struct signatures or direct calls
 report `machine_code_composite_register_aggregate_tv`. Aggregates wider than
 two leaves use
@@ -9072,6 +9072,13 @@ two leaves use
 in the active integer or f64 convention string and list
 `machine_code_tv_sysv_memory_class_aggregate_abi` as not performed. These
 are bounded LLVM lowering assumptions, not general ABI or runtime claims.
+Scalar i128/u128 leaves are modeled as low/high 64-bit input pairs, passed in
+consecutive GPRs, and returned through `rax`/`rdx`; the admitted
+add/subtract/negate, comparison, pass-through, and direct-call subset does not
+cover wide multiplication, whose LLVM limb-product sequence remains
+fail-closed as `unsupported_instruction` after the bounded solver returned
+`Unknown`, or external `__divti3`/`__udivti3` libcalls, which remain
+fail-closed.
 
 ## Related Documents
 
