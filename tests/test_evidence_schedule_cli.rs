@@ -170,11 +170,6 @@ fn text_diagnostic_is_one_static_line() {
 
 #[test]
 fn accepts_only_the_declared_embedded_acceptance_schema_versions() {
-    let mut schedule: Value =
-        serde_json::from_str(SELECTED_WITH_CHECK).expect("agent schedule fixture");
-    schedule["evidence_acceptance"]["opaque_contents"] = json!({"not": ["revalidated"]});
-    assert!(stdin_check(&json_bytes(&schedule)).status.success());
-
     for schema_version in [
         "mumei.evidence-acceptance/v1",
         "mumei.evidence-requirement-list-acceptance/v1",
@@ -187,6 +182,19 @@ fn accepts_only_the_declared_embedded_acceptance_schema_versions() {
             &json_bytes(&schedule),
         );
     }
+}
+
+#[test]
+fn embedded_acceptance_is_closed_and_consistent() {
+    let mut schedule: Value =
+        serde_json::from_str(SELECTED_WITH_CHECK).expect("agent schedule fixture");
+    schedule["evidence_acceptance"]["extra"] = json!("not accepted");
+    assert_invalid("extra embedded acceptance key", &json_bytes(&schedule));
+
+    let mut schedule: Value =
+        serde_json::from_str(SELECTED_WITH_CHECK).expect("agent schedule fixture");
+    schedule["evidence_acceptance"]["candidate_match"] = json!(false);
+    assert_invalid("accepted without a candidate match", &json_bytes(&schedule));
 }
 
 #[test]

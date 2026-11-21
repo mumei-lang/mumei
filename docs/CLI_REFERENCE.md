@@ -19,6 +19,8 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei evidence keygen` | 1 | Generate a fresh ed25519 producer keypair; writes the 64-char hex secret to a new file and prints only the public key |
 | `mumei evidence check` | 3 | Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity |
 | `mumei evidence check-schedule` | 2 | Core checks only the static representation and schedule consistency. A `selected` outcome names only a manifest-declared-success exit, never acceptance. `reported_outcome` is the adapter's manifest-declared self-report, never result polarity or a verdict. Manifest-declared argv, stdin and memory bounds are not attested by this record; embedded evidence_acceptance is carried, not re-judged. No adapter is executed and no grade is promoted. |
+| `mumei evidence check-adapter` | 2 | Core checks only the static representation and manifest consistency. Manifest-declared argv and stdin remain inert unless host policy opts in through allow_manifest_attempt_argv and allow_manifest_attempt_stdin; a host argv map takes precedence. Verdict markers describe an adapter self-report vocabulary, never a verdict. max_memory_mb is the adapter's declared ceiling: planning uses the smaller of it and the policy memory bound; a scheduled attempt uses it only when the host declares no memory bound. Core does not enforce it. No adapter is executed and no grade is promoted. |
+| `mumei evidence check-attempt-acceptance` | 2 | Core validates the closed representation and producer consistency of a scheduled evidence-check acceptance. `accepted` records the producer's binding of a declared check outcome to its current candidate, never Core Evidence acceptance. `candidate_match` is not rechecked because Core has no attempt-sequence snapshot. No Core check is rerun and no grade is promoted. |
 | `mumei evidence accept` | 4 | Normalize one declared requirement against one Evidence record into a bounded verdict; no tool execution or proof acceptance |
 | `mumei evidence accept-list` | 4 | Normalize one declared requirement against a bounded Evidence list envelope — per-record verdicts plus an aggregate; no tool execution or proof acceptance |
 | `mumei evidence check-list` | 3 | Validate a bounded Evidence list envelope's representation — every record individually, not their truth or consistency |
@@ -266,6 +268,52 @@ Usage: mumei evidence check-schedule [OPTIONS] [INPUT]
 |---|---|---|---|
 | `--stdin` | false | — | Read one attempt-schedule record from standard input (at most 65,536 bytes) |
 | `--json` | false | — | Print a static representation-only diagnostic; no adapter execution or grade promotion |
+
+## `mumei evidence check-adapter`
+
+Core checks only the static representation and manifest consistency. Manifest-declared argv and stdin remain inert unless host policy opts in through allow_manifest_attempt_argv and allow_manifest_attempt_stdin; a host argv map takes precedence. Verdict markers describe an adapter self-report vocabulary, never a verdict. max_memory_mb is the adapter's declared ceiling: planning uses the smaller of it and the policy memory bound; a scheduled attempt uses it only when the host declares no memory bound. Core does not enforce it. No adapter is executed and no grade is promoted.
+
+Usage:
+
+```text
+Usage: mumei evidence check-adapter [OPTIONS] [INPUT]
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `INPUT` | No | Regular mumei.verifier-adapter/v1 JSON file (at most 65,536 bytes) |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--stdin` | false | — | Read one adapter manifest from standard input (at most 65,536 bytes) |
+| `--json` | false | — | Print a static representation-only diagnostic; no adapter execution or grade promotion |
+
+## `mumei evidence check-attempt-acceptance`
+
+Core validates the closed representation and producer consistency of a scheduled evidence-check acceptance. `accepted` records the producer's binding of a declared check outcome to its current candidate, never Core Evidence acceptance. `candidate_match` is not rechecked because Core has no attempt-sequence snapshot. No Core check is rerun and no grade is promoted.
+
+Usage:
+
+```text
+Usage: mumei evidence check-attempt-acceptance [OPTIONS] [INPUT]
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `INPUT` | No | Regular mumei.evidence-check-acceptance/v1 JSON file (at most 65,536 bytes) |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--stdin` | false | — | Read one evidence-check acceptance from standard input (at most 65,536 bytes) |
+| `--json` | false | — | Print a static representation-only diagnostic; no Core check rerun or grade promotion |
 
 ## `mumei evidence accept`
 

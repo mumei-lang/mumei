@@ -2,6 +2,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::new_without_default)]
 
+pub mod adapter_manifest;
 pub mod ast;
 pub mod attempt_schedule;
 pub mod charter;
@@ -12,6 +13,7 @@ pub mod cross_spec;
 pub mod emitter;
 pub mod erosion;
 pub mod evidence_acceptance;
+pub mod evidence_check_acceptance;
 // NOTE: ffi module contains HTTP/JSON/server FFI backends not yet wired into the public API
 #[allow(dead_code)]
 pub mod ffi;
@@ -32,6 +34,7 @@ pub mod registry;
 pub mod resolver;
 pub mod semantic_contract;
 pub mod source_evidence;
+mod strict_json;
 pub mod structured_feedback;
 pub mod trust_boundary;
 pub mod verification;

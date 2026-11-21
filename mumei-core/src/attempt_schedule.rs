@@ -8,16 +8,16 @@
 //! adapter execution, claim-truth check, resource enforcement, or grade
 //! promotion.
 
-use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
-use serde_json::Number;
-use std::collections::BTreeMap;
+use crate::evidence_check_acceptance::{self, RepresentationError as EvidenceCheckError};
+use crate::strict_json::{
+    self, boolean_field, field, is_integer, nullable_string_field, object, require_keys,
+    string_field, unsigned_field, Error as StrictJsonError, JsonValue,
+};
 use std::fmt;
 
 pub const MAX_INPUT_BYTES: usize = 65_536;
 const MAX_ATTEMPTS: u64 = 8;
 const SCHEDULE_SCHEMA_VERSION: &str = "mumei.attempt-schedule/v1";
-const EVIDENCE_CHECK_SCHEMA_VERSION: &str = "mumei.verifier-evidence-check/v1";
-const EVIDENCE_ACCEPTANCE_SCHEMA_VERSIONS: &[&str] = &["mumei.evidence-check-acceptance/v1"];
 const TOP_LEVEL_KEYS: &[&str] = &[
     "schema_version",
     "outcome",
@@ -37,14 +37,6 @@ const ATTEMPT_KEYS: &[&str] = &[
     "exit_code",
     "reported_outcome",
 ];
-const EVIDENCE_CHECK_KEYS: &[&str] = &[
-    "schema_version",
-    "request_fingerprint",
-    "attempt_number",
-    "output_fingerprint",
-    "outcome",
-];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepresentationError {
     InputTooLarge,
@@ -88,111 +80,6 @@ pub struct Schedule {
     pub attempt_count: usize,
 }
 
-#[derive(Debug)]
-enum JsonValue {
-    Null,
-    Bool(bool),
-    Number(Number),
-    String(String),
-    Array(Vec<JsonValue>),
-    Object(BTreeMap<String, JsonValue>),
-}
-
-impl<'de> Deserialize<'de> for JsonValue {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_any(JsonValueVisitor)
-    }
-}
-
-struct JsonValueVisitor;
-
-impl<'de> Visitor<'de> for JsonValueVisitor {
-    type Value = JsonValue;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a JSON value")
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(JsonValue::Null)
-    }
-
-    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(JsonValue::Bool(value))
-    }
-
-    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(JsonValue::Number(Number::from(value)))
-    }
-
-    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(JsonValue::Number(Number::from(value)))
-    }
-
-    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Number::from_f64(value)
-            .map(JsonValue::Number)
-            .ok_or_else(|| E::custom("invalid JSON number"))
-    }
-
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(JsonValue::String(value.to_owned()))
-    }
-
-    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(JsonValue::String(value))
-    }
-
-    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let mut values = Vec::new();
-        while let Some(value) = sequence.next_element()? {
-            values.push(value);
-        }
-        Ok(JsonValue::Array(values))
-    }
-
-    fn visit_map<A>(self, mut mapping: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut values = BTreeMap::new();
-        while let Some(key) = mapping.next_key::<String>()? {
-            if values.contains_key(&key) {
-                return Err(de::Error::custom("duplicate JSON object key"));
-            }
-            values.insert(key, mapping.next_value()?);
-        }
-        Ok(JsonValue::Object(values))
-    }
-}
-
 pub fn decode(bytes: &[u8]) -> Result<Schedule, RepresentationError> {
     if bytes.len() > MAX_INPUT_BYTES {
         return Err(RepresentationError::InputTooLarge);
@@ -206,8 +93,8 @@ pub fn decode(bytes: &[u8]) -> Result<Schedule, RepresentationError> {
         return Err(RepresentationError::InvalidShape);
     }
 
-    let value: JsonValue =
-        serde_json::from_slice(bytes).map_err(|_| RepresentationError::InvalidShape)?;
+    let value = strict_json::parse(bytes)?;
+    strict_json::reject_unrepresentable_integers(&value)?;
     let root = object(&value)?;
     require_keys(root, TOP_LEVEL_KEYS)?;
 
@@ -245,9 +132,19 @@ pub fn decode(bytes: &[u8]) -> Result<Schedule, RepresentationError> {
         validate_attempt(attempt, index)?;
     }
 
-    let evidence_check = validate_evidence_check(field(root, "evidence_check")?)?;
-    let evidence_acceptance =
-        validate_evidence_acceptance(field(root, "evidence_acceptance")?, evidence_check)?;
+    let evidence_check = match field(root, "evidence_check")? {
+        JsonValue::Null => None,
+        value => Some(
+            evidence_check_acceptance::validate_check(value).map_err(map_evidence_check_error)?,
+        ),
+    };
+    let evidence_acceptance = match field(root, "evidence_acceptance")? {
+        JsonValue::Null => None,
+        value => Some(
+            evidence_check_acceptance::validate_acceptance(value)
+                .map_err(map_evidence_check_error)?,
+        ),
+    };
 
     let selected = outcome == ScheduleOutcome::Selected;
     if selected != selected_adapter_id.is_some() {
@@ -263,21 +160,29 @@ pub fn decode(bytes: &[u8]) -> Result<Schedule, RepresentationError> {
         {
             return Err(RepresentationError::InconsistentSchedule);
         }
-        if let Some(check) = evidence_check {
+        if let Some(check) = &evidence_check {
             if nullable_string_field(last_attempt, "request_fingerprint")?
-                != Some(string_field(check, "request_fingerprint")?)
+                != Some(check.request_fingerprint.as_str())
             {
                 return Err(RepresentationError::InconsistentSchedule);
             }
         }
     }
-    if !selected && (evidence_check.is_some() || evidence_acceptance) {
+    if let Some(acceptance) = &evidence_acceptance {
+        let Some(check) = &evidence_check else {
+            return Err(RepresentationError::InconsistentSchedule);
+        };
+        if acceptance.request_fingerprint != check.request_fingerprint
+            || acceptance.attempt_number != check.attempt_number
+            || acceptance.output_fingerprint != check.output_fingerprint
+            || acceptance.outcome != check.outcome
+        {
+            return Err(RepresentationError::InconsistentSchedule);
+        }
+    }
+    if !selected && (evidence_check.is_some() || evidence_acceptance.is_some()) {
         return Err(RepresentationError::InconsistentSchedule);
     }
-    if evidence_acceptance && evidence_check.is_none() {
-        return Err(RepresentationError::InconsistentSchedule);
-    }
-
     Ok(Schedule {
         outcome,
         attempt_count: attempts.len(),
@@ -332,136 +237,27 @@ fn validate_attempt(value: &JsonValue, index: usize) -> Result<(), Representatio
     Ok(())
 }
 
-fn validate_evidence_check(
-    value: &JsonValue,
-) -> Result<Option<&BTreeMap<String, JsonValue>>, RepresentationError> {
-    let JsonValue::Object(check) = value else {
-        return if matches!(value, JsonValue::Null) {
-            Ok(None)
-        } else {
-            Err(RepresentationError::InvalidValue)
-        };
-    };
-    require_keys(check, EVIDENCE_CHECK_KEYS)?;
-    if string_field(check, "schema_version")? != EVIDENCE_CHECK_SCHEMA_VERSION
-        || !valid_fingerprint(string_field(check, "request_fingerprint")?)
-        || unsigned_field(check, "attempt_number")? == 0
-        || !valid_fingerprint(string_field(check, "output_fingerprint")?)
-        || !matches!(
-            string_field(check, "outcome")?,
-            "valid" | "failed" | "cancelled" | "accepted" | "rejected" | "inconclusive"
-        )
-    {
-        return Err(RepresentationError::InvalidValue);
-    }
-    Ok(Some(check))
-}
-
-fn validate_evidence_acceptance(
-    value: &JsonValue,
-    evidence_check: Option<&BTreeMap<String, JsonValue>>,
-) -> Result<bool, RepresentationError> {
-    let JsonValue::Object(acceptance) = value else {
-        return if matches!(value, JsonValue::Null) {
-            Ok(false)
-        } else {
-            Err(RepresentationError::InvalidValue)
-        };
-    };
-    let schema_version = string_field(acceptance, "schema_version")?;
-    if !EVIDENCE_ACCEPTANCE_SCHEMA_VERSIONS.contains(&schema_version) {
-        return Err(RepresentationError::InvalidValue);
-    }
-    let evidence_check = evidence_check.ok_or(RepresentationError::InconsistentSchedule)?;
-    if string_field(acceptance, "request_fingerprint")?
-        != string_field(evidence_check, "request_fingerprint")?
-        || unsigned_field(acceptance, "attempt_number")?
-            != unsigned_field(evidence_check, "attempt_number")?
-        || string_field(acceptance, "output_fingerprint")?
-            != string_field(evidence_check, "output_fingerprint")?
-        || string_field(acceptance, "outcome")? != string_field(evidence_check, "outcome")?
-    {
-        return Err(RepresentationError::InconsistentSchedule);
-    }
-    Ok(true)
-}
-
-fn object(value: &JsonValue) -> Result<&BTreeMap<String, JsonValue>, RepresentationError> {
-    match value {
-        JsonValue::Object(object) => Ok(object),
-        _ => Err(RepresentationError::InvalidShape),
-    }
-}
-
-fn require_keys(
-    object: &BTreeMap<String, JsonValue>,
-    expected: &[&str],
-) -> Result<(), RepresentationError> {
-    if object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key)) {
-        Ok(())
-    } else {
-        Err(RepresentationError::InvalidShape)
-    }
-}
-
-fn field<'a>(
-    object: &'a BTreeMap<String, JsonValue>,
-    key: &str,
-) -> Result<&'a JsonValue, RepresentationError> {
-    object.get(key).ok_or(RepresentationError::InvalidShape)
-}
-
-fn string_field<'a>(
-    object: &'a BTreeMap<String, JsonValue>,
-    key: &str,
-) -> Result<&'a str, RepresentationError> {
-    match field(object, key)? {
-        JsonValue::String(value) => Ok(value),
-        _ => Err(RepresentationError::InvalidValue),
-    }
-}
-
-fn nullable_string_field<'a>(
-    object: &'a BTreeMap<String, JsonValue>,
-    key: &str,
-) -> Result<Option<&'a str>, RepresentationError> {
-    match field(object, key)? {
-        JsonValue::Null => Ok(None),
-        JsonValue::String(value) => Ok(Some(value)),
-        _ => Err(RepresentationError::InvalidValue),
-    }
-}
-
-fn unsigned_field(
-    object: &BTreeMap<String, JsonValue>,
-    key: &str,
-) -> Result<u64, RepresentationError> {
-    match field(object, key)? {
-        JsonValue::Number(number) => number.as_u64().ok_or(RepresentationError::InvalidValue),
-        _ => Err(RepresentationError::InvalidValue),
-    }
-}
-
-fn boolean_field(
-    object: &BTreeMap<String, JsonValue>,
-    key: &str,
-) -> Result<bool, RepresentationError> {
-    match field(object, key)? {
-        JsonValue::Bool(value) => Ok(*value),
-        _ => Err(RepresentationError::InvalidValue),
-    }
-}
-
-fn is_integer(value: &JsonValue) -> bool {
-    match value {
-        JsonValue::Number(number) => number.as_i64().is_some() || number.as_u64().is_some(),
-        _ => false,
+fn map_evidence_check_error(error: EvidenceCheckError) -> RepresentationError {
+    match error {
+        EvidenceCheckError::InputTooLarge => RepresentationError::InvalidValue,
+        EvidenceCheckError::InvalidShape => RepresentationError::InvalidShape,
+        EvidenceCheckError::InvalidValue => RepresentationError::InvalidValue,
+        EvidenceCheckError::InconsistentAcceptance => RepresentationError::InconsistentSchedule,
     }
 }
 
 fn valid_label(label: &str) -> bool {
     let length = label.chars().count();
     (1..=128).contains(&length) && !label.trim().is_empty() && label.trim() == label
+}
+
+impl From<StrictJsonError> for RepresentationError {
+    fn from(error: StrictJsonError) -> Self {
+        match error {
+            StrictJsonError::InvalidShape => Self::InvalidShape,
+            StrictJsonError::InvalidValue => Self::InvalidValue,
+        }
+    }
 }
 
 fn valid_fingerprint(fingerprint: &str) -> bool {

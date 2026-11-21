@@ -4008,6 +4008,14 @@ validation. Local/private function definitions, indirect calls, and unsupported
 or unresolvable relocations are inconclusive. Full object-code translation
 validation remains the deep endpoint.
 
+Agent consumes this as the bounded `native-object-recheck` route / MCP tool
+(mumei-agent #1050, #1051): it discharges only the object checks the validated
+`mumei.object-symbol-correspondence/v1` descriptor lists in `checks_performed`
+(schema and expected build ID must match; exit status alone discharges
+nothing), so an older Core without the link check never yields
+`object_link_correspondence`. It is not a recovery performer, and
+`object_translation_correspondence` stays not performed.
+
 ### Wave 5 acyclic forward-branch direct-call TV profile (C10 Option B)
 
 Core's opt-in `mumei native-bundle recheck-machine-tv` runs the full linked
@@ -4023,6 +4031,19 @@ callee-saved preservation are assumed, not verified, and make no ABI claim.
 Backward branches/loops, the C `main` wrapper, CRT/startup code, the loader,
 libc and runtime are not covered. This is a bounded per-instruction profile;
 full object-code TV remains the deep endpoint.
+
+Agent consumes it as the bounded `native-machine-tv-recheck` route / MCP tool
+(mumei-agent #1053). It validates the `mumei.machine-code-tv/v1` schema and
+expected build ID and discharges only the listed object checks, including the
+new `machine_code_leaf_function_tv` vocabulary entry. The assumed register
+convention is echoed as an assumption, function outcomes are reported as
+counts only, the route is not a recovery performer, and
+`object_translation_correspondence` stays not performed. The
+`machine_code_direct_call_site_tv` check added by mumei #1201 is not yet in
+the agent vocabulary, so the agent never discharges it until a follow-up
+adds it. No
+`accept-object` / `accept-machine-tv` acceptance producer exists yet, so the
+agent has no object-stage accept route.
 
 ### Wave 5 declared producer-identity gate (C02 consumer)
 
@@ -6176,8 +6197,42 @@ names only a manifest-declared-success exit, never acceptance.
 or a verdict. Manifest-declared argv/stdin/memory bounds are not attested;
 embedded `evidence_acceptance` is carried, not re-judged.
 
+Agent consumes it as the `evidence-check-schedule` route / MCP tool
+(mumei-agent #1054): one reserved attempt feeds the schedule bytes over
+stdin, the input is rehashed after execution (drift suppresses selection),
+and only an exact fail-closed diagnostic is accepted. A selected result is a
+manifest-declared-success exit, not Evidence acceptance or grade promotion.
+
 C11 stays partial; Evidence acceptance of adapter claims, C12's demand
 gate and grade promotion are unchanged.
+
+### C11 Core adapter-manifest attempt-field check (mumei)
+
+`mumei evidence check-adapter <input> | --stdin [--json]` applies a
+bounded representation and consistency check to the complete
+`mumei.verifier-adapter/v1` manifest. It does not execute an adapter or
+assess command safety, stdin semantics, host policy, or resource
+enforcement. Declared argv and stdin remain inert unless host policy opts
+in through `allow_manifest_attempt_argv` and
+`allow_manifest_attempt_stdin`; a host argv map takes precedence.
+Verdict markers describe adapter self-report vocabulary, never a verdict.
+`max_memory_mb` is the adapter's declared ceiling: planning uses the smaller
+of it and the policy memory bound; a scheduled attempt uses it only when the
+host declares no memory bound. Core does not enforce it. No grade is promoted.
+
+C11 stays partial; Evidence acceptance of adapter claims, C12's demand
+gate and grade promotion are unchanged.
+
+### C11 Core evidence-check acceptance check (mumei)
+
+`mumei evidence check-attempt-acceptance <input> | --stdin [--json]`
+validates the closed representation and consistency of a scheduled
+`mumei.evidence-check-acceptance/v1` record. `accepted` is the producer's
+binding of a declared check to its current candidate, never Core Evidence
+acceptance. `candidate_match` is not rechecked because Core has no
+attempt-sequence snapshot. Core does not rerun the declared check.
+
+C11 stays partial; C12's demand gate and grade promotion are unchanged.
 
 ### Claim Book promotable gate (mumei #1172)
 
@@ -8441,6 +8496,7 @@ capability model は Stage 1 のみが opt-in 拡張として上積みされて�
 - ✅ **追補（2026-11-21）— agent consumer wiring**: mumei-agent が `--proof-cert` で生成した証明書ファイルから P5-A メタデータ（`artifact_paths` / `harness_contract` / `intent_fidelity` / `budget_policy_fingerprint` / `lean_provenance`）を消費する経路を実装（mumei-agent PR #1027 — `verify --json` レポートはこれらを持たないため証明書ファイルが正典ソース）。`agent.proofcert.artifact_paths_of` / `validate_artifact_paths` が宣言パスの存在検証を行い、publish 結果に `proof_certificate_file`（repo 相対）と `artifact_paths_status` を載せる。あわせて recovery-eval 合成も拡張: native accept ルートの attempt report が `historical_execution` の performer となり（#1029）、署名検証文書が `registry_digest` / `revocation_digest` でアンカーバイトを pin する `shared:<field>` bind-path により `registry_authenticity` / `revocation_list_authenticity` が回復可能になった（#1030）。C10 runtime/ABI assurance の設計メモは mumei-agent `docs/DESIGN_RUNTIME_ABI_ASSURANCE.md`（#1031）。
 - ✅ **追補（2026-11-21, 2）— クロスファイル依存更層 + runtime-observation 語彙**: クロスファイル依存の更層を2段で実装（mumei-agent #1032: 依存先の invalidation map を fail-closed で維持。#1035: 依存先で回収できなかったチェックを依存元へ継承）。あわせて C10 Option A slice 1 として `RUNTIME_CHECK_VOCABULARY`（`os_exit_status_observation` / `os_stdout_observation` / `os_stderr_observation` / `runtime_observation_semantics`）を追加し、6つの native exit-status/stdout/stderr recheck・accept ルートの accept レポートが自身のチャネル観測チェックを discharge するようになった（#1034。`runtime_observation_semantics` の performer は Core 側 descriptor 待ち）。mumei-demo の6シナリオの `discharged_checks` アサーション追従は別途 follow-up。
 - ✅ **追補（2026-11-21, 3）— C10 Option B 消費設計 + C11 evidence fold の MCP 化**: mumei-agent に C10 Option B（object-code TV）の消費側設計メモ `docs/DESIGN_OBJECT_TV_CONSUMPTION.md` を追加（#1044）。LLVM↔object の対応は既存の `artifact_semantics`（source↔LLVM）を流用せず独立チェック `object_translation_correspondence` とし、performer は将来の object 段 accept 記述子のみ、recheck は non-performer、段階別レポートから source→executable の end-to-end チェックは合成しない。slice 1 として `OBJECT_CHECK_VOCABULARY`（`object_translation_correspondence`）を performer 未登録で予約し、`native-accept` / `native-artifact-recheck` は全 outcome でこのチェックを `checks_not_performed` に残す（#1045。非成功 outcome も C02 の6チェックと合わせて列挙するようになった）。Core の `native-bundle recheck-object`（mumei #1194 / #1195: symbol surface + direct call edges）はこのチェックを discharge しない有界ステップで、agent 側の consumer route はまだない。あわせて C11 の spawn-free evidence fold 4ルート（`evidence-acceptance-eval` / `freshness-eval` / `binding-eval` / `recovery-eval`）を MCP ツールとして公開（#1046。CLI と同一 payload、representation-level のみで Evidence acceptance・grade promotion なし）。追補（2）の mumei-demo 6シナリオ追従は mumei-demo #162 で着地済み。
+- ✅ **追補（2026-11-21, 4）— C10 Option B の有界 recheck 消費 + C11 schedule 表現検査の消費**: 追補（3）時点で consumer 未実装だった Core `native-bundle recheck-object` を、mumei-agent の `native-object-recheck` ルート / MCP ツールが消費（#1050）。Core #1197 の linked function correspondence に合わせ、検証済み記述子（schema + expected build ID 一致）の `checks_performed` に載ったチェックだけを discharge するよう変更し、`object_link_correspondence` を語彙に追加（#1051）。Core #1199 の `recheck-machine-tv` は `native-machine-tv-recheck` ルート / MCP ツールが消費し、`machine_code_leaf_function_tv` を語彙に追加（#1053。レジスタ規約は前提として出力するだけで ABI クレームなし、関数結果は件数のみ）。いずれも recheck なので recovery performer ではなく、`object_translation_correspondence` は未実施のまま。Core に object 段の acceptance producer（`accept-object` 等）がないため、`native-object-accept` は未実装。C11 では Core #1200 の `evidence check-schedule` を `evidence-check-schedule` ルート / MCP ツールが消費（#1054。1回の予約 attempt、入力ドリフトで選択抑止、固定形の診断のみ受理。Evidence acceptance・grade promotion なし）。mumei-demo は `native_object_recheck`（#165、#166 で link チェック追従）、`native_machine_tv_recheck` / `evidence_check_schedule` シナリオ追加と object 語彙追従（#167）。runtime 系6シナリオは object 語彙を比較しないため変更不要。
 
 **関連ファイル**:
 - `mcp_server.py`（mumei 側 MCP）/ `mumei-agent/agent/mcp_server.py`（agent 側 MCP）/ `mumei-agent/.mcp.json`
