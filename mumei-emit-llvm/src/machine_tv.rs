@@ -282,13 +282,6 @@ fn check_function_with_result_width<'ctx>(
     context: &'ctx Context,
     result_width: ResultWidth,
 ) -> (FunctionOutcome, Option<CalleeSavedPreservation>) {
-    if model
-        .call_sites
-        .iter()
-        .any(|site| site.arg_leaf_doubles.iter().any(|is_double| *is_double))
-    {
-        return (FunctionOutcome::OutsideProfile("call_arguments"), None);
-    }
     if model.inputs.len() > MAX_ARGUMENT_COUNT
         || model
             .call_sites
@@ -341,6 +334,7 @@ fn check_function_with_result_width<'ctx>(
         Err(outcome) => return (outcome, None),
     };
     let mut unknown_path = false;
+    let mut unsupported_call_arguments = false;
     for path in &lifted.paths {
         let result = check_query_with_simplify_fallback(context, |solver| {
             assert_path_equivalence_query(
@@ -353,10 +347,28 @@ fn check_function_with_result_width<'ctx>(
             );
         });
         match result {
-            SatResult::Unsat => {}
+            SatResult::Unsat => {
+                if !path.exact_f64_call_argument_obligations.is_empty() {
+                    let exact_arguments = check_query_with_simplify_fallback(context, |solver| {
+                        assert_path_exact_f64_call_arguments_query(
+                            solver,
+                            model,
+                            &lifted.arguments,
+                            path,
+                            context,
+                        );
+                    });
+                    if matches!(exact_arguments, SatResult::Sat | SatResult::Unknown) {
+                        unsupported_call_arguments = true;
+                    }
+                }
+            }
             SatResult::Sat => return (FunctionOutcome::Different, None),
             SatResult::Unknown => unknown_path = true,
         }
+    }
+    if unsupported_call_arguments {
+        return (FunctionOutcome::OutsideProfile("call_arguments"), None);
     }
     if unknown_path {
         return (FunctionOutcome::Unknown, None);
@@ -512,6 +524,21 @@ fn assert_path_equivalence_query<'ctx>(
     solver.assert(&Bool::and(context, &equivalent_terms).not());
 }
 
+fn assert_path_exact_f64_call_arguments_query<'ctx>(
+    solver: &Solver<'ctx>,
+    model: &PureI64Body<'ctx>,
+    arguments: &[BV<'ctx>],
+    path: &LiftedPath<'ctx>,
+    context: &'ctx Context,
+) {
+    assert_path_assumptions(solver, model, arguments, path);
+    let exact_arguments = path
+        .exact_f64_call_argument_obligations
+        .iter()
+        .collect::<Vec<_>>();
+    solver.assert(&Bool::and(context, &exact_arguments).not());
+}
+
 fn assert_path_assumptions<'ctx>(
     solver: &Solver<'ctx>,
     model: &PureI64Body<'ctx>,
@@ -592,6 +619,7 @@ struct LiftedPath<'ctx> {
     final_rsp_offset: i64,
     path_conditions: Vec<Bool<'ctx>>,
     call_argument_obligations: Vec<Bool<'ctx>>,
+    exact_f64_call_argument_obligations: Vec<Bool<'ctx>>,
     used_call_targets: BTreeSet<u64>,
 }
 
@@ -600,6 +628,7 @@ struct CallState<'ctx> {
     call_index: usize,
     used_call_targets: BTreeSet<u64>,
     argument_obligations: Vec<Bool<'ctx>>,
+    exact_f64_argument_obligations: Vec<Bool<'ctx>>,
 }
 
 #[derive(Clone)]
@@ -692,6 +721,7 @@ fn lift<'ctx>(
             call_index: 0,
             used_call_targets: BTreeSet::new(),
             argument_obligations: Vec::new(),
+            exact_f64_argument_obligations: Vec::new(),
         },
         path_conditions: Vec::new(),
     }];
@@ -1419,6 +1449,7 @@ fn finish_path<'ctx>(
         final_rsp_offset: state.rsp_offset,
         path_conditions: state.path_conditions,
         call_argument_obligations: state.call_state.argument_obligations,
+        exact_f64_call_argument_obligations: state.call_state.exact_f64_argument_obligations,
         used_call_targets: state.call_state.used_call_targets,
     })
 }
@@ -1958,50 +1989,70 @@ fn lift_call<'ctx>(
     if call_site.args.len() > MAX_ARGUMENT_COUNT {
         return Err(FunctionOutcome::OutsideProfile("argument_count"));
     }
-    if call_site
+    let float_argument_count = call_site
         .arg_leaf_doubles
         .iter()
-        .any(|is_double| *is_double)
-    {
+        .filter(|is_double| **is_double)
+        .count();
+    if tail_call && float_argument_count > 0 {
         return Err(FunctionOutcome::OutsideProfile("call_arguments"));
     }
-    if tail_call && call_site.args.len() > ARGUMENT_REGISTERS.len() {
+    if float_argument_count > FLOAT_ARGUMENT_REGISTER_COUNT {
+        return Err(FunctionOutcome::OutsideProfile("argument_count"));
+    }
+    let integer_argument_count = call_site.args.len() - float_argument_count;
+    if tail_call && integer_argument_count > ARGUMENT_REGISTERS.len() {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    if call_site.args.len() > ARGUMENT_REGISTERS.len() && (!rsp_is_known || rsp_offset % 8 != 0) {
+    if integer_argument_count > ARGUMENT_REGISTERS.len() && (!rsp_is_known || rsp_offset % 8 != 0) {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
     let mut outgoing_slots = BTreeSet::new();
     let mut integer_argument_index = 0usize;
-    for argument in &call_site.args {
-        if let Some(register_index) = ARGUMENT_REGISTERS.get(integer_argument_index) {
+    let mut float_argument_index = 0usize;
+    for (argument, is_double) in call_site.args.iter().zip(&call_site.arg_leaf_doubles) {
+        if *is_double {
+            let Some(register) = xmm_registers.get(float_argument_index) else {
+                return Err(FunctionOutcome::OutsideProfile("argument_count"));
+            };
+            let register = register.extract(63, 0);
             call_state
                 .argument_obligations
-                .push(argument._eq(&registers[*register_index]));
-            integer_argument_index += 1;
+                .push(f64_values_match(context, argument, &register));
+            call_state
+                .exact_f64_argument_obligations
+                .push(argument._eq(&register));
+            float_argument_index += 1;
         } else {
-            let stack_argument_index = integer_argument_index - ARGUMENT_REGISTERS.len();
-            let word_index = i64::try_from(stack_argument_index)
-                .map_err(|_| FunctionOutcome::OutsideProfile("call_arguments"))?;
-            let Some(stack_slot) = word_index
-                .checked_mul(8)
-                .and_then(|offset| rsp_offset.checked_add(offset))
-            else {
-                return Err(FunctionOutcome::OutsideProfile("call_arguments"));
-            };
-            if stack_slot % 8 != 0 {
-                return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+            if let Some(register_index) = ARGUMENT_REGISTERS.get(integer_argument_index) {
+                call_state
+                    .argument_obligations
+                    .push(argument._eq(&registers[*register_index]));
+                integer_argument_index += 1;
+            } else {
+                let stack_argument_index = integer_argument_index - ARGUMENT_REGISTERS.len();
+                let word_index = i64::try_from(stack_argument_index)
+                    .map_err(|_| FunctionOutcome::OutsideProfile("call_arguments"))?;
+                let Some(stack_slot) = word_index
+                    .checked_mul(8)
+                    .and_then(|offset| rsp_offset.checked_add(offset))
+                else {
+                    return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+                };
+                if stack_slot % 8 != 0 {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                }
+                let Some((_, stack_argument)) =
+                    stack.iter().find(|(candidate, _)| *candidate == stack_slot)
+                else {
+                    return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+                };
+                call_state
+                    .argument_obligations
+                    .push(argument._eq(stack_argument));
+                outgoing_slots.insert(stack_slot);
+                integer_argument_index += 1;
             }
-            let Some((_, stack_argument)) =
-                stack.iter().find(|(candidate, _)| *candidate == stack_slot)
-            else {
-                return Err(FunctionOutcome::OutsideProfile("call_arguments"));
-            };
-            call_state
-                .argument_obligations
-                .push(argument._eq(stack_argument));
-            outgoing_slots.insert(stack_slot);
-            integer_argument_index += 1;
         }
     }
     if !tail_call && !outgoing_slots.is_empty() {
@@ -3448,7 +3499,7 @@ entry:
         let (address, bytes, call_targets) = compiled_function_with_targets(caller_ir, "caller");
         assert_eq!(
             check_function(&bytes, address, &caller, &call_targets, &context),
-            FunctionOutcome::OutsideProfile("call_arguments")
+            FunctionOutcome::Equivalent
         );
 
         let float_result = BV::fresh_const(&context, "f64_call_result", 64);
@@ -3472,6 +3523,199 @@ entry:
                 &context,
             ),
             FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn f64_call_arguments_require_exact_bits_after_nan_aware_equivalence() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "atom callee(x: f64) -> f64 requires: true; ensures: true; body: { x };\n\
+            atom caller(x: f64) -> f64 requires: true; ensures: true; body: { callee(x) };\n\
+            atom computed(x: f64, y: f64) -> f64 requires: true; ensures: true; body: { callee(x + y) };\n\
+            atom mixed_callee(i: i64, x: f64) -> f64 requires: true; ensures: true; body: { x };\n\
+            atom mixed_caller(i: i64, x: f64) -> f64 requires: true; ensures: true; body: { mixed_callee(i, x) };\n\
+            atom twice(x: f64) -> f64 requires: true; ensures: true; body: { callee(x); callee(x) };";
+        let admission = RefinedAdmission::CompositeV19;
+        let caller = source_model_named_with_admission(source, "caller", &context, admission);
+        let computed = source_model_named_with_admission(source, "computed", &context, admission);
+        let mixed_caller =
+            source_model_named_with_admission(source, "mixed_caller", &context, admission);
+        let twice = source_model_named_with_admission(source, "twice", &context, admission);
+
+        let pass_through_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define double @callee(double %x) {
+entry:
+  ret double %x
+}
+define double @caller(double %x) {
+entry:
+  %result = call double @callee(double %x)
+  ret double %result
+}
+"#;
+        let (address, bytes, call_targets) =
+            compiled_function_with_targets(pass_through_ir, "caller");
+        let instructions = disassemble(&bytes, address).unwrap();
+        assert!(
+            instructions
+                .iter()
+                .any(|instruction| instruction.mnemonic == "callq"),
+            "{instructions:?}"
+        );
+        assert_eq!(
+            check_function(&bytes, address, &caller, &call_targets, &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let computed_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define double @callee(double %x) {
+entry:
+  ret double %x
+}
+define double @computed(double %x, double %y) {
+entry:
+  %sum = fadd double %x, %y
+  %result = call double @callee(double %sum)
+  ret double %result
+}
+"#;
+        let (address, bytes, call_targets) =
+            compiled_function_with_targets(computed_ir, "computed");
+        let instructions = disassemble(&bytes, address).unwrap();
+        assert!(
+            instructions
+                .iter()
+                .any(|instruction| instruction.mnemonic == "addsd"),
+            "{instructions:?}"
+        );
+        assert!(
+            instructions
+                .iter()
+                .any(|instruction| instruction.mnemonic == "callq"),
+            "{instructions:?}"
+        );
+        assert_eq!(
+            check_function(&bytes, address, &computed, &call_targets, &context),
+            FunctionOutcome::OutsideProfile("call_arguments")
+        );
+
+        let wrong_xmm_argument = [
+            0x66, 0x0f, 0x28, 0xc1, // movapd %xmm1, %xmm0
+            0xe8, 0x00, 0x00, 0x00, 0x00, // callq callee
+            0xc3,
+        ];
+        let mut caller_targets = helper_call_targets(&[5]);
+        caller_targets.get_mut(&5).unwrap().name = "callee".to_owned();
+        assert_eq!(
+            check_function(&wrong_xmm_argument, 0, &caller, &caller_targets, &context,),
+            FunctionOutcome::Different
+        );
+
+        let mixed_call = [0xe8, 0x00, 0x00, 0x00, 0x00, 0xc3];
+        let mut mixed_targets = helper_call_targets(&[1]);
+        mixed_targets.get_mut(&1).unwrap().name = "mixed_callee".to_owned();
+        assert_eq!(
+            check_function(&mixed_call, 0, &mixed_caller, &mixed_targets, &context,),
+            FunctionOutcome::Equivalent
+        );
+
+        let nan_payload_caller = twice;
+        assert_eq!(nan_payload_caller.call_sites.len(), 2);
+        assert_eq!(
+            nan_payload_caller.call_sites[0].arg_leaf_doubles,
+            vec![true]
+        );
+        assert_eq!(
+            nan_payload_caller.call_sites[1].arg_leaf_doubles,
+            vec![true]
+        );
+        let quiets_signaling_nan = [
+            0x41, 0x54, // pushq %r12
+            0x66, 0x49, 0x0f, 0x7e, 0xc4, // movq %xmm0, %r12
+            0xe8, 0x00, 0x00, 0x00, 0x00, // callq callee
+            0x4c, 0x89, 0xe0, // movq %r12, %rax
+            0x66, 0x48, 0x0f, 0x6e, 0xc0, // movq %rax, %xmm0
+            0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x80, // movabsq $-0x8000000000000000, %rax
+            0x66, 0x48, 0x0f, 0x6e, 0xc8, // movq %rax, %xmm1
+            0xf2, 0x0f, 0x58, 0xc1, // addsd %xmm1, %xmm0
+            0xe8, 0x00, 0x00, 0x00, 0x00, // callq callee
+            0x41, 0x5c, // popq %r12
+            0xc3,
+        ];
+        let exact_plain_x = [
+            0x41, 0x54, // pushq %r12
+            0x66, 0x49, 0x0f, 0x7e, 0xc4, // movq %xmm0, %r12
+            0xe8, 0x00, 0x00, 0x00, 0x00, // callq callee
+            0x4c, 0x89, 0xe0, // movq %r12, %rax
+            0x66, 0x48, 0x0f, 0x6e, 0xc0, // movq %rax, %xmm0
+            0xe8, 0x00, 0x00, 0x00, 0x00, // callq callee
+            0x41, 0x5c, // popq %r12
+            0xc3,
+        ];
+        let mut twice_targets = helper_call_targets(&[8, 40]);
+        for target in twice_targets.values_mut() {
+            target.name = "callee".to_owned();
+        }
+        assert_eq!(
+            check_function(
+                &quiets_signaling_nan,
+                0,
+                &nan_payload_caller,
+                &twice_targets,
+                &context,
+            ),
+            FunctionOutcome::OutsideProfile("call_arguments")
+        );
+        let mut plain_x_targets = helper_call_targets(&[8, 21]);
+        for target in plain_x_targets.values_mut() {
+            target.name = "callee".to_owned();
+        }
+        assert_eq!(
+            check_function(
+                &exact_plain_x,
+                0,
+                &nan_payload_caller,
+                &plain_x_targets,
+                &context,
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let tail_call = [0xe9, 0x00, 0x00, 0x00, 0x00]; // jmp callee
+        let mut tail_targets = helper_call_targets(&[1]);
+        tail_targets.get_mut(&1).unwrap().name = "callee".to_owned();
+        assert_eq!(
+            check_function(&tail_call, 0, &caller, &tail_targets, &context),
+            FunctionOutcome::OutsideProfile("call_arguments")
+        );
+
+        let result = BV::fresh_const(&context, "many_f64_result", 64);
+        let mut too_many_f64 =
+            PureI64Body::synthetic_scalar("too_many_f64_call_args", result.clone());
+        too_many_f64.result_leaf_doubles = vec![true];
+        too_many_f64.call_sites.push(CallSite {
+            callee: "helper".to_owned(),
+            args: (0..9)
+                .map(|index| BV::fresh_const(&context, &format!("f64_arg_{index}"), 64))
+                .collect(),
+            arg_leaf_doubles: vec![true; 9],
+            result,
+            result_is_double: true,
+            guard: Bool::from_bool(&context, true),
+        });
+        assert_eq!(
+            check_function(
+                &mixed_call,
+                0,
+                &too_many_f64,
+                &helper_call_targets(&[1]),
+                &context,
+            ),
+            FunctionOutcome::OutsideProfile("argument_count")
         );
     }
 
