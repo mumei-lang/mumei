@@ -408,7 +408,7 @@ atom inc(n: Nat)
 
 4. CLI integration
    - mumei doc <input> -o <output_dir>
-   - mumei doc --json (structured output)
+   - mumei doc <input> --format markdown (implemented formats: html, markdown; there is no --json mode)
 ```
 
 **Files to create/modify**:
