@@ -4798,6 +4798,10 @@ mod tests {
                 semantic_contract::LOOP_BOUND
             )
         );
+        assert_eq!(
+            machine_tv_input_domain(false, false),
+            MACHINE_CODE_TV_INPUT_DOMAIN
+        );
     }
 
     #[test]

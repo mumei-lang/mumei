@@ -3163,9 +3163,11 @@ The next C10 Option B slice re-derives module and multifile machine-TV source
 models under the profile pinned by the record, matching the LLVM recheck;
 single-file rechecks keep `RefinedAdmission::Reject`. Refined scalar parameter
 predicates are carried in the input domain, whose refined-signature label
-matches LLVM's exact module label and retains the loop-bound suffix. Unsupported
-memory, enums and composite operations beyond plain struct values, non-i64
-scalar features, and non-scalar f64 features remain outside the machine-TV
+matches LLVM's exact module label and retains the loop-bound suffix. U64 leaves
+use full-width 64-bit bitvectors without an extra signature-domain constraint;
+unsigned comparisons, `udiv`/`urem`, and `lshr` retain their source semantics.
+Unsupported memory, enums and composite operations beyond plain struct values,
+`i128`/`u128` leaves, and non-scalar f64 features remain outside the machine-TV
 profile.
 Agent consumers must adopt both check names and the function field.
 
@@ -3212,7 +3214,7 @@ C-ABI aggregate classification; SysV memory-class passing is not validated.
 F64 struct-call arguments use NaN-aware Query A matching plus a per-path
 exact-bit Query B obligation, whose failure is `call_arguments`, never
 `different`. F64 tail calls, enum signatures/call sites, structs with five
-or more leaves, u64/i128 leaves, post-writes, and bounded memory remain
+or more leaves, i128/u128 leaves, post-writes, and bounded memory remain
 fail-closed. Equivalent functions using struct signatures or direct calls
 perform `machine_code_composite_register_aggregate_tv`. Aggregates wider
 than two leaves use
