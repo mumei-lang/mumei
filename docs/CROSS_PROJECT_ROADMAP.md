@@ -6296,6 +6296,33 @@ on a local composite. `s[i].F[j]` direct-index stays closed exactly as
 `st.F[j]` does — a collection field is reachable only through
 extraction — and a pure array field still copies on extract.
 
+### Chan-element local containers (mumei-agent #1017)
+
+[mumei-agent#1017](https://github.com/mumei-lang/mumei-agent/pull/1017)
+admits `s[i] <- x` / `<-s[i]` on a bound `[]chan T` or `map[K]chan T`
+with a scalar payload: the element queues conflate into the container's
+share group, so an element send deposits into every holder's dep set
+like an element store and an element receive reads the group — `c <- x`
+(for `s := []chan{c}`), `s[i] <- x`, `b := s` copies, `s[i] = c` queue
+stores, and `s = []chan{c2}` reseats all stay connected. A reseat
+(`c = make(chan)`) detaches the member's queue under a surrogate token
+carrying the pre-reseat contents, since the slice keeps a copy of the
+old descriptor; a maybe-skipped reseat keeps membership so the untaken
+path's sends still reach the group. `[N]chan`, `[]chan chan`, element
+extraction (`d := s[i]`, until #1019), `close(s[i])`, `for range` and
+`select` on an element queue stay closed.
+
+### Chan-element container parameters and results (mumei-agent #1018)
+
+[mumei-agent#1018](https://github.com/mumei-lang/mumei-agent/pull/1018)
+lifts the signature gate so `[]chan T` / `map[K]chan T` params and
+results admit under the same `_chan_elem_collection` model: a `[]chan`
+param seeds its own share group like a scalar-element collection
+parameter, `s[i] <- x` deposits land in `indirect_writes` so a callee's
+send through the parameter reaches caller memory, and
+`func G() []chan int64` binds like the local `s :=` form. `[N]chan`
+and `[]chan chan` signatures stay closed.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
