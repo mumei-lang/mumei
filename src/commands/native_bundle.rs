@@ -2803,6 +2803,44 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn object_symbol_surface_parses_compiled_object_symbols() {
+        let dir = tempfile::tempdir().unwrap();
+        let ir_path = dir.path().join("symbols.ll");
+        let object_path = dir.path().join("symbols.o");
+        let ir = br#"
+declare i64 @external_ref(i64)
+
+define internal i64 @local_helper() {
+entry:
+  ret i64 1
+}
+
+define i64 @visible() {
+entry:
+  %external = call i64 @external_ref(i64 2)
+  %local = call i64 @local_helper()
+  %sum = add i64 %external, %local
+  ret i64 %sum
+}
+"#;
+        fs::write(&ir_path, ir).unwrap();
+        mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ir_path, &object_path)
+            .unwrap();
+
+        let surface = object_symbol_surface(&fs::read(&object_path).unwrap()).unwrap();
+        assert_eq!(surface.defined, BTreeSet::from(["visible".to_owned()]));
+        assert_eq!(
+            surface.undefined,
+            BTreeSet::from(["external_ref".to_owned()])
+        );
+        assert!(object_symbols_correspond(
+            &tv::ir_function_surface(ir).unwrap(),
+            &surface
+        ));
+        assert!(object_symbol_surface(b"not an object").is_err());
+    }
+
     fn executable_script(path: &Path, body: &str) {
         std::fs::write(path, body).unwrap();
         use std::os::unix::fs::PermissionsExt;
