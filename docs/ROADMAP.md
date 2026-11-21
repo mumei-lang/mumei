@@ -3228,7 +3228,12 @@ separate enum-signature gate. F64 tail calls remain fail-closed. Function-signat
 aggregates used as parameters or results with five or more leaves remain
 fail-closed. Local struct values inside a body are not subject to this
 aggregate limit because the source model flattens them. i128/u128 struct leaves
-and bounded memory remain fail-closed. Equivalent functions using struct
+remain fail-closed. Leaf-function bounded arrays admit qword `%rsp`-relative
+red-zone accesses with proven `-128..=-8` offsets; red-zone non-clobbering is
+assumed, not validated. Frame-memory accesses with calls (`frame_memory_call`)
+or in functions that push/pop or write `%rsp`/`%esp`
+(`frame_memory_stack_adjust`) remain fail-closed, as do non-qword accesses and
+`.rodata`/`Str` memory. Equivalent functions using struct
 signatures or direct calls perform
 `machine_code_composite_register_aggregate_tv`. Aggregates wider
 than two leaves use
