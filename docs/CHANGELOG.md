@@ -1,3 +1,11 @@
+### Unreleased: direct enum payload reads
+
+- Finite enums now model direct reads from uniquely owned named payloads when
+  the owning variant is proven by the current path, including reads through
+  enum-valued struct fields and scalar leaves of struct payloads. Unproven tags,
+  positional payloads, ambiguous owners and unknown fields retain the existing
+  conservative behavior.
+
 ### Unreleased: deep writes through enum-valued slots
 
 - Added deep writes through enum payloads and struct fields that contain

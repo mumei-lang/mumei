@@ -1029,11 +1029,10 @@ pub(crate) fn binding_declared_type(vc: &VCtx, name: &str) -> Option<String> {
 /// Declared type name of an expression, when statically recoverable:
 /// parameters, `result`, `let`-bound enum values, calls to atoms with a
 /// declared return type, and `FieldAccess` chains rooted at a struct-typed
-/// expression (`h.r` on `h: H`, `h.a.b` through nested structs, `result.r`,
-/// `f(x).r`). The chain walks `StructDef.fields` — field names are matched
-/// exactly per segment, so `_`-joined const-name ambiguity does not arise.
-/// The raw declared name is returned; callers apply `type_name_base` and
-/// `get_enum` to use it (a non-enum name is simply ignored downstream).
+/// expression or a uniquely named enum payload (`h.r`, `h.a.b`, `e.p.inner`,
+/// `result.r`, `f(x).r`). Field names are matched exactly per segment, so
+/// `_`-joined const-name ambiguity does not arise. The raw declared name is
+/// returned; callers resolve aliases and use `get_enum` as needed.
 pub(crate) fn declared_type_of_expr(vc: &VCtx, expr: &Expr) -> Option<String> {
     match expr {
         Expr::Variable(name) => binding_declared_type(vc, name),
@@ -1051,13 +1050,7 @@ pub(crate) fn declared_type_of_expr(vc: &VCtx, expr: &Expr) -> Option<String> {
             }
             let mut ty = declared_type_of_expr(vc, cur)?;
             for field in fields.iter().rev() {
-                let sdef = vc.module_env.get_struct(type_name_base(&ty))?;
-                ty = sdef
-                    .fields
-                    .iter()
-                    .find(|f| f.name == **field)?
-                    .type_name
-                    .clone();
+                ty = declared_field_type(vc, &ty, field)?;
             }
             Some(ty)
         }
@@ -1081,6 +1074,43 @@ pub(crate) fn declared_type_of_expr(vc: &VCtx, expr: &Expr) -> Option<String> {
         }
         _ => None,
     }
+}
+
+fn declared_field_type(vc: &VCtx, parent_type: &str, field: &str) -> Option<String> {
+    let resolved = vc.module_env.resolve_base_type(parent_type);
+    let base = type_name_base(&resolved);
+    if let Some(sdef) = vc.module_env.get_struct(base) {
+        return sdef
+            .fields
+            .iter()
+            .find(|f| f.name == field)
+            .map(|f| f.type_name.clone());
+    }
+    let edef = vc
+        .module_env
+        .get_enum(&resolved)
+        .or_else(|| vc.module_env.get_enum(base))?;
+    if field == "tag" {
+        return None;
+    }
+    let mut owner = None;
+    for variant in &edef.variants {
+        let Some(fidx) = variant.fields.iter().position(|payload| {
+            payload
+                .split_once(':')
+                .is_some_and(|(name, _)| name.trim() == field)
+        }) else {
+            continue;
+        };
+        if owner.is_some() {
+            return None;
+        }
+        owner = variant
+            .field_types
+            .get(fidx)
+            .map(|payload| payload.name.clone());
+    }
+    owner
 }
 
 /// Declared type of a statement's tail value: a `Stmt::Expr` yields its
@@ -1246,17 +1276,19 @@ pub(crate) fn resolve_variant_owner<'a>(
 /// calls to atoms declared to return an enum. Lets `match e` on a `let`-
 /// bound enum resolve variant owners the same way `match m` on `m: Mine`
 /// does — without this the owner set is ambiguous across prelude enums.
+/// Enum-valued struct fields and uniquely named enum-payload fields are also
+/// resolved from their declared types.
+fn resolved_enum_name(vc: &VCtx, type_name: &str) -> Option<String> {
+    let resolved = vc.module_env.resolve_base_type(type_name);
+    vc.module_env
+        .get_enum(&resolved)
+        .or_else(|| vc.module_env.get_enum(type_name_base(&resolved)))
+        .map(|e| e.name.clone())
+}
+
 pub(crate) fn infer_expr_enum_name(vc: &VCtx, expr: &Expr) -> Option<String> {
     match expr {
-        Expr::Variable(v) => binding_declared_type(vc, v)
-            .map(|t| {
-                if vc.module_env.get_enum(&t).is_some() {
-                    t
-                } else {
-                    type_name_base(&t).to_string()
-                }
-            })
-            .filter(|t| vc.module_env.get_enum(t).is_some()),
+        Expr::Variable(v) => binding_declared_type(vc, v).and_then(|t| resolved_enum_name(vc, &t)),
         Expr::Call(name, _) => {
             if let Some((enum_name, variant)) = name.split_once("::") {
                 let edef = vc
@@ -1280,16 +1312,7 @@ pub(crate) fn infer_expr_enum_name(vc: &VCtx, expr: &Expr) -> Option<String> {
                 vc.module_env
                     .get_atom(name)
                     .and_then(|a| a.return_type.as_deref())
-                    .map(|t| {
-                        // Keep `Wrap<i64>` whole when that instance is
-                        // registered; strip to the base otherwise.
-                        if vc.module_env.get_enum(t).is_some() {
-                            t.to_string()
-                        } else {
-                            type_name_base(t).to_string()
-                        }
-                    })
-                    .filter(|t| vc.module_env.get_enum(t).is_some())
+                    .and_then(|t| resolved_enum_name(vc, t))
             }
         }
         Expr::FieldAccess(inner, field) => {
@@ -1304,10 +1327,9 @@ pub(crate) fn infer_expr_enum_name(vc: &VCtx, expr: &Expr) -> Option<String> {
                 }
             }
             // `let s = h.r` — the declared type of a field chain rooted at a
-            // struct-typed binding; `match s` then resolves like `match h.r`.
-            declared_type_of_expr(vc, expr)
-                .map(|t| type_name_base(&t).to_string())
-                .filter(|t| vc.module_env.get_enum(t).is_some())
+            // struct- or enum-typed binding; `match s` then resolves like
+            // `match h.r`.
+            declared_type_of_expr(vc, expr).and_then(|t| resolved_enum_name(vc, &t))
         }
         Expr::IfThenElse {
             then_branch,

@@ -76,8 +76,7 @@ ensures: result == v;
 body: match b.e {
     Chan::Tcp(_, _) => {
         b.e.port = v;
-        b.e.port;
-        v
+        b.e.port
     },
     _ => 0
 };

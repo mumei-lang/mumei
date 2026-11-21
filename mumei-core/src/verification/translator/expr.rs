@@ -1872,6 +1872,233 @@ fn array_value_equality<'a>(
     Ok(Bool::and(ctx, &[&len_eq, &contents_eq]))
 }
 
+fn enum_payload_field_read<'a>(
+    vc: &VCtx<'a>,
+    inner_expr: &Expr,
+    field_name: &str,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> Result<Option<Dynamic<'a>>, MumeiError> {
+    let mut fields = Vec::new();
+    let mut base_expr = inner_expr;
+    while let Expr::FieldAccess(inner, field) = base_expr {
+        fields.push(field.clone());
+        base_expr = inner;
+    }
+    fields.reverse();
+    if fields.iter().any(|field| field == "tag") {
+        return Ok(None);
+    }
+    let mut field_path = fields.clone();
+    field_path.push(field_name.to_string());
+
+    let mut prefix = base_expr.clone();
+    let mut enum_prefixes = Vec::new();
+    if let Some(enum_name) = datatype::infer_expr_enum_name(vc, &prefix) {
+        enum_prefixes.push((prefix.clone(), 0, enum_name));
+    }
+    for (idx, field) in fields.iter().enumerate() {
+        prefix = Expr::FieldAccess(Box::new(prefix), field.clone());
+        if let Some(enum_name) = datatype::infer_expr_enum_name(vc, &prefix) {
+            enum_prefixes.push((prefix.clone(), idx + 1, enum_name));
+        }
+    }
+    let Some((root, root_len, enum_name)) = enum_prefixes.last().cloned() else {
+        return Ok(None);
+    };
+    let path: Vec<String> = field_path.iter().skip(root_len).cloned().collect();
+    let Some(payload_name) = path.first() else {
+        return Ok(None);
+    };
+    let enum_def = datatype::declared_type_of_expr(vc, &root)
+        .map(|ty| vc.module_env.resolve_base_type(&ty))
+        .and_then(|ty| {
+            vc.module_env
+                .get_enum(&ty)
+                .or_else(|| vc.module_env.get_enum(datatype::type_name_base(&ty)))
+        })
+        .or_else(|| vc.module_env.get_enum(&enum_name));
+    let Some(enum_def) = enum_def else {
+        return Ok(None);
+    };
+    if !datatype::is_finite_adt(enum_def, vc.module_env)
+        || datatype::enum_datatype_sort(vc, enum_def).is_none()
+    {
+        return Ok(None);
+    }
+
+    let mut owner = None;
+    for (variant_idx, variant) in enum_def.variants.iter().enumerate() {
+        let Some(field_idx) = variant.fields.iter().position(|payload| {
+            payload
+                .split_once(':')
+                .is_some_and(|(name, _)| name.trim() == payload_name)
+        }) else {
+            continue;
+        };
+        if owner.is_some() {
+            return Ok(None);
+        }
+        owner = Some((variant_idx, field_idx));
+    }
+    let Some((variant_idx, field_idx)) = owner else {
+        return Ok(None);
+    };
+    let Some(field_type) = enum_def.variants[variant_idx]
+        .field_types
+        .get(field_idx)
+        .map(|field| field.name.as_str())
+    else {
+        return Ok(None);
+    };
+    let Some((payload_offset, payload_width)) =
+        datatype::payload_leaf_range(enum_def, vc.module_env, variant_idx, field_idx)
+    else {
+        return Ok(None);
+    };
+    let Some(field_leaves) = datatype::field_leaf_types(field_type, vc.module_env) else {
+        return Ok(None);
+    };
+    if field_leaves.len() != payload_width {
+        return Ok(None);
+    }
+
+    let leaf_offset = if path.len() == 1 {
+        if payload_width != 1 || !field_leaves[0].0.is_empty() {
+            return Ok(None);
+        }
+        0
+    } else {
+        let mut field_type = field_type.to_string();
+        for segment in &path[1..] {
+            let resolved = vc.module_env.resolve_base_type(&field_type);
+            let Some(sdef) = vc
+                .module_env
+                .get_struct(datatype::type_name_base(&resolved))
+            else {
+                return Ok(None);
+            };
+            let Some(field) = sdef.fields.iter().find(|field| field.name == *segment) else {
+                return Ok(None);
+            };
+            field_type = field.type_name.clone();
+        }
+        let leaf_name = path[1..].join("_");
+        let Some(leaf_offset) = field_leaves.iter().position(|(name, _)| name == &leaf_name) else {
+            return Ok(None);
+        };
+        leaf_offset
+    };
+
+    let Some(solver) = solver_opt else {
+        return Ok(None);
+    };
+    for (outer_root, consumed, outer_enum_name) in enum_prefixes
+        .iter()
+        .take(enum_prefixes.len().saturating_sub(1))
+    {
+        let outer_enum_def = datatype::declared_type_of_expr(vc, outer_root)
+            .map(|ty| vc.module_env.resolve_base_type(&ty))
+            .and_then(|ty| {
+                vc.module_env
+                    .get_enum(&ty)
+                    .or_else(|| vc.module_env.get_enum(datatype::type_name_base(&ty)))
+            })
+            .or_else(|| vc.module_env.get_enum(outer_enum_name));
+        let Some(outer_enum_def) = outer_enum_def else {
+            return Ok(None);
+        };
+        if !datatype::is_finite_adt(outer_enum_def, vc.module_env)
+            || datatype::enum_datatype_sort(vc, outer_enum_def).is_none()
+        {
+            return Ok(None);
+        }
+        let Some(outer_payload_name) = field_path.get(*consumed) else {
+            return Ok(None);
+        };
+        let mut outer_owner = None;
+        for (variant_idx, variant) in outer_enum_def.variants.iter().enumerate() {
+            let Some(field_idx) = variant.fields.iter().position(|payload| {
+                payload
+                    .split_once(':')
+                    .is_some_and(|(name, _)| name.trim() == outer_payload_name)
+            }) else {
+                continue;
+            };
+            if outer_owner.is_some() {
+                return Ok(None);
+            }
+            outer_owner = Some((variant_idx, field_idx));
+        }
+        let Some((outer_variant_idx, outer_field_idx)) = outer_owner else {
+            return Ok(None);
+        };
+        let Some(outer_field_type) = outer_enum_def.variants[outer_variant_idx]
+            .field_types
+            .get(outer_field_idx)
+            .map(|field| field.name.as_str())
+        else {
+            return Ok(None);
+        };
+        let Some((_, width)) = datatype::payload_leaf_range(
+            outer_enum_def,
+            vc.module_env,
+            outer_variant_idx,
+            outer_field_idx,
+        ) else {
+            return Ok(None);
+        };
+        let Some(leaves) = datatype::field_leaf_types(outer_field_type, vc.module_env) else {
+            return Ok(None);
+        };
+        if width == 0 || leaves.len() != width {
+            return Ok(None);
+        }
+        let outer_base = expr_to_z3(vc, outer_root, env, Some(solver))?;
+        let Some((_, is_variant, resolved_idx, resolved_enum)) = datatype::variant_tester_condition(
+            vc,
+            &outer_base,
+            &outer_enum_def.variants[outer_variant_idx].name,
+        ) else {
+            return Ok(None);
+        };
+        if resolved_idx != outer_variant_idx || resolved_enum.name != outer_enum_def.name {
+            return Ok(None);
+        }
+        solver.push();
+        solver.assert(&vc.path_cond_conj());
+        solver.assert(&is_variant.not());
+        let tag_proven = crate::verification::phase_artifacts::check(solver) == SatResult::Unsat;
+        solver.pop(1);
+        if !tag_proven {
+            return Ok(None);
+        }
+    }
+    let base = expr_to_z3(vc, &root, env, Some(solver))?;
+    let Some((sort, is_variant, resolved_idx, resolved_enum)) =
+        datatype::variant_tester_condition(vc, &base, &enum_def.variants[variant_idx].name)
+    else {
+        return Ok(None);
+    };
+    if resolved_idx != variant_idx || resolved_enum.name != enum_def.name {
+        return Ok(None);
+    }
+    solver.push();
+    solver.assert(&vc.path_cond_conj());
+    solver.assert(&is_variant.not());
+    let tag_proven = crate::verification::phase_artifacts::check(solver) == SatResult::Unsat;
+    solver.pop(1);
+    if !tag_proven {
+        return Ok(None);
+    }
+    Ok(datatype::variant_selector_apply(
+        &sort,
+        variant_idx,
+        payload_offset + leaf_offset,
+        &base,
+    ))
+}
+
 pub(crate) fn expr_to_z3<'a>(
     vc: &VCtx<'a>,
     expr: &Expr,
@@ -5720,6 +5947,14 @@ pub(crate) fn expr_to_z3<'a>(
                             _ => {}
                         }
                     }
+                }
+            }
+
+            if field_name != "tag" {
+                if let Some(value) =
+                    enum_payload_field_read(vc, inner_expr, field_name, env, solver_opt)?
+                {
+                    return Ok(value);
                 }
             }
 
