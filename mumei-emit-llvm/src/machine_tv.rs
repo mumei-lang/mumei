@@ -464,7 +464,7 @@ pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
             });
     let result_shape_supported = match model.result_shape {
         None => {
-            (model.result_leaf_doubles.len() == 1 && model.value.get_size() == 64)
+            (model.result_leaf_doubles.len() <= 1 && model.value.get_size() == 64)
                 || (model.has_wide_scalar_features
                     && model.result_leaf_doubles.len() == 2
                     && model
