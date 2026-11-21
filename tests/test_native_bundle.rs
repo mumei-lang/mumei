@@ -39,6 +39,23 @@ atom chain_two(x: i64) -> i64 requires: true; ensures: true; body: { chain_leaf(
 atom chain_three(x: i64) -> i64 requires: true; ensures: true; body: { chain_two(x) + 1 };\n\
 atom chain_four(x: i64) -> i64 requires: true; ensures: true; body: { chain_three(x) + 1 };\n\
 atom main() -> i64 requires: true; ensures: true; body: { chain_four(0) };";
+const MANY_LIVE: &str = "atom many_live(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 \
+requires: true; ensures: true; body: {\n\
+    let v0 = a + b;\n\
+    let v1 = b + c;\n\
+    let v2 = c + d;\n\
+    let v3 = d + e;\n\
+    let v4 = e + f;\n\
+    let v5 = a + f;\n\
+    let v6 = a + c + e;\n\
+    let v7 = b + d + f;\n\
+    if a < b {\n\
+        v0 + v1 + v2 + v3 + v4 + v5 + v6 + v7\n\
+    } else {\n\
+        v0 - v1 + v2 - v3 + v4 - v5 + v6 - v7\n\
+    }\n\
+};\n\
+atom main() -> i64 requires: true; ensures: true; body: { many_live(1, 2, 3, 4, 5, 6) };";
 const STACK_ARGS: &str =
     "atom seven_args(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 requires: true; ensures: true; body: { a + b + c + d + e + f + g };\n\
 atom calls_seven(x: i64) -> i64 requires: true; ensures: true; body: { seven_args(x, 2, 3, 4, 5, 6, 7) };\n\
@@ -753,6 +770,23 @@ fn recheck_machine_tv_checks_unary_ops_and_base_index_lea() {
     let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         descriptor["functions"]["lea_sum"],
+        serde_json::json!({"outcome": "equivalent_within_profile"})
+    );
+}
+
+#[test]
+fn recheck_machine_tv_checks_many_live_with_solver_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), MANY_LIVE);
+    let output = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        descriptor["functions"]["many_live"],
+        serde_json::json!({"outcome": "equivalent_within_profile"})
+    );
+    assert_eq!(
+        descriptor["functions"]["__mumei_user_main"],
         serde_json::json!({"outcome": "equivalent_within_profile"})
     );
 }

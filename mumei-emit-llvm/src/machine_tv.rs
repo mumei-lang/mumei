@@ -11,7 +11,7 @@ use std::{
 };
 use z3::{
     ast::{Ast, Bool, BV},
-    Context, Params, SatResult, Solver,
+    Context, Params, SatResult, Solver, Tactic,
 };
 
 pub const TIMEOUT_MS: u32 = 5_000;
@@ -242,27 +242,29 @@ pub fn check_function<'ctx>(
     };
     let mut unknown_path = false;
     for path in &lifted.paths {
-        let solver = Solver::new(context);
-        set_solver_budget(&solver, context);
-        for (input, register) in model.inputs.iter().zip(&lifted.arguments) {
-            solver.assert(&input._eq(register));
-        }
-        for assumption in model
-            .param_domain
-            .iter()
-            .chain(&model.definedness)
-            .chain(&model.call_result_bounds)
-        {
-            solver.assert(assumption);
-        }
-        for condition in &path.path_conditions {
-            solver.assert(condition);
-        }
-        let output_matches = model.value._eq(&path.return_value);
-        let mut equivalent_terms: Vec<&Bool> = path.call_argument_obligations.iter().collect();
-        equivalent_terms.push(&output_matches);
-        solver.assert(&Bool::and(context, &equivalent_terms).not());
-        match solver.check() {
+        let default_result = {
+            let solver = Solver::new(context);
+            set_solver_budget(&solver, context);
+            assert_path_equivalence_query(&solver, model, &lifted.arguments, path, context);
+            solver.check()
+        };
+        let result = if default_result == SatResult::Unknown {
+            let simplify = Tactic::new(context, "simplify");
+            let smt = Tactic::new(context, "smt");
+            let fallback_solver = simplify.and_then(&smt).solver();
+            set_solver_budget(&fallback_solver, context);
+            assert_path_equivalence_query(
+                &fallback_solver,
+                model,
+                &lifted.arguments,
+                path,
+                context,
+            );
+            fallback_solver.check()
+        } else {
+            default_result
+        };
+        match result {
             SatResult::Unsat => {}
             SatResult::Sat => return FunctionOutcome::Different,
             SatResult::Unknown => unknown_path = true,
@@ -307,6 +309,33 @@ fn set_solver_budget(solver: &Solver, context: &Context) {
     params.set_u32("timeout", TIMEOUT_MS);
     params.set_u32("rlimit", RESOURCE_LIMIT);
     solver.set_params(&params);
+}
+
+fn assert_path_equivalence_query<'ctx>(
+    solver: &Solver<'ctx>,
+    model: &PureI64Body<'ctx>,
+    arguments: &[BV<'ctx>],
+    path: &LiftedPath<'ctx>,
+    context: &'ctx Context,
+) {
+    for (input, register) in model.inputs.iter().zip(arguments) {
+        solver.assert(&input._eq(register));
+    }
+    for assumption in model
+        .param_domain
+        .iter()
+        .chain(&model.definedness)
+        .chain(&model.call_result_bounds)
+    {
+        solver.assert(assumption);
+    }
+    for condition in &path.path_conditions {
+        solver.assert(condition);
+    }
+    let output_matches = model.value._eq(&path.return_value);
+    let mut equivalent_terms: Vec<&Bool> = path.call_argument_obligations.iter().collect();
+    equivalent_terms.push(&output_matches);
+    solver.assert(&Bool::and(context, &equivalent_terms).not());
 }
 
 const ARGUMENT_REGISTERS: [usize; 6] = [7, 6, 2, 1, 8, 9];
@@ -3636,7 +3665,7 @@ entry:
     }
 
     #[test]
-    fn survey_call_chain_bytes_match_and_many_live_lea_is_inconclusive() {
+    fn survey_call_chain_bytes_match_and_many_live_is_equivalent() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
         config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
@@ -3726,12 +3755,33 @@ entry:
             &BTreeMap::new(),
             &context,
         );
-        assert_eq!(many_live_outcome, FunctionOutcome::Unknown);
-        assert_ne!(many_live_outcome, FunctionOutcome::Different);
-        assert!(!matches!(
-            many_live_outcome,
-            FunctionOutcome::OutsideProfile(_)
-        ));
+        assert_eq!(many_live_outcome, FunctionOutcome::Equivalent);
+    }
+
+    #[test]
+    fn survey_quotient_seven_bytes_remain_inconclusive() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom quotient_seven(x: i64) -> i64 requires: true; ensures: true; body: { x / 7 };",
+            &context,
+        );
+        let bytes = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0xb9, 0x25, 0x49, 0x92, 0x24, 0x49, 0x92, 0x24, 0x49, // movabsq magic, %rcx
+            0x48, 0xf7, 0xe9, // imulq %rcx
+            0x48, 0x89, 0xd0, // movq %rdx, %rax
+            0x48, 0xc1, 0xe8, 0x3f, // shrq $63, %rax
+            0x48, 0xd1, 0xfa, // sarq %rdx
+            0x48, 0x01, 0xd0, // addq %rdx, %rax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::Unknown
+        );
     }
 
     #[test]

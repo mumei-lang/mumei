@@ -4023,6 +4023,9 @@ object-correspondence pipeline, then checks reproduced machine code against
 pure-i64 source models with Z3 for straight-line and acyclic-branch
 functions in a fixed instruction whitelist. Conditional and unconditional
 local branches must target decoded instruction starts inside the function.
+Unknown per-path equivalence queries retry the identical obligations with
+`simplify → smt` under the same budget; constant-divisor magic-number
+sequences may remain inconclusive.
 Backward edges are supported if the reachable CFG remains acyclic; reachable
 cycles are outside the profile. Symbolic execution is bounded at 64 completed
 paths. Direct calls are matched per path to ordered source `CallSite`s;
