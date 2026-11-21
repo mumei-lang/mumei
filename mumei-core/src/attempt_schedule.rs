@@ -104,6 +104,7 @@ pub fn decode(bytes: &[u8]) -> Result<Schedule, RepresentationError> {
     }
 
     let value = strict_json::parse(bytes)?;
+    strict_json::reject_unrepresentable_integers(&value)?;
     let root = object(&value)?;
     require_keys(root, TOP_LEVEL_KEYS)?;
 

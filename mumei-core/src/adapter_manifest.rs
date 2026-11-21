@@ -6,6 +6,8 @@
 //! Verdict markers describe an adapter self-report vocabulary, never a
 //! verdict. `max_memory_mb` is the adapter's declared ceiling and is used only
 //! when host policy declares none; Core does not enforce it.
+//! Core rejects escaped lone-surrogate strings, including argv items, as a
+//! deliberate fail-closed narrowing from the agent's Python representation.
 
 use crate::strict_json::{self, field, object, require_keys, Error as StrictJsonError, JsonValue};
 use std::collections::{BTreeSet, HashSet};
@@ -113,6 +115,7 @@ const RESERVED_SETTING_COMPONENTS: &[&str] = &[
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepresentationError {
+    InputTooLarge,
     InvalidShape,
     InvalidValue,
 }
@@ -153,7 +156,10 @@ struct ContractIdentity {
 }
 
 pub fn decode(bytes: &[u8]) -> Result<AdapterManifest, RepresentationError> {
-    let value = strict_json::parse_with_surrogate_strings(bytes)?;
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(RepresentationError::InputTooLarge);
+    }
+    let value = strict_json::parse(bytes)?;
     let root = object(&value)?;
     ensure_fields(root, ROOT_FIELDS, REQUIRED_ROOT_FIELDS)?;
 
@@ -411,12 +417,9 @@ fn validate_argv(value: &JsonValue) -> Result<(), RepresentationError> {
     }
     let values = array(value)?;
     if values.is_empty()
-        || values.iter().any(|value| {
-            !matches!(
-                value,
-                JsonValue::String(argument) if !argument.is_empty()
-            ) && !matches!(value, JsonValue::StringWithSurrogate)
-        })
+        || values
+            .iter()
+            .any(|value| !matches!(value, JsonValue::String(argument) if !argument.is_empty()))
     {
         return Err(RepresentationError::InvalidValue);
     }
@@ -606,4 +609,21 @@ fn valid_setting_name(value: &str) -> bool {
     !value
         .split('_')
         .any(|component| RESERVED_SETTING_COMPONENTS.contains(&component))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode, RepresentationError, MAX_INPUT_BYTES};
+
+    const MINIMAL: &str = r#"{"schema_version":"mumei.verifier-adapter/v1","adapter_id":"fixture","adapter_version":"1.0.0","profiles":["mumei.pure-i64-comparison/v1"],"methods":["deductive_proof"]}"#;
+
+    #[test]
+    fn decode_enforces_the_input_size_limit() {
+        let mut input = MINIMAL.as_bytes().to_vec();
+        input.resize(MAX_INPUT_BYTES, b' ');
+        assert!(decode(&input).is_ok());
+
+        input.push(b' ');
+        assert_eq!(decode(&input), Err(RepresentationError::InputTooLarge));
+    }
 }

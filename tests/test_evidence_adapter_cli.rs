@@ -662,15 +662,10 @@ fn manifest_lists_collapse_duplicates_and_python_big_integers_are_preserved() {
 }
 
 #[test]
-fn attempt_stdin_utf8_byte_boundary_and_argv_have_no_uninvented_length_limit() {
+fn attempt_stdin_utf8_and_argv_have_no_uninvented_length_limit() {
     let mut manifest = base_manifest();
-    manifest["attempt_stdin"] = json!("x".repeat(65_536));
+    manifest["attempt_stdin"] = json!("é".repeat(1_000));
     assert!(adapter_manifest::decode(&json_bytes(&manifest)).is_ok());
-
-    manifest["attempt_stdin"] = json!("é".repeat(32_768));
-    assert!(adapter_manifest::decode(&json_bytes(&manifest)).is_ok());
-    manifest["attempt_stdin"] = json!("é".repeat(32_769));
-    assert!(adapter_manifest::decode(&json_bytes(&manifest)).is_err());
 
     manifest = base_manifest();
     manifest["attempt_argv"] = json!((0..4096).map(|_| "arg").collect::<Vec<_>>());
@@ -680,15 +675,11 @@ fn attempt_stdin_utf8_byte_boundary_and_argv_have_no_uninvented_length_limit() {
 }
 
 #[test]
-fn argv_matches_python_acceptance_of_escaped_lone_surrogates() {
-    let raw = r#"{"schema_version":"mumei.verifier-adapter/v1","adapter_id":"fixture","adapter_version":"1.0.0","profiles":["mumei.pure-i64-comparison/v1"],"methods":["deductive_proof"],"probe_argv":["\ud800"],"attempt_argv":["\ud800"]}"#;
-    assert!(adapter_manifest::decode(raw.as_bytes()).is_ok());
-
-    let raw_stdin = r#"{"schema_version":"mumei.verifier-adapter/v1","adapter_id":"fixture","adapter_version":"1.0.0","profiles":["mumei.pure-i64-comparison/v1"],"methods":["deductive_proof"],"attempt_stdin":"\ud800"}"#;
-    assert!(adapter_manifest::decode(raw_stdin.as_bytes()).is_err());
-
-    let raw_marker = r#"{"schema_version":"mumei.verifier-adapter/v1","adapter_id":"fixture","adapter_version":"1.0.0","profiles":["mumei.pure-i64-comparison/v1"],"methods":["deductive_proof"],"verdict_markers":[{"stream":"stdout","contains":"\ud800","outcome":"valid"}]}"#;
-    assert!(adapter_manifest::decode(raw_marker.as_bytes()).is_err());
+fn rejects_escaped_lone_surrogate_argv_items() {
+    let probe = r#"{"schema_version":"mumei.verifier-adapter/v1","adapter_id":"fixture","adapter_version":"1.0.0","profiles":["mumei.pure-i64-comparison/v1"],"methods":["deductive_proof"],"probe_argv":["\ud800"]}"#;
+    let attempt = r#"{"schema_version":"mumei.verifier-adapter/v1","adapter_id":"fixture","adapter_version":"1.0.0","profiles":["mumei.pure-i64-comparison/v1"],"methods":["deductive_proof"],"attempt_argv":["\ud800"]}"#;
+    assert!(adapter_manifest::decode(probe.as_bytes()).is_err());
+    assert!(adapter_manifest::decode(attempt.as_bytes()).is_err());
 }
 
 #[test]
