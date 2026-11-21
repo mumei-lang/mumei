@@ -540,26 +540,59 @@ fn is_struct_projection_slot_name_with_memo(
 const MAX_PARAM_PROJECTION_DEPTH: usize = 16;
 const MAX_PARAM_PROJECTION_SLOT_NAMES: usize = 4096;
 
+#[derive(Clone, Debug)]
+struct StructProjectionPath {
+    flattened: String,
+    field_chain: String,
+}
+
+#[derive(Clone, Debug)]
+enum StructProjectionPathError {
+    Collision {
+        struct_name: String,
+        first: String,
+        second: String,
+        flattened: String,
+    },
+    LimitExceeded,
+}
+
+type StructProjectionPathMemo = std::collections::HashMap<
+    (String, usize, Vec<String>),
+    Result<Vec<StructProjectionPath>, StructProjectionPathError>,
+>;
+
 fn struct_projection_paths(
     module_env: &ModuleEnv,
     sdef: &crate::parser::ast::StructDef,
     depth: usize,
     type_path: &mut Vec<String>,
-    memo: &mut std::collections::HashMap<(String, usize, Vec<String>), Vec<String>>,
-) -> Option<Vec<String>> {
+    memo: &mut StructProjectionPathMemo,
+) -> Result<Vec<StructProjectionPath>, StructProjectionPathError> {
     let mut path_types = type_path.clone();
     path_types.sort_unstable();
     path_types.dedup();
     let key = (sdef.name.clone(), depth, path_types);
     if let Some(paths) = memo.get(&key) {
-        return Some(paths.clone());
+        return paths.clone();
     }
 
-    let mut paths = std::collections::BTreeSet::new();
+    let mut paths = std::collections::BTreeMap::<String, String>::new();
     for field in &sdef.fields {
-        paths.insert(field.name.clone());
+        if let Some(first) = paths.get(&field.name) {
+            if first != &field.name {
+                return Err(StructProjectionPathError::Collision {
+                    struct_name: sdef.name.clone(),
+                    first: first.clone(),
+                    second: field.name.clone(),
+                    flattened: field.name.clone(),
+                });
+            }
+        } else {
+            paths.insert(field.name.clone(), field.name.clone());
+        }
         if paths.len() * 2 > MAX_PARAM_PROJECTION_SLOT_NAMES {
-            return None;
+            return Err(StructProjectionPathError::LimitExceeded);
         }
 
         let resolved = module_env.resolve_base_type(&field.type_name);
@@ -580,20 +613,40 @@ fn struct_projection_paths(
         };
 
         type_path.push(nested_type);
-        let nested_paths = struct_projection_paths(module_env, nested, depth + 1, type_path, memo)?;
+        let nested_paths = struct_projection_paths(module_env, nested, depth + 1, type_path, memo);
         type_path.pop();
+        let nested_paths = nested_paths?;
 
         for nested_path in nested_paths {
-            paths.insert(format!("{}_{}", field.name, nested_path));
+            let flattened = format!("{}_{}", field.name, nested_path.flattened);
+            let field_chain = format!("{}.{}", field.name, nested_path.field_chain);
+            if let Some(first) = paths.get(&flattened) {
+                if first != &field_chain {
+                    return Err(StructProjectionPathError::Collision {
+                        struct_name: sdef.name.clone(),
+                        first: first.clone(),
+                        second: field_chain,
+                        flattened,
+                    });
+                }
+            } else {
+                paths.insert(flattened, field_chain);
+            }
             if paths.len() * 2 > MAX_PARAM_PROJECTION_SLOT_NAMES {
-                return None;
+                return Err(StructProjectionPathError::LimitExceeded);
             }
         }
     }
 
-    let paths = paths.into_iter().collect::<Vec<_>>();
-    memo.insert(key, paths.clone());
-    Some(paths)
+    let paths = paths
+        .into_iter()
+        .map(|(flattened, field_chain)| StructProjectionPath {
+            flattened,
+            field_chain,
+        })
+        .collect::<Vec<_>>();
+    memo.insert(key, Ok(paths.clone()));
+    Ok(paths)
 }
 
 fn struct_projection_slot_names(
@@ -603,9 +656,11 @@ fn struct_projection_slot_names(
 ) -> Option<Vec<String>> {
     let mut memo = std::collections::HashMap::new();
     let paths =
-        struct_projection_paths(module_env, sdef, 0, &mut vec![sdef.name.clone()], &mut memo)?;
+        struct_projection_paths(module_env, sdef, 0, &mut vec![sdef.name.clone()], &mut memo)
+            .ok()?;
     let mut names = Vec::with_capacity(paths.len() * 2);
     for path in paths {
+        let path = path.flattened;
         names.push(format!("{binding}_{path}"));
         names.push(struct_field_key(binding, &path));
         if names.len() > MAX_PARAM_PROJECTION_SLOT_NAMES {
@@ -613,6 +668,46 @@ fn struct_projection_slot_names(
         }
     }
     Some(names)
+}
+
+pub(crate) fn reject_struct_projection_path_collisions(
+    module_env: &ModuleEnv,
+    atom: &crate::parser::Atom,
+) -> MumeiResult<()> {
+    let mut structs = module_env.structs.values().collect::<Vec<_>>();
+    structs.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    let mut memo = std::collections::HashMap::new();
+
+    for sdef in structs {
+        match struct_projection_paths(module_env, sdef, 0, &mut vec![sdef.name.clone()], &mut memo)
+        {
+            Ok(_) => {}
+            Err(StructProjectionPathError::Collision {
+                struct_name,
+                first,
+                second,
+                flattened,
+            }) => {
+                return Err(MumeiError::type_error_at(
+                    format!(
+                        "struct '{struct_name}' has fields whose flattened projection paths collide ('{first}' and '{second}' both map to '{flattened}'); rename a field"
+                    ),
+                    atom.span.clone(),
+                ));
+            }
+            Err(StructProjectionPathError::LimitExceeded) => {
+                return Err(MumeiError::type_error_at(
+                    format!(
+                        "struct '{}' projection paths exceed the bounded collision-check limit; cannot establish collision-free fields",
+                        sdef.name
+                    ),
+                    atom.span.clone(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub(crate) fn reject_parameter_projection_slot_collisions(

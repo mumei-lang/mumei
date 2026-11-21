@@ -14,7 +14,7 @@
         "type_system_mapping"
       ],
       "name": "bc_add",
-      "proof_hash": "cf16d19f6930d572cba3850911115b68e631926f36c7a74ea53ef85b07266319",
+      "proof_hash": "2c80e066b38d22f7066c967c4a470a984143f8bb682f3ec175d90dc931a9e964",
       "status": "verified",
       "z3_check_result": "unsat"
     },
@@ -31,7 +31,7 @@
         "type_system_mapping"
       ],
       "name": "bc_double",
-      "proof_hash": "5561c6a6ea0ac815a9a946bf089d973812250355dd53beca587d15357f063cea",
+      "proof_hash": "c5260a8e36145577f3ac5e89e84ee25d4d7e3336fce522ae7c35579d493ff1c4",
       "status": "verified",
       "z3_check_result": "unsat"
     },
@@ -50,7 +50,7 @@
         "type_system_mapping"
       ],
       "name": "bc_clamp",
-      "proof_hash": "fae981f4c474d40a6e2eedabc15e2405282b6e52239e7ad66dc4a3f0abdd85d8",
+      "proof_hash": "298dd1a62e080b36187111bc2297e1462a8aa98b7b46179a0607d0e0b7e50500",
       "status": "verified",
       "z3_check_result": "unsat"
     }

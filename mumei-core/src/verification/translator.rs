@@ -29,7 +29,10 @@ pub(crate) use expr::{
 pub(crate) use pattern::{
     detect_enum_from_arms, format_counterexample, pattern_bind_variables, pattern_to_z3_condition,
 };
-pub(crate) use stmt::{reject_parameter_projection_slot_collisions, stmt_to_z3};
+pub(crate) use stmt::{
+    reject_parameter_projection_slot_collisions, reject_struct_projection_path_collisions,
+    stmt_to_z3,
+};
 pub(crate) use struct_invariants::{
     alias_struct_fields, assume_struct_contract, assume_struct_invariants, bind_struct_fields,
     check_struct_invariants, field_type_predicates, fresh_struct_handle, lower_struct_contract,
