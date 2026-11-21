@@ -285,24 +285,16 @@ fn havoc_vars<'a>(vc: &VCtx<'a>, env: &mut Env<'a>, vars: &std::collections::Has
                 if let Some(sdef) = vc.module_env.get_struct(&struct_type) {
                     let slot_keys = struct_binding_slot_keys(vc, name, sdef, env);
                     havoc_vars(vc, env, &slot_keys);
-                    let handle_name = env.get(name).and_then(|handle| {
-                        (handle.kind() == z3::AstKind::App
-                            && handle.decl().kind() == z3::DeclKind::UNINTERPRETED)
-                            .then(|| handle.decl().name())
-                    });
-                    if let Some(handle_name) = handle_name {
-                        let values: Vec<(String, Dynamic)> = sdef
-                            .fields
-                            .iter()
-                            .filter_map(|field| {
-                                env.get(&format!("__struct_{name}_{}", field.name))
-                                    .or_else(|| env.get(&format!("{name}_{}", field.name)))
-                                    .map(|value| (field.name.clone(), value.clone()))
-                            })
-                            .collect();
-                        if !values.is_empty() {
-                            bind_struct_fields(env, &handle_name, &values);
-                        }
+                    if let Some(handle) = env.get(name).cloned() {
+                        bind_havoced_struct_fields_to_handle(
+                            vc,
+                            env,
+                            name,
+                            sdef,
+                            &handle,
+                            0,
+                            &mut vec![struct_type],
+                        );
                     }
                 }
             }
@@ -619,6 +611,79 @@ fn struct_binding_slot_keys<'a>(
         &mut keys,
     );
     keys
+}
+
+fn bind_havoced_struct_fields_to_handle<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    binding: &str,
+    sdef: &crate::parser::ast::StructDef,
+    handle: &Dynamic<'a>,
+    depth: usize,
+    type_path: &mut Vec<String>,
+) {
+    const MAX_NESTED_DEPTH: usize = 16;
+    let Some(handle_name) = (handle.kind() == z3::AstKind::App
+        && handle.decl().kind() == z3::DeclKind::UNINTERPRETED)
+        .then(|| handle.decl().name())
+    else {
+        return;
+    };
+    let fields: Vec<(String, Dynamic<'a>)> = sdef
+        .fields
+        .iter()
+        .filter_map(|field| {
+            env.get(&struct_field_key(binding, &field.name))
+                .or_else(|| env.get(&format!("{binding}_{}", field.name)))
+                .map(|value| (field.name.clone(), value.clone()))
+        })
+        .collect();
+    if fields.is_empty() {
+        return;
+    }
+    bind_struct_fields(env, &handle_name, &fields);
+
+    if depth >= MAX_NESTED_DEPTH {
+        return;
+    }
+    for field in &sdef.fields {
+        let Some(nested_type) = canonical_struct_type(vc, &field.type_name) else {
+            continue;
+        };
+        if type_path.contains(&nested_type) {
+            continue;
+        }
+        let Some(nested) = vc.module_env.get_struct(&nested_type) else {
+            continue;
+        };
+        let Some(value) = fields
+            .iter()
+            .find(|(name, _)| name == &field.name)
+            .map(|(_, value)| value)
+        else {
+            continue;
+        };
+        type_path.push(nested_type);
+        bind_havoced_struct_fields_to_handle(
+            vc,
+            env,
+            &format!("{binding}_{}", field.name),
+            nested,
+            value,
+            depth + 1,
+            type_path,
+        );
+        type_path.pop();
+
+        let nested_fields = nested_field_bindings(env, value);
+        if !nested_fields.is_empty() {
+            bind_struct_fields(
+                env,
+                &format!("{handle_name}_{}", field.name),
+                &nested_fields,
+            );
+        }
+    }
 }
 
 fn rebind_struct_binding_slots<'a>(
