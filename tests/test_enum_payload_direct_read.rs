@@ -71,6 +71,60 @@ fn block_root_enum_payload_read_evaluates_side_effect_once() {
 }
 
 #[test]
+fn bitvec_u64_direct_payload_reads_preserve_unsigned_comparisons() {
+    let out = run_verify("test_enum_payload_direct_read_u64.mm", &["--bitvec-i64"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("Verification passed"),
+        "u64 direct payload comparisons must use unsigned semantics:\n{stdout}\n{stderr}"
+    );
+}
+
+#[test]
+fn bitvec_u64_direct_payload_signed_claims_are_rejected_per_atom() {
+    let out = run_verify(
+        "test_enum_payload_direct_read_u64_negative.mm",
+        &["--bitvec-i64", "--json", "--disable-spurious-detection"],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "false u64 direct-read comparisons must fail:\n{stdout}\n{stderr}"
+    );
+    let json_start = stdout
+        .find('{')
+        .unwrap_or_else(|| panic!("verify --json emitted no JSON:\n{stdout}\n{stderr}"));
+    let payload: serde_json::Value = serde_json::from_str(&stdout[json_start..])
+        .unwrap_or_else(|err| panic!("{err}: invalid verify JSON:\n{stdout}\n{stderr}"));
+    let diagnostics = payload["diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("verify JSON has no diagnostics array:\n{payload:#}"));
+    for atom in [
+        "bad_struct_payload_signed_compare",
+        "bad_scalar_payload_signed_compare",
+    ] {
+        let failures: Vec<_> = diagnostics
+            .iter()
+            .filter(|entry| {
+                entry["atom"].as_str() == Some(atom)
+                    && entry["code"] == "failed"
+                    && entry["severity"] == "error"
+                    && entry["message"].as_str().is_some_and(|message| {
+                        message.contains("Postcondition (ensures) is not satisfied")
+                    })
+            })
+            .collect();
+        assert_eq!(
+            failures.len(),
+            1,
+            "expected one false-ensures failure for '{atom}':\n{payload:#}"
+        );
+    }
+}
+
+#[test]
 fn direct_enum_payload_read_negatives_keep_their_own_diagnostics() {
     let out = run_verify(
         "test_enum_payload_direct_read_negative.mm",

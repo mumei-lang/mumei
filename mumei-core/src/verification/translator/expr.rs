@@ -1323,13 +1323,17 @@ pub(crate) fn fixed_width_int_type(vc: &VCtx, expr: &Expr) -> Option<&'static st
             ..
         } => stmt_tail_int_type(vc, then_branch).or_else(|| stmt_tail_int_type(vc, else_branch)),
         Expr::FieldAccess(inner, field) => {
-            // A struct field read keeps its declared signedness — without
-            // this `s.n < 5` on a `u64` field falls back to a signed
-            // comparison over the field's `BV(64)` value.
-            let ty = expr_struct_type(vc, inner)?;
-            let sdef = vc.module_env.get_struct(&ty)?;
-            let f = sdef.fields.iter().find(|f| f.name == *field)?;
-            let base = vc.module_env.resolve_base_type(f.type_name.trim());
+            // Preserve the declared width through nested structs and named
+            // enum payloads, not only fields whose receiver is a struct.
+            let declared = datatype::declared_type_of_expr(vc, expr).or_else(|| {
+                let ty = expr_struct_type(vc, inner)?;
+                let sdef = vc.module_env.get_struct(&ty)?;
+                sdef.fields
+                    .iter()
+                    .find(|candidate| candidate.name == *field)
+                    .map(|candidate| candidate.type_name.clone())
+            })?;
+            let base = vc.module_env.resolve_base_type(&declared);
             fixed_width_int(&base).map(|(ty, _, _)| ty)
         }
         _ => None,
