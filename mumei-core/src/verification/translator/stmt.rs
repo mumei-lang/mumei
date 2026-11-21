@@ -1686,6 +1686,18 @@ fn enum_field_assign<'a>(
         .as_ref()
         .and_then(|leaves| datatype::array_payload_element_type(leaves))
         .is_some();
+    let val = if array_payload {
+        if let Expr::Variable(name) = value {
+            env.get(&format!("__z3_arr_{name}"))
+                .and_then(|value| value.as_array())
+                .map(Into::into)
+                .unwrap_or(val)
+        } else {
+            val
+        }
+    } else {
+        val
+    };
     let val_leaves: Vec<Dynamic> = if array_payload {
         if val.as_array().is_none() {
             return Err(MumeiError::type_error(format!(

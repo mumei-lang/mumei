@@ -81,6 +81,37 @@ body: {
     len(a) == len(b)
 };
 
+atom stale_array_constructor_uses_updated_elements(xs: [i64]) -> i64
+requires: len(xs) > 0 && xs[0] == 1;
+ensures: result == 1;
+body: {
+    let a = xs;
+    a[0] = 5;
+    let e = Ev::Data(a);
+    match e {
+        Ev::Data(ys) => ys[0],
+        Ev::Idle => 0
+    }
+};
+
+atom stale_array_tagged_write_uses_updated_elements(e: Ev, xs: [i64]) -> i64
+requires:
+    match e {
+        Ev::Data(_) => true,
+        Ev::Idle => false
+    }
+    && len(xs) > 0 && xs[0] == 1;
+ensures: result == 1;
+body: {
+    let a = xs;
+    a[0] = 5;
+    e.xs = a;
+    match e {
+        Ev::Data(ys) => ys[0],
+        Ev::Idle => 0
+    }
+};
+
 atom array_inside_struct_payload(values: [i64]) -> i64
 requires: true;
 ensures: result == 0;

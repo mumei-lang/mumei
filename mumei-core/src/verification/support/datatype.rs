@@ -698,7 +698,17 @@ fn expand_ctor_args<'a>(
             )));
         };
         if array_payload_element_type(&field_leaves).is_some() {
-            if arg.as_array().is_none() {
+            let array_arg = arg_exprs
+                .get(i)
+                .and_then(|expr| match expr {
+                    crate::parser::ast::Expr::Variable(name) => env
+                        .get(&format!("__z3_arr_{name}"))
+                        .and_then(|value| value.as_array())
+                        .map(Into::into),
+                    _ => None,
+                })
+                .unwrap_or_else(|| arg.clone());
+            if array_arg.as_array().is_none() {
                 return Err(MumeiError::type_error(format!(
                     "enum constructor payload '{field_type}' expects an array value"
                 )));
@@ -707,10 +717,10 @@ fn expand_ctor_args<'a>(
                 vc,
                 env,
                 arg_exprs.get(i),
-                arg,
+                &array_arg,
                 solver_opt,
             );
-            leaves.push(arg.clone());
+            leaves.push(array_arg);
             leaves.push(len);
             continue;
         }
