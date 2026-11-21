@@ -718,15 +718,15 @@ fn struct_field_assign<'a>(
             type_name: parent_ty.to_string(),
             fields: init_fields,
         };
-        // Evaluate the RHS against the pre-write env — after the
-        // recursion rebinds `o.i`, `o.i.a + 1` would resolve to the
-        // post-write leaf and the tail value would diverge from the
-        // single-evaluation semantics LLVM emits.
-        let val = expr_to_z3(vc, value, env, solver_opt)?;
         let parent_var = format!("{}.{}", base, segments[..segments.len() - 1].join("."));
-        struct_field_assign(vc, &parent_var, &desugared, env, solver_opt)?;
-        // The statement's value is the written leaf, not the rebuilt
-        // subtree — `o.inner.a = v` in tail position yields `v`.
+        if struct_field_assign(vc, &parent_var, &desugared, env, solver_opt)?.is_none() {
+            return Ok(None);
+        }
+        // The desugared StructInit evaluated the RHS once against the
+        // pre-write env. Read the updated leaf back to return that value
+        // without re-evaluating any RHS side effects.
+        let written = Expr::FieldAccess(Box::new(parent_expr), leaf.to_string());
+        let val = expr_to_z3(vc, &written, env, solver_opt)?;
         return Ok(Some(val));
     }
     let Some(sdef) = vc.module_env.get_struct(&type_name) else {

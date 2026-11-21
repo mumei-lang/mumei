@@ -13,6 +13,16 @@ struct InBox {
     invariant: self.inner.x >= 0
 }
 
+atom ordinary_deep_rhs_once() -> i64
+requires: true;
+ensures: result == 2;
+body: {
+    let w = 0;
+    let o = Outer { inner: Inner { x: 1, y: 2 }, z: 3 };
+    o.inner.x = { w = w + 1; w };
+    w + w
+}
+
 enum Event {
     Move(p: Outer),
     Idle
@@ -30,6 +40,16 @@ requires: match e {
 };
 ensures: result == v;
 body: e.p.inner.x = v;
+
+atom enum_deep_rhs_once() -> i64
+requires: true;
+ensures: result == 2;
+body: {
+    let w = 0;
+    let e = Event::Move(Outer { inner: Inner { x: 1, y: 2 }, z: 3 });
+    e.p.inner.x = { w = w + 1; w };
+    w + w
+}
 
 atom shallow_write(e: Event, v: i64) -> i64
 requires: match e {

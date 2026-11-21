@@ -127,3 +127,23 @@ body: match e {
     },
     _ => 0
 };
+
+atom bad_struct_rhs_double_eval() -> i64
+requires: true;
+ensures: result == 4;
+body: {
+    let w = 0;
+    let o = Outer { inner: Inner { x: 1, y: 2 }, z: 3 };
+    o.inner.x = { w = w + 1; w };
+    w + w
+};
+
+atom bad_enum_rhs_double_eval() -> i64
+requires: true;
+ensures: result == 4;
+body: {
+    let w = 0;
+    let e = Event::Move(Outer { inner: Inner { x: 1, y: 2 }, z: 3 });
+    e.p.inner.x = { w = w + 1; w };
+    w + w
+};

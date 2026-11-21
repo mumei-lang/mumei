@@ -84,6 +84,14 @@ fn invalid_deep_enum_payload_writes_fail_closed() {
             "bad_false_ensures",
             "Postcondition (ensures) is not satisfied",
         ),
+        (
+            "bad_struct_rhs_double_eval",
+            "Postcondition (ensures) is not satisfied",
+        ),
+        (
+            "bad_enum_rhs_double_eval",
+            "Postcondition (ensures) is not satisfied",
+        ),
     ] {
         assert!(
             combined.contains(atom) && combined.contains(diagnostic),
