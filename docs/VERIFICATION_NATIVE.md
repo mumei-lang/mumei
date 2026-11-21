@@ -1883,10 +1883,10 @@ The `input_domain` is
 The comparison asserts the source model's signature-bounded parameter domains,
 division/shift definedness, and bounded-loop exit domain when present, but does
 not restrict inputs by `requires`.
-When machine-TV establishes an equivalent bounded-loop function, its JSON
-`input_domain` appends
-`_and_loops_exiting_within_bound_{LOOP_BOUND}`; loop-free bundles keep the
-base label above.
+When the equivalent source model has a loop, machine-TV JSON `input_domain`
+appends `_and_loops_exiting_within_bound_{LOOP_BOUND}`. This label follows
+source loops even if LLVM fully unrolls them into acyclic machine code;
+loop-free bundles keep the base label above.
 Unknown per-path equivalence queries retry the identical obligations with
 `simplify → smt` under the same budget; constant-divisor magic-number
 sequences may remain inconclusive.
@@ -1930,9 +1930,11 @@ has a backward but acyclic branch. The new
 function has both a conditional branch and a call; those functions remain
 counted as direct-call functions and are not also counted as forward- or
 acyclic-branch functions. `machine_code_bounded_loop_function_tv` is performed
-when an equivalent function has a reachable loop. The descriptor then lists
-`machine_code_tv_loop_executions_beyond_bound` and
-`runtime_cancellation_semantics` as not performed. It lists
+only when an equivalent machine function has a reachable loop. The descriptor
+lists `machine_code_tv_loop_executions_beyond_bound` and
+`runtime_cancellation_semantics` as not performed whenever an equivalent
+source loop is present, including when LLVM fully unrolls it into acyclic
+machine code. It lists
 `machine_code_tv_cyclic_control_flow_functions` as not performed only when a
 function outcome is `cyclic_control_flow` or `loop_bound`. The not-performed
 vocabulary changed from `machine_code_tv_backward_branch_functions` to
