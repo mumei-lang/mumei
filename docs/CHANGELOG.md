@@ -1,3 +1,12 @@
+### Unreleased: deep writes through enum-valued slots
+
+- Added deep writes through enum payloads and struct fields that contain
+  enums, such as `o.c.port = value` and `b.e.port = value`. Every owning tag
+  must be proven; nested struct obligations and invariants are reused, and
+  LLVM lowering rejects union-widened payload slots. Recursive/array paths
+  remain fail-closed, and composite translation validation does not admit the
+  new writes.
+
 ### Unreleased: deep writes through named enum struct payloads
 
 - Added leaf-wise updates such as `e.p.inner.x = value` for a uniquely owned,

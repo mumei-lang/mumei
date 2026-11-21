@@ -18,6 +18,234 @@ use mumei_core::hir::{collect_assigned_outer_variables_stmt, HirExpr, HirStmt};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
 
+#[allow(clippy::too_many_arguments)]
+fn emit_deep_aggregate_field_write<'ctx>(
+    context: &'ctx Context,
+    builder: &Builder<'ctx>,
+    module: &Module<'ctx>,
+    function: &FunctionValue<'ctx>,
+    var: &str,
+    base: &str,
+    root_type: &str,
+    segments: &[&str],
+    value: &HirExpr,
+    variables: &mut HashMap<String, BasicValueEnum<'ctx>>,
+    var_types: &mut HashMap<String, String>,
+    array_ptrs: &mut HashMap<String, ArrayPtr<'ctx>>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<Option<BasicValueEnum<'ctx>>> {
+    let resolved_root_type = module_env.resolve_base_type(root_type);
+    let root_is_struct = module_env.get_struct(&resolved_root_type).is_some();
+    if !root_is_struct && module_env.get_enum(&resolved_root_type).is_none() {
+        return Ok(None);
+    }
+
+    let mut parent_type = resolved_root_type;
+    let mut parent_types = Vec::with_capacity(segments.len());
+    let mut declared_types = Vec::with_capacity(segments.len());
+    let mut enum_payload_slots = Vec::with_capacity(segments.len());
+    let mut index_path = Vec::with_capacity(segments.len());
+    for segment in segments {
+        let Some((index, declared_type, enum_payload_slot)) =
+            deep_aggregate_field_slot(module_env, &parent_type, segment, var)?
+        else {
+            return Ok(None);
+        };
+        parent_types.push(parent_type);
+        parent_type = module_env.resolve_base_type(&declared_type);
+        index_path.push(index);
+        declared_types.push(declared_type);
+        enum_payload_slots.push(enum_payload_slot);
+    }
+
+    let old = variables.get(base).copied().ok_or_else(|| {
+        MumeiError::codegen(format!(
+            "aggregate binding '{base}' has no value for deep field write '{var}'"
+        ))
+    })?;
+    let BasicValueEnum::StructValue(root_aggregate) = old else {
+        return Err(MumeiError::codegen(format!(
+            "aggregate binding '{base}' is not an LLVM struct for deep field write '{var}'"
+        )));
+    };
+    let mut ancestors = vec![root_aggregate];
+    for (level, segment) in segments[..segments.len() - 1].iter().enumerate() {
+        let aggregate = ancestors[level];
+        let index = index_path[level];
+        let expected_type = resolve_param_type(context, Some(&declared_types[level]), module_env);
+        let slot_type = aggregate
+            .get_type()
+            .get_field_type_at_index(index)
+            .ok_or_else(|| {
+                MumeiError::codegen(format!("aggregate path '{var}' has no slot '{segment}'"))
+            })?;
+        if slot_type != expected_type {
+            return Err(deep_slot_type_error(
+                module_env,
+                &parent_types[level],
+                &declared_types[level],
+                index,
+                enum_payload_slots[level],
+            ));
+        }
+        let nested = llvm!(builder.build_extract_value(aggregate, index, "deep_field"));
+        if nested.get_type() != expected_type {
+            return Err(deep_slot_type_error(
+                module_env,
+                &parent_types[level],
+                &declared_types[level],
+                index,
+                enum_payload_slots[level],
+            ));
+        }
+        let BasicValueEnum::StructValue(nested) = nested else {
+            return Err(MumeiError::codegen(format!(
+                "deep field path '{var}' crosses non-aggregate field '{segment}'"
+            )));
+        };
+        ancestors.push(nested);
+    }
+
+    let leaf_level = segments.len() - 1;
+    let leaf_index = index_path[leaf_level];
+    let expected_type = resolve_param_type(context, Some(&declared_types[leaf_level]), module_env);
+    let slot_type = ancestors[leaf_level]
+        .get_type()
+        .get_field_type_at_index(leaf_index)
+        .ok_or_else(|| {
+            MumeiError::codegen(format!(
+                "aggregate path '{var}' has no slot '{}'",
+                segments[leaf_level]
+            ))
+        })?;
+    if slot_type != expected_type {
+        return Err(deep_slot_type_error(
+            module_env,
+            &parent_types[leaf_level],
+            &declared_types[leaf_level],
+            leaf_index,
+            enum_payload_slots[leaf_level],
+        ));
+    }
+
+    let written = compile_hir_expr(
+        context, builder, module, function, value, variables, var_types, array_ptrs, module_env,
+    )?;
+    let leaf_type = module_env.resolve_base_type(&declared_types[leaf_level]);
+    let written = if leaf_type == "i128" || leaf_type == "u128" {
+        wide_int_cast(builder, written, expected_type, leaf_type == "i128")?
+    } else {
+        written
+    };
+    if written.get_type() != expected_type {
+        return Err(MumeiError::codegen(format!(
+            "deep field path '{var}' expects value type {expected_type}, got {}",
+            written.get_type()
+        )));
+    }
+
+    let mut rebuilt: BasicValueEnum = written;
+    let mut first_subtree = None;
+    for level in (0..segments.len()).rev() {
+        rebuilt =
+            llvm!(builder.build_insert_value(ancestors[level], rebuilt, index_path[level], var))
+                .into_struct_value()
+                .into();
+        if root_is_struct && level == 1 {
+            first_subtree = Some(rebuilt);
+        }
+    }
+    variables.insert(base.to_string(), rebuilt);
+    if let Some(subtree) = first_subtree {
+        for key in [
+            format!("__struct_{base}_{}", segments[0]),
+            format!("{base}_{}", segments[0]),
+        ] {
+            variables.insert(key, subtree);
+        }
+    }
+    rebind_chan_payload(base, value, var_types);
+    Ok(Some(written))
+}
+
+pub(crate) fn deep_aggregate_field_slot(
+    module_env: &ModuleEnv,
+    parent_type: &str,
+    field: &str,
+    var: &str,
+) -> MumeiResult<Option<(u32, String, bool)>> {
+    let parent_type = module_env.resolve_base_type(parent_type);
+    if let Some(sdef) = module_env.get_struct(&parent_type) {
+        let Some((index, declared_type)) = sdef
+            .fields
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| candidate.name == field)
+            .map(|(index, candidate)| (index as u32, candidate.type_name.clone()))
+        else {
+            return Ok(None);
+        };
+        return Ok(Some((index, declared_type, false)));
+    }
+    let Some(edef) = module_env.get_enum(&parent_type) else {
+        return Ok(None);
+    };
+    let mut owner = None;
+    for variant in &edef.variants {
+        let Some(index) = variant.fields.iter().position(|decl| {
+            decl.split_once(':')
+                .is_some_and(|(name, _)| name.trim() == field)
+        }) else {
+            continue;
+        };
+        if owner.is_some() {
+            return Err(MumeiError::codegen(format!(
+                "enum field path '{var}' has an ambiguous payload owner"
+            )));
+        }
+        let Some(declared_type) = variant.field_types.get(index) else {
+            return Err(MumeiError::codegen(format!(
+                "enum payload '{field}' has no declared type"
+            )));
+        };
+        owner = Some((index, declared_type.name.clone()));
+    }
+    let Some((index, declared_type)) = owner else {
+        return Err(MumeiError::codegen(format!(
+            "enum field path '{var}' has no unique named payload owner"
+        )));
+    };
+    Ok(Some((1 + index as u32, declared_type, true)))
+}
+
+pub(crate) fn deep_slot_type_error(
+    module_env: &ModuleEnv,
+    parent_type: &str,
+    declared_type: &str,
+    index: u32,
+    enum_payload_slot: bool,
+) -> MumeiError {
+    if enum_payload_slot {
+        let parent_type = module_env.resolve_base_type(parent_type);
+        let declared_type = module_env.resolve_base_type(declared_type);
+        let slot = index.saturating_sub(1);
+        let declared_kind = if module_env.get_struct(&declared_type).is_some() {
+            "struct"
+        } else if module_env.get_enum(&declared_type).is_some() {
+            "enum"
+        } else {
+            "payload"
+        };
+        MumeiError::codegen(format!(
+            "enum '{parent_type}' payload slot {slot} does not match its declared {declared_kind} type"
+        ))
+    } else {
+        MumeiError::codegen(format!(
+            "aggregate field in deep path does not match its declared type (index {index})"
+        ))
+    }
+}
+
 /// P25: a binding that aliases a `chan<T>` handle inherits the channel's
 /// declared payload type; any other binding drops a stale one.
 fn rebind_chan_payload(
@@ -395,6 +623,14 @@ pub(crate) fn compile_hir_stmt<'a>(
                     // every-struct scan, so `q.inner.a` cannot land on
                     // an unrelated type's same-named field.
                     let segments: Vec<&str> = field.split('.').collect();
+                    if segments.len() > 1 {
+                        if let Some(written) = emit_deep_aggregate_field_write(
+                            context, builder, module, function, var, base, &struct_ty, &segments,
+                            value, variables, var_types, array_ptrs, module_env,
+                        )? {
+                            return Ok(written);
+                        }
+                    }
                     let mut index_path: Vec<u32> = Vec::with_capacity(segments.len());
                     let mut level_ty: &str = struct_ty.as_str();
                     let mut resolved = segments.len() > 1;
@@ -541,7 +777,7 @@ pub(crate) fn compile_hir_stmt<'a>(
                                                 "enum payload '{payload_field}' has no declared type"
                                             ))
                                         })?;
-                                    let payload_type = resolve_named_type(module_env, field_type);
+                                    let payload_type = module_env.resolve_base_type(field_type);
                                     let payload_sdef = module_env
                                         .get_struct(&payload_type)
                                         .ok_or_else(|| {
@@ -582,7 +818,7 @@ pub(crate) fn compile_hir_stmt<'a>(
                                     let mut index_path = Vec::with_capacity(segments.len() - 1);
                                     for segment in &segments[1..] {
                                         let resolved_type =
-                                            resolve_named_type(module_env, level_type);
+                                            module_env.resolve_base_type(level_type);
                                         let sdef =
                                             module_env.get_struct(&resolved_type).ok_or_else(|| {
                                                 MumeiError::codegen(format!(
@@ -608,7 +844,7 @@ pub(crate) fn compile_hir_stmt<'a>(
                                     )?;
                                     let expected_ty =
                                         resolve_param_type(context, Some(level_type), module_env);
-                                    let leaf_type = resolve_named_type(module_env, level_type);
+                                    let leaf_type = module_env.resolve_base_type(level_type);
                                     let val = if leaf_type == "i128" || leaf_type == "u128" {
                                         wide_int_cast(
                                             builder,
