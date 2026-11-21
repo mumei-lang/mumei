@@ -4125,16 +4125,17 @@ fn multifile_bundle_with_composite_enum_payloads_builds_as_v21() {
 }
 
 #[test]
-fn module_bundle_with_f64_arithmetic_builds_as_v22_and_rechecks() {
-    // `add` computes real IEEE 754 binary64 arithmetic on `f64`
-    // leaves (`x + y` -> `fadd`): the build, the source recheck and
+fn recheck_machine_tv_accept_object_f64_module_bundle() {
+    // `fadd` computes real IEEE 754 binary64 arithmetic on `f64`
+    // leaves (`x * y + x`): the build, the source recheck and
     // the LLVM snapshot recheck all carry the decode/compute/re-encode
     // under composite v19.
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build_source(
         root.path(),
-        "atom add(x: f64, y: f64) -> f64 requires: true; ensures: true; body: { x + y };\n\
-         atom same(x: f64, y: f64) -> bool requires: true; ensures: result == (x == y); body: { x == y };\n\
+        "atom fadd(x: f64, y: f64) -> f64 requires: true; ensures: true; body: { x * y + x };\n\
+         atom feq(x: f64, y: f64) -> bool requires: true; ensures: result == (x == y); body: { x == y };\n\
+         atom mixed(x: i64, y: f64) -> f64 requires: true; ensures: true; body: { y };\n\
          atom main() -> i64 requires: true; ensures: true; body: { 0 };",
     );
     let record = module_record(&bundle);
@@ -4146,6 +4147,53 @@ fn module_bundle_with_f64_arithmetic_builds_as_v22_and_rechecks() {
     assert_success(&check(&source, &bundle, &id));
     assert_success(&recheck(&source, &bundle, &id));
     assert_success(&recheck_llvm(&source, &bundle, &id));
+    let machine_tv = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&machine_tv);
+    let machine_tv: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
+    for function in ["fadd", "feq", "mixed"] {
+        assert_eq!(
+            machine_tv["functions"][function]["outcome"],
+            "equivalent_within_profile"
+        );
+        assert_eq!(
+            machine_tv["functions"][function]["callee_saved_preservation"],
+            "preserved"
+        );
+    }
+    assert!(machine_tv["checks_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check == "machine_code_f64_scalar_function_tv"));
+    for check in [
+        "machine_code_tv_mxcsr_control_state",
+        "machine_code_tv_nan_payload_bits",
+    ] {
+        assert!(machine_tv["checks_not_performed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|not_performed| not_performed == check));
+    }
+    let accepted = accept_object(&source, &bundle, &id, true);
+    assert_success(&accepted);
+    let accepted: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(accepted["accepted"], true);
+    assert!(accepted["checks_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check == "machine_code_f64_scalar_function_tv"));
+    for check in [
+        "machine_code_tv_mxcsr_control_state",
+        "machine_code_tv_nan_payload_bits",
+    ] {
+        assert!(accepted["checks_not_performed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|not_performed| not_performed == check));
+    }
     // A v22 record re-pinned as v21 is refused: v21 keeps `f64`
     // arithmetic out of the composite shape.
     let mut record = module_record(&bundle);

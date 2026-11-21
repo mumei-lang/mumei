@@ -63,6 +63,7 @@ pub enum CalleeSavedPreservation {
 enum ResultWidth {
     I64,
     I32,
+    F64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,7 +259,9 @@ pub fn check_entry_wrapper_with_preservation(
     model.call_sites.push(CallSite {
         callee: "main".to_owned(),
         args: Vec::new(),
+        arg_leaf_doubles: Vec::new(),
         result: value,
+        result_is_double: false,
         guard: Bool::from_bool(context, true),
     });
     check_function_with_result_width(
@@ -284,9 +287,28 @@ fn check_function_with_result_width<'ctx>(
             .call_sites
             .iter()
             .any(|site| site.args.len() > MAX_ARGUMENT_COUNT)
+        || model
+            .param_leaf_doubles
+            .iter()
+            .flatten()
+            .filter(|is_double| **is_double)
+            .count()
+            > FLOAT_ARGUMENT_REGISTER_COUNT
+        || model.call_sites.iter().any(|site| {
+            site.arg_leaf_doubles
+                .iter()
+                .filter(|is_double| **is_double)
+                .count()
+                > FLOAT_ARGUMENT_REGISTER_COUNT
+        })
     {
         return (FunctionOutcome::OutsideProfile("argument_count"), None);
     }
+    let result_width = if result_width == ResultWidth::I64 && model_result_is_double(model) {
+        ResultWidth::F64
+    } else {
+        result_width
+    };
     if !supports_signature(model) {
         if let Ok(instructions) = disassemble(bytes, address) {
             let function_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
@@ -384,27 +406,80 @@ pub fn function_has_reachable_cycle(
 }
 
 pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
+    let scalar_parameter_kinds = model.param_leaf_doubles.len() == model.param_shapes.len()
+        && model
+            .param_leaf_doubles
+            .iter()
+            .all(|leaves| leaves.len() == 1);
+    let scalar_result_kind = model.result_leaf_doubles.len() <= 1;
     model.inputs.len() == model.param_shapes.len()
         && model.inputs.iter().all(|input| input.get_size() == 64)
         && model.value.get_size() == 64
         && model.param_shapes.iter().all(Option::is_none)
+        && scalar_parameter_kinds
+        && scalar_result_kind
         && model.call_sites.iter().all(|site| {
             site.result.get_size() == 64
                 && site.args.iter().all(|argument| argument.get_size() == 64)
+                && site.arg_leaf_doubles.len() == site.args.len()
         })
         && !model.has_post_writes()
         && !model.has_composite_or_enum_features
-        && !model.has_f64_features
         && !model.has_non_i64_scalar_features
         && !model.composite_signature
         && model.result_shape.is_none()
-        && !model
-            .param_leaf_doubles
-            .iter()
-            .flatten()
-            .any(|is_double| *is_double)
-        && !model.result_leaf_doubles.iter().any(|is_double| *is_double)
         && !model.bounded_memory
+}
+
+fn model_parameter_is_double(model: &PureI64Body<'_>, index: usize) -> bool {
+    model
+        .param_leaf_doubles
+        .get(index)
+        .and_then(|leaves| leaves.first())
+        .copied()
+        .unwrap_or(false)
+}
+
+fn model_result_is_double(model: &PureI64Body<'_>) -> bool {
+    model.result_leaf_doubles.first().copied().unwrap_or(false)
+}
+
+fn model_has_f64_leaves(model: &PureI64Body<'_>) -> bool {
+    model
+        .param_leaf_doubles
+        .iter()
+        .flatten()
+        .any(|is_double| *is_double)
+        || model_result_is_double(model)
+}
+
+fn f64_values_match<'ctx>(context: &'ctx Context, left: &BV<'ctx>, right: &BV<'ctx>) -> Bool<'ctx> {
+    let both_nan = Bool::and(
+        context,
+        &[
+            &mumei_core::semantic_contract::f64_is_nan(context, left),
+            &mumei_core::semantic_contract::f64_is_nan(context, right),
+        ],
+    );
+    Bool::or(context, &[&left._eq(right), &both_nan])
+}
+
+fn x86_sse_scalar_f64<'ctx>(
+    context: &'ctx Context,
+    a: &BV<'ctx>,
+    b: &BV<'ctx>,
+    operation: mumei_core::semantic_contract::F64Arith,
+) -> BV<'ctx> {
+    use mumei_core::semantic_contract::{f64_arith, f64_is_nan};
+
+    let rounded = f64_arith(context, a, b, operation);
+    let quiet_mask = BV::from_u64(context, 1 << 51, 64);
+    let quiet_a = a.bvor(&quiet_mask);
+    let quiet_b = b.bvor(&quiet_mask);
+    let invalid_result = BV::from_u64(context, 0xFFF8_0000_0000_0000, 64);
+    let non_nan_result = f64_is_nan(context, &rounded).ite(&invalid_result, &rounded);
+    let b_nan_result = f64_is_nan(context, b).ite(&quiet_b, &non_nan_result);
+    f64_is_nan(context, a).ite(&quiet_a, &b_nan_result)
 }
 
 fn set_solver_budget(solver: &Solver, context: &Context) {
@@ -429,6 +504,7 @@ fn assert_path_equivalence_query<'ctx>(
             .value
             .extract(31, 0)
             ._eq(&path.return_value.extract(31, 0)),
+        ResultWidth::F64 => f64_values_match(context, &model.value, &path.return_value),
     };
     let mut equivalent_terms: Vec<&Bool> = path.call_argument_obligations.iter().collect();
     equivalent_terms.push(&output_matches);
@@ -500,6 +576,7 @@ fn check_query_with_simplify_fallback<'ctx>(
 }
 
 const ARGUMENT_REGISTERS: [usize; 6] = [7, 6, 2, 1, 8, 9];
+const FLOAT_ARGUMENT_REGISTER_COUNT: usize = 8;
 const CALLEE_SAVED_REGISTERS: [usize; 6] = [3, 5, 12, 13, 14, 15];
 
 struct LiftedFunction<'ctx> {
@@ -547,6 +624,7 @@ struct MachineState<'ctx> {
     instruction_index: usize,
     instruction_visits: Vec<usize>,
     registers: Vec<BV<'ctx>>,
+    xmm_registers: Vec<BV<'ctx>>,
     known_upper_32_zero: [bool; 16],
     stack: Vec<(i64, BV<'ctx>)>,
     outgoing_cleanup_slots: BTreeSet<i64>,
@@ -570,22 +648,35 @@ fn lift<'ctx>(
     let registers = (0..16)
         .map(|_| BV::fresh_const(context, "machine_initial_register", 64))
         .collect::<Vec<_>>();
+    let xmm_registers = (0..16)
+        .map(|_| BV::fresh_const(context, "machine_initial_xmm_register", 128))
+        .collect::<Vec<_>>();
     let callee_saved_initial = CALLEE_SAVED_REGISTERS
         .iter()
         .map(|register_index| registers[*register_index].extract(63, 0))
         .collect();
-    let arguments: Vec<_> = (0..model.inputs.len())
-        .map(|index| {
-            ARGUMENT_REGISTERS.get(index).map_or_else(
+    let mut integer_argument_indices = Vec::new();
+    let mut integer_argument_index = 0usize;
+    let mut float_argument_index = 0usize;
+    let mut arguments = Vec::with_capacity(model.inputs.len());
+    for input_index in 0..model.inputs.len() {
+        if model_parameter_is_double(model, input_index) {
+            arguments.push(xmm_registers[float_argument_index].extract(63, 0));
+            float_argument_index += 1;
+        } else {
+            integer_argument_indices.push(input_index);
+            arguments.push(ARGUMENT_REGISTERS.get(integer_argument_index).map_or_else(
                 || BV::fresh_const(context, "machine_initial_stack_argument", 64),
                 |register_index| registers[*register_index].extract(63, 0),
-            )
-        })
-        .collect();
+            ));
+            integer_argument_index += 1;
+        }
+    }
     let mut pending = vec![MachineState {
         instruction_index: 0,
         instruction_visits: vec![0; instructions.len()],
         registers,
+        xmm_registers,
         known_upper_32_zero: [false; 16],
         stack: Vec::new(),
         outgoing_cleanup_slots: BTreeSet::new(),
@@ -657,6 +748,7 @@ fn lift<'ctx>(
                         call_targets,
                         &mut state.call_state,
                         &mut state.registers,
+                        &mut state.xmm_registers,
                         &mut state.stack,
                         state.rsp_offset,
                         &mut state.outgoing_cleanup_slots,
@@ -720,6 +812,7 @@ fn lift<'ctx>(
                     call_targets,
                     &mut state.call_state,
                     &mut state.registers,
+                    &mut state.xmm_registers,
                     &mut state.stack,
                     state.rsp_offset,
                     &mut state.outgoing_cleanup_slots,
@@ -832,13 +925,23 @@ fn lift<'ctx>(
                     .first()
                     .is_some_and(|source| source.contains('('))
             {
-                lift_stack_argument_move(instruction, &mut state, model, &arguments)?;
+                lift_stack_argument_move(
+                    instruction,
+                    &mut state,
+                    &integer_argument_indices,
+                    &arguments,
+                )?;
             } else if instruction.mnemonic == "addq"
                 && split_operands(&instruction.operands)
                     .first()
                     .is_some_and(|source| source.contains('('))
             {
-                lift_stack_argument_add(instruction, &mut state, model, &arguments)?;
+                lift_stack_argument_add(
+                    instruction,
+                    &mut state,
+                    &integer_argument_indices,
+                    &arguments,
+                )?;
             } else if matches!(instruction.mnemonic.as_str(), "addq" | "subq")
                 && split_operands(&instruction.operands)
                     .get(1)
@@ -922,11 +1025,23 @@ fn lift<'ctx>(
                         | "leaq"
                         | "notl"
                         | "notq"
+                        | "movsd"
+                        | "movapd"
+                        | "movaps"
+                        | "addsd"
+                        | "subsd"
+                        | "mulsd"
+                        | "divsd"
+                        | "cmpeqsd"
+                        | "xorps"
+                        | "xorpd"
                 );
                 if !lift_instruction(
                     instruction,
                     &mut state.registers,
+                    &mut state.xmm_registers,
                     move_source_upper_32_zero,
+                    model_has_f64_leaves(model),
                     context,
                 ) {
                     return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
@@ -1242,7 +1357,11 @@ fn finish_path<'ctx>(
             return Err(FunctionOutcome::OutsideProfile("call_order"));
         }
     }
-    let return_value = state.registers[0].extract(63, 0);
+    let return_value = if model_result_is_double(model) {
+        state.xmm_registers[0].extract(63, 0)
+    } else {
+        state.registers[0].extract(63, 0)
+    };
     let callee_saved_registers = CALLEE_SAVED_REGISTERS
         .iter()
         .map(|register_index| state.registers[*register_index].extract(63, 0))
@@ -1580,7 +1699,7 @@ fn rsp_memory_entry_offset(operand: &str, rsp_offset: i64) -> Result<i64, Functi
 fn incoming_stack_argument<'ctx>(
     operand: &str,
     rsp_offset: i64,
-    input_count: usize,
+    integer_argument_indices: &[usize],
     arguments: &[BV<'ctx>],
 ) -> Result<BV<'ctx>, FunctionOutcome> {
     if rsp_offset % 8 != 0 {
@@ -1592,12 +1711,17 @@ fn incoming_stack_argument<'ctx>(
     }
     let slot_index = usize::try_from(entry_offset / 8)
         .map_err(|_| FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
-    let stack_argument_count = input_count.saturating_sub(ARGUMENT_REGISTERS.len());
+    let stack_argument_count = integer_argument_indices
+        .len()
+        .saturating_sub(ARGUMENT_REGISTERS.len());
     if slot_index == 0 || slot_index > stack_argument_count {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    arguments
+    let input_index = *integer_argument_indices
         .get(ARGUMENT_REGISTERS.len() + slot_index - 1)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    arguments
+        .get(input_index)
         .cloned()
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))
 }
@@ -1640,7 +1764,7 @@ fn lift_stack_store<'ctx>(
 fn lift_stack_argument_move<'ctx>(
     instruction: &Instruction,
     state: &mut MachineState<'ctx>,
-    model: &PureI64Body<'ctx>,
+    integer_argument_indices: &[usize],
     arguments: &[BV<'ctx>],
 ) -> Result<(), FunctionOutcome> {
     let operands = split_operands(&instruction.operands);
@@ -1650,7 +1774,12 @@ fn lift_stack_argument_move<'ctx>(
     if !state.rsp_is_known {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    let value = incoming_stack_argument(source, state.rsp_offset, model.inputs.len(), arguments)?;
+    let value = incoming_stack_argument(
+        source,
+        state.rsp_offset,
+        integer_argument_indices,
+        arguments,
+    )?;
     let (register_index, width) = parse_register(destination)
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
     if width != 64
@@ -1665,7 +1794,7 @@ fn lift_stack_argument_move<'ctx>(
 fn lift_stack_argument_add<'ctx>(
     instruction: &Instruction,
     state: &mut MachineState<'ctx>,
-    model: &PureI64Body<'ctx>,
+    integer_argument_indices: &[usize],
     arguments: &[BV<'ctx>],
 ) -> Result<(), FunctionOutcome> {
     let operands = split_operands(&instruction.operands);
@@ -1675,7 +1804,12 @@ fn lift_stack_argument_add<'ctx>(
     if !state.rsp_is_known {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    let right = incoming_stack_argument(source, state.rsp_offset, model.inputs.len(), arguments)?;
+    let right = incoming_stack_argument(
+        source,
+        state.rsp_offset,
+        integer_argument_indices,
+        arguments,
+    )?;
     let (register_index, width) = parse_register(destination)
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
     if width != 64 || register_index == 4 {
@@ -1696,6 +1830,7 @@ fn lift_call<'ctx>(
     call_targets: &BTreeMap<u64, CallTarget>,
     call_state: &mut CallState<'ctx>,
     registers: &mut [BV<'ctx>],
+    xmm_registers: &mut [BV<'ctx>],
     stack: &mut Vec<(i64, BV<'ctx>)>,
     rsp_offset: i64,
     outgoing_cleanup_slots: &mut BTreeSet<i64>,
@@ -1723,7 +1858,13 @@ fn lift_call<'ctx>(
         if tail_call {
             return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
         }
-        apply_call_result_and_clobbers(registers, BV::from_i64(context, 0, 64), context);
+        apply_call_result_and_clobbers(
+            registers,
+            xmm_registers,
+            BV::from_i64(context, 0, 64),
+            false,
+            context,
+        );
         call_state.used_call_targets.insert(field_offset);
         return Ok(());
     }
@@ -1751,50 +1892,82 @@ fn lift_call<'ctx>(
     if call_site.args.len() > MAX_ARGUMENT_COUNT {
         return Err(FunctionOutcome::OutsideProfile("argument_count"));
     }
-    if tail_call && call_site.args.len() > ARGUMENT_REGISTERS.len() {
-        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-    }
-    if call_site.args.len() > ARGUMENT_REGISTERS.len() && (!rsp_is_known || rsp_offset % 8 != 0) {
-        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-    }
-    for (argument, register_index) in call_site.args.iter().zip(ARGUMENT_REGISTERS) {
-        call_state
-            .argument_obligations
-            .push(argument._eq(&registers[register_index]));
-    }
-    let mut outgoing_slots = BTreeSet::new();
-    for (argument_index, argument) in call_site
-        .args
+    let integer_argument_indices = call_site
+        .arg_leaf_doubles
         .iter()
         .enumerate()
-        .skip(ARGUMENT_REGISTERS.len())
+        .filter_map(|(index, is_double)| (!*is_double).then_some(index))
+        .collect::<Vec<_>>();
+    let float_argument_indices = call_site
+        .arg_leaf_doubles
+        .iter()
+        .enumerate()
+        .filter_map(|(index, is_double)| (*is_double).then_some(index))
+        .collect::<Vec<_>>();
+    if float_argument_indices.len() > FLOAT_ARGUMENT_REGISTER_COUNT {
+        return Err(FunctionOutcome::OutsideProfile("argument_count"));
+    }
+    if tail_call && integer_argument_indices.len() > ARGUMENT_REGISTERS.len() {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    if integer_argument_indices.len() > ARGUMENT_REGISTERS.len()
+        && (!rsp_is_known || rsp_offset % 8 != 0)
     {
-        let word_index = i64::try_from(argument_index - ARGUMENT_REGISTERS.len())
-            .map_err(|_| FunctionOutcome::OutsideProfile("call_arguments"))?;
-        let Some(stack_slot) = word_index
-            .checked_mul(8)
-            .and_then(|offset| rsp_offset.checked_add(offset))
-        else {
-            return Err(FunctionOutcome::OutsideProfile("call_arguments"));
-        };
-        if stack_slot % 8 != 0 {
-            return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let mut outgoing_slots = BTreeSet::new();
+    let mut integer_argument_index = 0usize;
+    let mut float_argument_index = 0usize;
+    for (argument, is_double) in call_site.args.iter().zip(&call_site.arg_leaf_doubles) {
+        if *is_double {
+            let machine_argument = xmm_registers[float_argument_index].extract(63, 0);
+            call_state.argument_obligations.push(f64_values_match(
+                context,
+                argument,
+                &machine_argument,
+            ));
+            float_argument_index += 1;
+        } else if let Some(register_index) = ARGUMENT_REGISTERS.get(integer_argument_index) {
+            call_state
+                .argument_obligations
+                .push(argument._eq(&registers[*register_index]));
+            integer_argument_index += 1;
+        } else {
+            let stack_argument_index = integer_argument_index - ARGUMENT_REGISTERS.len();
+            let word_index = i64::try_from(stack_argument_index)
+                .map_err(|_| FunctionOutcome::OutsideProfile("call_arguments"))?;
+            let Some(stack_slot) = word_index
+                .checked_mul(8)
+                .and_then(|offset| rsp_offset.checked_add(offset))
+            else {
+                return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+            };
+            if stack_slot % 8 != 0 {
+                return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+            }
+            let Some((_, stack_argument)) =
+                stack.iter().find(|(candidate, _)| *candidate == stack_slot)
+            else {
+                return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+            };
+            call_state
+                .argument_obligations
+                .push(argument._eq(stack_argument));
+            outgoing_slots.insert(stack_slot);
+            integer_argument_index += 1;
         }
-        let Some((_, stack_argument)) =
-            stack.iter().find(|(candidate, _)| *candidate == stack_slot)
-        else {
-            return Err(FunctionOutcome::OutsideProfile("call_arguments"));
-        };
-        call_state
-            .argument_obligations
-            .push(argument._eq(stack_argument));
-        outgoing_slots.insert(stack_slot);
     }
     if !tail_call && !outgoing_slots.is_empty() {
         stack.retain(|(stack_slot, _)| !outgoing_slots.contains(stack_slot));
         outgoing_cleanup_slots.extend(outgoing_slots);
     }
-    apply_call_result_and_clobbers(registers, call_site.result.clone(), context);
+    apply_call_result_and_clobbers(
+        registers,
+        xmm_registers,
+        call_site.result.clone(),
+        call_site.result_is_double,
+        context,
+    );
     call_state.used_call_targets.insert(field_offset);
     call_state.call_index += 1;
     Ok(())
@@ -1802,10 +1975,21 @@ fn lift_call<'ctx>(
 
 fn apply_call_result_and_clobbers<'ctx>(
     registers: &mut [BV<'ctx>],
+    xmm_registers: &mut [BV<'ctx>],
     result: BV<'ctx>,
+    result_is_double: bool,
     context: &'ctx Context,
 ) {
-    registers[0] = result;
+    for xmm_register in xmm_registers.iter_mut() {
+        *xmm_register = BV::fresh_const(context, "machine_call_xmm_clobber", 128);
+    }
+    if result_is_double {
+        registers[0] = BV::fresh_const(context, "machine_call_integer_result_clobber", 64);
+        let upper = BV::fresh_const(context, "machine_call_xmm_result_upper", 64);
+        xmm_registers[0] = upper.concat(&result);
+    } else {
+        registers[0] = result;
+    }
     for register_index in [1, 2, 6, 7, 8, 9, 10, 11] {
         registers[register_index] = BV::fresh_const(context, "machine_call_clobber", 64);
     }
@@ -2233,9 +2417,14 @@ fn adjust_rsp<'ctx>(
 fn lift_instruction<'ctx>(
     instruction: &Instruction,
     registers: &mut [BV<'ctx>],
+    xmm_registers: &mut [BV<'ctx>],
     source_upper_32_zero: bool,
+    allow_f64: bool,
     context: &'ctx Context,
 ) -> bool {
+    if allow_f64 && lift_sse_scalar_instruction(instruction, registers, xmm_registers, context) {
+        return true;
+    }
     let operands = split_operands(&instruction.operands);
     match instruction.mnemonic.as_str() {
         "movl" => lift_move(&operands, registers, context, 32, source_upper_32_zero),
@@ -2256,6 +2445,127 @@ fn lift_instruction<'ctx>(
         "notq" => lift_not(&operands, registers, 64),
         "xorl" => lift_xor(&operands, registers, 32),
         "xorq" => lift_xor(&operands, registers, 64),
+        _ => false,
+    }
+}
+
+fn lift_sse_scalar_instruction<'ctx>(
+    instruction: &Instruction,
+    registers: &mut [BV<'ctx>],
+    xmm_registers: &mut [BV<'ctx>],
+    context: &'ctx Context,
+) -> bool {
+    let operands = split_operands(&instruction.operands);
+    match instruction.mnemonic.as_str() {
+        "movsd" => {
+            let [source, destination] = operands.as_slice() else {
+                return false;
+            };
+            let (Some(source_index), Some(destination_index)) =
+                (parse_xmm_register(source), parse_xmm_register(destination))
+            else {
+                return false;
+            };
+            let low = xmm_registers[source_index].extract(63, 0);
+            let upper = xmm_registers[destination_index].extract(127, 64);
+            xmm_registers[destination_index] = upper.concat(&low);
+            true
+        }
+        "movapd" | "movaps" => {
+            let [source, destination] = operands.as_slice() else {
+                return false;
+            };
+            let (Some(source_index), Some(destination_index)) =
+                (parse_xmm_register(source), parse_xmm_register(destination))
+            else {
+                return false;
+            };
+            xmm_registers[destination_index] = xmm_registers[source_index].clone();
+            true
+        }
+        "addsd" | "subsd" | "mulsd" | "divsd" => {
+            let [source, destination] = operands.as_slice() else {
+                return false;
+            };
+            let (Some(source_index), Some(destination_index)) =
+                (parse_xmm_register(source), parse_xmm_register(destination))
+            else {
+                return false;
+            };
+            let operation = match instruction.mnemonic.as_str() {
+                "addsd" => mumei_core::semantic_contract::F64Arith::Add,
+                "subsd" => mumei_core::semantic_contract::F64Arith::Sub,
+                "mulsd" => mumei_core::semantic_contract::F64Arith::Mul,
+                "divsd" => mumei_core::semantic_contract::F64Arith::Div,
+                _ => unreachable!(),
+            };
+            let a = xmm_registers[destination_index].extract(63, 0);
+            let b = xmm_registers[source_index].extract(63, 0);
+            let low = x86_sse_scalar_f64(context, &a, &b, operation);
+            let upper = xmm_registers[destination_index].extract(127, 64);
+            xmm_registers[destination_index] = upper.concat(&low);
+            true
+        }
+        "cmpeqsd" => {
+            let [source, destination] = operands.as_slice() else {
+                return false;
+            };
+            let (Some(source_index), Some(destination_index)) =
+                (parse_xmm_register(source), parse_xmm_register(destination))
+            else {
+                return false;
+            };
+            let a = xmm_registers[destination_index].extract(63, 0);
+            let b = xmm_registers[source_index].extract(63, 0);
+            let low = mumei_core::semantic_contract::f64_eq(context, &a, &b).ite(
+                &BV::from_u64(context, u64::MAX, 64),
+                &BV::from_u64(context, 0, 64),
+            );
+            let upper = xmm_registers[destination_index].extract(127, 64);
+            xmm_registers[destination_index] = upper.concat(&low);
+            true
+        }
+        "movq" => {
+            let [source, destination] = operands.as_slice() else {
+                return false;
+            };
+            if let (Some(source_index), Some((destination_index, 64))) =
+                (parse_xmm_register(source), parse_register(destination))
+            {
+                destination_index != 4
+                    && write_register(
+                        registers,
+                        destination_index,
+                        xmm_registers[source_index].extract(63, 0),
+                        64,
+                    )
+            } else if let (Some((source_index, 64)), Some(destination_index)) =
+                (parse_register(source), parse_xmm_register(destination))
+            {
+                if source_index == 4 {
+                    return false;
+                }
+                xmm_registers[destination_index] = registers[source_index].zero_ext(64);
+                true
+            } else {
+                false
+            }
+        }
+        "xorps" | "xorpd" => {
+            let [source, destination] = operands.as_slice() else {
+                return false;
+            };
+            let (Some(source_index), Some(destination_index)) =
+                (parse_xmm_register(source), parse_xmm_register(destination))
+            else {
+                return false;
+            };
+            if source_index != destination_index {
+                return false;
+            }
+            xmm_registers[destination_index] = BV::from_u64(context, 0, 128);
+            true
+        }
         _ => false,
     }
 }
@@ -2603,6 +2913,11 @@ fn split_operands(operands: &str) -> Vec<&str> {
     result
 }
 
+fn parse_xmm_register(register: &str) -> Option<usize> {
+    let index = register.strip_prefix("%xmm")?.parse::<usize>().ok()?;
+    (index < 16).then_some(index)
+}
+
 fn parse_register(register: &str) -> Option<(usize, u32)> {
     Some(match register.strip_prefix('%')? {
         "al" => (0, 8),
@@ -2705,7 +3020,16 @@ mod tests {
         name: &str,
         context: &'ctx Context,
     ) -> PureI64Body<'ctx> {
-        encode_pure_i64_module(source, context, true, RefinedAdmission::Reject)
+        source_model_named_with_admission(source, name, context, RefinedAdmission::Reject)
+    }
+
+    fn source_model_named_with_admission<'ctx>(
+        source: &str,
+        name: &str,
+        context: &'ctx Context,
+        admission: RefinedAdmission,
+    ) -> PureI64Body<'ctx> {
+        encode_pure_i64_module(source, context, true, admission)
             .unwrap()
             .into_iter()
             .find(|model| model.function_name == name)
@@ -2876,7 +3200,7 @@ entry:
     }
 
     #[test]
-    fn unsupported_memory_composite_and_f64_body_features_fail_closed() {
+    fn unsupported_memory_composite_and_non_i64_body_features_fail_closed() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
         config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
@@ -2902,7 +3226,7 @@ entry:
         floating_model.has_f64_features = true;
         assert_eq!(
             check_function(&bytes, 0, &floating_model, &BTreeMap::new(), &context),
-            FunctionOutcome::OutsideProfile("unsupported_signature")
+            FunctionOutcome::Equivalent
         );
 
         let mut non_i64_model = source_model(source, &context);
@@ -2910,6 +3234,165 @@ entry:
         assert_eq!(
             check_function(&bytes, 0, &non_i64_model, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("unsupported_signature")
+        );
+    }
+
+    #[test]
+    fn scalar_f64_sse2_machine_tv_models_results_and_mixed_abi_arguments() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "atom fadd(x: f64, y: f64) -> f64 requires: true; ensures: true; body: { x * y + x };\n\
+            atom add(x: f64, y: f64) -> f64 requires: true; ensures: true; body: { x + y };\n\
+            atom feq(x: f64, y: f64) -> bool requires: true; ensures: true; body: { x == y };\n\
+            atom mixed(x: i64, y: f64) -> f64 requires: true; ensures: true; body: { y };\n\
+            atom stack_mixed(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, p: f64, g: i64) -> i64 requires: true; ensures: true; body: { g };\n\
+            atom callee(x: f64) -> f64 requires: true; ensures: true; body: { x };\n\
+            atom caller(x: f64) -> f64 requires: true; ensures: true; body: { callee(x) };";
+
+        let fadd = source_model_named_with_admission(
+            source,
+            "fadd",
+            &context,
+            RefinedAdmission::CompositeV19,
+        );
+        let fadd_bytes = [
+            0xf2, 0x0f, 0x59, 0xc8, // mulsd %xmm0, %xmm1
+            0xf2, 0x0f, 0x58, 0xc1, // addsd %xmm1, %xmm0
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function_with_preservation(&fadd_bytes, 0, &fadd, &BTreeMap::new(), &context,),
+            (
+                FunctionOutcome::Equivalent,
+                Some(CalleeSavedPreservation::Preserved)
+            )
+        );
+
+        let add = source_model_named_with_admission(
+            source,
+            "add",
+            &context,
+            RefinedAdmission::CompositeV19,
+        );
+        let swapped_operands = [
+            0xf2, 0x0f, 0x58, 0xc8, // addsd %xmm0, %xmm1
+            0x66, 0x0f, 0x28, 0xc1, // movapd %xmm1, %xmm0
+            0xc3,
+        ];
+        // Reversed NaN payload priority is covered by the NaN-aware result
+        // obligation; for non-NaNs, floating-point addition is commutative.
+        assert_eq!(
+            check_function(&swapped_operands, 0, &add, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+        let subtraction = [
+            0xf2, 0x0f, 0x5c, 0xc1, // subsd %xmm1, %xmm0
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&subtraction, 0, &add, &BTreeMap::new(), &context),
+            FunctionOutcome::Different
+        );
+        let memory_operand = [
+            0xf2, 0x0f, 0x58, 0x00, // addsd (%rax), %xmm0
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&memory_operand, 0, &add, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+        let unsupported_compare = [
+            0x66, 0x0f, 0x2e, 0xc1, // ucomisd %xmm1, %xmm0
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&unsupported_compare, 0, &add, &BTreeMap::new(), &context,),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+
+        let feq = source_model_named_with_admission(
+            source,
+            "feq",
+            &context,
+            RefinedAdmission::CompositeV19,
+        );
+        let equality = [
+            0xf2, 0x0f, 0xc2, 0xc1, 0x00, // cmpeqsd %xmm1, %xmm0
+            0x66, 0x48, 0x0f, 0x7e, 0xc0, // movq %xmm0, %rax
+            0x83, 0xe0, 0x01, // andl $1, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&equality, 0, &feq, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+        let nan_bits_as_integer = [
+            0x66, 0x48, 0x0f, 0x7e, 0xc0, // movq %xmm0, %rax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&nan_bits_as_integer, 0, &feq, &BTreeMap::new(), &context),
+            FunctionOutcome::Different
+        );
+
+        let mixed = source_model_named_with_admission(
+            source,
+            "mixed",
+            &context,
+            RefinedAdmission::CompositeV19,
+        );
+        assert_eq!(
+            check_function(&[0xc3], 0, &mixed, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+        let stack_mixed = source_model_named_with_admission(
+            source,
+            "stack_mixed",
+            &context,
+            RefinedAdmission::CompositeV19,
+        );
+        let stack_argument = [
+            0x48, 0x8b, 0x44, 0x24, 0x08, // movq 8(%rsp), %rax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&stack_argument, 0, &stack_mixed, &BTreeMap::new(), &context,),
+            FunctionOutcome::Equivalent
+        );
+
+        let too_many_f64 = source_model_with_admission(
+            "atom too_many(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64, i: f64) -> f64 requires: true; ensures: true; body: { a };",
+            &context,
+            RefinedAdmission::CompositeV19,
+        );
+        assert_eq!(
+            check_function(&[0xc3], 0, &too_many_f64, &BTreeMap::new(), &context,),
+            FunctionOutcome::OutsideProfile("argument_count")
+        );
+
+        let caller = source_model_named_with_admission(
+            source,
+            "caller",
+            &context,
+            RefinedAdmission::CompositeV19,
+        );
+        let caller_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define double @callee(double %x) {
+entry:
+  ret double %x
+}
+define double @caller(double %x) {
+entry:
+  %result = call double @callee(double %x)
+  ret double %result
+}
+"#;
+        let (address, bytes, call_targets) = compiled_function_with_targets(caller_ir, "caller");
+        assert_eq!(
+            check_function(&bytes, address, &caller, &call_targets, &context),
+            FunctionOutcome::Equivalent
         );
     }
 

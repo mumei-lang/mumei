@@ -1356,6 +1356,11 @@ pub fn f64_arith<'ctx>(ctx: &'ctx Context, a: &BV<'ctx>, b: &BV<'ctx>, op: F64Ar
     use crate::verification::translator::z3_types::{
         float_from_ieee_bv, ieee_bv_from_float, round_nearest_even,
     };
+    // Give commutative operations a deterministic term order.
+    let (a, b) = match op {
+        F64Arith::Add | F64Arith::Mul if a.to_string() > b.to_string() => (b, a),
+        _ => (a, b),
+    };
     let rne = round_nearest_even(ctx);
     let fa = float_from_ieee_bv(ctx, a);
     let fb = float_from_ieee_bv(ctx, b);
@@ -6615,7 +6620,9 @@ fn json_digest(value: &impl Serialize) -> Result<String, SemanticContractError> 
 pub struct CallSite<'ctx> {
     pub callee: String,
     pub args: Vec<BV<'ctx>>,
+    pub arg_leaf_doubles: Vec<bool>,
     pub result: BV<'ctx>,
+    pub result_is_double: bool,
     pub guard: Bool<'ctx>,
 }
 
@@ -10812,6 +10819,7 @@ fn source_expr<'ctx>(
             // same i64 0/1 bitvector a bool parameter does — so the call
             // site and `signature_domain`/`param_env` see one encoding.
             let mut applied = Vec::with_capacity(args.len());
+            let mut arg_leaf_doubles = Vec::with_capacity(args.len());
             for arg in args {
                 let lower = |value: SourceValue<'ctx>| lower_scalar(value, ctx);
                 match source_expr(
@@ -10833,7 +10841,10 @@ fn source_expr<'ctx>(
                     // `signature_domain` consume the same order.
                     SourceValue::Composite(fields) => {
                         for (_, field) in fields {
+                            let before = applied.len();
                             lower_composite(field, ctx, &mut applied)?;
+                            arg_leaf_doubles
+                                .extend(std::iter::repeat_n(false, applied.len() - before));
                         }
                     }
                     // A passed-through enum parameter flattens into its
@@ -10841,17 +10852,24 @@ fn source_expr<'ctx>(
                     // order `signature_domain` and `param_env` consume.
                     SourceValue::Enum { tag, slots, .. } => {
                         applied.push(tag);
+                        arg_leaf_doubles.push(false);
                         for slot in slots {
+                            let before = applied.len();
                             lower_composite(slot, ctx, &mut applied)?;
+                            arg_leaf_doubles
+                                .extend(std::iter::repeat_n(false, applied.len() - before));
                         }
                     }
                     scalar => {
+                        let is_double = matches!(&scalar, SourceValue::Float64(_));
                         let lowered = lower(scalar)?;
                         if lowered.get_size() == 128 {
                             applied.push(lowered.extract(63, 0));
                             applied.push(lowered.extract(127, 64));
+                            arg_leaf_doubles.extend([false, false]);
                         } else {
                             applied.push(lowered);
+                            arg_leaf_doubles.push(is_double);
                         }
                     }
                 }
@@ -10874,7 +10892,9 @@ fn source_expr<'ctx>(
                 call_sites.push(CallSite {
                     callee: name.clone(),
                     args: applied.clone(),
+                    arg_leaf_doubles: arg_leaf_doubles.clone(),
                     result: aggregate_value(&slots),
+                    result_is_double: false,
                     guard: guard.clone(),
                 });
                 return Ok(composite_from_slots(
@@ -10901,7 +10921,9 @@ fn source_expr<'ctx>(
                 call_sites.push(CallSite {
                     callee: name.clone(),
                     args: applied.clone(),
+                    arg_leaf_doubles: arg_leaf_doubles.clone(),
                     result: aggregate_value(&slots),
+                    result_is_double: false,
                     guard: guard.clone(),
                 });
                 return Ok(SourceValue::Enum {
@@ -10927,7 +10949,9 @@ fn source_expr<'ctx>(
                 call_sites.push(CallSite {
                     callee: name.clone(),
                     args: applied.clone(),
+                    arg_leaf_doubles: arg_leaf_doubles.clone(),
                     result: aggregate_value(&slots),
+                    result_is_double: false,
                     guard: guard.clone(),
                 });
                 let agg = aggregate_value(&slots);
@@ -10945,7 +10969,9 @@ fn source_expr<'ctx>(
             call_sites.push(CallSite {
                 callee: name.clone(),
                 args: applied.clone(),
+                arg_leaf_doubles,
                 result: value.clone(),
+                result_is_double: call_returns.returns_f64(name),
                 guard: guard.clone(),
             });
             // The uninterpreted result is a bitvector; a callee whose
