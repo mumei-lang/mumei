@@ -1,3 +1,12 @@
+### Unreleased: deep writes through named enum struct payloads
+
+- Added leaf-wise updates such as `e.p.inner.x = value` for a uniquely owned,
+  named enum payload whose declared type is a struct. The verifier requires
+  the owning variant tag and reuses struct field refinement, `where` and
+  invariant checks; the LLVM emitter rebuilds the nested aggregates while
+  preserving siblings. Positional, scalar and ambiguous payload paths remain
+  fail-closed, and composite translation validation does not admit this form.
+
 ### Unreleased: Core evidence-check acceptance representation check
 
 - Added `mumei evidence check-attempt-acceptance <input> | --stdin [--json]`

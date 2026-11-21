@@ -3,7 +3,9 @@ use crate::codegen::expr_emit::{
     hir_int_type_name, infer_struct_type_name, is_fixed_int_type_name, resolve_named_type,
     LAMBDA_MARK,
 };
-use crate::codegen::lowering::{bitpreserve_cast, wide_int_cast, ArrayPtr};
+use crate::codegen::lowering::{
+    bitpreserve_cast, resolve_param_type, struct_llvm_type, wide_int_cast, ArrayPtr,
+};
 use crate::codegen::pattern_emit::find_field_index;
 use crate::codegen::task_runtime::declare_task_group_should_cancel_current_extern;
 use inkwell::builder::Builder;
@@ -499,32 +501,164 @@ pub(crate) fn compile_hir_stmt<'a>(
                         rebind_chan_payload(base, value, var_types);
                         return Ok(val);
                     }
-                    // `e.p = v` — `field` names a payload slot of
-                    // exactly one variant; the layout puts payload
-                    // slot i at aggregate index 1 + i (tag at 0).
-                    if !resolved && segments.len() == 1 {
+                    // Enum payload writes use the receiver's declared enum
+                    // and only named fields owned by exactly one variant.
+                    if !resolved {
                         if let Some(edef) = module_env.get_enum(&struct_ty) {
-                            let mut owner: Option<u32> = None;
+                            let payload_field = segments[0];
+                            let mut owner: Option<(usize, usize)> = None;
                             let mut ambiguous = false;
-                            for variant in &edef.variants {
+                            for (vidx, variant) in edef.variants.iter().enumerate() {
                                 // `fields` keeps a named payload's
                                 // verbatim `name: type` text — a
                                 // positional payload has no name a
                                 // write can address.
-                                if let Some(pos) = variant.fields.iter().position(|f| {
+                                if let Some(fidx) = variant.fields.iter().position(|f| {
                                     f.split_once(':')
-                                        .map(|(n, _)| n.trim())
-                                        .unwrap_or(f.as_str())
-                                        == field
+                                        .map(|(n, _)| n.trim() == payload_field)
+                                        .unwrap_or(false)
                                 }) {
                                     if owner.is_some() {
                                         ambiguous = true;
                                         break;
                                     }
-                                    owner = Some(pos as u32);
+                                    owner = Some((vidx, fidx));
                                 }
                             }
-                            if let (Some(fidx), false) = (owner, ambiguous) {
+                            if segments.len() > 1 && ambiguous {
+                                return Err(MumeiError::codegen(format!(
+                                    "enum field write '{var}' has an ambiguous payload owner"
+                                )));
+                            }
+                            if let (Some((vidx, fidx)), false) = (owner, ambiguous) {
+                                if segments.len() > 1 {
+                                    let field_type = edef.variants[vidx]
+                                        .field_types
+                                        .get(fidx)
+                                        .map(|field| field.name.as_str())
+                                        .ok_or_else(|| {
+                                            MumeiError::codegen(format!(
+                                                "enum payload '{payload_field}' has no declared type"
+                                            ))
+                                        })?;
+                                    let payload_type = resolve_named_type(module_env, field_type);
+                                    let payload_sdef = module_env
+                                        .get_struct(&payload_type)
+                                        .ok_or_else(|| {
+                                            MumeiError::codegen(format!(
+                                                "deep enum payload write '{var}' requires a struct payload"
+                                            ))
+                                        })?;
+                                    let old = variables.get(base).copied().ok_or_else(|| {
+                                        MumeiError::codegen(format!(
+                                            "enum binding '{base}' has no aggregate value"
+                                        ))
+                                    })?;
+                                    let agg = old.into_struct_value();
+                                    let payload_index = 1 + fidx as u32;
+                                    let slot_ty = agg
+                                        .get_type()
+                                        .get_field_type_at_index(payload_index)
+                                        .ok_or_else(|| {
+                                            MumeiError::codegen(format!(
+                                                "enum '{struct_ty}' has no payload slot {fidx}"
+                                            ))
+                                        })?;
+                                    let declared_payload_ty: inkwell::types::BasicTypeEnum =
+                                        struct_llvm_type(context, payload_sdef, module_env).into();
+                                    if slot_ty != declared_payload_ty {
+                                        return Err(MumeiError::codegen(format!(
+                                            "enum '{struct_ty}' payload slot {fidx} does not match its declared struct type"
+                                        )));
+                                    }
+                                    let payload = llvm!(builder.build_extract_value(
+                                        agg,
+                                        payload_index,
+                                        "enum_payload"
+                                    ))
+                                    .into_struct_value();
+
+                                    let mut level_type = payload_type.as_str();
+                                    let mut index_path = Vec::with_capacity(segments.len() - 1);
+                                    for segment in &segments[1..] {
+                                        let resolved_type =
+                                            resolve_named_type(module_env, level_type);
+                                        let sdef =
+                                            module_env.get_struct(&resolved_type).ok_or_else(|| {
+                                                MumeiError::codegen(format!(
+                                                    "enum payload path '{var}' crosses a non-struct field"
+                                                ))
+                                            })?;
+                                        let field_index = sdef
+                                            .fields
+                                            .iter()
+                                            .position(|field| field.name == *segment)
+                                            .ok_or_else(|| {
+                                                MumeiError::codegen(format!(
+                                                    "enum payload path '{var}' has no field '{segment}'"
+                                                ))
+                                            })?;
+                                        index_path.push(field_index as u32);
+                                        level_type = sdef.fields[field_index].type_name.as_str();
+                                    }
+
+                                    let val = compile_hir_expr(
+                                        context, builder, module, function, value, variables,
+                                        var_types, array_ptrs, module_env,
+                                    )?;
+                                    let expected_ty =
+                                        resolve_param_type(context, Some(level_type), module_env);
+                                    let leaf_type = resolve_named_type(module_env, level_type);
+                                    let val = if leaf_type == "i128" || leaf_type == "u128" {
+                                        wide_int_cast(
+                                            builder,
+                                            val,
+                                            expected_ty,
+                                            leaf_type == "i128",
+                                        )?
+                                    } else {
+                                        val
+                                    };
+                                    if val.get_type() != expected_ty {
+                                        return Err(MumeiError::codegen(format!(
+                                            "enum payload path '{var}' expects value type {expected_ty}, got {}",
+                                            val.get_type()
+                                        )));
+                                    }
+
+                                    let mut ancestors: Vec<inkwell::values::StructValue> =
+                                        vec![payload];
+                                    for &index in &index_path[..index_path.len() - 1] {
+                                        let nested = llvm!(builder.build_extract_value(
+                                            *ancestors.last().unwrap(),
+                                            index,
+                                            "enum_payload_nested"
+                                        ));
+                                        ancestors.push(nested.into_struct_value());
+                                    }
+                                    let mut rebuilt: BasicValueEnum = val;
+                                    for (level, &index) in index_path.iter().enumerate().rev() {
+                                        rebuilt = llvm!(builder.build_insert_value(
+                                            ancestors[level],
+                                            rebuilt,
+                                            index,
+                                            "enum_payload_update"
+                                        ))
+                                        .into_struct_value()
+                                        .into();
+                                    }
+                                    let updated = llvm!(builder.build_insert_value(
+                                        agg,
+                                        rebuilt,
+                                        payload_index,
+                                        var
+                                    ));
+                                    variables.insert(
+                                        base.to_string(),
+                                        updated.into_struct_value().into(),
+                                    );
+                                    return Ok(val);
+                                }
                                 let val = compile_hir_expr(
                                     context, builder, module, function, value, variables,
                                     var_types, array_ptrs, module_env,
@@ -541,17 +675,26 @@ pub(crate) fn compile_hir_stmt<'a>(
                                 // into an f64 slot mismatches.
                                 let agg = old.into_struct_value();
                                 let Some(slot_ty) =
-                                    agg.get_type().get_field_type_at_index(1 + fidx)
+                                    agg.get_type().get_field_type_at_index(1 + fidx as u32)
                                 else {
                                     return Err(MumeiError::codegen(format!(
                                         "enum '{struct_ty}' has no payload slot {fidx}"
                                     )));
                                 };
                                 let coerced = bitpreserve_cast(builder, val, slot_ty)?;
-                                let cur =
-                                    llvm!(builder.build_insert_value(agg, coerced, 1 + fidx, var));
+                                let cur = llvm!(builder.build_insert_value(
+                                    agg,
+                                    coerced,
+                                    1 + fidx as u32,
+                                    var
+                                ));
                                 variables.insert(base.to_string(), cur.into_struct_value().into());
                                 return Ok(val);
+                            }
+                            if segments.len() > 1 {
+                                return Err(MumeiError::codegen(format!(
+                                    "enum field write '{var}' has no unique named payload owner"
+                                )));
                             }
                         }
                     }

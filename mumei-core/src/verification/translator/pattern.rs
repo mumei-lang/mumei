@@ -12,7 +12,7 @@ use serde_json::json;
 /// fields are bound recursively, so `handle.inner.x` projects a declared
 /// field (`inner`) instead of only seeing flat `inner_x` leaves — the same
 /// shape a param-seeded nested struct has.
-fn rebuild_payload_direct_fields<'a>(
+pub(crate) fn rebuild_payload_direct_fields<'a>(
     ctx: &'a Context,
     vc: &VCtx<'a>,
     env: &mut Env<'a>,

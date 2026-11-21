@@ -3961,3 +3961,38 @@ fn composite_v14_f64_payload_enum_equality_is_refused() {
     )
     .is_err());
 }
+
+#[test]
+fn composite_v23_does_not_admit_deep_enum_payload_writes() {
+    let baseline = "struct Inner { x: i64, y: i64 }\n\
+        struct Outer { inner: Inner, z: i64 }\n\
+        enum Event { Move(p: Outer), Idle }\n\
+        atom main() -> i64 requires: true; ensures: true; body: {\n\
+            let e = Event::Move(Outer { inner: Inner { x: 1, y: 2 }, z: 3 });\n\
+            0\n\
+        };";
+    let baseline_items = parse_module_checked(baseline).unwrap();
+    let baseline_ir = emitted_module(&baseline_items);
+    let baseline_report = tv::validate_native_module(
+        baseline,
+        &baseline_ir,
+        Options::default(),
+        RefinedAdmission::CompositeV23,
+    )
+    .unwrap();
+    assert_eq!(baseline_report.outcome, Outcome::EquivalentWithinProfile);
+
+    let deep_write = baseline.replace("0\n", "e.p.z = 7;\n0\n");
+    let deep_write_items = parse_module_checked(&deep_write).unwrap();
+    let deep_write_ir = emitted_module(&deep_write_items);
+    assert!(
+        tv::validate_native_module(
+            &deep_write,
+            &deep_write_ir,
+            Options::default(),
+            RefinedAdmission::CompositeV23,
+        )
+        .is_err(),
+        "deep enum payload writes must remain outside composite TV admission"
+    );
+}

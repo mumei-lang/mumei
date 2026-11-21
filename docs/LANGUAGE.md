@@ -139,6 +139,18 @@ atom area(s: Shape)
         }
     }
 ```
+For a named payload whose declared type is a struct, a narrowed enum value may
+be updated at a declared leaf path. The write requires the enum to hold the
+variant that owns the payload, and rechecks the struct field's refined type,
+`where` constraint and invariants while preserving sibling fields:
+
+```mumei
+e.p.inner.x = value
+```
+
+Positional payloads, scalar payloads and ambiguous payload names do not support
+deep field writes. These writes are not admitted by composite translation
+validation.
 
 ---
 ## Atom Syntax
