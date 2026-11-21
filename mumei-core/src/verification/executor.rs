@@ -2727,6 +2727,7 @@ fn verify_inner_impl(
                                     ));
                                 }
                             }
+                            let mut length_companion_solver_names = HashSet::new();
                             let length_companions = atom
                                 .params
                                 .iter()
@@ -2735,11 +2736,20 @@ fn verify_inner_impl(
                                     let lowering =
                                         length_companion_lowering(type_name, module_env)?;
                                     let value = pre_body_env.get(&array_len_key(&param.name))?;
-                                    Some(raise_length_companion(
-                                        &model,
-                                        &param.name,
-                                        value,
-                                        lowering,
+                                    length_companion_solver_names
+                                        .insert(format!("len_{}", param.name));
+                                    length_companion_solver_names
+                                        .insert(array_len_key(&param.name));
+                                    length_companion_solver_names
+                                        .insert(array_root_len_key(&param.name));
+                                    Some((
+                                        param.name.clone(),
+                                        raise_length_companion(
+                                            &model,
+                                            &param.name,
+                                            value,
+                                            lowering,
+                                        ),
                                     ))
                                 })
                                 .collect::<Vec<_>>();
@@ -2775,6 +2785,7 @@ fn verify_inner_impl(
                                     loss_env.insert(param.name.clone(), value.clone());
                                     for symbol in [
                                         array_len_key(&param.name),
+                                        array_root_len_key(&param.name),
                                         format!("__z3_arr_{}", param.name),
                                     ] {
                                         if let Some(value) = pre_body_env.get(&symbol) {
@@ -2798,18 +2809,23 @@ fn verify_inner_impl(
                                 &loss_env,
                                 module_env,
                             );
-                            let length_companion_names = length_companions
-                                .iter()
-                                .map(|value| value.source_name.clone())
-                                .collect::<HashSet<_>>();
                             let mut raised_loss = raised_loss;
-                            raised_loss.values.extend(length_companions);
+                            for (binding, mut companion) in length_companions {
+                                if raised_loss
+                                    .values
+                                    .iter()
+                                    .any(|value| value.source_name == companion.source_name)
+                                {
+                                    companion.source_name = format!("len({binding})");
+                                }
+                                raised_loss.values.push(companion);
+                            }
                             raised_loss
                                 .values
                                 .sort_by(|left, right| left.source_name.cmp(&right.source_name));
                             raised_loss
                                 .omitted_solver_symbols
-                                .retain(|symbol| !length_companion_names.contains(symbol));
+                                .retain(|symbol| !length_companion_solver_names.contains(symbol));
                             for value in &raised_loss.values {
                                 if !raised_counterexample
                                     .values
@@ -2824,7 +2840,7 @@ fn verify_inner_impl(
                                 .extend(raised_loss.omitted_solver_symbols.iter().cloned());
                             raised_counterexample
                                 .omitted_solver_symbols
-                                .retain(|symbol| !length_companion_names.contains(symbol));
+                                .retain(|symbol| !length_companion_solver_names.contains(symbol));
                             raised_counterexample
                                 .values
                                 .sort_by(|a, b| a.source_name.cmp(&b.source_name));
