@@ -317,12 +317,17 @@ enum FlagState<'ctx> {
         value: BV<'ctx>,
         width: u32,
     },
+    ShiftResult {
+        value: BV<'ctx>,
+        width: u32,
+    },
 }
 
 #[derive(Clone)]
 struct MachineState<'ctx> {
     instruction_index: usize,
     registers: Vec<BV<'ctx>>,
+    known_upper_32_zero: [bool; 16],
     stack: Vec<(i64, BV<'ctx>)>,
     rsp_offset: i64,
     rsp_is_known: bool,
@@ -356,6 +361,7 @@ fn lift<'ctx>(
     let mut pending = vec![MachineState {
         instruction_index: 0,
         registers,
+        known_upper_32_zero: [false; 16],
         stack: Vec::new(),
         rsp_offset: 0,
         rsp_is_known: true,
@@ -386,10 +392,20 @@ fn lift<'ctx>(
                 let mut taken = state.clone();
                 taken.path_conditions.push(condition.clone());
                 taken.instruction_index = target;
-                pending.push(taken);
+                let taken_is_feasible =
+                    path_feasibility_status(model, &taken.path_conditions, &arguments, context)
+                        != SatResult::Unsat;
                 state.path_conditions.push(condition.not());
                 state.instruction_index = index + 1;
-                continue;
+                if taken_is_feasible {
+                    pending.push(taken);
+                }
+                if path_feasibility_status(model, &state.path_conditions, &arguments, context)
+                    != SatResult::Unsat
+                {
+                    continue;
+                }
+                break;
             }
             if is_unconditional_jump(&instruction.mnemonic) {
                 if is_tail_call(instruction, call_targets) {
@@ -438,7 +454,24 @@ fn lift<'ctx>(
                 state.instruction_index += 1;
                 continue;
             }
-            if instruction.mnemonic == "callq" {
+            let move_source_upper_32_zero = instruction.mnemonic == "movl"
+                && split_operands(&instruction.operands)
+                    .first()
+                    .and_then(|source| parse_register(source))
+                    .is_some_and(|(index, width)| width == 32 && state.known_upper_32_zero[index]);
+            if instruction.mnemonic == "cqto" {
+                lift_cqto(instruction, &mut state.registers, context)?;
+            } else if instruction.mnemonic == "cltd" {
+                lift_cltd(instruction, &mut state.registers, context)?;
+            } else if matches!(instruction.mnemonic.as_str(), "idivq" | "divq" | "divl") {
+                lift_division(instruction, &mut state, model, &arguments, context)?;
+                state.flags = FlagState::Unknown;
+            } else if instruction.mnemonic == "imulq"
+                && split_operands(&instruction.operands).len() == 1
+            {
+                lift_imul_high(instruction, &mut state.registers)?;
+                state.flags = FlagState::Unknown;
+            } else if instruction.mnemonic == "callq" {
                 lift_call(
                     instruction,
                     model,
@@ -548,10 +581,8 @@ fn lift<'ctx>(
                     BitwiseOp::Or,
                 )?;
             } else if is_shift_mnemonic(&instruction.mnemonic) {
-                if !lift_shift(instruction, &mut state.registers, context) {
-                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-                }
-                state.flags = FlagState::Unknown;
+                state.flags = lift_shift(instruction, &mut state.registers, context)
+                    .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
             } else if instruction.mnemonic.starts_with("set") {
                 lift_setcc(instruction, &mut state, context)?;
             } else if instruction.mnemonic.starts_with("cmov") {
@@ -559,14 +590,42 @@ fn lift<'ctx>(
             } else {
                 let leaves_flags_unchanged = matches!(
                     instruction.mnemonic.as_str(),
-                    "movl" | "movq" | "movzbl" | "movzbq" | "movsbl" | "movsbq" | "leaq"
+                    "movl"
+                        | "movq"
+                        | "movabsq"
+                        | "movzbl"
+                        | "movzbq"
+                        | "movsbl"
+                        | "movsbq"
+                        | "leaq"
                 );
-                if !lift_instruction(instruction, &mut state.registers, context) {
+                if !lift_instruction(
+                    instruction,
+                    &mut state.registers,
+                    move_source_upper_32_zero,
+                    context,
+                ) {
                     return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
                 }
                 if !leaves_flags_unchanged {
                     state.flags = FlagState::Unknown;
                 }
+            }
+            state.known_upper_32_zero = [false; 16];
+            match instruction.mnemonic.as_str() {
+                "divl" => {
+                    state.known_upper_32_zero[0] = true;
+                    state.known_upper_32_zero[2] = true;
+                }
+                "movl" => {
+                    if let Some((index, 32)) = split_operands(&instruction.operands)
+                        .get(1)
+                        .and_then(|destination| parse_register(destination))
+                    {
+                        state.known_upper_32_zero[index] = true;
+                    }
+                }
+                _ => (),
             }
             state.instruction_index += 1;
         }
@@ -788,6 +847,14 @@ fn condition_for_flags<'ctx>(
             let sign = most_significant_bit(value, *width, context);
             (zero, sign.clone(), sign, Bool::from_bool(context, false))
         }
+        FlagState::ShiftResult { value, width } => {
+            let zero = value._eq(&BV::from_u64(context, 0, *width));
+            return match suffix {
+                "e" | "z" => Ok(zero),
+                "ne" | "nz" => Ok(zero.not()),
+                _ => Err(FunctionOutcome::OutsideProfile("unsupported_flags")),
+            };
+        }
     };
     let not_zero = zero.not();
     let not_signed_less = signed_less.not();
@@ -986,7 +1053,7 @@ fn lift_shift<'ctx>(
     instruction: &Instruction,
     registers: &mut [BV<'ctx>],
     context: &'ctx Context,
-) -> bool {
+) -> Option<FlagState<'ctx>> {
     let (width, operation) = match instruction.mnemonic.as_str() {
         "shlq" => (64, ShiftOp::Left),
         "shll" => (32, ShiftOp::Left),
@@ -994,24 +1061,20 @@ fn lift_shift<'ctx>(
         "shrl" => (32, ShiftOp::LogicalRight),
         "sarq" => (64, ShiftOp::ArithmeticRight),
         "sarl" => (32, ShiftOp::ArithmeticRight),
-        _ => return false,
+        _ => return None,
     };
     let operands = split_operands(&instruction.operands);
     let (count, destination) = match operands.as_slice() {
         [destination] => (1, *destination),
         [count, destination] => {
-            let Some(count) = count.strip_prefix('$').and_then(parse_integer) else {
-                return false;
-            };
+            let count = count.strip_prefix('$').and_then(parse_integer)?;
             (count, *destination)
         }
-        _ => return false,
+        _ => return None,
     };
-    let Some((index, destination_width)) = parse_register(destination) else {
-        return false;
-    };
+    let (index, destination_width) = parse_register(destination)?;
     if destination_width != width || index == 4 {
-        return false;
+        return None;
     }
     let count_mask = if width == 64 { 0x3f } else { 0x1f };
     let count = count & count_mask;
@@ -1026,7 +1089,15 @@ fn lift_shift<'ctx>(
             ShiftOp::ArithmeticRight => value.bvashr(&count),
         }
     };
-    write_register(registers, index, shifted, width)
+    let flags = if count == 0 {
+        FlagState::Unknown
+    } else {
+        FlagState::ShiftResult {
+            value: shifted.clone(),
+            width,
+        }
+    };
+    write_register(registers, index, shifted, width).then_some(flags)
 }
 
 fn lift_cmov<'ctx>(
@@ -1176,13 +1247,12 @@ fn lift_call<'ctx>(
     Ok(())
 }
 
-fn call_guard_status<'ctx>(
+fn path_solver<'ctx>(
     model: &PureI64Body<'ctx>,
-    guard: &Bool<'ctx>,
     path_conditions: &[Bool<'ctx>],
     arguments: &[BV<'ctx>],
     context: &'ctx Context,
-) -> Option<bool> {
+) -> Solver<'ctx> {
     let solver = Solver::new(context);
     set_solver_budget(&solver, context);
     for assumption in model
@@ -1199,6 +1269,26 @@ fn call_guard_status<'ctx>(
     for path_condition in path_conditions {
         solver.assert(path_condition);
     }
+    solver
+}
+
+fn path_feasibility_status<'ctx>(
+    model: &PureI64Body<'ctx>,
+    path_conditions: &[Bool<'ctx>],
+    arguments: &[BV<'ctx>],
+    context: &'ctx Context,
+) -> SatResult {
+    path_solver(model, path_conditions, arguments, context).check()
+}
+
+fn call_guard_status<'ctx>(
+    model: &PureI64Body<'ctx>,
+    guard: &Bool<'ctx>,
+    path_conditions: &[Bool<'ctx>],
+    arguments: &[BV<'ctx>],
+    context: &'ctx Context,
+) -> Option<bool> {
+    let solver = path_solver(model, path_conditions, arguments, context);
     if solver.check() != SatResult::Sat {
         return None;
     }
@@ -1219,6 +1309,339 @@ fn call_guard_status<'ctx>(
         SatResult::Unsat => Some(false),
         SatResult::Sat | SatResult::Unknown => None,
     }
+}
+
+fn prove_division_safe<'ctx>(
+    model: &PureI64Body<'ctx>,
+    state: &MachineState<'ctx>,
+    arguments: &[BV<'ctx>],
+    safety: &Bool<'ctx>,
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    let status = call_guard_status(model, safety, &state.path_conditions, arguments, context);
+    if status == Some(true) {
+        Ok(())
+    } else {
+        Err(FunctionOutcome::OutsideProfile("division_trap"))
+    }
+}
+
+fn lift_division<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    model: &PureI64Body<'ctx>,
+    arguments: &[BV<'ctx>],
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [operand] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+
+    match instruction.mnemonic.as_str() {
+        "idivq" => {
+            let divisor = register_value(operand, &state.registers, 64)
+                .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+            let sign_filled_rax = most_significant_bit(&state.registers[0], 64, context).ite(
+                &BV::from_i64(context, -1, 64),
+                &BV::from_i64(context, 0, 64),
+            );
+            let dividend_is_sign_extended_i64 = call_guard_status(
+                model,
+                &state.registers[2]._eq(&sign_filled_rax),
+                &state.path_conditions,
+                arguments,
+                context,
+            ) == Some(true);
+            let nonzero = divisor._eq(&BV::from_i64(context, 0, 64)).not();
+            if dividend_is_sign_extended_i64 {
+                let min = BV::from_i64(context, i64::MIN, 64);
+                let minus_one = BV::from_i64(context, -1, 64);
+                let overflow = Bool::and(
+                    context,
+                    &[&state.registers[0]._eq(&min), &divisor._eq(&minus_one)],
+                )
+                .not();
+                prove_division_safe(
+                    model,
+                    state,
+                    arguments,
+                    &Bool::and(context, &[&nonzero, &overflow]),
+                    context,
+                )?;
+                let dividend = state.registers[0].clone();
+                state.registers[0] = signed_division_64(&dividend, &divisor, false);
+                state.registers[2] = signed_division_64(&dividend, &divisor, true);
+            } else {
+                let dividend = state.registers[2].concat(&state.registers[0]);
+                let quotient = signed_division_128(&dividend, &divisor, false);
+                let remainder = signed_division_128(&dividend, &divisor, true);
+                let quotient_low = quotient.extract(63, 0);
+                let fits = quotient._eq(&quotient_low.sign_ext(64));
+                prove_division_safe(
+                    model,
+                    state,
+                    arguments,
+                    &Bool::and(context, &[&nonzero, &fits]),
+                    context,
+                )?;
+                state.registers[0] = quotient_low;
+                state.registers[2] = remainder.extract(63, 0);
+            }
+        }
+        "divq" => {
+            let divisor = register_value(operand, &state.registers, 64)
+                .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+            let dividend = state.registers[2].concat(&state.registers[0]);
+            let wide_divisor = divisor.zero_ext(64);
+            let quotient = dividend.bvudiv(&wide_divisor);
+            let remainder = dividend.bvurem(&wide_divisor);
+            let fits = quotient.extract(127, 64)._eq(&BV::from_u64(context, 0, 64));
+            let nonzero = divisor._eq(&BV::from_u64(context, 0, 64)).not();
+            prove_division_safe(
+                model,
+                state,
+                arguments,
+                &Bool::and(context, &[&nonzero, &fits]),
+                context,
+            )?;
+            state.registers[0] = quotient.extract(63, 0);
+            state.registers[2] = remainder.extract(63, 0);
+        }
+        "divl" => {
+            let Some((divisor_index, 32)) = parse_register(operand) else {
+                return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+            };
+            let divisor = register_value(operand, &state.registers, 32)
+                .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+            let divisor_i64 = state.registers[divisor_index].clone();
+            let dividend = state.registers[2]
+                .extract(31, 0)
+                .concat(&state.registers[0].extract(31, 0));
+            let wide_divisor = divisor.zero_ext(32);
+            let quotient = dividend.bvudiv(&wide_divisor);
+            let remainder = dividend.bvurem(&wide_divisor);
+            let fits_by_small_dividend =
+                dividend.extract(63, 32)._eq(&BV::from_u64(context, 0, 32));
+            let fits_by_quotient = quotient.extract(63, 32)._eq(&BV::from_u64(context, 0, 32));
+            let nonzero = divisor._eq(&BV::from_u64(context, 0, 32)).not();
+            prove_division_safe(
+                model,
+                state,
+                arguments,
+                &Bool::and(
+                    context,
+                    &[
+                        &nonzero,
+                        &Bool::or(context, &[&fits_by_small_dividend, &fits_by_quotient]),
+                    ],
+                ),
+                context,
+            )?;
+            let zero_extended_32_bit_operands = Bool::and(
+                context,
+                &[
+                    &state.registers[0]
+                        .extract(63, 32)
+                        ._eq(&BV::from_u64(context, 0, 32)),
+                    &state.registers[2]
+                        .extract(31, 0)
+                        ._eq(&BV::from_u64(context, 0, 32)),
+                    &divisor_i64
+                        .extract(63, 32)
+                        ._eq(&BV::from_u64(context, 0, 32)),
+                ],
+            );
+            let zero_extended_32_bit_status = call_guard_status(
+                model,
+                &zero_extended_32_bit_operands,
+                &state.path_conditions,
+                arguments,
+                context,
+            );
+            if zero_extended_32_bit_status == Some(true) {
+                let dividend = state.registers[0].clone();
+                state.registers[0] = signed_division_64(&dividend, &divisor_i64, false);
+                state.registers[2] = signed_division_64(&dividend, &divisor_i64, true);
+            } else if !write_register(&mut state.registers, 0, quotient.extract(31, 0), 32)
+                || !write_register(&mut state.registers, 2, remainder.extract(31, 0), 32)
+            {
+                return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+            }
+        }
+        _ => return Err(FunctionOutcome::OutsideProfile("unsupported_instruction")),
+    }
+    Ok(())
+}
+
+fn bv_ite_parts<'ctx>(value: &BV<'ctx>) -> Option<(Bool<'ctx>, BV<'ctx>, BV<'ctx>)> {
+    let simplified = value.simplify();
+    let declaration = simplified.decl().name();
+    if declaration == "extract" {
+        let extracted = simplified.children().into_iter().next()?.as_bv()?;
+        if extracted.get_size() == simplified.get_size() {
+            return bv_ite_parts(&extracted);
+        }
+        return None;
+    }
+    if declaration != "if" {
+        return None;
+    }
+    let mut children = simplified.children().into_iter();
+    Some((
+        children.next()?.as_bool()?,
+        children.next()?.as_bv()?,
+        children.next()?.as_bv()?,
+    ))
+}
+
+fn neg_one_divisor_ite<'ctx>(
+    condition: &Bool<'ctx>,
+    then_divisor: &BV<'ctx>,
+    else_divisor: &BV<'ctx>,
+) -> Option<BV<'ctx>> {
+    if then_divisor.as_u64() == Some(1)
+        && is_neg_one_comparison(condition, else_divisor) == Some(true)
+    {
+        return Some(else_divisor.clone());
+    }
+    if else_divisor.as_u64() == Some(1)
+        && is_neg_one_comparison(condition, then_divisor) == Some(false)
+    {
+        return Some(then_divisor.clone());
+    }
+    None
+}
+
+fn is_neg_one_comparison(condition: &Bool<'_>, divisor: &BV<'_>) -> Option<bool> {
+    let simplified = condition.simplify();
+    let (equality, positive) = if simplified.decl().name() == "not" {
+        (simplified.children().into_iter().next()?.as_bool()?, false)
+    } else {
+        (simplified, true)
+    };
+    if equality.decl().name() != "=" {
+        return None;
+    }
+    let mut children = equality.children().into_iter();
+    let left = children.next()?.as_bv()?;
+    let right = children.next()?.as_bv()?;
+    let compares_divisor_to_minus_one = (left == divisor.clone()
+        && right.as_u64() == Some(u64::MAX))
+        || (right == divisor.clone() && left.as_u64() == Some(u64::MAX));
+    compares_divisor_to_minus_one.then_some(positive)
+}
+
+fn signed_division_64<'ctx>(numerator: &BV<'ctx>, divisor: &BV<'ctx>, remainder: bool) -> BV<'ctx> {
+    if let Some((condition, then_divisor, else_divisor)) = bv_ite_parts(divisor) {
+        if remainder {
+            if let Some(original_divisor) =
+                neg_one_divisor_ite(&condition, &then_divisor, &else_divisor)
+            {
+                return numerator.bvsrem(&original_divisor);
+            }
+        }
+        let then_result = if remainder {
+            numerator.bvsrem(&then_divisor)
+        } else {
+            numerator.bvsdiv(&then_divisor)
+        };
+        let else_result = if remainder {
+            numerator.bvsrem(&else_divisor)
+        } else {
+            numerator.bvsdiv(&else_divisor)
+        };
+        condition.ite(&then_result, &else_result).simplify()
+    } else if remainder {
+        numerator.bvsrem(divisor)
+    } else {
+        numerator.bvsdiv(divisor)
+    }
+}
+
+fn signed_division_128<'ctx>(
+    numerator: &BV<'ctx>,
+    divisor: &BV<'ctx>,
+    remainder: bool,
+) -> BV<'ctx> {
+    if let Some((condition, then_divisor, else_divisor)) = bv_ite_parts(divisor) {
+        if remainder {
+            if let Some(original_divisor) =
+                neg_one_divisor_ite(&condition, &then_divisor, &else_divisor)
+            {
+                return numerator.bvsrem(&original_divisor.sign_ext(64));
+            }
+        }
+        let then_divisor = then_divisor.sign_ext(64);
+        let else_divisor = else_divisor.sign_ext(64);
+        let then_result = if remainder {
+            numerator.bvsrem(&then_divisor)
+        } else {
+            numerator.bvsdiv(&then_divisor)
+        };
+        let else_result = if remainder {
+            numerator.bvsrem(&else_divisor)
+        } else {
+            numerator.bvsdiv(&else_divisor)
+        };
+        condition.ite(&then_result, &else_result).simplify()
+    } else {
+        let wide_divisor = divisor.sign_ext(64);
+        if remainder {
+            numerator.bvsrem(&wide_divisor)
+        } else {
+            numerator.bvsdiv(&wide_divisor)
+        }
+    }
+}
+
+fn lift_cqto<'ctx>(
+    instruction: &Instruction,
+    registers: &mut [BV<'ctx>],
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    if !instruction.operands.is_empty() {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let sign = most_significant_bit(&registers[0], 64, context);
+    registers[2] = sign.ite(
+        &BV::from_i64(context, -1, 64),
+        &BV::from_i64(context, 0, 64),
+    );
+    Ok(())
+}
+
+fn lift_cltd<'ctx>(
+    instruction: &Instruction,
+    registers: &mut [BV<'ctx>],
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    if !instruction.operands.is_empty() {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let eax = registers[0].extract(31, 0);
+    let sign = most_significant_bit(&eax, 32, context);
+    registers[2] = sign.ite(
+        &BV::from_u64(context, u64::from(u32::MAX), 64),
+        &BV::from_u64(context, 0, 64),
+    );
+    Ok(())
+}
+
+fn lift_imul_high<'ctx>(
+    instruction: &Instruction,
+    registers: &mut [BV<'ctx>],
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [operand] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let source = register_value(operand, registers, 64)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let product = registers[0].sign_ext(64).bvmul(&source.sign_ext(64));
+    registers[0] = product.extract(63, 0);
+    registers[2] = product.extract(127, 64);
+    Ok(())
 }
 
 fn adjust_rsp<'ctx>(
@@ -1245,12 +1668,14 @@ fn adjust_rsp<'ctx>(
 fn lift_instruction<'ctx>(
     instruction: &Instruction,
     registers: &mut [BV<'ctx>],
+    source_upper_32_zero: bool,
     context: &'ctx Context,
 ) -> bool {
     let operands = split_operands(&instruction.operands);
     match instruction.mnemonic.as_str() {
-        "movl" => lift_move(&operands, registers, context, 32),
-        "movq" => lift_move(&operands, registers, context, 64),
+        "movl" => lift_move(&operands, registers, context, 32, source_upper_32_zero),
+        "movq" => lift_move(&operands, registers, context, 64, false),
+        "movabsq" => lift_move(&operands, registers, context, 64, false),
         "movzbl" => lift_move_extend(&operands, registers, false, 32),
         "movzbq" => lift_move_extend(&operands, registers, false, 64),
         "movsbl" => lift_move_extend(&operands, registers, true, 32),
@@ -1308,6 +1733,7 @@ fn lift_move<'ctx>(
     registers: &mut [BV<'ctx>],
     context: &'ctx Context,
     width: u32,
+    source_upper_32_zero: bool,
 ) -> bool {
     let [source, destination] = operands else {
         return false;
@@ -1317,6 +1743,12 @@ fn lift_move<'ctx>(
     };
     if destination_width != width || index == 4 {
         return false;
+    }
+    if width == 32 && source_upper_32_zero {
+        if let Some((source_index, 32)) = parse_register(source) {
+            registers[index] = registers[source_index].clone();
+            return true;
+        }
     }
     let Some(source) = operand_value(source, registers, context, width) else {
         return false;
@@ -2282,7 +2714,7 @@ entry:
             ),
             FunctionOutcome::OutsideProfile("unsupported_instruction")
         );
-        let branch_after_shift = [0x48, 0xc1, 0xe8, 0x01, 0x74, 0x01, 0xc3, 0xc3];
+        let branch_after_shift = [0x48, 0xc1, 0xe8, 0x01, 0x7f, 0x01, 0xc3, 0xc3];
         assert_eq!(
             check_function(
                 &branch_after_shift,
@@ -2525,6 +2957,29 @@ entry:
     }
 
     #[test]
+    fn movabsq_preserves_flags_for_conditional_move() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom min_five(x: i64) -> i64 requires: true; ensures: true; body: { if x < 5 { 5 } else { x } };",
+            &context,
+        );
+        let bytes = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0x83, 0xff, 0x05, // cmpq $5, %rdi
+            0x48, 0xb9, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabsq $5, %rcx
+            0x48, 0x0f, 0x4c, 0xc1, // cmovlq %rcx, %rax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
     fn symbolic_forward_paths_are_bounded() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
@@ -2535,8 +2990,16 @@ entry:
             &context,
         );
         let mut bytes = Vec::new();
-        for _ in 0..7 {
-            bytes.extend([0x48, 0x85, 0xff, 0x74, 0x01, 0x90]);
+        for (rex, modrm) in [
+            (0x48, 0xff),
+            (0x48, 0xf6),
+            (0x48, 0xd2),
+            (0x48, 0xc9),
+            (0x48, 0xdb),
+            (0x4d, 0xc0),
+            (0x4d, 0xc9),
+        ] {
+            bytes.extend([rex, 0x85, modrm, 0x74, 0x01, 0x90]);
         }
         bytes.extend([0xb8, 0x00, 0x00, 0x00, 0x00, 0xc3]);
         assert_eq!(
@@ -2664,6 +3127,254 @@ entry:
         assert_eq!(
             check_function(&bytes, 0, &model, &helper_call_targets(&[10]), &context),
             FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn division_probe_bytes_match_signed_and_unsigned_source_models() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let md_model = source_model(
+            "atom md(x: i64, y: i64) -> i64 requires: x >= 0 && x <= 1000 && y >= 1 && y <= 100; ensures: true; body: { x / y };",
+            &context,
+        );
+        let mr_model = source_model(
+            "atom mr(x: i64, y: i64) -> i64 requires: x >= 0 && x <= 1000 && y >= 1 && y <= 100; ensures: true; body: { x % y };",
+            &context,
+        );
+        let signed_md_model = source_model(
+            "atom signed_md(x: i64, y: i64) -> i64 requires: x >= -1000 && x <= 1000 && ((y >= -100 && y <= -1) || (y >= 1 && y <= 100)); ensures: true; body: { x / y };",
+            &context,
+        );
+        let signed_mr_model = source_model(
+            "atom signed_mr(x: i64, y: i64) -> i64 requires: x >= -1000 && x <= 1000 && ((y >= -100 && y <= -1) || (y >= 1 && y <= 100)); ensures: true; body: { x % y };",
+            &context,
+        );
+        let md_bytes = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0x89, 0xf9, // movq %rdi, %rcx
+            0x48, 0x09, 0xf1, // orq %rsi, %rcx
+            0x48, 0xc1, 0xe9, 0x20, // shrq $32, %rcx
+            0x74, 0x06, // je to 32-bit fast path
+            0x48, 0x99, // cqto
+            0x48, 0xf7, 0xfe, // idivq %rsi
+            0xc3, // retq
+            0x31, 0xd2, // xorl %edx, %edx
+            0xf7, 0xf6, // divl %esi
+            0xc3, // retq
+        ];
+        let mr_bytes = [
+            0x48, 0x83, 0xfe, 0xff, // cmpq $-1, %rsi
+            0xb9, 0x01, 0x00, 0x00, 0x00, // movl $1, %ecx
+            0x48, 0x0f, 0x45, 0xce, // cmovneq %rsi, %rcx
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0x89, 0xfa, // movq %rdi, %rdx
+            0x48, 0x09, 0xca, // orq %rcx, %rdx
+            0x48, 0xc1, 0xea, 0x20, // shrq $32, %rdx
+            0x74, 0x09, // je to 32-bit fast path
+            0x48, 0x99, // cqto
+            0x48, 0xf7, 0xf9, // idivq %rcx
+            0x48, 0x89, 0xd0, // movq %rdx, %rax
+            0xc3, // retq
+            0x31, 0xd2, // xorl %edx, %edx
+            0xf7, 0xf1, // divl %ecx
+            0x89, 0xd0, // movl %edx, %eax
+            0xc3, // retq
+        ];
+        for (name, bytes, model) in [
+            ("md", &md_bytes[..], &md_model),
+            ("signed_md", &md_bytes[..], &signed_md_model),
+            ("mr", &mr_bytes[..], &mr_model),
+            ("signed_mr", &mr_bytes[..], &signed_mr_model),
+        ] {
+            assert_eq!(
+                check_function(bytes, 0, model, &BTreeMap::new(), &context),
+                FunctionOutcome::Equivalent,
+                "{name}"
+            );
+        }
+
+        let u32_md_model = source_model(
+            "atom md_u32(x: u32, y: u32) -> u32 requires: true; ensures: true; body: { x / y };",
+            &context,
+        );
+        let md_instructions = disassemble(&md_bytes, 0).unwrap();
+        let u32_lifted = lift(
+            &md_instructions,
+            u64::try_from(md_bytes.len()).unwrap(),
+            &u32_md_model,
+            &BTreeMap::new(),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(u32_lifted.paths.len(), 1);
+        assert_eq!(
+            check_function(&md_bytes, 0, &u32_md_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let unrestricted_md_model = source_model(
+            "atom md_unrestricted(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { x / y };",
+            &context,
+        );
+        let unrestricted_lifted = lift(
+            &md_instructions,
+            u64::try_from(md_bytes.len()).unwrap(),
+            &unrestricted_md_model,
+            &BTreeMap::new(),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(unrestricted_lifted.paths.len(), 2);
+        assert_eq!(
+            check_function(
+                &md_bytes,
+                0,
+                &unrestricted_md_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let constant_model = source_model(
+            "atom constant_seven(x: i64) -> i64 requires: x >= -1000 && x <= 1000; ensures: true; body: { x / 7 };",
+            &context,
+        );
+        let constant_seven = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0xb9, 0x25, 0x49, 0x92, 0x24, 0x49, 0x92, 0x24, 0x49, // movabs magic, %rcx
+            0x48, 0xf7, 0xe9, // imulq %rcx
+            0x48, 0x89, 0xd0, // movq %rdx, %rax
+            0x48, 0xc1, 0xe8, 0x3f, // shrq $63, %rax
+            0x48, 0xd1, 0xfa, // sarq %rdx
+            0x48, 0x01, 0xd0, // addq %rdx, %rax
+            0xc3, // retq
+        ];
+        assert!(matches!(
+            check_function(
+                &constant_seven,
+                0,
+                &constant_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::Equivalent | FunctionOutcome::Unknown
+        ));
+    }
+
+    #[test]
+    fn one_operand_imulq_writes_both_product_halves() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom high(x: i64) -> i64 requires: true; ensures: true; body: { x };",
+            &context,
+        );
+        let low_bytes = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0xb9, 0x25, 0x49, 0x92, 0x24, 0x49, 0x92, 0x24, 0x49, // movabs magic, %rcx
+            0x48, 0xf7, 0xe9, // imulq %rcx
+            0xc3, // retq
+        ];
+        let high_bytes = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0xb9, 0x25, 0x49, 0x92, 0x24, 0x49, 0x92, 0x24, 0x49, // movabs magic, %rcx
+            0x48, 0xf7, 0xe9, // imulq %rcx
+            0x48, 0x89, 0xd0, // movq %rdx, %rax
+            0xc3, // retq
+        ];
+        let multiplier = BV::from_u64(&context, 0x4924_9249_2492_4925, 64);
+        for (bytes, high_half) in [(&low_bytes[..], false), (&high_bytes[..], true)] {
+            let instructions = disassemble(bytes, 0).unwrap();
+            let lifted = lift(
+                &instructions,
+                u64::try_from(bytes.len()).unwrap(),
+                &model,
+                &BTreeMap::new(),
+                &context,
+            )
+            .unwrap();
+            assert_eq!(lifted.paths.len(), 1);
+            let product = lifted.arguments[0]
+                .sign_ext(64)
+                .bvmul(&multiplier.sign_ext(64));
+            let expected = if high_half {
+                product.extract(127, 64)
+            } else {
+                product.extract(63, 0)
+            };
+            assert_eq!(
+                lifted.paths[0]
+                    .return_value
+                    ._eq(&expected)
+                    .simplify()
+                    .as_bool(),
+                Some(true)
+            );
+        }
+    }
+
+    #[test]
+    fn division_remainder_swap_refutes_and_trapping_domains_fail_closed() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom helper(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { x / y };",
+            &context,
+        );
+        let swapped = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0x99, // cqto
+            0x48, 0xf7, 0xfe, // idivq %rsi
+            0x48, 0x89, 0xd0, // movq %rdx, %rax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&swapped, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::Different
+        );
+
+        let mut zero_divisor_model = source_model(
+            "atom helper(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { x / y };",
+            &context,
+        );
+        zero_divisor_model.definedness.clear();
+        assert_eq!(
+            check_function(
+                &swapped[..8],
+                0,
+                &zero_divisor_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::OutsideProfile("division_trap")
+        );
+
+        let mut overflow_model = source_model(
+            "atom helper(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { x / y };",
+            &context,
+        );
+        overflow_model.definedness.clear();
+        overflow_model.param_domain = vec![
+            overflow_model.inputs[0]._eq(&BV::from_i64(&context, i64::MIN, 64)),
+            overflow_model.inputs[1]._eq(&BV::from_i64(&context, -1, 64)),
+        ];
+        assert_eq!(
+            check_function(
+                &swapped[..8],
+                0,
+                &overflow_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::OutsideProfile("division_trap")
         );
     }
 }

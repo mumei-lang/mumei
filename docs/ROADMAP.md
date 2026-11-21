@@ -3086,11 +3086,16 @@ Branches must land on decoded instruction starts; backward edges are
 supported when the reachable CFG is acyclic, while cycles remain outside the
 profile. Symbolic path exploration is bounded at 64 completed paths. The
 instruction profile includes `setcc`, byte-register views and extensions,
-masked immediate or implicit-one shifts, and `or` logical flags. The x86-64
-integer-register convention and callee-saved preservation are assumed, not
-verified; this makes no ABI claim. The C `main` wrapper, CRT/startup code,
-loader, libc and runtime are not covered. Full object-code TV remains the
-deeper endpoint.
+masked immediate or implicit-one shifts, and `or` logical flags. The division
+slice adds `cqto`/`cltd`, register `idivq`/`divq`/`divl`, and one-operand
+`imulq` high-half products. A division is accepted only when each path proves
+the divisor is nonzero and the quotient fits; otherwise it is
+`division_trap`. For nonzero shifts, only zero-flag `e`/`z` and `ne`/`nz`
+branches are modeled. These are bounded proof obligations, not a runtime
+no-trap or ABI claim. The x86-64 integer-register convention and callee-saved
+preservation are assumed, not verified. The C `main` wrapper, CRT/startup
+code, loader, libc and runtime are not covered. Full object-code TV remains
+the deeper endpoint.
 
 `machine_code_forward_branch_function_tv` retains its forward-only meaning;
 `machine_code_acyclic_branch_function_tv` covers equivalent functions with

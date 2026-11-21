@@ -1808,13 +1808,29 @@ unsupported. `movzbl`/`movzbq` and `movsbl`/`movsbq` zero- or sign-extend an
 the implicit count of one printed without a count operand. Counts are masked
 to six bits for 64-bit operations and five bits for 32-bit operations; a
 masked zero leaves the destination unchanged. 32-bit shift results
-zero-extend. Shifts set flags to unknown, and `%cl`-count shifts are
-unsupported.
+zero-extend. For nonzero shifts, only `e`/`z` and `ne`/`nz` conditions are
+modeled from the result's zero flag; other condition codes after a shift are
+unsupported. A masked-zero shift leaves flags unknown, and `%cl`-count shifts
+are unsupported.
 
-`mov`, `lea`, `push`, `pop`, and `nop` preserve flags. Initial flags and flags
-after other arithmetic or calls are unknown, so a condition that reads them
-is outside the profile. Symbolic execution is bounded at 64 completed paths;
-exceeding that bound is `path_bound`.
+`cqto` sign-fills `%rax` into `%rdx`; `cltd` sign-fills `%eax` into `%edx`,
+with the usual zero-extension of the 32-bit destination. Register-source
+`idivq`, `divq`, and `divl` model the architectural dividend, quotient, and
+remainder widths. A register-source one-operand `imulq` models the signed
+128-bit product in `%rdx:%rax`. Each division path must prove a nonzero
+divisor and that the quotient fits the destination width under the bounded
+input domain, source definedness, call-result bounds, path conditions, and
+input/register bindings. Failure to prove that obligation is
+`division_trap`; memory operands and other division forms remain unsupported.
+This is a bounded no-trap obligation, not a runtime or ABI guarantee.
+
+`mov`, `movabsq`, `lea`, `push`, `pop`, and `nop` preserve flags. Initial flags
+and flags after other arithmetic or calls are unknown, so a condition that
+reads them is outside the profile. At conditional forks, paths proved
+infeasible under the declared domain, definedness, call-result bounds,
+input/register bindings, and accumulated path conditions are pruned; paths
+with Sat or Unknown solver results are retained. Symbolic execution is bounded
+at 64 completed paths; exceeding that bound is `path_bound`.
 
 The `input_domain` is
 `signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires`.
@@ -1822,7 +1838,7 @@ The comparison asserts the source model's signature-bounded parameter domains
 and division/shift definedness, but does not restrict inputs by `requires`.
 Outside-profile reasons include `argument_count`, `branch_target`,
 `call_order`, `conditional_call`, `cyclic_control_flow`,
-`not_a_source_atom`, `path_bound`, `unsupported_flags`,
+`division_trap`, `not_a_source_atom`, `path_bound`, `unsupported_flags`,
 `unsupported_instruction`, and `unsupported_signature`. A direct-call callee
 or count mismatch is reported as `call_order`. Direct calls in branching
 functions are matched per path against ordered source `CallSite`s. Provably
