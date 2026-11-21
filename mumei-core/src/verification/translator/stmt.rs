@@ -11,6 +11,8 @@ use crate::verification::translator::may_write::{callee_may_write_args, CalleeRe
 use crate::verification::translator::z3_types::array_root_ast;
 use serde_json::json;
 
+const ENUM_STRUCT_ARRAY_REBUILD_KEY: &str = "__enum_struct_array_rebuild";
+
 /// Insert `__z3_arr_<var>` for every caller variable the call may store
 /// through — the same may-write set `havoc_array_args` /
 /// `apply_local_lambda` havoc at call evaluation, so loop-carried havoc
@@ -1433,7 +1435,25 @@ fn struct_field_assign<'a>(
         // genuine use-after-move before translation reaches here.
         return Ok(None);
     };
-    let val = expr_to_z3(vc, value, env, solver_opt)?;
+    let mut val = expr_to_z3(vc, value, env, solver_opt)?;
+    let array_field = datatype::field_leaf_types(&sfield.type_name, vc.module_env)
+        .is_some_and(|leaves| datatype::array_payload_element_type(&leaves).is_some());
+    if array_field {
+        let array = match value {
+            Expr::Variable(name) => env
+                .get(&format!("__z3_arr_{name}"))
+                .and_then(|value| value.as_array())
+                .or_else(|| val.as_array()),
+            _ => val.as_array(),
+        };
+        if let Some(array) = array {
+            let array_value: Dynamic = array.clone().into();
+            let len =
+                super::z3_types::array_len_for_expr(vc, env, Some(value), &array_value, solver_opt);
+            super::z3_types::register_array_value_len(env, &array, len);
+            val = array_value;
+        }
+    }
     let slot_key = format!("{base}_{field}");
     if let Some(slot) = env.get(&slot_key) {
         if val.get_sort() != slot.get_sort() {
@@ -1682,6 +1702,16 @@ fn enum_field_assign<'a>(
         .structs
         .get(&vc.module_env.resolve_base_type(&field_type));
     let field_leaves = datatype::field_leaf_types(&field_type, vc.module_env);
+    if composite_sdef.is_some()
+        && !env.contains_key(ENUM_STRUCT_ARRAY_REBUILD_KEY)
+        && field_leaves
+            .as_ref()
+            .is_some_and(|leaves| datatype::array_payload_leaf_pairs(leaves).next().is_some())
+    {
+        return Err(MumeiError::type_error(format!(
+            "enum field write '{var}' cannot replace a struct payload containing array fields"
+        )));
+    }
     let array_payload = field_leaves
         .as_ref()
         .and_then(|leaves| datatype::array_payload_element_type(leaves))
@@ -1710,8 +1740,8 @@ fn enum_field_assign<'a>(
         // Flatten deeper than direct fields — nested payloads bind leaves
         // like `inner_x`, keyed the same way `nested_field_bindings` reports
         // the value's env entries.
-        let Some(fields) =
-            field_leaves.and_then(|lt| datatype::flattened_value_leaves(env, &val, &lt))
+        let Some(fields) = field_leaves
+            .and_then(|lt| datatype::flattened_value_leaves(vc, env, &val, &lt, solver_opt))
         else {
             return Err(MumeiError::type_error(format!(
                 "enum field '{var}' expects a struct value"
@@ -2004,7 +2034,17 @@ fn enum_struct_payload_field_assign<'a>(
     let handle = fresh_struct_handle(vc.ctx, &sdef.name);
     let handle_name = handle.decl().name();
     bind_struct_fields(env, &handle_name, &direct);
-    bind_struct_fields(env, &temp, &leaves);
+    let array_length_indices: std::collections::HashSet<usize> =
+        datatype::array_payload_leaf_pairs(&leaf_types)
+            .map(|(array_index, _)| array_index + 1)
+            .collect();
+    let struct_leaves: Vec<(String, Dynamic)> = leaves
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !array_length_indices.contains(index))
+        .map(|(_, leaf)| leaf.clone())
+        .collect();
+    bind_struct_fields(env, &temp, &struct_leaves);
     bind_struct_fields(env, &temp, &direct);
     env.insert(temp.clone(), handle);
     vc.local_struct_types
@@ -2018,6 +2058,10 @@ fn enum_struct_payload_field_assign<'a>(
 
     let path_type = enum_payload_path_type(vc, sdef.name.clone(), path);
     let env_keys_before_write: std::collections::HashSet<String> = env.keys().cloned().collect();
+    env.insert(
+        ENUM_STRUCT_ARRAY_REBUILD_KEY.to_string(),
+        Bool::from_bool(vc.ctx, true).into(),
+    );
     let result = (|| {
         let temp_path = format!("{temp}.{path}");
         let Some(written) = struct_field_assign(vc, &temp_path, value, env, solver_opt)? else {
@@ -2030,6 +2074,7 @@ fn enum_struct_payload_field_assign<'a>(
         };
         Ok(Some(written))
     })();
+    env.remove(ENUM_STRUCT_ARRAY_REBUILD_KEY);
 
     let mut temp_handles = std::collections::HashSet::new();
     if let Some(temp_value) = env.get(&temp) {

@@ -40,9 +40,10 @@ const MAX_ENUM_PAYLOAD_NEST: u8 = 8;
 /// counts: its leaves flatten into the constructor, mirroring the trusted
 /// verifier's `pure-i64-composite/v18` layout; a payload field typed as
 /// another finite enum counts too, carrying one accessor of the inner
-/// enum's datatype sort — `pure-i64-composite/v23`). Direct arrays of
-/// scalar elements contribute array and length accessors; arrays nested in
-/// structs or containing non-scalar elements keep the Int-tag path.
+/// enum's datatype sort — `pure-i64-composite/v23`). Direct arrays and
+/// scalar-element arrays nested in structs contribute array and length
+/// accessors; nested arrays and arrays containing non-scalar elements keep
+/// the Int-tag path.
 pub(crate) fn is_finite_adt(enum_def: &EnumDef, module_env: &ModuleEnv) -> bool {
     is_finite_adt_fueled(
         enum_def,
@@ -90,10 +91,10 @@ fn is_finite_adt_fueled(
 /// the Z3 constructor: a scalar field is a single unnamed leaf; a declared
 /// struct expands to its scalar leaves, with a struct-typed field recursing
 /// under a `{field}_{leaf}` name (`b.inner.x` → leaf `inner_x`, matching the
-/// `<binding>_<path>` env-key convention). A direct `[T]` field with scalar
-/// `T` contributes an array leaf and a `#len` leaf. Nested arrays and arrays
-/// within struct payloads, a
-/// recursive struct on the flattening path, a leaf-name collision
+/// `<binding>_<path>` env-key convention). A scalar-element `[T]` field at
+/// any struct path contributes an array leaf and its sibling `#len` leaf.
+/// Nested arrays and arrays of non-scalar elements, a recursive struct on the
+/// flattening path, a leaf-name collision
 /// (`inner_x` scalar beside `inner: {x}`), or more than
 /// `MAX_PAYLOAD_LEAVES` leaves return `None` and keep the enum on the
 /// Int-tag encoding.
@@ -170,6 +171,39 @@ pub(crate) fn array_payload_element_type(leaves: &[(String, String)]) -> Option<
     }
 }
 
+/// Iterate the array/length sibling pairs in a flattened payload leaf list.
+/// The length name is the array leaf's path with `#len` appended, including
+/// the direct-payload pair `""` / `"#len"`.
+pub(crate) fn array_payload_leaf_pairs<'a>(
+    leaves: &'a [(String, String)],
+) -> impl Iterator<Item = (usize, &'a str)> + 'a {
+    leaves.windows(2).enumerate().filter_map(|(index, pair)| {
+        let (name, base) = &pair[0];
+        let element_type = base.strip_prefix("array:")?;
+        let len_name = format!("{name}#len");
+        (pair[1].0 == len_name && pair[1].1 == "array_len").then_some((index, element_type))
+    })
+}
+
+pub(crate) fn assert_payload_array_lengths<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+    gate: &Bool<'a>,
+    leaf_types: &[(String, String)],
+    leaf_values: &[Dynamic<'a>],
+) {
+    for (array_index, _) in array_payload_leaf_pairs(leaf_types) {
+        let Some(length) = leaf_values.get(array_index + 1) else {
+            continue;
+        };
+        if let Some(nonnegative) =
+            crate::verification::translator::z3_types::nonneg_constraint(vc.ctx, length)
+        {
+            solver.assert(&gate.implies(&nonnegative));
+        }
+    }
+}
+
 /// Widest leaf set one payload field may flatten to — the same budget the
 /// composite fragment allows a bound struct. Exponential blowup from shared
 /// nested declarations is rejected as a whole rather than truncated.
@@ -212,19 +246,19 @@ fn collect_field_leaves(
         .and_then(|ty| ty.strip_suffix(']'))
         .map(str::trim)
     {
-        if !name.is_empty()
-            || !field_is_scalar(element_type, module_env)
+        let len_name = format!("{name}#len");
+        if !field_is_scalar(element_type, module_env)
             || leaves.len() + 2 > MAX_PAYLOAD_LEAVES
-            || !seen.insert(String::new())
-            || !seen.insert("#len".to_string())
+            || !seen.insert(name.clone())
+            || !seen.insert(len_name.clone())
         {
             return None;
         }
         leaves.push((
-            String::new(),
+            name,
             format!("array:{}", module_env.resolve_base_type(element_type)),
         ));
-        leaves.push(("#len".to_string(), "array_len".to_string()));
+        leaves.push((len_name, "array_len".to_string()));
         return Some(());
     }
     // An enum-typed payload leaf contributes a single `enum:`-marked leaf —
@@ -279,16 +313,12 @@ fn collect_field_leaves(
 /// composite (`b` for `V(b: Box{inner: Point})` → `inner_x`) and a
 /// `StructInit` literal answer identically.
 pub(crate) fn flattened_value_leaves<'a>(
-    env: &crate::verification::types::Env<'a>,
+    vc: &VCtx<'a>,
+    env: &mut crate::verification::types::Env<'a>,
     value: &Dynamic<'a>,
     leaf_types: &[(String, String)],
+    solver_opt: Option<&Solver<'a>>,
 ) -> Option<Vec<Dynamic<'a>>> {
-    if leaf_types
-        .iter()
-        .any(|(_, base)| base.starts_with("array:") || base == "array_len")
-    {
-        return None;
-    }
     if leaf_types.len() == 1 && leaf_types[0].0.is_empty() {
         return Some(vec![value.clone()]);
     }
@@ -296,10 +326,28 @@ pub(crate) fn flattened_value_leaves<'a>(
         crate::verification::translator::nested_field_bindings(env, value)
             .into_iter()
             .collect();
-    leaf_types
-        .iter()
-        .map(|(name, _)| flat.get(name).cloned())
-        .collect()
+    let array_pairs: std::collections::HashMap<usize, &str> =
+        array_payload_leaf_pairs(leaf_types).collect();
+    let mut values = Vec::with_capacity(leaf_types.len());
+    let mut index = 0;
+    while index < leaf_types.len() {
+        let (name, base) = &leaf_types[index];
+        if array_pairs.contains_key(&index) {
+            let array = flat.get(name)?.as_array()?;
+            let len = crate::verification::translator::z3_types::array_len_for_value(
+                vc, env, &array, solver_opt,
+            );
+            values.push(array.into());
+            values.push(len);
+            index += 2;
+        } else if base == "array_len" {
+            return None;
+        } else {
+            values.push(flat.get(name)?.clone());
+            index += 1;
+        }
+    }
+    Some(values)
 }
 
 /// `(accessor_name, sort)` pairs one declared payload field contributes to
@@ -317,9 +365,17 @@ fn field_leaf_sorts<'a>(
     let mut out = Vec::with_capacity(leaves.len());
     for (leaf_name, base) in leaves {
         let name = if base.starts_with("array:") {
-            format!("{variant_name}_{field_idx}")
+            if leaf_name.is_empty() {
+                format!("{variant_name}_{field_idx}")
+            } else {
+                format!("{variant_name}_{field_idx}_{leaf_name}")
+            }
         } else if base == "array_len" {
-            format!("{variant_name}_{field_idx}#len")
+            if leaf_name == "#len" {
+                format!("{variant_name}_{field_idx}#len")
+            } else {
+                format!("{variant_name}_{field_idx}_{leaf_name}")
+            }
         } else if single {
             format!("{variant_name}_{field_idx}")
         } else {
@@ -677,15 +733,13 @@ pub(crate) fn resolve_enum_ctor<'a>(
 }
 
 /// Expand declared-arity ctor args to the constructor's flattened leaf
-/// arity: scalar fields consume their arg unchanged; a struct-typed field
-/// consumes the arg's projected leaves (`struct_fields_of_value`), so both
-/// `Event::Move(Point { x, y })` and `Event::Move(p)` reach the leaves.
+/// arity: scalar fields consume their arg unchanged; array and struct fields
+/// consume per-argument leaf snapshots so later arguments cannot change them.
 fn expand_ctor_args<'a>(
     vc: &VCtx<'a>,
-    env: &mut crate::verification::types::Env<'a>,
     variant: &crate::parser::ast::EnumVariant,
     args: &[Dynamic<'a>],
-    array_payload_snapshots: &[Option<ArrayPayloadSnapshot<'a>>],
+    payload_snapshots: &[Option<PayloadSnapshot<'a>>],
 ) -> MumeiResult<Vec<Dynamic<'a>>> {
     let mut leaves: Vec<Dynamic> = Vec::new();
     for (i, arg) in args.iter().enumerate() {
@@ -696,28 +750,33 @@ fn expand_ctor_args<'a>(
                 "enum constructor payload '{field_type}' has no flattened leaves"
             )));
         };
-        if array_payload_element_type(&field_leaves).is_some() {
-            let Some(snapshot) = array_payload_snapshots.get(i).and_then(Option::as_ref) else {
+        if array_payload_element_type(&field_leaves).is_some()
+            || vc.module_env.structs.contains_key(&base)
+        {
+            let Some(snapshot) = payload_snapshots.get(i).and_then(Option::as_ref) else {
                 return Err(MumeiError::type_error(format!(
-                    "enum constructor payload '{field_type}' expects an array value"
+                    "enum constructor payload '{field_type}' has no value snapshot"
                 )));
             };
-            if snapshot.array.as_array().is_none() {
+            if array_payload_element_type(&field_leaves).is_some()
+                && snapshot
+                    .leaves
+                    .first()
+                    .and_then(|value| value.as_array())
+                    .is_none()
+            {
                 return Err(MumeiError::type_error(format!(
                     "enum constructor payload '{field_type}' expects an array value"
                 )));
             }
-            leaves.push(snapshot.array.clone());
-            leaves.push(snapshot.len.clone());
-            continue;
-        }
-        if vc.module_env.structs.contains_key(&base) {
-            let Some(fields) = flattened_value_leaves(env, arg, &field_leaves) else {
+            if snapshot.leaves.len() != field_leaves.len() {
                 return Err(MumeiError::type_error(format!(
-                    "enum constructor payload '{field_type}' expects a '{base}' struct value"
+                    "enum constructor payload '{field_type}' has {} leaves but its snapshot has {}",
+                    field_leaves.len(),
+                    snapshot.leaves.len()
                 )));
-            };
-            leaves.extend(fields);
+            }
+            leaves.extend(snapshot.leaves.iter().cloned());
         } else {
             leaves.push(arg.clone());
         }
@@ -725,9 +784,8 @@ fn expand_ctor_args<'a>(
     Ok(leaves)
 }
 
-pub(crate) struct ArrayPayloadSnapshot<'a> {
-    pub array: Dynamic<'a>,
-    pub len: Dynamic<'a>,
+pub(crate) struct PayloadSnapshot<'a> {
+    pub leaves: Vec<Dynamic<'a>>,
 }
 
 /// The accessor domain sorts of `enum_def.variants[idx]`'s constructor,
@@ -793,10 +851,10 @@ pub(crate) fn enum_ctor_apply_leaves<'a>(
 /// wrong — callers then keep the previous behaviour (unknown/atom call).
 pub(crate) fn enum_ctor_apply<'a>(
     vc: &VCtx<'a>,
-    env: &mut crate::verification::types::Env<'a>,
+    _env: &mut crate::verification::types::Env<'a>,
     ctor_path: &str,
     args: &[Dynamic<'a>],
-    array_payload_snapshots: &[Option<ArrayPayloadSnapshot<'a>>],
+    payload_snapshots: &[Option<PayloadSnapshot<'a>>],
 ) -> MumeiResult<Option<Dynamic<'a>>> {
     let Some((enum_def, idx)) = resolve_enum_ctor(vc, ctor_path)? else {
         return Ok(None);
@@ -807,13 +865,7 @@ pub(crate) fn enum_ctor_apply<'a>(
     if enum_def.variants[idx].fields.len() != args.len() {
         return Ok(None);
     }
-    let leaf_args = expand_ctor_args(
-        vc,
-        env,
-        &enum_def.variants[idx],
-        args,
-        array_payload_snapshots,
-    )?;
+    let leaf_args = expand_ctor_args(vc, &enum_def.variants[idx], args, payload_snapshots)?;
     Ok(enum_ctor_apply_leaves(vc, enum_def, idx, &leaf_args))
 }
 
