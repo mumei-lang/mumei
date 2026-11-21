@@ -3833,6 +3833,43 @@ fn module_bundle_with_bounded_arrays_builds_as_v14_and_rechecks() {
 }
 
 #[test]
+fn module_bundle_with_bounded_arrays_in_allocated_frame_recheck_machine_tv_and_accept_object() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "atom inc(x: i64) -> i64 requires: x >= 0 && x < 1000; ensures: result == x + 1; body: { x + 1 };\n\
+         atom usea(a0: i64, i: i64) -> i64 requires: 0 <= i && i < 3 && a0 >= 0 && a0 < 1000; ensures: true; body: { let a = [a0, 20, 30]; a[i] = inc(a0); a[i] };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { usea(1, 1) };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V14);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_MEMORY_PROFILE
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    let machine_tv = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&machine_tv);
+    let machine_tv: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
+    for function in ["inc", "usea", "main"] {
+        assert_eq!(
+            machine_tv["functions"][function]["outcome"],
+            "equivalent_within_profile"
+        );
+    }
+    let convention = machine_tv["register_convention_assumed"].as_str().unwrap();
+    assert!(convention.contains("_allocated_frame_memory_assumed_callee_isolated"));
+
+    let accepted = accept_object(&source, &bundle, &id, true);
+    assert_success(&accepted);
+    let accepted: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(accepted["accepted"], true);
+    let convention = accepted["register_convention_assumed"].as_str().unwrap();
+    assert!(convention.contains("_allocated_frame_memory_assumed_callee_isolated"));
+}
+
+#[test]
 fn multifile_bundle_with_bounded_arrays_builds_as_v14() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("app.mm");

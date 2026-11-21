@@ -1902,10 +1902,20 @@ Models with post-state writes, bounded strings, unsupported composite or enum
 body features, or unsupported f64 operations fail closed as
 `unsupported_signature`. Leaf-function bounded arrays may use qword
 `%rsp`-relative red-zone accesses only when each effective offset is proved
-within `-128..=-8`; the model assumes the red zone is not clobbered.
-Frame-memory accesses with calls (`frame_memory_call`) or in functions that
-push/pop or write `%rsp`/`%esp` (`frame_memory_stack_adjust`) remain fail-closed,
-as do non-qword accesses and `.rodata`/`Str` memory. Scalar subranges and
+within `-128..=-8`; the model assumes the red zone is not clobbered. Leaf
+red-zone accesses in functions with calls (`frame_memory_call`) or stack
+adjustments (`frame_memory_stack_adjust`) remain fail-closed. Non-leaf bounded
+arrays may use one allocated entry-relative frame region per path, with each
+qword access proved inside that region. Calls are allowed only under the
+explicit assumption that callees write below their return address and that no
+stack-argument slot occupies the region; this is not a validated ABI claim.
+The region closes when `%rsp` is deallocated past its lower bound and cannot be
+reopened. Accesses to deallocated or reallocated regions fail as
+`frame_memory_bounds`, and a stack-argument call whose slot would be routed
+through the region fails as `call_arguments`. Non-qword accesses and
+`.rodata`/`Str` memory remain fail-closed. Equivalent functions using this
+allocated-memory model carry
+`_allocated_frame_memory_assumed_callee_isolated`. Scalar subranges and
 refined signatures remain supported because their input restrictions are
 carried by `param_domain`.
 `u64` leaves are also admitted as full-width 64-bit bitvectors with no
@@ -1928,7 +1938,8 @@ Larger multiply-heavy functions may remain inconclusive within the solver
 budget; this is fail-closed and does not imply inequivalence.
 Outside-profile reasons include `argument_count`, `branch_target`,
 `call_arguments`, `call_order`, `conditional_call`, `cyclic_control_flow`,
-`division_trap`, `loop_bound`, `not_a_source_atom`, `path_bound`,
+`division_trap`, `frame_memory_bounds`, `frame_memory_call`,
+`frame_memory_stack_adjust`, `loop_bound`, `not_a_source_atom`, `path_bound`,
 `unsupported_flags`, `unsupported_instruction`, and `unsupported_signature`.
 A direct-call callee
 or count mismatch is reported as `call_order`. Direct calls in branching
