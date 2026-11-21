@@ -2323,6 +2323,10 @@ fn enum_payload_field_read<'a>(
         else {
             return Ok(None);
         };
+        let Some(nonnegative) = super::z3_types::nonneg_constraint(vc.ctx, &length) else {
+            return Ok(None);
+        };
+        solver.assert(&is_variant.implies(&nonnegative));
         if let Some(array) = value.as_ref().and_then(|value| value.as_array()) {
             super::z3_types::register_array_value_len(env, &array, length);
         }

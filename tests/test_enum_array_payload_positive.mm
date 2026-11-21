@@ -132,6 +132,17 @@ requires: match e {
 ensures: result == 4;
 body: len(e.xs);
 
+atom tagged_direct_array_length_is_nonnegative(e: Ev) -> i64
+requires: match e {
+    Ev::Data(_) => true,
+    Ev::Idle => false
+};
+ensures: result >= 0;
+body: {
+    let xs = e.xs;
+    len(xs)
+};
+
 atom repeated_direct_payload_reads_keep_length(e: Ev) -> bool
 requires: match e {
     Ev::Data(xs) => len(xs) == 4,
