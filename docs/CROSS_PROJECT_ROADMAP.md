@@ -6366,9 +6366,9 @@ still names the same queues, so `_opaque_container_bind` joins `b` to
 like the slice form. `[N][M]chan` nested arrays, `[]chan chan` and
 `[][]chan` extraction stay closed.
 
-### External chan-element containers (mumei-agent #1022)
+### External chan-element containers (mumei-agent #1025)
 
-[mumei-agent#1022](https://github.com/mumei-lang/mumei-agent/pull/1022)
+[mumei-agent#1025](https://github.com/mumei-lang/mumei-agent/pull/1025)
 admits the same element surface on a chan-element container living in
 external state — `var GS []chan T` / `var GM map[K]chan T` /
 `var GA [N]chan T` package-level, or an imported member `lib.GS[i]`.
@@ -6378,7 +6378,12 @@ record an imported CallTransfer on the *container's* identity (like a
 `lib.VA[i] = v` member write): sends broadcast `value ∪ index` deps
 into `indirect_writes`, reads return `indirect_writes` plus the
 index's deps, and `select` alternatives resolve through the same
-operand paths. `[][]chan` nests, `[]chan chan`, `d := GS[i]`
+operand paths. Storing a channel into an external slot
+(`GS[i] = c`, `GS = s`) promotes the stored queue's group to the
+same caller-visible state — sends into it broadcast through
+`indirect_writes`, group reads union it, and a callee performing
+an external chan-element op promotes the caller's channel
+arguments. `[][]chan` nests, `[]chan chan`, `d := GS[i]`
 extraction and `map[string]chan` variable keys stay closed.
 
 ### Append on a chan-element collection (mumei-agent #1024)
