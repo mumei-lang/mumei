@@ -90,6 +90,17 @@ body: {
     }
 };
 
+atom conditional_struct_payload_length(c: bool, s1: S, s2: S) -> i64
+requires: len(s1.xs) == 2 && len(s2.xs) == 2;
+ensures: result == 2;
+body: {
+    let e = E::D(if c { s1 } else { s2 });
+    match e {
+        E::D(t) => len(t.xs),
+        E::N => 0
+    }
+};
+
 atom nested_struct_array_payload_length(s: Inner) -> i64
 requires: len(s.xs) > 1;
 ensures: result > 1;
