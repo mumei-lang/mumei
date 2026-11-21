@@ -99,6 +99,10 @@ REQUIRED_NO_MM_LANGUAGE_PHRASES = [
     "Go `values[idx]` bounds",
     "Z3 counterexample",
 ]
+REQUIRED_C10_OPTION_B_MACHINE_TV_CHECKS = [
+    "machine_code_callee_saved_register_preservation",
+    "machine_code_callee_saved_preservation_assumed_for_external_callees",
+]
 
 
 @dataclass(frozen=True)
@@ -264,6 +268,15 @@ def _check_canonical_doc() -> list[Violation]:
     for phrase in required_phrases:
         if phrase not in section:
             violations.append(Violation(CANONICAL_DOC, f"canonical section is missing phrase: {phrase}"))
+
+    for check_name in REQUIRED_C10_OPTION_B_MACHINE_TV_CHECKS:
+        if f"`{check_name}`" not in text:
+            violations.append(
+                Violation(
+                    CANONICAL_DOC,
+                    f"C10 Option B check vocabulary is missing `{check_name}`",
+                )
+            )
 
     return violations
 

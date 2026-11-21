@@ -3281,6 +3281,26 @@ struct MachineTvLoopCounts {
     equivalent_source_loop_count: usize,
 }
 
+fn machine_tv_callee_saved_preservation_checks(
+    equivalent_count: usize,
+    preserved_count: usize,
+) -> (Vec<&'static str>, Vec<&'static str>) {
+    if equivalent_count == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    if preserved_count == equivalent_count {
+        (
+            vec!["machine_code_callee_saved_register_preservation"],
+            vec!["machine_code_callee_saved_preservation_assumed_for_external_callees"],
+        )
+    } else {
+        (
+            Vec::new(),
+            vec!["machine_code_callee_saved_register_preservation"],
+        )
+    }
+}
+
 fn machine_tv_input_domain(source_loops: bool) -> String {
     if source_loops {
         format!(
@@ -3347,6 +3367,7 @@ fn machine_tv_coverage_checks(
 
 struct MachineTvCounts {
     equivalent_count: usize,
+    equivalent_callee_saved_preserved_count: usize,
     equivalent_leaf_count: usize,
     equivalent_call_count: usize,
     equivalent_forward_branch_count: usize,
@@ -3434,6 +3455,7 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
     let mut functions = BTreeMap::new();
     let mut outcomes = BTreeMap::new();
     let mut equivalent_count = 0usize;
+    let mut equivalent_callee_saved_preserved_count = 0usize;
     let mut equivalent_leaf_count = 0usize;
     let mut equivalent_call_count = 0usize;
     let mut equivalent_forward_branch_count = 0usize;
@@ -3452,6 +3474,7 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
         let mut branch_shape = machine_tv::BranchShape::None;
         let mut has_conditional_call = false;
         let mut has_reachable_cycle = false;
+        let mut callee_saved_preservation = None;
         let outcome = if let Some(model) = source_models.get(function_name) {
             if model.inputs.len() > machine_tv::MAX_ARGUMENT_COUNT {
                 FunctionOutcome::OutsideProfile("argument_count")
@@ -3477,7 +3500,15 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
                 branch_shape = machine_tv::branch_shape(&bytes, address, &call_targets);
                 has_conditional_call =
                     machine_tv::has_conditional_branch_and_call(&bytes, address, &call_targets);
-                machine_tv::check_function(&bytes, address, model, &call_targets, &context)
+                let (outcome, preservation) = machine_tv::check_function_with_preservation(
+                    &bytes,
+                    address,
+                    model,
+                    &call_targets,
+                    &context,
+                );
+                callee_saved_preservation = preservation;
+                outcome
             } else {
                 FunctionOutcome::OutsideProfile("unsupported_instruction")
             }
@@ -3487,6 +3518,17 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
         let value = match outcome {
             FunctionOutcome::Equivalent => {
                 equivalent_count += 1;
+                let preservation = callee_saved_preservation.ok_or(
+                    "Machine-code TV equivalence result is missing callee-saved preservation.",
+                )?;
+                let preservation_label = match preservation {
+                    machine_tv::CalleeSavedPreservation::Preserved => {
+                        equivalent_callee_saved_preserved_count += 1;
+                        "preserved"
+                    }
+                    machine_tv::CalleeSavedPreservation::Violated => "violated",
+                    machine_tv::CalleeSavedPreservation::Unknown => "unknown",
+                };
                 if has_source_loop {
                     equivalent_source_loop_count += 1;
                 }
@@ -3509,7 +3551,10 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
                         }
                     }
                 }
-                serde_json::json!({"outcome": "equivalent_within_profile"})
+                serde_json::json!({
+                    "outcome": "equivalent_within_profile",
+                    "callee_saved_preservation": preservation_label,
+                })
             }
             FunctionOutcome::Different => serde_json::json!({"outcome": "different"}),
             FunctionOutcome::Unknown => serde_json::json!({"outcome": "unknown"}),
@@ -3525,6 +3570,7 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
     }
     let counts = MachineTvCounts {
         equivalent_count,
+        equivalent_callee_saved_preserved_count,
         equivalent_leaf_count,
         equivalent_call_count,
         equivalent_forward_branch_count,
@@ -3534,7 +3580,7 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
         equivalent_source_loop_count,
         object_function_count: data.object_surface.defined.len(),
     };
-    let coverage = machine_tv_coverage_checks(
+    let mut coverage = machine_tv_coverage_checks(
         counts.equivalent_leaf_count,
         counts.equivalent_call_count,
         counts.equivalent_forward_branch_count,
@@ -3546,6 +3592,12 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
         },
         has_cyclic_or_loop_bound_outcome,
     );
+    let callee_saved_coverage = machine_tv_callee_saved_preservation_checks(
+        counts.equivalent_count,
+        counts.equivalent_callee_saved_preserved_count,
+    );
+    coverage.0.extend(callee_saved_coverage.0);
+    coverage.1.extend(callee_saved_coverage.1);
     let scope = if data.object_link_correspondence {
         MACHINE_CODE_TV_SCOPE
     } else {
@@ -4238,6 +4290,35 @@ mod tests {
         let (_, not_performed) =
             machine_tv_coverage_checks(0, 0, 0, 0, 0, MachineTvLoopCounts::default(), false);
         assert!(!not_performed.contains(&"machine_code_tv_cyclic_control_flow_functions"));
+    }
+
+    #[test]
+    fn machine_tv_descriptor_tracks_callee_saved_preservation_coverage() {
+        let (performed, not_performed) = machine_tv_callee_saved_preservation_checks(2, 2);
+        assert_eq!(
+            performed,
+            vec!["machine_code_callee_saved_register_preservation"]
+        );
+        assert_eq!(
+            not_performed,
+            vec!["machine_code_callee_saved_preservation_assumed_for_external_callees"]
+        );
+        let performed_set: BTreeSet<_> = performed.iter().copied().collect();
+        let not_performed_set: BTreeSet<_> = not_performed.iter().copied().collect();
+        assert_eq!(performed_set.len(), performed.len());
+        assert_eq!(not_performed_set.len(), not_performed.len());
+        assert!(performed_set.is_disjoint(&not_performed_set));
+
+        let (performed, not_performed) = machine_tv_callee_saved_preservation_checks(2, 1);
+        assert!(performed.is_empty());
+        assert_eq!(
+            not_performed,
+            vec!["machine_code_callee_saved_register_preservation"]
+        );
+
+        let (performed, not_performed) = machine_tv_callee_saved_preservation_checks(0, 0);
+        assert!(performed.is_empty());
+        assert!(not_performed.is_empty());
     }
 
     #[test]

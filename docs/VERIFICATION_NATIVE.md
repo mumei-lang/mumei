@@ -1940,6 +1940,19 @@ function outcome is `cyclic_control_flow` or `loop_bound`. The not-performed
 vocabulary changed from `machine_code_tv_backward_branch_functions` to
 `machine_code_tv_cyclic_control_flow_functions`; mumei-agent consumers must
 adopt the new bounded-loop descriptor names and this conditional vocabulary.
+Each Equivalent function also reports `callee_saved_preservation` as
+`preserved`, `violated`, or `unknown`, independently of its return-value
+equivalence result. `machine_code_callee_saved_register_preservation` is
+performed only when at least one function is Equivalent and all such functions
+are preserved; otherwise it is not performed when an Equivalent function
+exists. When performed,
+`machine_code_callee_saved_preservation_assumed_for_external_callees` remains
+not performed. The machine-TV call model assumes direct callees and the
+cancellation poll preserve callee-saved registers, so the claim is
+compositional within a module only when every source callee is independently
+proved preserved; external and poll callees remain assumptions. The register
+argument/result convention itself remains assumed, not validated. Agent
+consumers must adopt the new preservation check names and function field.
 
 ### Object-stage machine-code acceptance (C10 Option B)
 

@@ -52,6 +52,13 @@ pub enum FunctionOutcome {
     OutsideProfile(&'static str),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalleeSavedPreservation {
+    Preserved,
+    Violated,
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallTarget {
     pub name: String,
@@ -207,28 +214,50 @@ pub fn check_function<'ctx>(
     call_targets: &BTreeMap<u64, CallTarget>,
     context: &'ctx Context,
 ) -> FunctionOutcome {
+    check_function_with_preservation(bytes, address, model, call_targets, context).0
+}
+
+/// Check return-value equivalence and, when equivalent, prove callee-saved
+/// preservation. Calls assume callees preserve these registers; this is
+/// compositional for source callees only when each is independently proved
+/// preserving, while external and cancellation-poll callees remain assumptions.
+pub fn check_function_with_preservation<'ctx>(
+    bytes: &[u8],
+    address: u64,
+    model: &PureI64Body<'ctx>,
+    call_targets: &BTreeMap<u64, CallTarget>,
+    context: &'ctx Context,
+) -> (FunctionOutcome, Option<CalleeSavedPreservation>) {
     if !supports_signature(model) {
         if let Ok(instructions) = disassemble(bytes, address) {
             let function_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
             if function_has_reachable_cycle(&instructions, function_size, call_targets) {
-                return FunctionOutcome::OutsideProfile("cyclic_control_flow");
+                return (FunctionOutcome::OutsideProfile("cyclic_control_flow"), None);
             }
         }
-        return FunctionOutcome::OutsideProfile("unsupported_signature");
+        return (
+            FunctionOutcome::OutsideProfile("unsupported_signature"),
+            None,
+        );
     }
     if model.inputs.len() > MAX_ARGUMENT_COUNT {
-        return FunctionOutcome::OutsideProfile("argument_count");
+        return (FunctionOutcome::OutsideProfile("argument_count"), None);
     }
     if model
         .call_sites
         .iter()
         .any(|site| site.args.len() > MAX_ARGUMENT_COUNT)
     {
-        return FunctionOutcome::OutsideProfile("argument_count");
+        return (FunctionOutcome::OutsideProfile("argument_count"), None);
     }
     let instructions = match disassemble(bytes, address) {
         Ok(instructions) if !instructions.is_empty() => instructions,
-        _ => return FunctionOutcome::OutsideProfile("unsupported_instruction"),
+        _ => {
+            return (
+                FunctionOutcome::OutsideProfile("unsupported_instruction"),
+                None,
+            )
+        }
     };
     let lifted = match lift(
         &instructions,
@@ -238,43 +267,50 @@ pub fn check_function<'ctx>(
         context,
     ) {
         Ok(lifted) => lifted,
-        Err(outcome) => return outcome,
+        Err(outcome) => return (outcome, None),
     };
     let mut unknown_path = false;
     for path in &lifted.paths {
-        let default_result = {
-            let solver = Solver::new(context);
-            set_solver_budget(&solver, context);
-            assert_path_equivalence_query(&solver, model, &lifted.arguments, path, context);
-            solver.check()
-        };
-        let result = if default_result == SatResult::Unknown {
-            let simplify = Tactic::new(context, "simplify");
-            let smt = Tactic::new(context, "smt");
-            let fallback_solver = simplify.and_then(&smt).solver();
-            set_solver_budget(&fallback_solver, context);
-            assert_path_equivalence_query(
-                &fallback_solver,
-                model,
-                &lifted.arguments,
-                path,
-                context,
-            );
-            fallback_solver.check()
-        } else {
-            default_result
-        };
+        let result = check_query_with_simplify_fallback(context, |solver| {
+            assert_path_equivalence_query(solver, model, &lifted.arguments, path, context);
+        });
         match result {
             SatResult::Unsat => {}
-            SatResult::Sat => return FunctionOutcome::Different,
+            SatResult::Sat => return (FunctionOutcome::Different, None),
             SatResult::Unknown => unknown_path = true,
         }
     }
     if unknown_path {
-        FunctionOutcome::Unknown
-    } else {
-        FunctionOutcome::Equivalent
+        return (FunctionOutcome::Unknown, None);
     }
+
+    let mut preservation_violated = false;
+    let mut preservation_unknown = false;
+    for path in &lifted.paths {
+        let result = check_query_with_simplify_fallback(context, |solver| {
+            assert_path_callee_saved_preservation_query(
+                solver,
+                model,
+                &lifted.arguments,
+                &lifted.callee_saved_initial,
+                path,
+                context,
+            );
+        });
+        match result {
+            SatResult::Unsat => {}
+            SatResult::Sat => preservation_violated = true,
+            SatResult::Unknown => preservation_unknown = true,
+        }
+    }
+    let preservation = if preservation_violated {
+        CalleeSavedPreservation::Violated
+    } else if preservation_unknown {
+        CalleeSavedPreservation::Unknown
+    } else {
+        CalleeSavedPreservation::Preserved
+    };
+    (FunctionOutcome::Equivalent, Some(preservation))
 }
 
 pub fn function_has_reachable_cycle(
@@ -317,6 +353,19 @@ fn assert_path_equivalence_query<'ctx>(
     path: &LiftedPath<'ctx>,
     context: &'ctx Context,
 ) {
+    assert_path_assumptions(solver, model, arguments, path);
+    let output_matches = model.value._eq(&path.return_value);
+    let mut equivalent_terms: Vec<&Bool> = path.call_argument_obligations.iter().collect();
+    equivalent_terms.push(&output_matches);
+    solver.assert(&Bool::and(context, &equivalent_terms).not());
+}
+
+fn assert_path_assumptions<'ctx>(
+    solver: &Solver<'ctx>,
+    model: &PureI64Body<'ctx>,
+    arguments: &[BV<'ctx>],
+    path: &LiftedPath<'ctx>,
+) {
     for (input, register) in model.inputs.iter().zip(arguments) {
         solver.assert(&input._eq(register));
     }
@@ -332,21 +381,62 @@ fn assert_path_equivalence_query<'ctx>(
     for condition in &path.path_conditions {
         solver.assert(condition);
     }
-    let output_matches = model.value._eq(&path.return_value);
-    let mut equivalent_terms: Vec<&Bool> = path.call_argument_obligations.iter().collect();
-    equivalent_terms.push(&output_matches);
-    solver.assert(&Bool::and(context, &equivalent_terms).not());
+}
+
+fn assert_path_callee_saved_preservation_query<'ctx>(
+    solver: &Solver<'ctx>,
+    model: &PureI64Body<'ctx>,
+    arguments: &[BV<'ctx>],
+    initial_callee_saved: &[BV<'ctx>],
+    path: &LiftedPath<'ctx>,
+    context: &'ctx Context,
+) {
+    assert_path_assumptions(solver, model, arguments, path);
+    let mut changed_registers = initial_callee_saved
+        .iter()
+        .zip(&path.callee_saved_registers)
+        .map(|(initial, final_value)| final_value._eq(initial).not())
+        .collect::<Vec<_>>();
+    changed_registers.push(Bool::from_bool(context, path.final_rsp_offset != 0));
+    let changed_registers = changed_registers.iter().collect::<Vec<_>>();
+    solver.assert(&Bool::or(context, &changed_registers));
+}
+
+fn check_query_with_simplify_fallback<'ctx>(
+    context: &'ctx Context,
+    assert_query: impl Fn(&Solver<'ctx>),
+) -> SatResult {
+    let default_result = {
+        let solver = Solver::new(context);
+        set_solver_budget(&solver, context);
+        assert_query(&solver);
+        solver.check()
+    };
+    if default_result == SatResult::Unknown {
+        let simplify = Tactic::new(context, "simplify");
+        let smt = Tactic::new(context, "smt");
+        let fallback_solver = simplify.and_then(&smt).solver();
+        set_solver_budget(&fallback_solver, context);
+        assert_query(&fallback_solver);
+        fallback_solver.check()
+    } else {
+        default_result
+    }
 }
 
 const ARGUMENT_REGISTERS: [usize; 6] = [7, 6, 2, 1, 8, 9];
+const CALLEE_SAVED_REGISTERS: [usize; 6] = [3, 5, 12, 13, 14, 15];
 
 struct LiftedFunction<'ctx> {
     arguments: Vec<BV<'ctx>>,
+    callee_saved_initial: Vec<BV<'ctx>>,
     paths: Vec<LiftedPath<'ctx>>,
 }
 
 struct LiftedPath<'ctx> {
     return_value: BV<'ctx>,
+    callee_saved_registers: Vec<BV<'ctx>>,
+    final_rsp_offset: i64,
     path_conditions: Vec<Bool<'ctx>>,
     call_argument_obligations: Vec<Bool<'ctx>>,
     used_call_targets: BTreeSet<u64>,
@@ -405,6 +495,10 @@ fn lift<'ctx>(
     let registers = (0..16)
         .map(|_| BV::fresh_const(context, "machine_initial_register", 64))
         .collect::<Vec<_>>();
+    let callee_saved_initial = CALLEE_SAVED_REGISTERS
+        .iter()
+        .map(|register_index| registers[*register_index].extract(63, 0))
+        .collect();
     let arguments: Vec<_> = (0..model.inputs.len())
         .map(|index| {
             ARGUMENT_REGISTERS.get(index).map_or_else(
@@ -806,7 +900,11 @@ fn lift<'ctx>(
     if used_call_targets.len() != call_targets.len() {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    Ok(LiftedFunction { arguments, paths })
+    Ok(LiftedFunction {
+        arguments,
+        callee_saved_initial,
+        paths,
+    })
 }
 
 fn is_unconditional_jump(mnemonic: &str) -> bool {
@@ -1069,8 +1167,15 @@ fn finish_path<'ctx>(
             return Err(FunctionOutcome::OutsideProfile("call_order"));
         }
     }
+    let return_value = state.registers[0].extract(63, 0);
+    let callee_saved_registers = CALLEE_SAVED_REGISTERS
+        .iter()
+        .map(|register_index| state.registers[*register_index].extract(63, 0))
+        .collect();
     Ok(LiftedPath {
-        return_value: state.registers[0].extract(63, 0),
+        return_value,
+        callee_saved_registers,
+        final_rsp_offset: state.rsp_offset,
         path_conditions: state.path_conditions,
         call_argument_obligations: state.call_state.argument_obligations,
         used_call_targets: state.call_state.used_call_targets,
@@ -2751,12 +2856,60 @@ entry:
             0xc3,
         ];
         assert_eq!(
-            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
-            FunctionOutcome::Equivalent
+            check_function_with_preservation(&bytes, 0, &model, &BTreeMap::new(), &context),
+            (
+                FunctionOutcome::Equivalent,
+                Some(CalleeSavedPreservation::Preserved)
+            )
         );
         assert_eq!(
             check_function(&[0x5b, 0xc3], 0, &model, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+    }
+
+    #[test]
+    fn callee_saved_register_clobbers_are_reported_separately_from_equivalence() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom identity(x: i64) -> i64 requires: true; ensures: true; body: { x };",
+            &context,
+        );
+        let clobbers_rbx = [
+            0x48, 0x89, 0xfb, // movq %rdi, %rbx
+            0x48, 0x89, 0xd8, // movq %rbx, %rax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function_with_preservation(&clobbers_rbx, 0, &model, &BTreeMap::new(), &context,),
+            (
+                FunctionOutcome::Equivalent,
+                Some(CalleeSavedPreservation::Violated)
+            )
+        );
+
+        let pops_saved_rbx_into_rcx = [
+            0x53, // pushq %rbx
+            0x48, 0x89, 0xfb, // movq %rdi, %rbx
+            0x59, // popq %rcx
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function_with_preservation(
+                &pops_saved_rbx_into_rcx,
+                0,
+                &model,
+                &BTreeMap::new(),
+                &context,
+            ),
+            (
+                FunctionOutcome::Equivalent,
+                Some(CalleeSavedPreservation::Violated)
+            )
         );
     }
 
@@ -2946,14 +3099,17 @@ entry:
         let model = source_model_named(WHILE_PROBE_SOURCE, "loop_count", &context);
         assert!(model.loop_bound_exits.is_some());
         assert_eq!(
-            check_function(
+            check_function_with_preservation(
                 &loop_count_machine_bytes(),
                 0,
                 &model,
                 &poll_call_targets(),
                 &context,
             ),
-            FunctionOutcome::Equivalent
+            (
+                FunctionOutcome::Equivalent,
+                Some(CalleeSavedPreservation::Preserved)
+            )
         );
     }
 
