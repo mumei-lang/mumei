@@ -392,10 +392,20 @@ fn lift<'ctx>(
                 let mut taken = state.clone();
                 taken.path_conditions.push(condition.clone());
                 taken.instruction_index = target;
-                pending.push(taken);
+                let taken_is_feasible =
+                    path_feasibility_status(model, &taken.path_conditions, &arguments, context)
+                        != SatResult::Unsat;
                 state.path_conditions.push(condition.not());
                 state.instruction_index = index + 1;
-                continue;
+                if taken_is_feasible {
+                    pending.push(taken);
+                }
+                if path_feasibility_status(model, &state.path_conditions, &arguments, context)
+                    != SatResult::Unsat
+                {
+                    continue;
+                }
+                break;
             }
             if is_unconditional_jump(&instruction.mnemonic) {
                 if is_tail_call(instruction, call_targets) {
@@ -1230,13 +1240,12 @@ fn lift_call<'ctx>(
     Ok(())
 }
 
-fn call_guard_status<'ctx>(
+fn path_solver<'ctx>(
     model: &PureI64Body<'ctx>,
-    guard: &Bool<'ctx>,
     path_conditions: &[Bool<'ctx>],
     arguments: &[BV<'ctx>],
     context: &'ctx Context,
-) -> Option<bool> {
+) -> Solver<'ctx> {
     let solver = Solver::new(context);
     set_solver_budget(&solver, context);
     for assumption in model
@@ -1253,6 +1262,26 @@ fn call_guard_status<'ctx>(
     for path_condition in path_conditions {
         solver.assert(path_condition);
     }
+    solver
+}
+
+fn path_feasibility_status<'ctx>(
+    model: &PureI64Body<'ctx>,
+    path_conditions: &[Bool<'ctx>],
+    arguments: &[BV<'ctx>],
+    context: &'ctx Context,
+) -> SatResult {
+    path_solver(model, path_conditions, arguments, context).check()
+}
+
+fn call_guard_status<'ctx>(
+    model: &PureI64Body<'ctx>,
+    guard: &Bool<'ctx>,
+    path_conditions: &[Bool<'ctx>],
+    arguments: &[BV<'ctx>],
+    context: &'ctx Context,
+) -> Option<bool> {
+    let solver = path_solver(model, path_conditions, arguments, context);
     if solver.check() != SatResult::Sat {
         return None;
     }
@@ -2931,8 +2960,16 @@ entry:
             &context,
         );
         let mut bytes = Vec::new();
-        for _ in 0..7 {
-            bytes.extend([0x48, 0x85, 0xff, 0x74, 0x01, 0x90]);
+        for (rex, modrm) in [
+            (0x48, 0xff),
+            (0x48, 0xf6),
+            (0x48, 0xd2),
+            (0x48, 0xc9),
+            (0x48, 0xdb),
+            (0x4d, 0xc0),
+            (0x4d, 0xc9),
+        ] {
+            bytes.extend([rex, 0x85, modrm, 0x74, 0x01, 0x90]);
         }
         bytes.extend([0xb8, 0x00, 0x00, 0x00, 0x00, 0xc3]);
         assert_eq!(
@@ -3128,6 +3165,49 @@ entry:
                 "{name}"
             );
         }
+
+        let u32_md_model = source_model(
+            "atom md_u32(x: u32, y: u32) -> u32 requires: true; ensures: true; body: { x / y };",
+            &context,
+        );
+        let md_instructions = disassemble(&md_bytes, 0).unwrap();
+        let u32_lifted = lift(
+            &md_instructions,
+            u64::try_from(md_bytes.len()).unwrap(),
+            &u32_md_model,
+            &BTreeMap::new(),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(u32_lifted.paths.len(), 1);
+        assert_eq!(
+            check_function(&md_bytes, 0, &u32_md_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let unrestricted_md_model = source_model(
+            "atom md_unrestricted(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { x / y };",
+            &context,
+        );
+        let unrestricted_lifted = lift(
+            &md_instructions,
+            u64::try_from(md_bytes.len()).unwrap(),
+            &unrestricted_md_model,
+            &BTreeMap::new(),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(unrestricted_lifted.paths.len(), 2);
+        assert_eq!(
+            check_function(
+                &md_bytes,
+                0,
+                &unrestricted_md_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
 
         let constant_model = source_model(
             "atom constant_seven(x: i64) -> i64 requires: x >= -1000 && x <= 1000; ensures: true; body: { x / 7 };",
