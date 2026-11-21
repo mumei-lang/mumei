@@ -355,6 +355,8 @@ fn rec_fn_result_projection<'a>(
     decl.apply(&app_args)
 }
 
+const REC_FN_ARRAY_LEN_PROJECTION: &str = "len#result";
+
 /// The result sort a `rec_fn#` application for `callee` must produce.
 fn call_result_sort<'a>(vc: &VCtx<'a>, callee: &Atom) -> Sort<'a> {
     let has_float = callee.params.iter().any(|p| {
@@ -659,7 +661,7 @@ fn unfold_constant_calls<'a>(
                 let len_sym = rec_fn_result_projection(
                     vc,
                     atom,
-                    &array_len_key("result"),
+                    REC_FN_ARRAY_LEN_PROJECTION,
                     &domain,
                     &len_sort,
                     &rec_args,
@@ -3330,7 +3332,7 @@ pub(crate) fn expr_to_z3<'a>(
                                 rec_fn_result_projection(
                                     vc,
                                     &callee,
-                                    &array_len_key("result"),
+                                    REC_FN_ARRAY_LEN_PROJECTION,
                                     domain,
                                     &len_sort,
                                     rec_args,
@@ -5661,7 +5663,7 @@ pub(crate) fn expr_to_z3<'a>(
                                 let len_sym = rec_fn_result_projection(
                                     vc,
                                     &callee_atom,
-                                    "len",
+                                    REC_FN_ARRAY_LEN_PROJECTION,
                                     domain,
                                     &len_sort,
                                     rec_args,
