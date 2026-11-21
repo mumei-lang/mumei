@@ -1887,6 +1887,22 @@ When the equivalent source model has a loop, machine-TV JSON `input_domain`
 appends `_and_loops_exiting_within_bound_{LOOP_BOUND}`. This label follows
 source loops even if LLVM fully unrolls them into acyclic machine code;
 loop-free bundles keep the base label above.
+For a module or multifile bundle, machine-TV re-derives source models with the
+same `module_refined_admission` or `multifile_refined_admission` helper as the
+LLVM recheck, using the profile pinned in the once-read bundle record. The
+single-file LLVM recheck has no admission argument, so its machine-TV path uses
+`RefinedAdmission::Reject`.
+If any equivalent source model has a refined signature, `input_domain` uses the
+LLVM module label
+`module_members_signed_i64_inputs_with_refined_scalar_signature_predicate_domains_not_process_exit_status`,
+with the loop-bound suffix above when applicable. Refined scalar parameter
+predicates are asserted through `param_domain`; return refinements remain
+postconditions and are not added to the machine return-value equality.
+Models with post-state writes, bounded memory/strings, composite or enum body
+features, non-i64 scalar leaves (`u64`, `i128`, `u128`), or f64
+leaves/arithmetic fail closed as
+`unsupported_signature`. Scalar subranges and refined signatures remain
+supported because their input restrictions are carried by `param_domain`.
 Unknown per-path equivalence queries retry the identical obligations with
 `simplify → smt` under the same budget; constant-divisor magic-number
 sequences may remain inconclusive.

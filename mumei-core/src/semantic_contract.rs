@@ -6702,9 +6702,20 @@ pub struct PureI64Body<'ctx> {
     /// carrying this flag, and the report names the bounded-memory
     /// profile for it.
     pub bounded_memory: bool,
+    /// True when the admitted module uses composite or enum body features.
+    pub has_composite_or_enum_features: bool,
+    /// True when the admitted module uses f64 leaves or arithmetic.
+    pub has_f64_features: bool,
+    /// True when the admitted module uses u64, i128 or u128 leaves.
+    pub has_non_i64_scalar_features: bool,
 }
 
 impl<'ctx> PureI64Body<'ctx> {
+    /// Whether the encoded body contains composite post-state writes.
+    pub fn has_post_writes(&self) -> bool {
+        !self.post_writes.is_empty()
+    }
+
     /// Construct a scalar body for a synthetic machine-TV obligation.
     pub fn synthetic_scalar(function_name: impl Into<String>, value: BV<'ctx>) -> Self {
         Self {
@@ -6726,11 +6737,25 @@ impl<'ctx> PureI64Body<'ctx> {
             loop_bound_exits: None,
             post_writes: HashMap::new(),
             bounded_memory: false,
+            has_composite_or_enum_features: false,
+            has_f64_features: false,
+            has_non_i64_scalar_features: false,
         }
     }
 }
 
 type BodyResult<T> = std::result::Result<T, SemanticContractError>;
+type AdmittedPureI64Module = (
+    String,
+    Vec<Item>,
+    RefinedEnv,
+    StructEnv,
+    EnumEnv,
+    bool,
+    bool,
+    bool,
+    bool,
+);
 
 /// `allow_wrapping_arithmetic` admits wrapping i64 add/sub/mul in the encoded
 /// body; callers checking the bounded C03 fragment (recheck, evidence) pass
@@ -6740,8 +6765,17 @@ pub fn encode_pure_i64_body<'ctx>(
     context: &'ctx Context,
     allow_wrapping_arithmetic: bool,
 ) -> BodyResult<PureI64Body<'ctx>> {
-    let (source_sha256, mut items, refined, structs, enums, bounded_memory) =
-        bounded_pure_i64_module(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
+    let (
+        source_sha256,
+        mut items,
+        refined,
+        structs,
+        enums,
+        bounded_memory,
+        has_composite_or_enum_features,
+        has_f64_features,
+        has_non_i64_scalar_features,
+    ) = bounded_pure_i64_module(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     let call_returns =
         call_return_kinds(&items, &refined, &structs, &enums, RefinedAdmission::Reject);
     let Some(Item::Atom(atom)) = items.pop() else {
@@ -6756,6 +6790,9 @@ pub fn encode_pure_i64_body<'ctx>(
         &enums,
         &call_returns,
         bounded_memory,
+        has_composite_or_enum_features,
+        has_f64_features,
+        has_non_i64_scalar_features,
     )
 }
 
@@ -6769,8 +6806,17 @@ pub fn encode_pure_i64_module<'ctx>(
     allow_wrapping_arithmetic: bool,
     admission: RefinedAdmission,
 ) -> BodyResult<Vec<PureI64Body<'ctx>>> {
-    let (source_sha256, items, refined, structs, enums, bounded_memory) =
-        bounded_pure_i64_module(source, allow_wrapping_arithmetic, admission)?;
+    let (
+        source_sha256,
+        items,
+        refined,
+        structs,
+        enums,
+        bounded_memory,
+        has_composite_or_enum_features,
+        has_f64_features,
+        has_non_i64_scalar_features,
+    ) = bounded_pure_i64_module(source, allow_wrapping_arithmetic, admission)?;
     let call_returns = call_return_kinds(&items, &refined, &structs, &enums, admission);
     items
         .iter()
@@ -6784,6 +6830,9 @@ pub fn encode_pure_i64_module<'ctx>(
                 &enums,
                 &call_returns,
                 bounded_memory,
+                has_composite_or_enum_features,
+                has_f64_features,
+                has_non_i64_scalar_features,
             )),
             _ => None,
         })
@@ -6799,7 +6848,7 @@ fn bounded_pure_i64_module(
     source: &str,
     allow_wrapping_arithmetic: bool,
     admission: RefinedAdmission,
-) -> BodyResult<(String, Vec<Item>, RefinedEnv, StructEnv, EnumEnv, bool)> {
+) -> BodyResult<AdmittedPureI64Module> {
     if source.len() > 65_536 {
         return Err(SemanticContractError::Unsupported("source size limit"));
     }
@@ -6823,8 +6872,36 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let (items, refined, structs, enums, _, _, _, _, _, _, _, arrays, strs, _, _, _, _, _, _) =
-        admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
+    let (
+        items,
+        refined,
+        structs,
+        enums,
+        struct_values_used,
+        field_writes_used,
+        enum_values_used,
+        merged_composites_used,
+        _,
+        u64_leaves,
+        f64_leaves,
+        arrays,
+        strs,
+        enum_scalar_ops_used,
+        nested_writes_used,
+        enum_writes_used,
+        f64_arithmetic_used,
+        _,
+        wide_leaves,
+    ) = admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
+    let has_composite_or_enum_features = struct_values_used
+        || field_writes_used
+        || enum_values_used
+        || merged_composites_used
+        || enum_scalar_ops_used
+        || nested_writes_used
+        || enum_writes_used;
+    let has_f64_features = f64_leaves || f64_arithmetic_used;
+    let has_non_i64_scalar_features = u64_leaves || wide_leaves;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
     if !allow_wrapping_arithmetic && items.len() != 1 {
@@ -6841,6 +6918,9 @@ fn bounded_pure_i64_module(
         // A `Str` literal's byte cells live under the same bounded
         // stack-memory model as an admitted array literal.
         arrays || strs,
+        has_composite_or_enum_features,
+        has_f64_features,
+        has_non_i64_scalar_features,
     ))
 }
 
@@ -6854,6 +6934,9 @@ fn encode_atom_body<'ctx>(
     enums: &EnumEnv,
     call_returns: &CallShapes<'ctx>,
     bounded_memory: bool,
+    has_composite_or_enum_features: bool,
+    has_f64_features: bool,
+    has_non_i64_scalar_features: bool,
 ) -> BodyResult<PureI64Body<'ctx>> {
     // A struct parameter contributes one input per field, so the limit
     // bounds the flattened signature.
@@ -7162,6 +7245,9 @@ fn encode_atom_body<'ctx>(
             .unwrap_or_default(),
         loop_bound_exits,
         bounded_memory,
+        has_composite_or_enum_features,
+        has_f64_features,
+        has_non_i64_scalar_features,
         post_writes: top_writes
             .into_iter()
             .filter(|(_, value)| {
@@ -7686,8 +7772,17 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
     context: &'ctx Context,
     admission: RefinedAdmission,
 ) -> BodyResult<Vec<ModuleAtomObligations<'ctx>>> {
-    let (source_sha256, items, refined, structs, enums, bounded_memory) =
-        bounded_pure_i64_module(source, true, admission)?;
+    let (
+        source_sha256,
+        items,
+        refined,
+        structs,
+        enums,
+        bounded_memory,
+        has_composite_or_enum_features,
+        has_f64_features,
+        has_non_i64_scalar_features,
+    ) = bounded_pure_i64_module(source, true, admission)?;
     let atom_items: Vec<&crate::parser::ast::Atom> = items
         .iter()
         .filter_map(|item| match item {
@@ -7716,6 +7811,9 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
                 &enums,
                 &call_returns,
                 bounded_memory,
+                has_composite_or_enum_features,
+                has_f64_features,
+                has_non_i64_scalar_features,
             )
         })
         .collect::<BodyResult<_>>()?;

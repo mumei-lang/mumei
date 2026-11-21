@@ -3253,6 +3253,41 @@ fn module_bundle_with_refined_scalar_members_builds_as_v2() {
         .success());
 }
 
+#[test]
+fn accept_object_recheck_machine_tv_rederives_refined_scalar_models() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "type Pos = i64 where v > 0;\n\
+         atom inc(x: Pos) -> i64 requires: x < 9223372036854775807; ensures: result == x + 1; body: { x + 1 };\n\
+         atom main() -> i64 requires: true; ensures: result == 2; body: { inc(1) };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V2);
+
+    let recheck = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&recheck);
+    let machine_tv: serde_json::Value = serde_json::from_slice(&recheck.stdout).unwrap();
+    assert_eq!(
+        machine_tv["functions"]["inc"]["outcome"],
+        "equivalent_within_profile"
+    );
+    assert_eq!(
+        machine_tv["input_domain"],
+        "module_members_signed_i64_inputs_with_refined_scalar_signature_predicate_domains_not_process_exit_status"
+    );
+
+    let accepted = accept_object(&source, &bundle, &id, true);
+    assert_success(&accepted);
+    let descriptor: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(descriptor["accepted"], true);
+    assert_eq!(
+        descriptor["functions"]["inc"]["outcome"],
+        "equivalent_within_profile"
+    );
+    assert_eq!(descriptor["input_domain"], machine_tv["input_domain"]);
+}
+
 const COMPOSITE_MODULE: &str = "struct Point { x: i64, y: i64 }\n\
      atom gx(p: Point) -> i64 requires: p.x >= 0; ensures: result == p.x; body: { p.x };\n\
      atom fwd(p: Point) -> i64 requires: p.x >= 1; ensures: result >= 1; body: { gx(p) };\n\

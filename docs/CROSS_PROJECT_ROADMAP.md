@@ -4116,6 +4116,13 @@ The future mumei-agent `native-object-accept` route maps the Core check
 `object_source_machine_code_correspondence` to its agent-owned
 `object_translation_correspondence` vocabulary. The Core descriptor does not
 emit the agent-owned name, and no mumei-agent code is changed in this slice.
+The following Core C10 Option B slice re-derives module and multifile machine-TV
+models under the record's pinned admission, as the LLVM recheck does; the
+single-file path retains `RefinedAdmission::Reject`. Refined scalar parameter
+predicates feed the machine-TV input domain, whose label matches LLVM's exact
+refined-signature module label and preserves any loop-bound suffix. Unsupported
+memory, composite/enum, non-i64 scalar and f64 features remain outside the
+profile.
 The C10 Option B machine-TV result adds `callee_saved_preservation` to each
 Equivalent function entry. Core performs
 `machine_code_callee_saved_register_preservation` only when at least one
