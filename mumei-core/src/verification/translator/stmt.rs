@@ -673,6 +673,11 @@ fn struct_field_assign<'a>(
     };
     let segments: Vec<&str> = field.split('.').collect();
     if segments.len() > 1 {
+        if value.binds_name(base) {
+            return Err(MumeiError::type_error(format!(
+                "field write '{var}' value must not rebind '{base}'",
+            )));
+        }
         // `q.inner.a = v` desugars to a whole-subtree write of the
         // parent struct: `q.inner = Inner { a: v, <others>: q.inner.<f> }`.
         // Re-running the write against the parent path reuses the field
@@ -700,12 +705,26 @@ fn struct_field_assign<'a>(
             .fold(Expr::Variable(base.to_string()), |acc, segment| {
                 Expr::FieldAccess(Box::new(acc), segment.to_string())
             });
+        let val = expr_to_z3(vc, value, env, solver_opt)?;
+        static RHS_TEMP_COUNTER: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        let rhs_name = loop {
+            let id = RHS_TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let name = format!("__field_write_rhs_{id}");
+            let occupied = env.contains_key(&name)
+                || vc.local_struct_types.borrow().contains_key(&name)
+                || vc.local_enum_types.borrow().contains_key(&name);
+            if !occupied {
+                break name;
+            }
+        };
+        env.insert(rhs_name.clone(), val.clone());
         let init_fields: Vec<(String, Expr)> = parent_sdef
             .fields
             .iter()
             .map(|f| {
                 if f.name == leaf {
-                    (f.name.clone(), value.clone())
+                    (f.name.clone(), Expr::Variable(rhs_name.clone()))
                 } else {
                     (
                         f.name.clone(),
@@ -719,14 +738,11 @@ fn struct_field_assign<'a>(
             fields: init_fields,
         };
         let parent_var = format!("{}.{}", base, segments[..segments.len() - 1].join("."));
-        if struct_field_assign(vc, &parent_var, &desugared, env, solver_opt)?.is_none() {
+        let result = struct_field_assign(vc, &parent_var, &desugared, env, solver_opt);
+        env.remove(&rhs_name);
+        if result?.is_none() {
             return Ok(None);
         }
-        // The desugared StructInit evaluated the RHS once against the
-        // pre-write env. Read the updated leaf back to return that value
-        // without re-evaluating any RHS side effects.
-        let written = Expr::FieldAccess(Box::new(parent_expr), leaf.to_string());
-        let val = expr_to_z3(vc, &written, env, solver_opt)?;
         return Ok(Some(val));
     }
     let Some(sdef) = vc.module_env.get_struct(&type_name) else {
