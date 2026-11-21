@@ -241,13 +241,23 @@ pub fn check_function_with_preservation<'ctx>(
     (outcome, preservation)
 }
 
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct FrameMemoryUse {
+    pub red_zone: bool,
+    pub allocated: bool,
+}
+
 pub fn check_function_with_frame_memory<'ctx>(
     bytes: &[u8],
     address: u64,
     model: &PureI64Body<'ctx>,
     call_targets: &BTreeMap<u64, CallTarget>,
     context: &'ctx Context,
-) -> (FunctionOutcome, Option<CalleeSavedPreservation>, bool) {
+) -> (
+    FunctionOutcome,
+    Option<CalleeSavedPreservation>,
+    FrameMemoryUse,
+) {
     check_function_with_result_width(
         bytes,
         address,
@@ -300,7 +310,11 @@ fn check_function_with_result_width<'ctx>(
     call_targets: &BTreeMap<u64, CallTarget>,
     context: &'ctx Context,
     result_width: ResultWidth,
-) -> (FunctionOutcome, Option<CalleeSavedPreservation>, bool) {
+) -> (
+    FunctionOutcome,
+    Option<CalleeSavedPreservation>,
+    FrameMemoryUse,
+) {
     if model.inputs.len() > MAX_ARGUMENT_COUNT
         || model
             .param_leaf_doubles
@@ -313,7 +327,7 @@ fn check_function_with_result_width<'ctx>(
         return (
             FunctionOutcome::OutsideProfile("argument_count"),
             None,
-            false,
+            FrameMemoryUse::default(),
         );
     }
     if model
@@ -324,7 +338,7 @@ fn check_function_with_result_width<'ctx>(
         return (
             FunctionOutcome::OutsideProfile("call_arguments"),
             None,
-            false,
+            FrameMemoryUse::default(),
         );
     }
     if model
@@ -335,7 +349,7 @@ fn check_function_with_result_width<'ctx>(
         return (
             FunctionOutcome::OutsideProfile("argument_count"),
             None,
-            false,
+            FrameMemoryUse::default(),
         );
     }
     let result_width = if result_width == ResultWidth::I64 && model_result_is_double(model) {
@@ -355,14 +369,14 @@ fn check_function_with_result_width<'ctx>(
                 return (
                     FunctionOutcome::OutsideProfile("cyclic_control_flow"),
                     None,
-                    false,
+                    FrameMemoryUse::default(),
                 );
             }
         }
         return (
             FunctionOutcome::OutsideProfile("unsupported_signature"),
             None,
-            false,
+            FrameMemoryUse::default(),
         );
     }
     let instructions = match disassemble(bytes, address) {
@@ -371,7 +385,7 @@ fn check_function_with_result_width<'ctx>(
             return (
                 FunctionOutcome::OutsideProfile("unsupported_instruction"),
                 None,
-                false,
+                FrameMemoryUse::default(),
             )
         }
     };
@@ -383,7 +397,7 @@ fn check_function_with_result_width<'ctx>(
         context,
     ) {
         Ok(lifted) => lifted,
-        Err(outcome) => return (outcome, None, false),
+        Err(outcome) => return (outcome, None, FrameMemoryUse::default()),
     };
     let mut unknown_path = false;
     let mut unsupported_call_arguments = false;
@@ -415,7 +429,7 @@ fn check_function_with_result_width<'ctx>(
                     }
                 }
             }
-            SatResult::Sat => return (FunctionOutcome::Different, None, false),
+            SatResult::Sat => return (FunctionOutcome::Different, None, FrameMemoryUse::default()),
             SatResult::Unknown => unknown_path = true,
         }
     }
@@ -423,11 +437,11 @@ fn check_function_with_result_width<'ctx>(
         return (
             FunctionOutcome::OutsideProfile("call_arguments"),
             None,
-            false,
+            FrameMemoryUse::default(),
         );
     }
     if unknown_path {
-        return (FunctionOutcome::Unknown, None, false);
+        return (FunctionOutcome::Unknown, None, FrameMemoryUse::default());
     }
 
     let mut preservation_violated = false;
@@ -459,7 +473,7 @@ fn check_function_with_result_width<'ctx>(
     (
         FunctionOutcome::Equivalent,
         Some(preservation),
-        lifted.uses_frame_memory,
+        lifted.frame_memory_use,
     )
 }
 
@@ -822,7 +836,7 @@ struct LiftedFunction<'ctx> {
     arguments: Vec<BV<'ctx>>,
     callee_saved_initial: Vec<BV<'ctx>>,
     paths: Vec<LiftedPath<'ctx>>,
-    uses_frame_memory: bool,
+    frame_memory_use: FrameMemoryUse,
 }
 
 struct LiftedPath<'ctx> {
@@ -834,6 +848,7 @@ struct LiftedPath<'ctx> {
     exact_f64_call_argument_obligations: Vec<Bool<'ctx>>,
     used_call_targets: BTreeSet<u64>,
     used_frame_memory: bool,
+    used_allocated_frame_memory: bool,
 }
 
 #[derive(Clone)]
@@ -882,6 +897,9 @@ struct MachineState<'ctx> {
     stack: Vec<(i64, BV<'ctx>)>,
     frame_memory: Array<'ctx>,
     used_frame_memory: bool,
+    used_allocated_frame_memory: bool,
+    frame_region: Option<(i64, i64)>,
+    frame_region_closed: bool,
     outgoing_cleanup_slots: BTreeSet<i64>,
     rsp_offset: i64,
     rsp_is_known: bool,
@@ -912,6 +930,10 @@ fn lift<'ctx>(
                     matches!(destination.trim(), "%rsp" | "%esp" | "%sp" | "%spl")
                 })
     });
+    let function_indexes_frame = instructions
+        .iter()
+        .any(|instruction| instruction.operands.contains("(%rsp,%"));
+    let allocated_frame_memory_mode = function_indexes_frame && model.bounded_memory;
     let memory_sort = Sort::bitvector(context, 64);
     let frame_memory = Array::fresh_const(
         context,
@@ -979,6 +1001,9 @@ fn lift<'ctx>(
         stack: Vec::new(),
         frame_memory,
         used_frame_memory: false,
+        used_allocated_frame_memory: false,
+        frame_region: None,
+        frame_region_closed: false,
         outgoing_cleanup_slots: BTreeSet::new(),
         rsp_offset: 0,
         rsp_is_known: true,
@@ -1232,9 +1257,21 @@ fn lift<'ctx>(
                 let destination = operands
                     .get(1)
                     .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
-                if state.rsp_offset != 0
-                    || is_incoming_stack_argument_operand(destination, state.rsp_offset)
-                {
+                if is_incoming_stack_argument_operand(destination, state.rsp_offset) {
+                    lift_stack_store(instruction, &mut state, context)?;
+                } else if should_use_allocated_frame_memory(
+                    destination,
+                    &state,
+                    allocated_frame_memory_mode,
+                )? {
+                    lift_allocated_frame_memory_store(
+                        instruction,
+                        &mut state,
+                        model,
+                        &arguments,
+                        context,
+                    )?;
+                } else if state.rsp_offset != 0 {
                     lift_stack_store(instruction, &mut state, context)?;
                 } else {
                     lift_frame_memory_store(
@@ -1256,9 +1293,26 @@ fn lift<'ctx>(
                 let source = operands
                     .first()
                     .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
-                if is_incoming_stack_argument_operand(source, state.rsp_offset)
-                    || state.rsp_offset != 0
-                {
+                if is_incoming_stack_argument_operand(source, state.rsp_offset) {
+                    lift_stack_argument_move(
+                        instruction,
+                        &mut state,
+                        &integer_argument_indices,
+                        &arguments,
+                    )?;
+                } else if should_use_allocated_frame_memory(
+                    source,
+                    &state,
+                    allocated_frame_memory_mode,
+                )? {
+                    lift_allocated_frame_memory_load(
+                        instruction,
+                        &mut state,
+                        model,
+                        &arguments,
+                        context,
+                    )?;
+                } else if state.rsp_offset != 0 {
                     lift_stack_argument_move(
                         instruction,
                         &mut state,
@@ -1293,7 +1347,12 @@ fn lift<'ctx>(
                     .get(1)
                     .is_some_and(|destination| *destination == "%rsp")
             {
-                lift_rsp_adjustment(instruction, &mut state, context)?;
+                lift_rsp_adjustment(
+                    instruction,
+                    &mut state,
+                    allocated_frame_memory_mode,
+                    context,
+                )?;
             } else if matches!(instruction.mnemonic.as_str(), "cmpb" | "cmpl" | "cmpq") {
                 let width = instruction_width(&instruction.mnemonic)?;
                 state.flags =
@@ -1469,6 +1528,13 @@ fn lift<'ctx>(
             state
                 .outgoing_cleanup_slots
                 .retain(|stack_slot| *stack_slot >= state.rsp_offset);
+            if state
+                .frame_region
+                .is_some_and(|(lo, _)| state.rsp_offset > lo)
+            {
+                state.frame_region = None;
+                state.frame_region_closed = true;
+            }
             state.instruction_index += 1;
         }
     }
@@ -1482,12 +1548,15 @@ fn lift<'ctx>(
     if used_call_targets.len() != call_targets.len() {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    let uses_frame_memory = paths.iter().any(|path| path.used_frame_memory);
+    let frame_memory_use = FrameMemoryUse {
+        red_zone: paths.iter().any(|path| path.used_frame_memory),
+        allocated: paths.iter().any(|path| path.used_allocated_frame_memory),
+    };
     Ok(LiftedFunction {
         arguments,
         callee_saved_initial,
         paths,
-        uses_frame_memory,
+        frame_memory_use,
     })
 }
 
@@ -1913,6 +1982,7 @@ fn finish_path<'ctx>(
         exact_f64_call_argument_obligations: state.call_state.exact_f64_argument_obligations,
         used_call_targets: state.call_state.used_call_targets,
         used_frame_memory: state.used_frame_memory,
+        used_allocated_frame_memory: state.used_allocated_frame_memory,
     })
 }
 
@@ -2183,6 +2253,7 @@ fn lift_cmov<'ctx>(
 fn lift_rsp_adjustment<'ctx>(
     instruction: &Instruction,
     state: &mut MachineState<'ctx>,
+    allocated_frame_memory_mode: bool,
     context: &'ctx Context,
 ) -> Result<(), FunctionOutcome> {
     let operands = split_operands(&instruction.operands);
@@ -2216,6 +2287,19 @@ fn lift_rsp_adjustment<'ctx>(
         context,
     ) {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    if allocated_frame_memory_mode
+        && instruction.mnemonic == "subq"
+        && amount_signed > 0
+        && amount_signed % 8 == 0
+        && state.frame_region.is_none()
+        && !state.frame_region_closed
+    {
+        let hi = state
+            .rsp_offset
+            .checked_add(amount_signed)
+            .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+        state.frame_region = Some((state.rsp_offset, hi));
     }
     state.flags = arithmetic_flags(
         &previous_rsp,
@@ -2322,6 +2406,38 @@ fn is_incoming_stack_argument_operand(operand: &str, rsp_offset: i64) -> bool {
     rsp_memory_entry_offset(operand, rsp_offset).is_ok_and(|entry_offset| entry_offset > 0)
 }
 
+fn should_use_allocated_frame_memory<'ctx>(
+    operand: &str,
+    state: &MachineState<'ctx>,
+    allocated_frame_memory_mode: bool,
+) -> Result<bool, FunctionOutcome> {
+    if !allocated_frame_memory_mode {
+        return Ok(false);
+    }
+    if state.frame_region_closed {
+        return Err(FunctionOutcome::OutsideProfile("frame_memory_bounds"));
+    }
+    let indexed = operand.contains("(%rsp,");
+    let Some((lo, hi)) = state.frame_region else {
+        return if indexed && state.rsp_offset != 0 {
+            Err(FunctionOutcome::OutsideProfile("frame_memory_bounds"))
+        } else {
+            Ok(false)
+        };
+    };
+    if indexed {
+        return Ok(true);
+    }
+    let Some((displacement, None)) = parse_frame_memory_operand(operand) else {
+        return Ok(false);
+    };
+    let entry_offset = state
+        .rsp_offset
+        .checked_add(displacement)
+        .ok_or(FunctionOutcome::OutsideProfile("frame_memory_bounds"))?;
+    Ok(entry_offset >= lo && entry_offset < hi)
+}
+
 fn parse_frame_memory_operand(operand: &str) -> Option<(i64, Option<usize>)> {
     let open = operand.find('(')?;
     let close = operand.rfind(')')?;
@@ -2398,6 +2514,57 @@ fn frame_memory_offset<'ctx>(
     Ok(offset)
 }
 
+fn allocated_frame_memory_offset<'ctx>(
+    operand: &str,
+    state: &MachineState<'ctx>,
+    model: &PureI64Body<'ctx>,
+    arguments: &[BV<'ctx>],
+    context: &'ctx Context,
+) -> Result<BV<'ctx>, FunctionOutcome> {
+    let (displacement, index) = parse_frame_memory_operand(operand)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let (lo, hi) = state
+        .frame_region
+        .ok_or(FunctionOutcome::OutsideProfile("frame_memory_bounds"))?;
+    if state.frame_region_closed
+        || !state.rsp_is_known
+        || state.rsp_offset % 8 != 0
+        || displacement % 8 != 0
+    {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let base = state
+        .rsp_offset
+        .checked_add(displacement)
+        .ok_or(FunctionOutcome::OutsideProfile("frame_memory_bounds"))?;
+    let base = BV::from_i64(context, base, 64);
+    let offset = index.map_or_else(
+        || base.clone(),
+        |index| {
+            state.registers[index]
+                .bvshl(&BV::from_u64(context, 3, 64))
+                .bvadd(&base)
+        },
+    );
+    let last_qword = hi
+        .checked_sub(8)
+        .ok_or(FunctionOutcome::OutsideProfile("frame_memory_bounds"))?;
+    let lower_bound = offset.bvsge(&BV::from_i64(context, lo, 64));
+    let upper_bound = offset.bvsle(&BV::from_i64(context, last_qword, 64));
+    let in_region = Bool::and(context, &[&lower_bound, &upper_bound]);
+    if call_guard_status(
+        model,
+        &in_region,
+        &state.path_conditions,
+        arguments,
+        context,
+    ) != Some(true)
+    {
+        return Err(FunctionOutcome::OutsideProfile("frame_memory_bounds"));
+    }
+    Ok(offset)
+}
+
 fn lift_frame_memory_store<'ctx>(
     instruction: &Instruction,
     state: &mut MachineState<'ctx>,
@@ -2430,6 +2597,31 @@ fn lift_frame_memory_store<'ctx>(
     };
     state.frame_memory = state.frame_memory.store(&offset, &value);
     state.used_frame_memory = true;
+    Ok(())
+}
+
+fn lift_allocated_frame_memory_store<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    model: &PureI64Body<'ctx>,
+    arguments: &[BV<'ctx>],
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let offset = allocated_frame_memory_offset(destination, state, model, arguments, context)?;
+    let value = if let Some(immediate) = source.strip_prefix('$') {
+        let immediate = parse_integer(immediate)
+            .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+        BV::from_i64(context, i64::from(immediate as u32 as i32), 64)
+    } else {
+        register_value(source, &state.registers, 64)
+            .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?
+    };
+    state.frame_memory = state.frame_memory.store(&offset, &value);
+    state.used_allocated_frame_memory = true;
     Ok(())
 }
 
@@ -2466,6 +2658,32 @@ fn lift_frame_memory_load<'ctx>(
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
     state.used_frame_memory = true;
+    Ok(())
+}
+
+fn lift_allocated_frame_memory_load<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    model: &PureI64Body<'ctx>,
+    arguments: &[BV<'ctx>],
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let offset = allocated_frame_memory_offset(source, state, model, arguments, context)?;
+    let (register, width) = parse_register(destination)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let value = state
+        .frame_memory
+        .select(&offset)
+        .as_bv()
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    if width != 64 || register == 4 || !write_register(&mut state.registers, register, value, 64) {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    state.used_allocated_frame_memory = true;
     Ok(())
 }
 
@@ -4507,6 +4725,169 @@ merge:
         assert_eq!(
             check_function(&non_qword_store, 0, &sum_model, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+    }
+
+    #[test]
+    fn allocated_frame_memory_matches_codegen_and_fails_closed_at_region_edges() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = |source: &str, name: &str| {
+            source_model_named_with_admission(
+                source,
+                name,
+                &context,
+                RefinedAdmission::CompositeV11,
+            )
+        };
+        let usea_source = "atom inc(x: i64) -> i64 requires: true; ensures: result == x + 1; body: { x + 1 };\n\
+            atom usea(a0: i64, i: i64) -> i64 requires: 0 <= i && i < 3 && a0 >= 0 && a0 < 1000; ensures: if i == 0 { result == 2 * (a0 + 1) } else { result == 2 * a0 + 1 }; body: { let a = [a0, 20, 30]; a[i] = inc(a0); a[0] + a[i] };";
+        let sum_source = "atom sum() -> i64 requires: true; ensures: result == 13; body: { let a = [1, 2, 3]; a[1] = 9; a[0] + a[1] + a[2] };";
+        let get_source = "atom get(a0: i64, a1: i64, i: i64) -> i64 requires: 0 <= i && i < 2; ensures: true; body: { let a = [a0, a1]; a[i] };";
+        let calls_seven_source = "atom seven_args(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64) -> i64 requires: true; ensures: true; body: { a0 };\n\
+            atom calls_seven(x: i64) -> i64 requires: true; ensures: true; body: { let a = [x, 2]; a[0] + seven_args(x, 2, 3, 4, 5, 6, 7) };";
+        let usea_model = model(usea_source, "usea");
+        let sum_model = model(sum_source, "sum");
+        let get_model = model(get_source, "get");
+        let calls_seven_model = model(calls_seven_source, "calls_seven");
+        assert!(usea_model.bounded_memory);
+        assert!(calls_seven_model.bounded_memory);
+        let usea_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+declare i64 @inc(i64)
+define i64 @usea(i64 %a0, i64 %i) {
+entry:
+  %a = alloca [3 x i64], align 8
+  %p0 = getelementptr [3 x i64], ptr %a, i64 0, i64 0
+  store i64 %a0, ptr %p0, align 8
+  %p1 = getelementptr [3 x i64], ptr %a, i64 0, i64 1
+  store i64 20, ptr %p1, align 8
+  %p2 = getelementptr [3 x i64], ptr %a, i64 0, i64 2
+  store i64 30, ptr %p2, align 8
+  %call = call i64 @inc(i64 %a0)
+  %hi = icmp slt i64 %i, 3
+  %lo = icmp sge i64 %i, 0
+  %safe = and i1 %hi, %lo
+  br i1 %safe, label %store, label %loadcheck
+store:
+  %pi = getelementptr [3 x i64], ptr %a, i64 0, i64 %i
+  store i64 %call, ptr %pi, align 8
+  br label %loadcheck
+loadcheck:
+  %v0 = load i64, ptr %p0, align 8
+  %hi2 = icmp slt i64 %i, 3
+  %lo2 = icmp sge i64 %i, 0
+  %safe2 = and i1 %hi2, %lo2
+  br i1 %safe2, label %load, label %oob
+load:
+  %pj = getelementptr [3 x i64], ptr %a, i64 0, i64 %i
+  %v = load i64, ptr %pj, align 8
+  br label %merge
+oob:
+  br label %merge
+merge:
+  %selected = phi i64 [ %v, %load ], [ 0, %oob ]
+  %result = add i64 %v0, %selected
+  ret i64 %result
+}
+"#;
+        let (usea_address, usea_bytes, usea_targets) =
+            compiled_function_with_targets(usea_ir, "usea");
+        let (outcome, _, frame_memory_use) = check_function_with_frame_memory(
+            &usea_bytes,
+            usea_address,
+            &usea_model,
+            &usea_targets,
+            &context,
+        );
+        assert_eq!(outcome, FunctionOutcome::Equivalent);
+        assert_eq!(
+            frame_memory_use,
+            FrameMemoryUse {
+                red_zone: false,
+                allocated: true
+            }
+        );
+
+        let concrete_load = disassemble(&usea_bytes, usea_address)
+            .unwrap()
+            .into_iter()
+            .find(|instruction| {
+                instruction.mnemonic == "movq"
+                    && instruction.operands.contains("(%rsp)")
+                    && instruction.operands.ends_with("%rax")
+            })
+            .unwrap();
+        let mut wrong_concrete_load = usea_bytes.clone();
+        wrong_concrete_load[concrete_load.offset as usize + 4] = 0x10;
+        assert_eq!(
+            check_function(
+                &wrong_concrete_load,
+                usea_address,
+                &usea_model,
+                &usea_targets,
+                &context
+            ),
+            FunctionOutcome::Different
+        );
+
+        let closed_region = [
+            0x48, 0x83, 0xec, 0x10, // subq $0x10, %rsp
+            0x48, 0xc7, 0x04, 0x24, 5, 0, 0, 0, // movq $5, (%rsp)
+            0x48, 0x83, 0xc4, 0x10, // addq $0x10, %rsp
+            0x50, 0x58, // pushq %rax; popq %rax
+            0x48, 0x83, 0xec, 0x10, // subq $0x10, %rsp
+            0x48, 0x8b, 0x04, 0xd4, // movq (%rsp,%rdx,8), %rax
+            0x48, 0x83, 0xc4, 0x10, 0xc3,
+        ];
+        assert_eq!(
+            check_function(&closed_region, 0, &sum_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("frame_memory_bounds")
+        );
+
+        let below_region = [
+            0x48, 0x83, 0xec, 0x10, // subq $0x10, %rsp
+            0x31, 0xd2, // xorl %edx, %edx
+            0x48, 0x8b, 0x44, 0xd4, 0xe0, // movq -0x20(%rsp,%rdx,8), %rax
+            0x48, 0x83, 0xc4, 0x10, 0xc3,
+        ];
+        assert_eq!(
+            check_function(&below_region, 0, &get_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("frame_memory_bounds")
+        );
+
+        let call_with_array_stack_argument = [
+            0x48, 0x83, 0xec, 0x10, // subq $0x10, %rsp
+            0x48, 0xc7, 0x04, 0x24, 7, 0, 0, 0, // movq $7, (%rsp)
+            0xbe, 2, 0, 0, 0, // movl $2, %esi
+            0xba, 3, 0, 0, 0, // movl $3, %edx
+            0xb9, 4, 0, 0, 0, // movl $4, %ecx
+            0x41, 0xb8, 5, 0, 0, 0, // movl $5, %r8d
+            0x41, 0xb9, 6, 0, 0, 0, // movl $6, %r9d
+            0xe8, 0, 0, 0, 0, // callq seven_args
+            0x48, 0x83, 0xc4, 0x10, // addq $0x10, %rsp
+            0x48, 0x8b, 0x04, 0xfc, // movq (%rsp,%rdi,8), %rax
+            0xc3,
+        ];
+        let call_targets = BTreeMap::from([(
+            40,
+            CallTarget {
+                name: "seven_args".to_owned(),
+                relocation_kind: CallRelocationKind::ElfX86_64Plt32,
+                relocation_size: 32,
+                addend: -4,
+            },
+        )]);
+        assert_eq!(
+            check_function(
+                &call_with_array_stack_argument,
+                0,
+                &calls_seven_model,
+                &call_targets,
+                &context
+            ),
+            FunctionOutcome::OutsideProfile("call_arguments")
         );
     }
 

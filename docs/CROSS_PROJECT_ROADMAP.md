@@ -9075,10 +9075,19 @@ fail-closed. Local struct values inside a body are not subject to this
 aggregate limit because the source model flattens them. i128/u128 struct leaves
 remain fail-closed. Leaf-function bounded arrays admit qword `%rsp`-relative
 red-zone accesses with proven `-128..=-8` offsets; red-zone non-clobbering is
-assumed, not validated. Frame-memory accesses with calls (`frame_memory_call`)
-or in functions that push/pop or write `%rsp`/`%esp`
-(`frame_memory_stack_adjust`) remain fail-closed, as do non-qword accesses and
-`.rodata`/`Str` memory. Equivalent functions using struct
+assumed, not validated. Red-zone accesses in functions with calls
+(`frame_memory_call`) or stack adjustments (`frame_memory_stack_adjust`) remain
+fail-closed. Non-leaf bounded arrays may use one allocated entry-relative
+region per path, with qword accesses proved inside the region. Calls are
+allowed under the explicit assumption that callees write only below their
+return address and that no stack-argument slot occupies the region; this is
+not a validated ABI claim. The region closes when `%rsp` is deallocated past
+its lower bound and cannot be reopened. Deallocated or reallocated-region
+accesses fail as `frame_memory_bounds`, and stack-argument calls whose slot is
+routed through the region fail as `call_arguments`. Equivalent functions
+using allocated-frame memory carry
+`_allocated_frame_memory_assumed_callee_isolated`. Non-qword accesses and
+`.rodata`/`Str` memory remain fail-closed. Equivalent functions using struct
 signatures or direct calls report
 `machine_code_composite_register_aggregate_tv`. Aggregates wider than
 two leaves use

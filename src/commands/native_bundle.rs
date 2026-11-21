@@ -143,20 +143,24 @@ fn machine_tv_register_convention_assumed_with_frame_memory(
     equivalent_f64_composite_aggregate_count: usize,
     equivalent_wide_composite_aggregate_count: usize,
     equivalent_wide_scalar_count: usize,
-    equivalent_frame_memory_count: usize,
+    equivalent_red_zone_frame_memory_count: usize,
+    equivalent_allocated_frame_memory_count: usize,
 ) -> String {
-    let convention = machine_tv_register_convention_assumed_with_wide_scalars(
+    let mut convention = machine_tv_register_convention_assumed_with_wide_scalars(
         equivalent_f64_leaf_count,
         equivalent_composite_aggregate_count,
         equivalent_f64_composite_aggregate_count,
         equivalent_wide_composite_aggregate_count,
         equivalent_wide_scalar_count,
-    );
-    if equivalent_frame_memory_count > 0 {
-        format!("{convention}_leaf_red_zone_frame_memory_assumed_unclobbered")
-    } else {
-        convention.to_owned()
+    )
+    .to_owned();
+    if equivalent_red_zone_frame_memory_count > 0 {
+        convention.push_str("_leaf_red_zone_frame_memory_assumed_unclobbered");
     }
+    if equivalent_allocated_frame_memory_count > 0 {
+        convention.push_str("_allocated_frame_memory_assumed_callee_isolated");
+    }
+    convention
 }
 
 fn machine_tv_call_shapes_have_composite_aggregate(
@@ -3650,7 +3654,8 @@ struct MachineTvCounts {
     equivalent_f64_composite_aggregate_count: usize,
     equivalent_wide_composite_aggregate_count: usize,
     equivalent_wide_scalar_count: usize,
-    equivalent_frame_memory_count: usize,
+    equivalent_red_zone_frame_memory_count: usize,
+    equivalent_allocated_frame_memory_count: usize,
     object_function_count: usize,
 }
 
@@ -3768,7 +3773,8 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
     let mut equivalent_f64_composite_aggregate_count = 0usize;
     let mut equivalent_wide_composite_aggregate_count = 0usize;
     let mut equivalent_wide_scalar_count = 0usize;
-    let mut equivalent_frame_memory_count = 0usize;
+    let mut equivalent_red_zone_frame_memory_count = 0usize;
+    let mut equivalent_allocated_frame_memory_count = 0usize;
     let mut has_cyclic_or_loop_bound_outcome = false;
     for function_name in &data.object_surface.defined {
         let is_entry_wrapper = function_name == "main";
@@ -3815,7 +3821,7 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
         let mut has_conditional_call = false;
         let mut has_reachable_cycle = false;
         let mut callee_saved_preservation = None;
-        let mut used_frame_memory = false;
+        let mut frame_memory_use = machine_tv::FrameMemoryUse::default();
         let outcome = if is_entry_wrapper {
             if entry_wrapper_applicable {
                 if let Some((address, bytes)) =
@@ -3866,7 +3872,7 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
                 branch_shape = machine_tv::branch_shape(&bytes, address, &call_targets);
                 has_conditional_call =
                     machine_tv::has_conditional_branch_and_call(&bytes, address, &call_targets);
-                let (outcome, preservation, frame_memory) =
+                let (outcome, preservation, frame_memory_use_result) =
                     machine_tv::check_function_with_frame_memory(
                         &bytes,
                         address,
@@ -3875,7 +3881,7 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
                         &context,
                     );
                 callee_saved_preservation = preservation;
-                used_frame_memory = frame_memory;
+                frame_memory_use = frame_memory_use_result;
                 outcome
             } else {
                 FunctionOutcome::OutsideProfile("unsupported_instruction")
@@ -3919,8 +3925,11 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
                     if has_wide_scalar {
                         equivalent_wide_scalar_count += 1;
                     }
-                    if used_frame_memory {
-                        equivalent_frame_memory_count += 1;
+                    if frame_memory_use.red_zone {
+                        equivalent_red_zone_frame_memory_count += 1;
+                    }
+                    if frame_memory_use.allocated {
+                        equivalent_allocated_frame_memory_count += 1;
                     }
                     if has_source_loop {
                         equivalent_source_loop_count += 1;
@@ -3988,7 +3997,8 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
         equivalent_f64_composite_aggregate_count,
         equivalent_wide_composite_aggregate_count,
         equivalent_wide_scalar_count,
-        equivalent_frame_memory_count,
+        equivalent_red_zone_frame_memory_count,
+        equivalent_allocated_frame_memory_count,
         object_function_count: data.object_surface.defined.len(),
     };
     let mut coverage = machine_tv_coverage_checks(
@@ -4113,7 +4123,8 @@ fn write_machine_tv(
                 evaluation.counts.equivalent_f64_composite_aggregate_count,
                 evaluation.counts.equivalent_wide_composite_aggregate_count,
                 evaluation.counts.equivalent_wide_scalar_count,
-                evaluation.counts.equivalent_frame_memory_count,
+                evaluation.counts.equivalent_red_zone_frame_memory_count,
+                evaluation.counts.equivalent_allocated_frame_memory_count,
             ),
             "input_domain": evaluation.input_domain,
             "functions": evaluation.functions,
@@ -4273,7 +4284,8 @@ fn write_object_machine_tv_acceptance(
                 evaluation.counts.equivalent_f64_composite_aggregate_count,
                 evaluation.counts.equivalent_wide_composite_aggregate_count,
                 evaluation.counts.equivalent_wide_scalar_count,
-                evaluation.counts.equivalent_frame_memory_count,
+                evaluation.counts.equivalent_red_zone_frame_memory_count,
+                evaluation.counts.equivalent_allocated_frame_memory_count,
             ),
             "input_domain": &evaluation.input_domain,
             "functions": &evaluation.functions,
