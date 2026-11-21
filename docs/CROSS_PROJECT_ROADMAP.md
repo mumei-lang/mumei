@@ -4016,16 +4016,19 @@ nothing), so an older Core without the link check never yields
 `object_link_correspondence`. It is not a recovery performer, and
 `object_translation_correspondence` stays not performed.
 
-### Wave 5 first per-instruction TV profile (C10 Option B)
+### Wave 5 straight-line direct-call TV profile (C10 Option B)
 
 Core's opt-in `mumei native-bundle recheck-machine-tv` runs the full linked
 object-correspondence pipeline, then checks reproduced machine code against
-pure-i64 source models with Z3 for leaf straight-line functions in a fixed
-instruction whitelist. Its x86-64 integer-register convention is declared
-and assumed, not verified; this makes no ABI claim. Non-leaf functions, the C
+pure-i64 source models with Z3 for straight-line functions in a fixed
+instruction whitelist. Direct calls are matched to source `CallSite`s in
+order and compared as uninterpreted sites, including call arguments and result
+terms; conditional calls are outside the profile. The x86-64 integer-register
+convention and callee-saved preservation are assumed, not verified, and make
+no ABI claim. Conditional branches and other branching functions, the C
 `main` wrapper, CRT/startup code, the loader, libc and runtime are not covered.
-This is only the first bounded per-instruction profile; full object-code TV
-remains the deep endpoint.
+This is a bounded per-instruction profile; full object-code TV remains the
+deep endpoint.
 
 Agent consumes it as the bounded `native-machine-tv-recheck` route / MCP tool
 (mumei-agent #1053). It validates the `mumei.machine-code-tv/v1` schema and
@@ -4033,7 +4036,10 @@ expected build ID and discharges only the listed object checks, including the
 new `machine_code_leaf_function_tv` vocabulary entry. The assumed register
 convention is echoed as an assumption, function outcomes are reported as
 counts only, the route is not a recovery performer, and
-`object_translation_correspondence` stays not performed. No
+`object_translation_correspondence` stays not performed. The
+`machine_code_direct_call_site_tv` check added by mumei #1201 is not yet in
+the agent vocabulary, so the agent never discharges it until a follow-up
+adds it. No
 `accept-object` / `accept-machine-tv` acceptance producer exists yet, so the
 agent has no object-stage accept route.
 
@@ -6194,6 +6200,23 @@ Agent consumes it as the `evidence-check-schedule` route / MCP tool
 stdin, the input is rehashed after execution (drift suppresses selection),
 and only an exact fail-closed diagnostic is accepted. A selected result is a
 manifest-declared-success exit, not Evidence acceptance or grade promotion.
+
+C11 stays partial; Evidence acceptance of adapter claims, C12's demand
+gate and grade promotion are unchanged.
+
+### C11 Core adapter-manifest attempt-field check (mumei)
+
+`mumei evidence check-adapter <input> | --stdin [--json]` applies a
+bounded representation and consistency check to the complete
+`mumei.verifier-adapter/v1` manifest. It does not execute an adapter or
+assess command safety, stdin semantics, host policy, or resource
+enforcement. Declared argv and stdin remain inert unless host policy opts
+in through `allow_manifest_attempt_argv` and
+`allow_manifest_attempt_stdin`; a host argv map takes precedence.
+Verdict markers describe adapter self-report vocabulary, never a verdict.
+`max_memory_mb` is the adapter's declared ceiling: planning uses the smaller
+of it and the policy memory bound; a scheduled attempt uses it only when the
+host declares no memory bound. Core does not enforce it. No grade is promoted.
 
 C11 stays partial; Evidence acceptance of adapter claims, C12's demand
 gate and grade promotion are unchanged.

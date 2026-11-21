@@ -293,6 +293,24 @@ fn recheck_object_reports_module_and_multifile_symbol_surfaces() {
         })
     );
     assert_eq!(multifile_descriptor["resolved_call_sites"], 2);
+    let multifile_tv =
+        recheck_machine_tv(&multifile_source, &multifile_bundle, &multifile_id, true);
+    assert_success(&multifile_tv);
+    let multifile_tv_descriptor: serde_json::Value =
+        serde_json::from_slice(&multifile_tv.stdout).unwrap();
+    assert_eq!(
+        multifile_tv_descriptor["functions"],
+        serde_json::json!({
+            "__mumei_user_main": {"outcome": "equivalent_within_profile"},
+            "helper": {"outcome": "equivalent_within_profile"},
+            "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
+        })
+    );
+    assert!(multifile_tv_descriptor["checks_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check == "machine_code_direct_call_site_tv"));
 }
 
 #[test]
@@ -320,10 +338,10 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     assert_success(&text);
     let text = String::from_utf8_lossy(&text.stdout);
     assert!(text.contains(
-        "Machine-code TV: 1 of 2 object functions equivalent to their source atoms within the leaf profile."
+        "Machine-code TV: 1 of 2 object functions equivalent to their source atoms within the straight-line profile."
     ));
     assert!(text.contains(
-        "Scope: artifact_reproduction_object_link_correspondence_and_leaf_function_machine_code_tv_only/no_abi_or_runtime_semantics"
+        "Scope: artifact_reproduction_object_link_correspondence_and_straight_line_function_machine_code_tv_only/no_abi_or_runtime_semantics"
     ));
 
     let output = recheck_machine_tv(&source, &bundle, &id, true);
@@ -332,7 +350,7 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     assert_eq!(descriptor["schema_version"], "mumei.machine-code-tv/v1");
     assert_eq!(
         descriptor["scope"],
-        "artifact_reproduction_object_link_correspondence_and_leaf_function_machine_code_tv_only/no_abi_or_runtime_semantics"
+        "artifact_reproduction_object_link_correspondence_and_straight_line_function_machine_code_tv_only/no_abi_or_runtime_semantics"
     );
     assert_eq!(
         descriptor["register_convention_assumed"],
@@ -369,18 +387,30 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
             "os_stdout_observation",
             "os_stderr_observation",
             "runtime_observation_semantics",
-            "machine_code_tv_non_leaf_functions",
+            "machine_code_tv_branching_functions",
+            "machine_code_direct_call_site_tv",
         ])
     );
 }
 
 #[test]
-fn recheck_machine_tv_reports_module_leaf_and_non_leaf_outcomes() {
+fn recheck_machine_tv_reports_module_direct_call_and_wrapper_outcomes() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build_source(root.path(), MODULE);
     assert_eq!(
         object_function_disassembly(&bundle, "helper"),
         vec!["leaq 1(%rdi), %rax".to_owned(), "retq".to_owned()]
+    );
+    let main_disassembly = object_function_disassembly(&bundle, "__mumei_user_main");
+    assert_eq!(
+        main_disassembly,
+        vec![
+            "pushq %rax".to_owned(),
+            "movl $5, %edi".to_owned(),
+            "callq 0".to_owned(),
+            "popq %rcx".to_owned(),
+            "retq".to_owned(),
+        ]
     );
     let output = recheck_machine_tv(&source, &bundle, &id, true);
     assert_success(&output);
@@ -388,11 +418,16 @@ fn recheck_machine_tv_reports_module_leaf_and_non_leaf_outcomes() {
     assert_eq!(
         descriptor["functions"],
         serde_json::json!({
-            "__mumei_user_main": {"outcome": "outside_profile", "reason": "calls"},
+            "__mumei_user_main": {"outcome": "equivalent_within_profile"},
             "helper": {"outcome": "equivalent_within_profile"},
             "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
         })
     );
+    assert!(descriptor["checks_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check == "machine_code_direct_call_site_tv"));
 }
 
 #[test]

@@ -1,0 +1,11 @@
+{
+  "schema_version": "mumei.verifier-adapter/v1",
+  "adapter_id": "fixture",
+  "adapter_version": "1.0.0",
+  "profiles": [
+    "mumei.pure-i64-comparison/v1"
+  ],
+  "methods": [
+    "deductive_proof"
+  ]
+}

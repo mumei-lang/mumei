@@ -1,4 +1,5 @@
 use crate::cli::EvidenceCommand;
+use mumei_core::adapter_manifest;
 use mumei_core::attempt_schedule;
 use mumei_core::evidence_acceptance::{self, Verdict};
 use mumei_core::producer_signature::{self, PRODUCER_SIGNATURE_SCHEMA};
@@ -118,6 +119,10 @@ pub(crate) fn run(command: EvidenceCommand) {
         EvidenceCommand::CheckSchedule { input, stdin, json } => (
             check_schedule(input.as_deref().map(Path::new), stdin, json, &mut output).map(|()| 0),
             "Attempt-schedule representation check failed",
+        ),
+        EvidenceCommand::CheckAdapter { input, stdin, json } => (
+            check_adapter(input.as_deref().map(Path::new), stdin, json, &mut output).map(|()| 0),
+            "Adapter-manifest representation check failed",
         ),
         EvidenceCommand::CheckList {
             input,
@@ -1071,6 +1076,60 @@ fn check_schedule(
             schedule.attempt_count,
         )
         .into_bytes()
+    };
+    output
+        .write_all(&diagnostic)
+        .map_err(|_| "cannot write representation diagnostic")
+}
+
+fn check_adapter(
+    input: Option<&Path>,
+    stdin: bool,
+    json: bool,
+    output: &mut impl Write,
+) -> Result<(), &'static str> {
+    let bytes = match (input, stdin) {
+        (Some(path), false) => {
+            super::input::read_regular(path, adapter_manifest::MAX_INPUT_BYTES as u64)?
+        }
+        (None, true) => super::input::read_stdin(adapter_manifest::MAX_INPUT_BYTES as u64)?,
+        _ => return Err("choose exactly one adapter-manifest input"),
+    };
+    let manifest =
+        adapter_manifest::decode(&bytes).map_err(|_| "invalid adapter-manifest representation")?;
+    let diagnostic = if json {
+        let body = serde_json::json!({
+            "schema_version": "mumei.adapter-manifest-check/v1",
+            "manifest_schema_version": "mumei.verifier-adapter/v1",
+            "representation": "valid",
+            "acceptance": "not_evaluated",
+            "attempt_argv": if manifest.attempt_argv_declared { "declared" } else { "absent" },
+            "attempt_stdin": if manifest.attempt_stdin_declared { "declared" } else { "absent" },
+            "verdict_marker_count": manifest.verdict_marker_count,
+            "declared_field_meaning": {
+                "attempt_argv": "inert_without_host_opt_in",
+                "attempt_stdin": "inert_without_host_opt_in",
+                "verdict_markers": "adapter_self_report_vocabulary",
+                "max_memory_mb": "declared_ceiling_not_enforced_by_core",
+            },
+            "checks_performed": ["representation_gate", "manifest_consistency"],
+            "checks_not_performed": [
+                "adapter_execution",
+                "command_safety",
+                "stdin_semantics",
+                "reported_outcome_truth",
+                "resource_enforcement",
+                "producer_authenticity",
+                "host_policy",
+                "grade_promotion",
+            ],
+        });
+        let mut bytes = serde_json::to_vec_pretty(&body)
+            .map_err(|_| "cannot encode representation diagnostic")?;
+        bytes.push(b'\n');
+        bytes
+    } else {
+        b"Adapter manifest v1 representation valid; acceptance not evaluated.\n".to_vec()
     };
     output
         .write_all(&diagnostic)

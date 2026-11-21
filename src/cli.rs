@@ -543,6 +543,21 @@ pub(crate) enum EvidenceCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Validate one verifier-adapter manifest's representation and consistency only
+    #[command(
+        long_about = "Core checks only the static representation and manifest consistency. Manifest-declared argv and stdin remain inert unless host policy opts in through allow_manifest_attempt_argv and allow_manifest_attempt_stdin; a host argv map takes precedence. Verdict markers describe an adapter self-report vocabulary, never a verdict. max_memory_mb is the adapter's declared ceiling: planning uses the smaller of it and the policy memory bound; a scheduled attempt uses it only when the host declares no memory bound. Core does not enforce it. No adapter is executed and no grade is promoted."
+    )]
+    CheckAdapter {
+        /// Regular mumei.verifier-adapter/v1 JSON file (at most 65,536 bytes)
+        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        input: Option<String>,
+        /// Read one adapter manifest from standard input (at most 65,536 bytes)
+        #[arg(long)]
+        stdin: bool,
+        /// Print a static representation-only diagnostic; no adapter execution or grade promotion
+        #[arg(long)]
+        json: bool,
+    },
     /// Normalize one declared requirement against one Evidence record into a bounded verdict; no tool execution or proof acceptance
     Accept {
         /// Regular Evidence v1 JSON record file (at most 65,536 bytes); not a native report envelope or proof certificate
@@ -706,7 +721,7 @@ pub(crate) enum NativeBundleCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Compare leaf straight-line machine code with pure-i64 source models under an assumed register convention; no ABI or runtime claim
+    /// Compare straight-line machine code, including direct calls, with pure-i64 source models under assumed register conventions; no ABI or runtime claim
     RecheckMachineTv {
         bundle: String,
         source: String,
