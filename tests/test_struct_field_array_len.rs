@@ -61,12 +61,15 @@ fn struct_field_array_lengths_are_root_keyed_in_both_integer_modes() {
 
 #[test]
 fn distinct_struct_field_array_roots_cannot_share_lengths() {
-    const EXPECTED_FAILURES: [&str; 5] = [
+    const EXPECTED_FAILURES: [&str; 8] = [
         "len_confusion",
         "len_confusion_eq",
         "len_nested_confusion",
         "len_if_branch_confusion",
         "len_match_branch_confusion",
+        "len_field_conflicts_with_parameter_name",
+        "len_plain_array_conflicts_with_parameter_name",
+        "len_plain_array_false_claim",
     ];
     for bitvec_i64 in [false, true] {
         let output = run_verify("test_struct_field_array_len_negative.mm", bitvec_i64);
