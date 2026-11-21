@@ -433,7 +433,7 @@ pub(crate) fn merge_arm_env_into<'a>(
     // struct with unconstrained fields. They take their arm-local value
     // verbatim — the `ite` selects the right handle per path.
     for (key, arm_val) in arm_env.iter() {
-        if !key.starts_with(STRUCT_FIELD_PREFIX)
+        if !(key.starts_with(STRUCT_FIELD_PREFIX) || key.starts_with(ARRAY_VALUE_LEN_PREFIX))
             || base_env.contains_key(key)
             || bound.contains(key)
         {
@@ -724,12 +724,21 @@ pub(crate) fn register_array_value_len<'a>(
 ) -> String {
     let root = array_root_value(arr);
     let key = array_value_len_key(&root);
-    env.insert(key.clone(), len);
+    env.insert(key.clone(), len.clone());
+    if root.kind() == z3::AstKind::App
+        && root.decl().kind() == z3::DeclKind::UNINTERPRETED
+        && root.num_children() == 0
+    {
+        let root_name = root.decl().name().to_string();
+        env.entry(array_root_len_key(&root_name)).or_insert(len);
+    }
     key
 }
 
+pub(crate) const ARRAY_VALUE_LEN_PREFIX: &str = "__array_len#";
+
 fn array_value_len_key(root: &Dynamic<'_>) -> String {
-    format!("__array_len#{root}")
+    format!("{ARRAY_VALUE_LEN_PREFIX}{root}")
 }
 
 pub(crate) fn mark_string_constraints(vc: &VCtx<'_>) {
@@ -882,6 +891,7 @@ pub(crate) fn wire_array_slots<'a>(
     let arr_dyn: Dynamic = arr.clone().into();
     env.insert(format!("__z3_arr_{name}"), arr_dyn.clone());
     let len = array_len_for_expr(vc, env, value, &arr_dyn, solver_opt);
+    register_array_value_len(env, &arr, len.clone());
     env.insert(array_len_key(name), len);
     vc.local_array_elem_types
         .borrow_mut()

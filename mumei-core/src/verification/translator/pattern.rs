@@ -23,12 +23,16 @@ pub(crate) fn rebuild_payload_direct_fields<'a>(
     let mut cursor = 0usize;
     for field in &sdef.fields {
         let field_leaves = datatype::field_leaf_types(&field.type_name, vc.module_env)?;
-        if datatype::array_payload_element_type(&field_leaves).is_some() {
-            return None;
-        }
         let width = field_leaves.len();
         let slice = leaves.get(cursor..cursor + width)?;
         cursor += width;
+        if datatype::array_payload_element_type(&field_leaves).is_some() {
+            let array = slice.first()?.as_array()?;
+            let len = slice.get(1)?.clone();
+            super::z3_types::register_array_value_len(env, &array, len);
+            direct.push((field.name.clone(), slice[0].clone()));
+            continue;
+        }
         // Aliases resolve like the variant-field lookup above does — an
         // un-resolved name misses `get_struct` and falls into the scalar
         // path, where an empty struct's zero-width slice would panic on
@@ -190,6 +194,19 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                                         });
                                 leaves.push((leaf_name, leaf));
                             }
+                            if let (Some(solver), Some(leaf_types)) =
+                                (solver_opt, leaf_types.as_ref())
+                            {
+                                let leaf_values: Vec<Dynamic> =
+                                    leaves.iter().map(|(_, value)| value.clone()).collect();
+                                datatype::assert_payload_array_lengths(
+                                    vc,
+                                    solver,
+                                    &is_v,
+                                    leaf_types,
+                                    &leaf_values,
+                                );
+                            }
                             let handle = crate::verification::translator::fresh_struct_handle(
                                 ctx, &sdef.name,
                             );
@@ -202,9 +219,13 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                             // fields, not `inner_x`-style leaves.
                             let leaf_vals: Vec<Dynamic> =
                                 leaves.iter().map(|(_, v)| v.clone()).collect();
-                            let direct =
+                            let Some(direct) =
                                 rebuild_payload_direct_fields(ctx, vc, env, sdef, &leaf_vals)
-                                    .unwrap_or_else(|| leaves.clone());
+                            else {
+                                return Err(MumeiError::verification(
+                                    "could not rebuild struct enum payload fields",
+                                ));
+                            };
                             crate::verification::translator::bind_struct_fields(
                                 env,
                                 &handle_name,
@@ -507,9 +528,18 @@ pub(crate) fn pattern_bind_variables<'a>(
                                 // declared fields only.
                                 let leaf_vals: Vec<Dynamic> =
                                     leaves.iter().map(|(_, v)| v.clone()).collect();
-                                let direct =
-                                    rebuild_payload_direct_fields(ctx, vc, env, sdef, &leaf_vals)
-                                        .unwrap_or_else(|| leaves.clone());
+                                let direct = match rebuild_payload_direct_fields(
+                                    ctx, vc, env, sdef, &leaf_vals,
+                                ) {
+                                    Some(direct) => direct,
+                                    None if leaf_types.as_ref().is_some_and(|types| {
+                                        datatype::array_payload_leaf_pairs(types).next().is_some()
+                                    }) =>
+                                    {
+                                        continue;
+                                    }
+                                    None => leaves.clone(),
+                                };
                                 crate::verification::translator::bind_struct_fields(
                                     env,
                                     &handle_name,
@@ -520,8 +550,25 @@ pub(crate) fn pattern_bind_variables<'a>(
                                     handle.clone(),
                                 );
                                 if let Pattern::Variable(fname) = field_pattern {
+                                    let array_length_indices: std::collections::HashSet<usize> =
+                                        leaf_types
+                                            .as_ref()
+                                            .map(|types| {
+                                                datatype::array_payload_leaf_pairs(types)
+                                                    .map(|(array_index, _)| array_index + 1)
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default();
+                                    let struct_leaves: Vec<(String, Dynamic)> = leaves
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(index, _)| !array_length_indices.contains(index))
+                                        .map(|(_, leaf)| leaf.clone())
+                                        .collect();
                                     crate::verification::translator::bind_struct_fields(
-                                        env, fname, &leaves,
+                                        env,
+                                        fname,
+                                        &struct_leaves,
                                     );
                                     crate::verification::translator::bind_struct_fields(
                                         env, fname, &direct,
@@ -543,7 +590,10 @@ pub(crate) fn pattern_bind_variables<'a>(
                                             ),
                                         );
                                     }
-                                    for (leaf, _) in &leaves {
+                                    for (index, (leaf, _)) in leaves.iter().enumerate() {
+                                        if array_length_indices.contains(&index) {
+                                            continue;
+                                        }
                                         bound.insert(format!("{fname}_{leaf}"));
                                         bound.insert(
                                             crate::verification::translator::struct_field_key(

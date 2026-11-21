@@ -1999,7 +1999,7 @@ fn enum_payload_field_read<'a>(
             vc.module_env
                 .get_struct(datatype::type_name_base(&resolved_terminal_type))
         });
-    let (leaf_offset, struct_leaf_width) = if terminal_struct.is_some() {
+    let (leaf_offset, struct_leaf_width, selected_leaf_types) = if terminal_struct.is_some() {
         let Some(struct_leaves) = datatype::field_leaf_types(&terminal_type, vc.module_env) else {
             return Ok(None);
         };
@@ -2029,7 +2029,7 @@ fn enum_payload_field_read<'a>(
         else {
             return Ok(None);
         };
-        (leaf_offset, selected_leaf_names.len())
+        (leaf_offset, selected_leaf_names.len(), Some(struct_leaves))
     } else {
         let leaf_offset = if path.len() == 1 {
             if direct_array_payload {
@@ -2047,8 +2047,10 @@ fn enum_payload_field_read<'a>(
             };
             leaf_offset
         };
-        (leaf_offset, 0)
+        (leaf_offset, 0, None)
     };
+    let array_leaf_pair = datatype::array_payload_leaf_pairs(&field_leaves)
+        .find(|(array_index, _)| *array_index == leaf_offset);
 
     if terminal_struct.is_some() && solver_opt.is_none() {
         return Ok(None);
@@ -2159,10 +2161,13 @@ fn enum_payload_field_read<'a>(
         let Some(value) = super::z3_types::dynamic_ite(&gate, &selector, &fresh) else {
             return Ok(None);
         };
-        if direct_array_payload {
-            let Some(length_selector) =
-                datatype::variant_selector_apply(&sort, variant_idx, payload_offset + 1, &base)
-            else {
+        if let Some((array_index, _)) = array_leaf_pair {
+            let Some(length_selector) = datatype::variant_selector_apply(
+                &sort,
+                variant_idx,
+                payload_offset + array_index + 1,
+                &base,
+            ) else {
                 return Ok(None);
             };
             let Some(length_fresh) = super::z3_types::dynamic_fresh_const(
@@ -2296,6 +2301,10 @@ fn enum_payload_field_read<'a>(
             };
             leaves.push(leaf);
         }
+        let Some(leaf_types) = selected_leaf_types.as_ref() else {
+            return Ok(None);
+        };
+        datatype::assert_payload_array_lengths(vc, solver, &is_variant, leaf_types, &leaves);
         let env_keys_before: std::collections::HashSet<String> = env.keys().cloned().collect();
         let Some(direct) = crate::verification::translator::pattern::rebuild_payload_direct_fields(
             vc.ctx, vc, env, sdef, &leaves,
@@ -2317,10 +2326,13 @@ fn enum_payload_field_read<'a>(
     }
     let value =
         datatype::variant_selector_apply(&sort, variant_idx, payload_offset + leaf_offset, &base);
-    if direct_array_payload {
-        let Some(length) =
-            datatype::variant_selector_apply(&sort, variant_idx, payload_offset + 1, &base)
-        else {
+    if let Some((array_index, _)) = array_leaf_pair {
+        let Some(length) = datatype::variant_selector_apply(
+            &sort,
+            variant_idx,
+            payload_offset + array_index + 1,
+            &base,
+        ) else {
             return Ok(None);
         };
         let Some(nonnegative) = super::z3_types::nonneg_constraint(vc.ctx, &length) else {
@@ -3778,47 +3790,56 @@ pub(crate) fn expr_to_z3<'a>(
                         {
                             let enum_ctor = datatype::resolve_enum_ctor(vc, name)?;
                             let mut ctor_args = Vec::with_capacity(args.len());
-                            let mut array_payload_snapshots = Vec::with_capacity(args.len());
+                            let mut payload_snapshots = Vec::with_capacity(args.len());
                             for (i, arg) in args.iter().enumerate() {
                                 let arg_z3 = expr_to_z3(vc, arg, env, solver_opt)?;
-                                let is_array_payload = enum_ctor
+                                let payload_snapshot = enum_ctor
                                     .and_then(|(enum_def, idx)| enum_def.variants.get(idx))
                                     .and_then(|variant| variant.field_types.get(i))
-                                    .is_some_and(|field_type| {
+                                    .and_then(|field_type| {
                                         let field_type =
                                             datatype::payload_field_type_name(field_type);
-                                        datatype::field_leaf_types(&field_type, vc.module_env)
-                                            .is_some_and(|leaves| {
-                                                datatype::array_payload_element_type(&leaves)
-                                                    .is_some()
+                                        let field_leaves =
+                                            datatype::field_leaf_types(&field_type, vc.module_env)?;
+                                        if datatype::array_payload_element_type(&field_leaves)
+                                            .is_some()
+                                        {
+                                            let array = match arg {
+                                                Expr::Variable(name) => env
+                                                    .get(&format!("__z3_arr_{name}"))
+                                                    .and_then(|value| value.as_array())
+                                                    .map(Into::into)
+                                                    .unwrap_or_else(|| arg_z3.clone()),
+                                                _ => arg_z3.clone(),
+                                            };
+                                            let array_ast = array.as_array()?;
+                                            let len = super::z3_types::array_len_for_expr(
+                                                vc,
+                                                env,
+                                                Some(arg),
+                                                &array,
+                                                solver_opt,
+                                            );
+                                            Some(datatype::PayloadSnapshot {
+                                                leaves: vec![array_ast.into(), len],
                                             })
+                                        } else if vc.module_env.structs.contains_key(
+                                            &vc.module_env.resolve_base_type(&field_type),
+                                        ) {
+                                            datatype::flattened_value_leaves(
+                                                vc,
+                                                env,
+                                                &arg_z3,
+                                                &field_leaves,
+                                                solver_opt,
+                                            )
+                                            .map(|leaves| datatype::PayloadSnapshot { leaves })
+                                        } else {
+                                            None
+                                        }
                                     });
-                                let snapshot = if is_array_payload {
-                                    let array = match arg {
-                                        Expr::Variable(name) => env
-                                            .get(&format!("__z3_arr_{name}"))
-                                            .and_then(|value| value.as_array())
-                                            .map(Into::into)
-                                            .unwrap_or_else(|| arg_z3.clone()),
-                                        _ => arg_z3.clone(),
-                                    };
-                                    if array.as_array().is_some() {
-                                        let len = super::z3_types::array_len_for_expr(
-                                            vc,
-                                            env,
-                                            Some(arg),
-                                            &array,
-                                            solver_opt,
-                                        );
-                                        Some(datatype::ArrayPayloadSnapshot { array, len })
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                };
                                 ctor_args.push(arg_z3);
-                                array_payload_snapshots.push(snapshot);
+                                payload_snapshots.push(payload_snapshot);
                             }
                             // A payload argument must satisfy the declared
                             // field type — `Chan::Tcp(0)` with `p: Port`
@@ -3885,7 +3906,7 @@ pub(crate) fn expr_to_z3<'a>(
                                 env,
                                 name,
                                 &ctor_args,
-                                &array_payload_snapshots,
+                                &payload_snapshots,
                             )? {
                                 return Ok(value);
                             }
@@ -4652,7 +4673,32 @@ pub(crate) fn expr_to_z3<'a>(
             let handle_name = handle.decl().name();
             let mut field_values: Vec<(String, Dynamic)> = Vec::with_capacity(fields.len());
             for (field_name, field_expr) in fields {
-                let val = expr_to_z3(vc, field_expr, env, solver_opt)?;
+                let mut val = expr_to_z3(vc, field_expr, env, solver_opt)?;
+                let array_field = sdef
+                    .and_then(|sdef| sdef.fields.iter().find(|field| field.name == *field_name))
+                    .and_then(|field| datatype::field_leaf_types(&field.type_name, vc.module_env))
+                    .is_some_and(|leaves| datatype::array_payload_element_type(&leaves).is_some());
+                if array_field {
+                    let array = match field_expr {
+                        Expr::Variable(name) => env
+                            .get(&format!("__z3_arr_{name}"))
+                            .and_then(|value| value.as_array())
+                            .or_else(|| val.as_array()),
+                        _ => val.as_array(),
+                    };
+                    if let Some(array) = array {
+                        let array_value: Dynamic = array.clone().into();
+                        let len = super::z3_types::array_len_for_expr(
+                            vc,
+                            env,
+                            Some(field_expr),
+                            &array_value,
+                            solver_opt,
+                        );
+                        super::z3_types::register_array_value_len(env, &array, len);
+                        val = array_value;
+                    }
+                }
                 let qualified_name = format!("__struct_{}_{}", type_name, field_name);
                 env.insert(qualified_name, val.clone());
                 field_values.push((field_name.clone(), val.clone()));
