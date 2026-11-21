@@ -1008,15 +1008,32 @@ body: {{ let o = WrapDeep {{ a: Outer {{ inner: Inner {{ x: 1, y: 2 }}, z: 3 }} 
         );
         let errors = check(&src);
         assert_eq!(errors.len(), 4, "{errors:?}");
-        for expected in [
-            "payload 'i' of 'e' expects struct 'Inner' but got struct 'Other'",
-            "payload 'p.inner' of 'e' expects struct 'Inner' but got struct 'Other'",
-            "payload 'p.inner' of 'e' expects struct 'Inner' but got struct 'Other'",
-            "field 'a.inner' of 'o' expects struct 'Inner' but got struct 'Other'",
+        for (atom, expected) in [
+            (
+                "local_enum_payload_mismatch",
+                "payload 'i' of 'e' expects struct 'Inner' but got struct 'Other'",
+            ),
+            (
+                "local_enum_deep_payload_mismatch",
+                "payload 'p.inner' of 'e' expects struct 'Inner' but got struct 'Other'",
+            ),
+            (
+                "param_enum_deep_payload_mismatch",
+                "payload 'p.inner' of 'e' expects struct 'Inner' but got struct 'Other'",
+            ),
+            (
+                "ordinary_struct_deep_field_mismatch",
+                "field 'a.inner' of 'o' expects struct 'Inner' but got struct 'Other'",
+            ),
         ] {
-            assert!(
-                errors.iter().any(|error| error.contains(expected)),
-                "{errors:?}"
+            let atom_context = format!("in atom '{atom}'");
+            let matches = errors
+                .iter()
+                .filter(|error| error.contains(&atom_context) && error.contains(expected))
+                .count();
+            assert_eq!(
+                matches, 1,
+                "expected exactly one matching diagnostic for atom '{atom}': {errors:?}"
             );
         }
     }
