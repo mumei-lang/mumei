@@ -1980,7 +1980,8 @@ NaN payloads are not claimed. Arithmetic models round to nearest, ties to even,
 and implement the specified x86 NaN propagation. MXCSR RNE, masked exceptions,
 and disabled FTZ/DAZ are assumptions, reported as
 `machine_code_tv_mxcsr_control_state`; `machine_code_tv_nan_payload_bits` is
-also not performed. When an equivalent function has a scalar f64 leaf,
+also not performed. When an equivalent function has an f64 leaf, including
+inside a struct or a call shape,
 `machine_code_f64_scalar_function_tv` is performed. Memory operands fail
 closed. Register-only `ucomisd` and `comisd` compare the low 64-bit XMM
 operands and model `ZF = unordered || fp.eq`, `CF = unordered || fp.lt`,
@@ -1989,43 +1990,50 @@ branches, `setcc`, and `cmovcc`; memory operands remain outside the profile.
 Parity conditions after integer flag-producing instructions remain outside the
 profile because integer PF is not modeled. Agent consumers must adopt the
 three f64 check names.
-Scalar f64 function parameters and direct-call arguments use `xmm0`–`xmm7`,
-independently of the integer argument registers; integer overflow arguments
-continue in stack slots indexed among integer arguments only. Call arguments
-first use NaN-aware f64 equality alongside exact integer equality and output
-matching. A second query must prove that every machine f64 argument's low 64
-bits exactly equal the source argument bits under the same path assumptions.
+Scalar f64 parameters and f64 leaves in admitted struct parameters and
+direct-call arguments use `xmm0`–`xmm7`, independently of the integer
+argument registers; integer overflow arguments continue in stack slots
+indexed among integer arguments only. Call arguments first use NaN-aware f64
+equality alongside exact integer equality and output matching. A second query
+must prove that every machine f64 argument's low 64 bits exactly equal the
+source argument bits under the same path assumptions.
 This admits pass-through f64 calls without assuming that a callee ignores NaN
 payloads; a computed f64 argument whose exact NaN bits cannot be proved, or an
 f64 tail call, remains outside the profile as `call_arguments`. More than eight
 f64 call arguments are outside the profile as `argument_count`. f64 call
 results remain supported and are bound from the low 64 bits of `xmm0`. When an
-equivalent function has a scalar f64 leaf,
+equivalent function has an f64 leaf, including inside a struct or a call shape,
 `register_convention_assumed` names the XMM argument/result registers with
 `sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_result_rax_or_xmm0`;
 otherwise the descriptor retains the integer-only convention string.
 
-Small integer struct parameters and results are admitted only when each
-aggregate has one or two 64-bit integer leaves and every leaf in the
-struct-bearing signature is integer; enum signatures, f64/u64/i128 leaves,
-larger aggregates, post-writes, and bounded memory remain outside the profile.
-Flattened integer leaves consume `rdi`–`r9` in order.
-A two-leaf aggregate that cannot fit wholly in the remaining argument
-registers is outside as `argument_count`; aggregates are never split between
-registers and the stack, and stack arguments remain scalar-only. Result leaf 0
-is compared exactly with `rax`, and leaf 1 with `rdx`. Direct-call sites also
-admit scalar arguments and one-/two-leaf all-integer struct arguments. Struct
-leaves consume consecutive GPRs and must fit wholly in the remaining `rdi`–`r9`
-registers; they are never passed on the stack. One-/two-leaf integer struct
-results bind leaf 0 to `rax` and leaf 1 to `rdx` after caller-saved clobbers.
-Enums, f64-containing structs, structs with three or more leaves, and tail
-calls with struct arguments or results remain outside as `call_arguments`.
-When an equivalent function has a struct parameter, result, or direct-call
-argument/result, the descriptor performs
-`machine_code_composite_register_aggregate_tv` and appends
-`_two_eightbyte_integer_aggregates_in_consecutive_gprs_result_rax_rdx` to its
-active integer or f64 `register_convention_assumed` string. This is bounded
-profile evidence under an assumed SysV convention, not general ABI validation.
+One-/two-leaf struct parameters, results, and direct-call values may contain
+integer and/or f64 leaves. Each leaf is a separate SysV eightbyte: integer
+leaves consume the next GPR from `rdi`–`r9`, and f64 leaves consume the next
+XMM register from `xmm0`–`xmm7`. A struct must fit wholly in the remaining
+registers of both classes before any of its leaves are assigned; otherwise it
+is outside as `argument_count`. Structs are never split between registers and
+the stack, and stack arguments remain scalar-only. Results are assigned in
+leaf order, using `rax` then `rdx` for integer leaves and the low 64 bits of
+`xmm0` then `xmm1` for f64 leaves. Function-result f64 leaves use NaN-aware
+matching; integer leaves are compared exactly. Struct call results bind the
+same leaves into those registers after caller-saved clobbers.
+
+F64 leaves in struct call arguments use the scalar f64 call obligations:
+Query A compares NaN-aware values, and Query B must prove exact argument bits
+under the same path assumptions. If that exact proof is satisfiable or
+unknown, the function fails closed as `call_arguments`, not `different`.
+Enums, structs with three or more leaves, u64/i128 leaves, post-writes,
+bounded memory, and tail calls with struct arguments or results remain outside
+the profile. When an equivalent function has a struct parameter, result, or
+direct-call argument/result, the descriptor performs
+`machine_code_composite_register_aggregate_tv`. Integer-only aggregates append
+`_two_eightbyte_integer_aggregates_in_consecutive_gprs_result_rax_rdx`; an
+aggregate with an f64 leaf instead appends
+`_two_eightbyte_aggregates_classified_integer_gprs_sse_xmm_result_rax_rdx_xmm0_xmm1`
+to the active integer or f64 `register_convention_assumed` string. This is
+bounded profile evidence under an assumed SysV convention, not general ABI
+validation.
 
 ### Object-stage machine-code acceptance (C10 Option B)
 

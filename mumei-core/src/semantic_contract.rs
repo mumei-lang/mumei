@@ -6670,6 +6670,7 @@ pub struct CallSite<'ctx> {
     pub result: BV<'ctx>,
     pub result_is_double: bool,
     pub result_shape: CallValueShape,
+    pub result_leaf_doubles: Vec<bool>,
     pub guard: Bool<'ctx>,
 }
 
@@ -8378,6 +8379,21 @@ fn source_value_contains_f64(value: &SourceValue<'_>) -> bool {
             .any(|(_, field)| source_value_contains_f64(field)),
         SourceValue::Enum { slots, .. } => slots.iter().any(source_value_contains_f64),
         _ => false,
+    }
+}
+
+fn source_value_leaf_doubles(value: &SourceValue<'_>) -> Vec<bool> {
+    match value {
+        SourceValue::Float64(_) => vec![true],
+        SourceValue::Composite(fields) => fields
+            .iter()
+            .flat_map(|(_, field)| source_value_leaf_doubles(field))
+            .collect(),
+        SourceValue::Enum { slots, .. } => std::iter::once(false)
+            .chain(slots.iter().flat_map(source_value_leaf_doubles))
+            .collect(),
+        SourceValue::Wide(_) | SourceValue::UWide(_) => vec![false, false],
+        _ => vec![false],
     }
 }
 
@@ -10959,9 +10975,11 @@ fn source_expr<'ctx>(
                         let first_leaf = applied.len();
                         for (_, field) in fields {
                             let before = applied.len();
+                            let leaf_doubles = source_value_leaf_doubles(&field);
+                            let leaf_count = leaf_doubles.len();
                             lower_composite(field, ctx, &mut applied)?;
-                            arg_leaf_doubles
-                                .extend(std::iter::repeat_n(false, applied.len() - before));
+                            arg_leaf_doubles.extend(leaf_doubles);
+                            debug_assert_eq!(applied.len() - before, leaf_count);
                         }
                         argument_shapes.push(CallValueShape::Struct {
                             leaf_count: applied.len() - first_leaf,
@@ -10979,9 +10997,11 @@ fn source_expr<'ctx>(
                         arg_leaf_doubles.push(false);
                         for slot in slots {
                             let before = applied.len();
+                            let leaf_doubles = source_value_leaf_doubles(&slot);
+                            let leaf_count = leaf_doubles.len();
                             lower_composite(slot, ctx, &mut applied)?;
-                            arg_leaf_doubles
-                                .extend(std::iter::repeat_n(false, applied.len() - before));
+                            arg_leaf_doubles.extend(leaf_doubles);
+                            debug_assert_eq!(applied.len() - before, leaf_count);
                         }
                         argument_shapes.push(CallValueShape::Enum {
                             leaf_count: applied.len() - first_leaf,
@@ -11007,7 +11027,12 @@ fn source_expr<'ctx>(
             // A struct-returning call applies one uninterpreted function
             // per field slot; the site records their `aggregate_value`.
             if let Some(fields) = call_returns.result_fields(name) {
-                let leaf_count = call_returns.flattened_kinds(fields).len();
+                let result_leaf_doubles: Vec<_> = call_returns
+                    .flattened_kinds(fields)
+                    .iter()
+                    .map(|kind| *kind == ScalarKind::F64)
+                    .collect();
+                let leaf_count = result_leaf_doubles.len();
                 let slots = (0..leaf_count)
                     .map(|i| {
                         call_field_decl(ctx, name, applied.len(), i)
@@ -11029,10 +11054,9 @@ fn source_expr<'ctx>(
                     result_shape: CallValueShape::Struct {
                         leaf_count,
                         has_enum: call_returns.fields_contain_enum(fields),
-                        has_f64: call_returns
-                            .flattened_kinds(fields)
-                            .contains(&ScalarKind::F64),
+                        has_f64: result_leaf_doubles.iter().any(|is_double| *is_double),
                     },
+                    result_leaf_doubles,
                     guard: guard.clone(),
                 });
                 return Ok(composite_from_slots(
@@ -11067,6 +11091,7 @@ fn source_expr<'ctx>(
                     result_shape: CallValueShape::Enum {
                         leaf_count: slots.len(),
                     },
+                    result_leaf_doubles: vec![false; slots.len()],
                     guard: guard.clone(),
                 });
                 return Ok(SourceValue::Enum {
@@ -11098,6 +11123,7 @@ fn source_expr<'ctx>(
                     result: aggregate_value(&slots),
                     result_is_double: false,
                     result_shape: CallValueShape::Scalar { leaf_count: 2 },
+                    result_leaf_doubles: vec![false; 2],
                     guard: guard.clone(),
                 });
                 let agg = aggregate_value(&slots);
@@ -11121,6 +11147,7 @@ fn source_expr<'ctx>(
                 result: value.clone(),
                 result_is_double: call_returns.returns_f64(name),
                 result_shape: CallValueShape::Scalar { leaf_count: 1 },
+                result_leaf_doubles: vec![call_returns.returns_f64(name)],
                 guard: guard.clone(),
             });
             // The uninterpreted result is a bitvector; a callee whose
