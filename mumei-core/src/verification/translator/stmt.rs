@@ -451,7 +451,11 @@ fn record_binding_struct_type(vc: &VCtx, var: &str, value: &Expr) {
 
 fn canonical_struct_type_in_module(module_env: &ModuleEnv, type_name: &str) -> Option<String> {
     let resolved = module_env.resolve_base_type(type_name);
-    let base = crate::verification::support::datatype::type_name_base(&resolved).to_string();
+    let resolved = resolved.trim();
+    if resolved.starts_with('[') || resolved.ends_with("[]") {
+        return None;
+    }
+    let base = crate::verification::support::datatype::type_name_base(resolved).to_string();
     module_env.get_struct(&base).map(|_| base)
 }
 
@@ -2525,7 +2529,10 @@ pub(crate) fn stmt_to_z3<'a>(
 
 #[cfg(test)]
 mod projection_slot_tests {
-    use super::{is_struct_projection_slot_name, struct_binding_slot_keys};
+    use super::{
+        canonical_struct_type_in_module, is_struct_projection_slot_name,
+        reject_parameter_projection_slot_collisions, struct_binding_slot_keys,
+    };
     use crate::parser::{parse_module, Item};
     use crate::verification::ModuleEnv;
     use std::collections::HashSet;
@@ -2541,6 +2548,40 @@ mod projection_slot_tests {
             }
         }
         module_env
+    }
+
+    #[test]
+    fn array_aliases_are_not_struct_parameter_types() {
+        let mut module_env = ModuleEnv::new();
+        let mut alias = None;
+        let mut atom = None;
+        for item in parse_module(
+            "struct Item { x: i64 } \
+             type Items = i64; \
+             atom array_alias(items: Items, items_x: i64) -> i64 \
+             requires: true; ensures: result == items_x; body: items_x",
+        ) {
+            match item {
+                Item::StructDef(sdef) => module_env.register_struct(&sdef),
+                Item::TypeDef(mut refined) => {
+                    refined._base_type = "[Item]".to_string();
+                    alias = Some(refined);
+                }
+                Item::Atom(parsed) => atom = Some(parsed),
+                _ => {}
+            }
+        }
+        module_env.register_type(alias.as_ref().expect("Items alias parsed"));
+
+        assert_eq!(module_env.resolve_base_type("Items"), "[Item]");
+        assert_eq!(canonical_struct_type_in_module(&module_env, "[Item]"), None);
+        assert_eq!(canonical_struct_type_in_module(&module_env, "Item[]"), None);
+        assert_eq!(canonical_struct_type_in_module(&module_env, "Items"), None);
+        assert!(reject_parameter_projection_slot_collisions(
+            &module_env,
+            &atom.expect("array alias atom parsed")
+        )
+        .is_ok());
     }
 
     #[test]

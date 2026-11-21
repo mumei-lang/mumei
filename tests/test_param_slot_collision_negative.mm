@@ -37,6 +37,15 @@ requires: true;
 ensures: result == 0;
 body: 0
 
+struct Item {
+    x: i64
+}
+
+atom real_struct_slot_collision(item: Item, item_x: i64) -> i64
+requires: true;
+ensures: result == item_x;
+body: item.x
+
 atom let_name_collides_parameter_slot(p: ScalarP) -> i64
 requires: true;
 ensures: result == 1;

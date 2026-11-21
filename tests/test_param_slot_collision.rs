@@ -60,6 +60,10 @@ fn parameter_projection_slot_collisions_are_rejected() {
             "nested_struct_slot_collision",
             "parameter 'p_a' collides with a field projection slot of struct parameter 'p'; rename the parameter",
         ),
+        (
+            "real_struct_slot_collision",
+            "parameter 'item_x' collides with a field projection slot of struct parameter 'item'; rename the parameter",
+        ),
     ];
     assert_eq!(
         diagnostics.len(),
