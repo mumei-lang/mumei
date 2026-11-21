@@ -4112,6 +4112,18 @@ The future mumei-agent `native-object-accept` route maps the Core check
 `object_source_machine_code_correspondence` to its agent-owned
 `object_translation_correspondence` vocabulary. The Core descriptor does not
 emit the agent-owned name, and no mumei-agent code is changed in this slice.
+The C10 Option B machine-TV result adds `callee_saved_preservation` to each
+Equivalent function entry. Core performs
+`machine_code_callee_saved_register_preservation` only when at least one
+function is Equivalent and all equivalent functions are proved preserved;
+otherwise the check is not performed, and with no equivalent functions it is
+absent. When performed,
+`machine_code_callee_saved_preservation_assumed_for_external_callees` remains
+not performed. Direct and cancellation-poll callees are assumed to preserve
+callee-saved registers; composition within a module requires independent
+preservation proofs for all source callees, while external callees remain an
+assumption. The argument/result register convention remains assumed. Agent
+consumers must adopt both check names and the function field.
 
 ### Wave 5 declared producer-identity gate (C02 consumer)
 

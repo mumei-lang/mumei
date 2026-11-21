@@ -370,8 +370,14 @@ fn recheck_object_reports_module_and_multifile_symbol_surfaces() {
     assert_eq!(
         multifile_tv_descriptor["functions"],
         serde_json::json!({
-            "__mumei_user_main": {"outcome": "equivalent_within_profile"},
-            "helper": {"outcome": "equivalent_within_profile"},
+            "__mumei_user_main": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            },
+            "helper": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            },
             "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
         })
     );
@@ -432,7 +438,10 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     assert_eq!(
         descriptor["functions"],
         serde_json::json!({
-            "__mumei_user_main": {"outcome": "equivalent_within_profile"},
+            "__mumei_user_main": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            },
             "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
         })
     );
@@ -444,6 +453,7 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
             "object_call_edge_correspondence",
             "object_link_correspondence",
             "machine_code_leaf_function_tv",
+            "machine_code_callee_saved_register_preservation",
         ])
     );
     assert_eq!(
@@ -461,6 +471,7 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
             "machine_code_acyclic_branch_function_tv",
             "machine_code_conditional_call_function_tv",
             "machine_code_bounded_loop_function_tv",
+            "machine_code_callee_saved_preservation_assumed_for_external_callees",
         ])
     );
 }
@@ -490,8 +501,14 @@ fn recheck_machine_tv_reports_module_direct_call_and_wrapper_outcomes() {
     assert_eq!(
         descriptor["functions"],
         serde_json::json!({
-            "__mumei_user_main": {"outcome": "equivalent_within_profile"},
-            "helper": {"outcome": "equivalent_within_profile"},
+            "__mumei_user_main": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            },
+            "helper": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            },
             "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
         })
     );
@@ -500,6 +517,11 @@ fn recheck_machine_tv_reports_module_direct_call_and_wrapper_outcomes() {
         .unwrap()
         .iter()
         .any(|check| check == "machine_code_direct_call_site_tv"));
+    assert!(descriptor["checks_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check == "machine_code_callee_saved_register_preservation"));
     assert!(descriptor["checks_not_performed"]
         .as_array()
         .unwrap()
@@ -546,12 +568,27 @@ fn recheck_machine_tv_checks_forward_and_acyclic_branches() {
     assert_eq!(
         descriptor["functions"],
         serde_json::json!({
-            "__mumei_user_main": {"outcome": "equivalent_within_profile"},
-            "absd": {"outcome": "equivalent_within_profile"},
-            "band": {"outcome": "equivalent_within_profile"},
-            "clamp": {"outcome": "equivalent_within_profile"},
+            "__mumei_user_main": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            },
+            "absd": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            },
+            "band": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            },
+            "clamp": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            },
             "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
-            "pick": {"outcome": "equivalent_within_profile"},
+            "pick": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            },
         })
     );
     let performed = descriptor["checks_performed"].as_array().unwrap();
@@ -639,11 +676,26 @@ fn recheck_machine_tv_checks_branching_calls() {
     assert_eq!(
         descriptor["functions"],
         serde_json::json!({
-            "__mumei_user_main": {"outcome": "equivalent_within_profile"},
-            "cc": {"outcome": "equivalent_within_profile"},
-            "cc_both": {"outcome": "equivalent_within_profile"},
-            "cc_result": {"outcome": "equivalent_within_profile"},
-            "helper": {"outcome": "equivalent_within_profile"},
+            "__mumei_user_main": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            },
+            "cc": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            },
+            "cc_both": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            },
+            "cc_result": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            },
+            "helper": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            },
             "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
         })
     );
@@ -686,7 +738,10 @@ fn recheck_machine_tv_checks_stack_passed_arguments() {
     for name in ["seven_args", "calls_seven"] {
         assert_eq!(
             descriptor["functions"][name],
-            serde_json::json!({"outcome": "equivalent_within_profile"}),
+            serde_json::json!({
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            }),
             "{name}"
         );
     }
@@ -721,11 +776,17 @@ fn recheck_machine_tv_checks_setcc_and_shift_probe() {
     let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         descriptor["functions"]["lt"],
-        serde_json::json!({"outcome": "equivalent_within_profile"})
+        serde_json::json!({
+            "outcome": "equivalent_within_profile",
+            "callee_saved_preservation": "preserved"
+        })
     );
     assert_eq!(
         descriptor["functions"]["half"],
-        serde_json::json!({"outcome": "equivalent_within_profile"})
+        serde_json::json!({
+            "outcome": "equivalent_within_profile",
+            "callee_saved_preservation": "preserved"
+        })
     );
 }
 
@@ -751,7 +812,10 @@ fn recheck_machine_tv_checks_variable_count_shifts() {
     for name in ["shl_v", "shr_pos", "shr_signed", "shl32_v"] {
         assert_eq!(
             descriptor["functions"][name],
-            serde_json::json!({"outcome": "equivalent_within_profile"}),
+            serde_json::json!({
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            }),
             "{name}"
         );
     }
@@ -767,7 +831,10 @@ fn recheck_machine_tv_checks_unary_ops_and_base_index_lea() {
     for name in ["chain_leaf", "chain_two", "chain_three", "chain_four"] {
         assert_eq!(
             descriptor["functions"][name],
-            serde_json::json!({"outcome": "equivalent_within_profile"}),
+            serde_json::json!({
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            }),
             "{name}"
         );
     }
@@ -783,7 +850,10 @@ fn recheck_machine_tv_checks_unary_ops_and_base_index_lea() {
     let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         descriptor["functions"]["lea_sum"],
-        serde_json::json!({"outcome": "equivalent_within_profile"})
+        serde_json::json!({
+            "outcome": "equivalent_within_profile",
+            "callee_saved_preservation": "preserved"
+        })
     );
 }
 
@@ -796,11 +866,17 @@ fn recheck_machine_tv_checks_many_live_with_solver_fallback() {
     let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         descriptor["functions"]["many_live"],
-        serde_json::json!({"outcome": "equivalent_within_profile"})
+        serde_json::json!({
+            "outcome": "equivalent_within_profile",
+            "callee_saved_preservation": "preserved"
+        })
     );
     assert_eq!(
         descriptor["functions"]["__mumei_user_main"],
-        serde_json::json!({"outcome": "equivalent_within_profile"})
+        serde_json::json!({
+            "outcome": "equivalent_within_profile",
+            "callee_saved_preservation": "preserved"
+        })
     );
 }
 
@@ -4844,7 +4920,10 @@ fn loop_bundle_links_and_pins_runtime_but_keeps_runtime_out_of_claims() {
     let descriptor: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
     assert_eq!(
         descriptor["functions"]["loop_count"],
-        serde_json::json!({"outcome": "equivalent_within_profile"})
+        serde_json::json!({
+            "outcome": "equivalent_within_profile",
+            "callee_saved_preservation": "preserved"
+        })
     );
     assert_eq!(
         descriptor["input_domain"],
@@ -4854,6 +4933,9 @@ fn loop_bundle_links_and_pins_runtime_but_keeps_runtime_out_of_claims() {
     assert!(performed
         .iter()
         .any(|check| check == "machine_code_bounded_loop_function_tv"));
+    assert!(performed
+        .iter()
+        .any(|check| check == "machine_code_callee_saved_register_preservation"));
     let not_performed = descriptor["checks_not_performed"].as_array().unwrap();
     assert!(not_performed
         .iter()
@@ -5069,8 +5151,14 @@ fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
     assert_eq!(
         descriptor["functions"],
         serde_json::json!({
-            "__mumei_user_main": {"outcome": "equivalent_within_profile"},
-            "helper": {"outcome": "equivalent_within_profile"},
+            "__mumei_user_main": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            },
+            "helper": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved"
+            },
             "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
         })
     );
@@ -5081,6 +5169,9 @@ fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
     assert!(performed
         .iter()
         .any(|check| check == "object_link_correspondence"));
+    assert!(performed
+        .iter()
+        .any(|check| check == "machine_code_callee_saved_register_preservation"));
     assert!(!performed
         .iter()
         .any(|check| check == "pinned_member_merge_rederivation"));
@@ -5116,10 +5207,17 @@ fn accept_object_accepts_loop_bundle_without_object_link() {
         descriptor["input_domain"],
         "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires_and_loops_exiting_within_bound_4"
     );
+    assert_eq!(
+        descriptor["functions"]["loop_count"]["callee_saved_preservation"],
+        "preserved"
+    );
     let performed = descriptor["checks_performed"].as_array().unwrap();
     assert!(performed
         .iter()
         .any(|check| check == "object_source_machine_code_correspondence"));
+    assert!(performed
+        .iter()
+        .any(|check| check == "machine_code_callee_saved_register_preservation"));
     assert!(!performed
         .iter()
         .any(|check| check == "object_link_correspondence"));

@@ -3148,6 +3148,14 @@ mumei-agent `native-object-accept` route to the agent-owned
 `object_translation_correspondence` check; the Core descriptor does not emit
 the agent name. Inconclusive outcomes emit no descriptor, and ABI/runtime,
 wrapper, authenticity and historical-execution claims remain outside scope.
+Machine-TV function entries separately report
+`callee_saved_preservation`, and descriptors perform
+`machine_code_callee_saved_register_preservation` only when every equivalent
+function is proved preserved. Direct and poll callees remain assumed to
+preserve these registers, so in-module composition requires each source callee
+to be independently proved; the external-callee assumption is listed as
+`machine_code_callee_saved_preservation_assumed_for_external_callees`.
+Agent consumers must adopt both check names and the function field.
 
 Sibling descriptors now name the exit-status observation only as
 `os_exit_status_observation` (formerly bare `os_exit_status` in
