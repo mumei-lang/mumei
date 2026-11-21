@@ -61,6 +61,8 @@ const MACHINE_CODE_REGISTER_CONVENTION_WITH_INTEGER_AGGREGATES: &str =
     "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax_two_eightbyte_integer_aggregates_in_consecutive_gprs_result_rax_rdx";
 const MACHINE_CODE_F64_REGISTER_CONVENTION_WITH_INTEGER_AGGREGATES: &str =
     "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_result_rax_or_xmm0_two_eightbyte_integer_aggregates_in_consecutive_gprs_result_rax_rdx";
+const MACHINE_CODE_F64_REGISTER_CONVENTION_WITH_SSE_AGGREGATES: &str =
+    "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_result_rax_or_xmm0_two_eightbyte_aggregates_classified_integer_gprs_sse_xmm_result_rax_rdx_xmm0_xmm1";
 const MACHINE_CODE_TV_INPUT_DOMAIN: &str =
     "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires";
 const MACHINE_CODE_TV_REFINED_INPUT_DOMAIN: &str =
@@ -75,17 +77,23 @@ const RUNTIME_OBSERVATION_RECHECK_SCOPE: &str =
     "artifact_reproduction_and_runtime_observation_semantics_on_one_invocation_only/no_runtime_abi_or_semantic_proof";
 
 fn machine_tv_register_convention_assumed(
-    equivalent_f64_scalar_count: usize,
+    equivalent_f64_leaf_count: usize,
     equivalent_composite_aggregate_count: usize,
+    equivalent_f64_composite_aggregate_count: usize,
 ) -> &'static str {
+    let has_f64_leaves =
+        equivalent_f64_leaf_count > 0 || equivalent_f64_composite_aggregate_count > 0;
     match (
-        equivalent_f64_scalar_count > 0,
+        has_f64_leaves,
         equivalent_composite_aggregate_count > 0,
+        equivalent_f64_composite_aggregate_count > 0,
     ) {
-        (true, true) => MACHINE_CODE_F64_REGISTER_CONVENTION_WITH_INTEGER_AGGREGATES,
-        (true, false) => MACHINE_CODE_F64_REGISTER_CONVENTION,
-        (false, true) => MACHINE_CODE_REGISTER_CONVENTION_WITH_INTEGER_AGGREGATES,
-        (false, false) => MACHINE_CODE_REGISTER_CONVENTION,
+        (true, true, true) => MACHINE_CODE_F64_REGISTER_CONVENTION_WITH_SSE_AGGREGATES,
+        (true, true, false) => MACHINE_CODE_F64_REGISTER_CONVENTION_WITH_INTEGER_AGGREGATES,
+        (true, false, _) => MACHINE_CODE_F64_REGISTER_CONVENTION,
+        (false, true, true) => MACHINE_CODE_F64_REGISTER_CONVENTION_WITH_SSE_AGGREGATES,
+        (false, true, false) => MACHINE_CODE_REGISTER_CONVENTION_WITH_INTEGER_AGGREGATES,
+        (false, false, _) => MACHINE_CODE_REGISTER_CONVENTION,
     }
 }
 
@@ -113,6 +121,30 @@ fn machine_tv_model_uses_composite_aggregate(model: &semantic_contract::PureI64B
         })
 }
 
+fn machine_tv_model_uses_f64_composite_aggregate(
+    model: &semantic_contract::PureI64Body<'_>,
+) -> bool {
+    model
+        .param_shapes
+        .iter()
+        .zip(&model.param_leaf_doubles)
+        .any(|(shape, leaf_doubles)| {
+            shape.is_some() && leaf_doubles.iter().any(|is_double| *is_double)
+        })
+        || (model.result_shape.is_some()
+            && model.result_leaf_doubles.iter().any(|is_double| *is_double))
+        || model.call_sites.iter().any(|call_site| {
+            call_site.argument_shapes.iter().any(|shape| {
+                matches!(
+                    shape,
+                    semantic_contract::CallValueShape::Struct { has_f64: true, .. }
+                )
+            }) || matches!(
+                call_site.result_shape,
+                semantic_contract::CallValueShape::Struct { has_f64: true, .. }
+            )
+        })
+}
 const OBSERVATION_ENVIRONMENT: &str = "empty";
 const OBSERVATION_WORKING_DIRECTORY: &str = "executable_directory";
 /// The build/recheck single-run cap for observing an executable: a
@@ -3464,9 +3496,9 @@ fn machine_tv_coverage_checks(
 }
 
 fn machine_tv_f64_scalar_checks(
-    equivalent_f64_scalar_count: usize,
+    equivalent_f64_leaf_count: usize,
 ) -> (Vec<&'static str>, Vec<&'static str>) {
-    if equivalent_f64_scalar_count == 0 {
+    if equivalent_f64_leaf_count == 0 {
         return (Vec::new(), Vec::new());
     }
     (
@@ -3502,8 +3534,9 @@ struct MachineTvCounts {
     equivalent_bounded_loop_count: usize,
     equivalent_source_loop_count: usize,
     equivalent_refined_signature_count: usize,
-    equivalent_f64_scalar_count: usize,
+    equivalent_f64_leaf_count: usize,
     equivalent_composite_aggregate_count: usize,
+    equivalent_f64_composite_aggregate_count: usize,
     object_function_count: usize,
 }
 
@@ -3616,25 +3649,39 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
     let mut equivalent_bounded_loop_count = 0usize;
     let mut equivalent_source_loop_count = 0usize;
     let mut equivalent_refined_signature_count = 0usize;
-    let mut equivalent_f64_scalar_count = 0usize;
+    let mut equivalent_f64_leaf_count = 0usize;
     let mut equivalent_composite_aggregate_count = 0usize;
+    let mut equivalent_f64_composite_aggregate_count = 0usize;
     let mut has_cyclic_or_loop_bound_outcome = false;
     for function_name in &data.object_surface.defined {
         let is_entry_wrapper = function_name == "main";
         let has_refined_signature = source_models
             .get(function_name)
             .is_some_and(|model| model.refined_signature);
-        let has_f64_scalar_leaves = source_models.get(function_name).is_some_and(|model| {
+        let has_f64_leaves = source_models.get(function_name).is_some_and(|model| {
             model
                 .param_leaf_doubles
                 .iter()
                 .flatten()
                 .any(|is_double| *is_double)
                 || model.result_leaf_doubles.iter().any(|is_double| *is_double)
+                || model.call_sites.iter().any(|call_site| {
+                    call_site
+                        .arg_leaf_doubles
+                        .iter()
+                        .any(|is_double| *is_double)
+                        || call_site
+                            .result_leaf_doubles
+                            .iter()
+                            .any(|is_double| *is_double)
+                })
         });
         let has_composite_aggregate = source_models
             .get(function_name)
             .is_some_and(machine_tv_model_uses_composite_aggregate);
+        let has_f64_composite_aggregate = source_models
+            .get(function_name)
+            .is_some_and(machine_tv_model_uses_f64_composite_aggregate);
         let has_source_loop = source_models
             .get(function_name)
             .is_some_and(|model| model.loop_bound_exits.is_some());
@@ -3731,11 +3778,14 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
                     if has_refined_signature {
                         equivalent_refined_signature_count += 1;
                     }
-                    if has_f64_scalar_leaves {
-                        equivalent_f64_scalar_count += 1;
+                    if has_f64_leaves {
+                        equivalent_f64_leaf_count += 1;
                     }
                     if has_composite_aggregate {
                         equivalent_composite_aggregate_count += 1;
+                    }
+                    if has_f64_composite_aggregate {
+                        equivalent_f64_composite_aggregate_count += 1;
                     }
                     if has_source_loop {
                         equivalent_source_loop_count += 1;
@@ -3798,8 +3848,9 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
         equivalent_bounded_loop_count,
         equivalent_source_loop_count,
         equivalent_refined_signature_count,
-        equivalent_f64_scalar_count,
+        equivalent_f64_leaf_count,
         equivalent_composite_aggregate_count,
+        equivalent_f64_composite_aggregate_count,
         object_function_count: data.object_surface.defined.len(),
     };
     let mut coverage = machine_tv_coverage_checks(
@@ -3818,7 +3869,7 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
         counts.equivalent_callee_saved_count,
         counts.equivalent_callee_saved_preserved_count,
     );
-    let f64_coverage = machine_tv_f64_scalar_checks(counts.equivalent_f64_scalar_count);
+    let f64_coverage = machine_tv_f64_scalar_checks(counts.equivalent_f64_leaf_count);
     coverage.0.extend(f64_coverage.0);
     coverage.1.extend(f64_coverage.1);
     let composite_aggregate_coverage =
@@ -3917,8 +3968,9 @@ fn write_machine_tv(
             "scope": evaluation.scope,
             "build_id": expected_build_id,
             "register_convention_assumed": machine_tv_register_convention_assumed(
-                evaluation.counts.equivalent_f64_scalar_count,
+                evaluation.counts.equivalent_f64_leaf_count,
                 evaluation.counts.equivalent_composite_aggregate_count,
+                evaluation.counts.equivalent_f64_composite_aggregate_count,
             ),
             "input_domain": evaluation.input_domain,
             "functions": evaluation.functions,
@@ -4073,8 +4125,9 @@ fn write_object_machine_tv_acceptance(
             "llvm_sha256": format!("{:x}", Sha256::digest(&data.llvm_bytes)),
             "object_sha256": format!("{:x}", Sha256::digest(&data.object_bytes)),
             "register_convention_assumed": machine_tv_register_convention_assumed(
-                evaluation.counts.equivalent_f64_scalar_count,
+                evaluation.counts.equivalent_f64_leaf_count,
                 evaluation.counts.equivalent_composite_aggregate_count,
+                evaluation.counts.equivalent_f64_composite_aggregate_count,
             ),
             "input_domain": &evaluation.input_domain,
             "functions": &evaluation.functions,
@@ -4735,20 +4788,24 @@ mod tests {
     #[test]
     fn machine_tv_descriptor_tracks_f64_scalar_coverage_and_assumptions() {
         assert_eq!(
-            machine_tv_register_convention_assumed(1, 0),
+            machine_tv_register_convention_assumed(1, 0, 0),
             "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_result_rax_or_xmm0"
         );
         assert_eq!(
-            machine_tv_register_convention_assumed(0, 0),
+            machine_tv_register_convention_assumed(0, 0, 0),
             "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax"
         );
         assert_eq!(
-            machine_tv_register_convention_assumed(0, 1),
+            machine_tv_register_convention_assumed(0, 1, 0),
             "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax_two_eightbyte_integer_aggregates_in_consecutive_gprs_result_rax_rdx"
         );
         assert_eq!(
-            machine_tv_register_convention_assumed(1, 1),
+            machine_tv_register_convention_assumed(1, 1, 0),
             "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_result_rax_or_xmm0_two_eightbyte_integer_aggregates_in_consecutive_gprs_result_rax_rdx"
+        );
+        assert_eq!(
+            machine_tv_register_convention_assumed(1, 1, 1),
+            "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_result_rax_or_xmm0_two_eightbyte_aggregates_classified_integer_gprs_sse_xmm_result_rax_rdx_xmm0_xmm1"
         );
         let (performed, not_performed) = machine_tv_f64_scalar_checks(1);
         assert_eq!(performed, vec!["machine_code_f64_scalar_function_tv"]);
@@ -4804,18 +4861,31 @@ mod tests {
             result: z3::ast::BV::from_u64(&context, 0, 64),
             result_is_double: false,
             result_shape: semantic_contract::CallValueShape::Scalar { leaf_count: 1 },
+            result_leaf_doubles: vec![false],
             guard: z3::ast::Bool::from_bool(&context, true),
         });
         assert!(model.param_shapes.is_empty());
         assert_eq!(model.result_shape, None);
         assert!(machine_tv_model_uses_composite_aggregate(&model));
         assert_eq!(
-            machine_tv_register_convention_assumed(0, 1),
+            machine_tv_register_convention_assumed(0, 1, 0),
             "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax_two_eightbyte_integer_aggregates_in_consecutive_gprs_result_rax_rdx"
         );
         assert_eq!(
             machine_tv_composite_aggregate_checks(1).0,
             vec!["machine_code_composite_register_aggregate_tv"]
+        );
+
+        model.call_sites[0].arg_leaf_doubles = vec![false, true];
+        model.call_sites[0].argument_shapes = vec![semantic_contract::CallValueShape::Struct {
+            leaf_count: 2,
+            has_enum: false,
+            has_f64: true,
+        }];
+        assert!(machine_tv_model_uses_f64_composite_aggregate(&model));
+        assert_eq!(
+            machine_tv_register_convention_assumed(1, 1, 1),
+            MACHINE_CODE_F64_REGISTER_CONVENTION_WITH_SSE_AGGREGATES
         );
     }
 

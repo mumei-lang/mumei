@@ -4148,10 +4148,11 @@ computed f64 arguments whose NaN payload bits are not provably identical and
 f64 tail calls fail closed as `call_arguments`; more than eight f64 arguments
 use `argument_count`. f64 call results remain supported. MXCSR RNE, masked
 exceptions, disabled FTZ/DAZ, and NaN payload bits are not established. Core
-performs `machine_code_f64_scalar_function_tv` for equivalent scalar-f64
-functions and lists `machine_code_tv_mxcsr_control_state` and
-`machine_code_tv_nan_payload_bits` as not performed. Composite f64 remains
-outside the profile. Register-only `ucomisd`/`comisd` model
+performs `machine_code_f64_scalar_function_tv` for equivalent functions with
+any f64 leaf, including one inside a struct or call shape, and lists
+`machine_code_tv_mxcsr_control_state` and `machine_code_tv_nan_payload_bits`
+as not performed. One-/two-leaf f64 aggregates use the mixed INTEGER/SSE
+rules described in the machine-TV profile. Register-only `ucomisd`/`comisd` model
 unordered/equal/less flags exactly (`ZF = unordered || fp.eq`,
 `CF = unordered || fp.lt`, `PF = unordered`; `OF/SF/AF = 0`); their branch,
 `setcc`, and `cmovcc` conditions are supported. Memory operands and parity
@@ -9039,22 +9040,26 @@ Wave 6（P25、現在）: P31 `task_group` — `task` / `task_group:all` lowerin
 
 ### C10 Option B machine-TV profile update
 
-Core machine-TV admits one- or two-leaf struct parameters/results only when
-every leaf in the struct-bearing signature is integer, under the recorded
-composite profile. Leaves use consecutive GPRs and results use `rax`/`rdx`.
-Direct-call sites also admit one-/two-leaf all-integer struct arguments and
-results, with exact leaf obligations against consecutive GPRs and result
-binding in `rax`/`rdx`. Struct arguments must fit wholly in the remaining
-GPRs and are never passed on the stack; an aggregate that cannot fit returns
-`argument_count`. Enum signatures/call sites, f64-containing or three-or-more
-leaf structs, and tail calls with struct arguments or results remain
+Core machine-TV admits one-/two-leaf struct parameters, results, and
+direct-call values whose leaves are INTEGER (`i64`) and/or SSE (`f64`)
+eightbytes. INTEGER leaves use the next GPR from `rdi`–`r9`; SSE leaves use
+the next XMM register from `xmm0`–`xmm7`, independently. Aggregates are
+preflighted per class and must fit wholly in the remaining registers; they are
+never split or passed on the stack. Results preserve source leaf order:
+INTEGER leaves use `rax` then `rdx`, SSE leaves use the low 64 bits of `xmm0`
+then `xmm1`. Function-result f64 leaves compare NaN-aware, while integer
+leaves compare exactly.
+
+F64 struct-call arguments use NaN-aware Query A matching plus a per-path
+exact-bit Query B obligation, whose failure is `call_arguments`, never
+`different`. F64 tail calls, enum signatures/call sites, structs with three
+or more leaves, u64/i128 leaves, post-writes, and bounded memory remain
 fail-closed. Equivalent functions using struct signatures or direct calls
-report `machine_code_composite_register_aggregate_tv` and the corresponding
-register-convention suffix. Core #1238 also admits scalar f64 call arguments
-only when NaN-aware value matching and a per-path exact-bit proof both hold;
-computed arguments without that proof and f64 tail calls remain
-`call_arguments`. These are bounded machine-TV assumptions, not general ABI
-or runtime claims.
+report `machine_code_composite_register_aggregate_tv`; integer-only
+aggregates use the GPR-only convention suffix, and any equivalent aggregate
+containing f64 uses
+`_two_eightbyte_aggregates_classified_integer_gprs_sse_xmm_result_rax_rdx_xmm0_xmm1`.
+These are bounded machine-TV assumptions, not general ABI or runtime claims.
 
 ## Related Documents
 
