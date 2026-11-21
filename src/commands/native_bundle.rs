@@ -56,17 +56,16 @@ const OBSERVATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// never stores or hashes an unbounded channel — overflow yields no pin.
 const OBSERVED_CHANNEL_MAX_BYTES: usize = 65_536;
 
-/// Declare the inputs of the one invocation. Environment and working
-/// directory are inherited from the consumer and unpinned, so observations
-/// hold only under that unpinned context.
+/// Declare the inputs of the one invocation: an empty environment and the
+/// executable's directory as the working directory.
 fn observation_invocation_envelope() -> serde_json::Value {
     serde_json::json!({
         "argv": [],
         "stdin": "closed",
         "timeout_ms": OBSERVATION_TIMEOUT.as_millis(),
         "channel_cap_bytes": OBSERVED_CHANNEL_MAX_BYTES,
-        "environment": "inherited_unpinned",
-        "working_directory": "inherited_unpinned",
+        "environment": "empty",
+        "working_directory": "executable_directory",
     })
 }
 
@@ -81,6 +80,22 @@ fn observation_host() -> serde_json::Value {
     })
 }
 
+/// Resolve `executable` to an absolute path when possible, then spawn it under
+/// the pinned envelope: empty environment, cwd = its directory, no arguments.
+fn observation_command(executable: &Path) -> std::process::Command {
+    let resolved_executable =
+        std::path::absolute(executable).unwrap_or_else(|_| executable.to_path_buf());
+    let mut command = std::process::Command::new(&resolved_executable);
+    command.env_clear();
+    if let Some(dir) = resolved_executable
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+    {
+        command.current_dir(dir);
+    }
+    command
+}
+
 /// Which standard output channel an observation drains and digests.
 #[derive(Clone, Copy)]
 enum ObservedChannel {
@@ -88,12 +103,12 @@ enum ObservedChannel {
     Stderr,
 }
 
-/// Run `executable` once with no arguments and closed stdio, returning
-/// its 0..=255 exit code. `None` on spawn failure, timeout or signal
-/// termination — never a claim about program semantics, only an OS
-/// exit-status observation.
+/// Run `executable` once with no arguments, an empty environment, cwd set to
+/// its directory and closed stdio, returning its 0..=255 exit code. `None`
+/// on spawn failure, timeout or signal termination — never a claim about
+/// program semantics, only an OS exit-status observation.
 fn observed_exit_status(executable: &Path) -> Option<u32> {
-    let mut child = std::process::Command::new(executable)
+    let mut child = observation_command(executable)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -114,8 +129,9 @@ fn observed_exit_status(executable: &Path) -> Option<u32> {
     }
 }
 
-/// Run `executable` once with no arguments, closed stdin and the other
-/// channel discarded, draining `channel` into a buffer capped at
+/// Run `executable` once with no arguments, an empty environment, cwd set to
+/// its directory, closed stdin and the other channel discarded, draining
+/// `channel` into a buffer capped at
 /// `OBSERVED_CHANNEL_MAX_BYTES` (the reader keeps draining past the cap
 /// so the child never blocks on a full pipe), returning the sha256 hex
 /// of the captured bytes. `None` on spawn failure, timeout, signal
@@ -141,7 +157,7 @@ fn observed_stream_inner(
     executable: &Path,
     channel: ObservedChannel,
 ) -> Result<String, ObservedStreamFailure> {
-    let mut command = std::process::Command::new(executable);
+    let mut command = observation_command(executable);
     command.stdin(Stdio::null());
     match channel {
         ObservedChannel::Stdout => {
@@ -249,8 +265,10 @@ enum RuntimeObservationCheck {
     Inconclusive(&'static str),
 }
 
+/// Run `executable` once with no arguments, an empty environment, cwd set to
+/// its directory and closed stdin, observing both output channels.
 fn observed_invocation(executable: &Path) -> Result<InvocationObservation, ObservedStreamFailure> {
-    let mut child = std::process::Command::new(executable)
+    let mut child = observation_command(executable)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2676,6 +2694,74 @@ mod tests {
         assert_eq!(observation.exit_status, 7);
         assert_eq!(observation.stdout_sha256, sha256(b"out"));
         assert_eq!(observation.stderr_sha256, sha256(b"err"));
+    }
+
+    #[test]
+    fn observation_command_resolves_a_relative_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let printer = sub.join("printer.sh");
+        executable_script(
+            &printer,
+            "#!/bin/sh\nprintf '%s|%s' \"${HOME-unset}\" \"$(pwd -P)\"",
+        );
+        let canonical_dir = sub.canonicalize().unwrap();
+        let expected = format!("unset|{}", canonical_dir.display());
+        let observation = observed_invocation(&printer).unwrap();
+        assert_eq!(observation.stdout_sha256, sha256(expected.as_bytes()));
+
+        let command = observation_command(Path::new("rel/exe"));
+        let program = Path::new(command.get_program());
+        assert!(program.is_absolute());
+        assert!(program.ends_with(Path::new("rel/exe")));
+        let expected_cwd = std::env::current_dir().unwrap().join("rel");
+        assert_eq!(command.get_current_dir(), Some(expected_cwd.as_path()));
+    }
+
+    #[test]
+    fn invocation_observation_uses_an_empty_environment_and_executable_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_dir = dir.path().canonicalize().unwrap();
+        let printer = dir.path().join("printer.sh");
+        executable_script(
+            &printer,
+            "#!/bin/sh\nprintf '%s|%s' \"${HOME-unset}\" \"$(pwd -P)\"",
+        );
+        let expected = format!("unset|{}", canonical_dir.display());
+        let observation = observed_invocation(&printer).unwrap();
+        assert_eq!(observation.stdout_sha256, sha256(expected.as_bytes()));
+    }
+
+    #[test]
+    fn stdout_observation_uses_an_empty_environment_and_executable_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_dir = dir.path().canonicalize().unwrap();
+        let printer = dir.path().join("printer.sh");
+        executable_script(
+            &printer,
+            "#!/bin/sh\nprintf '%s|%s' \"${HOME-unset}\" \"$(pwd -P)\"",
+        );
+        let expected = format!("unset|{}", canonical_dir.display());
+        assert_eq!(
+            observed_stream_inner(&printer, ObservedChannel::Stdout).unwrap(),
+            sha256(expected.as_bytes())
+        );
+    }
+
+    #[test]
+    fn exit_status_observation_uses_an_empty_environment_and_executable_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_dir = dir.path().canonicalize().unwrap();
+        let executable = dir.path().join("check-context.sh");
+        executable_script(
+            &executable,
+            &format!(
+                "#!/bin/sh\n[ -z \"${{HOME+x}}\" ] && [ \"$(pwd -P)\" = \"{}\" ] && exit 0\nexit 9\n",
+                canonical_dir.display()
+            ),
+        );
+        assert_eq!(observed_exit_status(&executable), Some(0));
     }
 
     #[test]

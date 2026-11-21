@@ -1899,12 +1899,20 @@ and the mumei-agent `native-observations-accept` route (mumei-agent#1039).
 
 Both JSON descriptors report the same invocation envelope:
 `argv: []`, `stdin: "closed"`, `timeout_ms: 30000`,
-`channel_cap_bytes: 65536`, and `environment` and
-`working_directory: "inherited_unpinned"`. Multiple invocations,
-non-empty argv, stdin bytes, pinned environment or working directory,
-and CPU/memory resource limits are not supported or claimed; only the
-30-second timeout and 64 KiB per-channel cap are enforced, and none of
-those properties is covered by `runtime_observation_semantics`.
+`channel_cap_bytes: 65536`, `environment: "empty"` and
+`working_directory: "executable_directory"`. Multiple invocations,
+non-empty argv, stdin bytes and CPU/memory resource limits are not
+supported or claimed; only the 30-second timeout and 64 KiB per-channel
+cap are enforced, and none of those properties is covered by
+`runtime_observation_semantics`.
+
+Every native observation uses this spawn policy: build-time pins,
+per-channel `recheck-*`/`accept-*`, and
+`recheck-observations`/`accept-observations`. The bundle record does not
+pin the envelope: older Core bundles may have build-time pins from the
+inherited environment and cwd but are now rechecked with an empty
+environment and executable-directory cwd. A match is the claim; a
+mismatch fails closed.
 
 Both runtime-observation descriptors also carry `host` (`os`, `arch`,
 `family`), the running consumer binary's compile-time target, recorded

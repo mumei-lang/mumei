@@ -3044,10 +3044,14 @@ acceptance descriptor only when the artifact chain and all three
 observations match in one invocation; it is the only descriptor that
 performs `runtime_observation_semantics`. Its JSON envelope declares
 `argv: []`, `stdin: "closed"`, `timeout_ms: 30000`,
-`channel_cap_bytes: 65536`, `environment: "inherited_unpinned"` and
-`working_directory: "inherited_unpinned"`; it does not
-claim multiple invocations, non-empty argv, stdin bytes, pinned context
-or CPU/memory limits. The Agent
+`channel_cap_bytes: 65536`, `environment: "empty"` and
+`working_directory: "executable_directory"`; it does not claim multiple
+invocations, non-empty argv, stdin bytes or CPU/memory limits. Every
+native observation uses this policy, including build-time pins and all
+per-channel and runtime-observation recheck/accept commands. The record
+does not pin the envelope: older Core bundles may have build-time pins
+under inherited environment/cwd but are now rechecked with the pinned
+environment and cwd; a match is claimed and a mismatch fails closed. The Agent
 `native-observations-accept` route (mumei-agent#1039) now performs this
 check from the descriptor; its acceptance rests on Core's exit code and
 input recheck, and it does not validate the Core-reported envelope. See the [runtime-observation acceptance
