@@ -648,7 +648,10 @@ pub(crate) fn run(command: NativeBundleCommand) {
                         report_object_acceptance_inconclusive(message);
                     }
                 };
-                match machine_tv_acceptance_decision(&evaluation.outcomes) {
+                match machine_tv_acceptance_decision(
+                    &evaluation.outcomes,
+                    evaluation.entry_wrapper_applicable,
+                ) {
                     ObjectMachineTvAcceptanceDecision::Accepted => {
                         write_object_machine_tv_acceptance(
                             &data,
@@ -3301,6 +3304,20 @@ fn machine_tv_callee_saved_preservation_checks(
     }
 }
 
+fn machine_tv_entry_wrapper_checks(
+    applicable: bool,
+    outcome: Option<FunctionOutcome>,
+) -> (Vec<&'static str>, Vec<&'static str>) {
+    if !applicable {
+        return (Vec::new(), Vec::new());
+    }
+    if outcome == Some(FunctionOutcome::Equivalent) {
+        (vec!["machine_code_entry_wrapper_tv"], Vec::new())
+    } else {
+        (Vec::new(), vec!["machine_code_entry_wrapper_tv"])
+    }
+}
+
 fn machine_tv_input_domain(source_loops: bool) -> String {
     if source_loops {
         format!(
@@ -3367,6 +3384,7 @@ fn machine_tv_coverage_checks(
 
 struct MachineTvCounts {
     equivalent_count: usize,
+    equivalent_callee_saved_count: usize,
     equivalent_callee_saved_preserved_count: usize,
     equivalent_leaf_count: usize,
     equivalent_call_count: usize,
@@ -3385,6 +3403,7 @@ struct MachineTvEvaluation {
     coverage: (Vec<&'static str>, Vec<&'static str>),
     input_domain: String,
     scope: &'static str,
+    entry_wrapper_applicable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3396,6 +3415,7 @@ enum ObjectMachineTvAcceptanceDecision {
 
 fn machine_tv_acceptance_decision(
     outcomes: &BTreeMap<String, FunctionOutcome>,
+    entry_wrapper_applicable: bool,
 ) -> ObjectMachineTvAcceptanceDecision {
     if outcomes
         .values()
@@ -3403,8 +3423,22 @@ fn machine_tv_acceptance_decision(
     {
         return ObjectMachineTvAcceptanceDecision::Different;
     }
+    if entry_wrapper_applicable {
+        match outcomes.get("main") {
+            Some(FunctionOutcome::Equivalent) => (),
+            Some(FunctionOutcome::Different) => {
+                return ObjectMachineTvAcceptanceDecision::Different;
+            }
+            Some(FunctionOutcome::Unknown | FunctionOutcome::OutsideProfile(_)) | None => {
+                return ObjectMachineTvAcceptanceDecision::Inconclusive;
+            }
+        }
+    }
     let mut source_atom_count = 0;
-    for outcome in outcomes.values() {
+    for (name, outcome) in outcomes {
+        if entry_wrapper_applicable && name == "main" {
+            continue;
+        }
         match outcome {
             FunctionOutcome::Equivalent => source_atom_count += 1,
             FunctionOutcome::OutsideProfile("not_a_source_atom") => (),
@@ -3452,9 +3486,15 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
             return Err("Machine-code TV inconclusive; source atom names do not map uniquely to object functions.");
         }
     }
+    let entry_wrapper_applicable = data.object_surface.defined.contains("main")
+        && data.object_surface.defined.contains("__mumei_user_main")
+        && source_models
+            .get("__mumei_user_main")
+            .is_some_and(machine_tv::supports_signature);
     let mut functions = BTreeMap::new();
     let mut outcomes = BTreeMap::new();
     let mut equivalent_count = 0usize;
+    let mut equivalent_callee_saved_count = 0usize;
     let mut equivalent_callee_saved_preserved_count = 0usize;
     let mut equivalent_leaf_count = 0usize;
     let mut equivalent_call_count = 0usize;
@@ -3465,6 +3505,7 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
     let mut equivalent_source_loop_count = 0usize;
     let mut has_cyclic_or_loop_bound_outcome = false;
     for function_name in &data.object_surface.defined {
+        let is_entry_wrapper = function_name == "main";
         let has_source_loop = source_models
             .get(function_name)
             .is_some_and(|model| model.loop_bound_exits.is_some());
@@ -3475,7 +3516,32 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
         let mut has_conditional_call = false;
         let mut has_reachable_cycle = false;
         let mut callee_saved_preservation = None;
-        let outcome = if let Some(model) = source_models.get(function_name) {
+        let outcome = if is_entry_wrapper {
+            if entry_wrapper_applicable {
+                if let Some((address, bytes)) =
+                    object_function_bytes(&data.object_bytes, function_name)
+                {
+                    let call_targets = data
+                        .object_surface
+                        .call_targets
+                        .get(function_name)
+                        .cloned()
+                        .unwrap_or_default();
+                    let (outcome, preservation) = machine_tv::check_entry_wrapper_with_preservation(
+                        &bytes,
+                        address,
+                        &call_targets,
+                        &context,
+                    );
+                    callee_saved_preservation = preservation;
+                    outcome
+                } else {
+                    FunctionOutcome::OutsideProfile("unsupported_instruction")
+                }
+            } else {
+                FunctionOutcome::OutsideProfile("not_a_source_atom")
+            }
+        } else if let Some(model) = source_models.get(function_name) {
             if model.inputs.len() > machine_tv::MAX_ARGUMENT_COUNT {
                 FunctionOutcome::OutsideProfile("argument_count")
             } else if let Some((address, bytes)) =
@@ -3517,7 +3583,10 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
         };
         let value = match outcome {
             FunctionOutcome::Equivalent => {
-                equivalent_count += 1;
+                equivalent_callee_saved_count += 1;
+                if !is_entry_wrapper {
+                    equivalent_count += 1;
+                }
                 let preservation = callee_saved_preservation.ok_or(
                     "Machine-code TV equivalence result is missing callee-saved preservation.",
                 )?;
@@ -3529,25 +3598,27 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
                     machine_tv::CalleeSavedPreservation::Violated => "violated",
                     machine_tv::CalleeSavedPreservation::Unknown => "unknown",
                 };
-                if has_source_loop {
-                    equivalent_source_loop_count += 1;
-                }
-                if has_reachable_cycle {
-                    equivalent_bounded_loop_count += 1;
-                }
-                if has_source_calls {
-                    equivalent_call_count += 1;
-                    if has_conditional_call {
-                        equivalent_conditional_call_count += 1;
+                if !is_entry_wrapper {
+                    if has_source_loop {
+                        equivalent_source_loop_count += 1;
                     }
-                } else if !has_reachable_cycle {
-                    match branch_shape {
-                        machine_tv::BranchShape::None => equivalent_leaf_count += 1,
-                        machine_tv::BranchShape::Forward => {
-                            equivalent_forward_branch_count += 1;
+                    if has_reachable_cycle {
+                        equivalent_bounded_loop_count += 1;
+                    }
+                    if has_source_calls {
+                        equivalent_call_count += 1;
+                        if has_conditional_call {
+                            equivalent_conditional_call_count += 1;
                         }
-                        machine_tv::BranchShape::AcyclicBackward => {
-                            equivalent_acyclic_branch_count += 1;
+                    } else if !has_reachable_cycle {
+                        match branch_shape {
+                            machine_tv::BranchShape::None => equivalent_leaf_count += 1,
+                            machine_tv::BranchShape::Forward => {
+                                equivalent_forward_branch_count += 1;
+                            }
+                            machine_tv::BranchShape::AcyclicBackward => {
+                                equivalent_acyclic_branch_count += 1;
+                            }
                         }
                     }
                 }
@@ -3565,11 +3636,21 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
                 serde_json::json!({"outcome": "outside_profile", "reason": reason})
             }
         };
+        let value = if is_entry_wrapper {
+            let mut value = value;
+            if let serde_json::Value::Object(entry) = &mut value {
+                entry.insert("role".to_owned(), serde_json::json!("entry_wrapper"));
+            }
+            value
+        } else {
+            value
+        };
         functions.insert(function_name.clone(), value);
         outcomes.insert(function_name.clone(), outcome);
     }
     let counts = MachineTvCounts {
         equivalent_count,
+        equivalent_callee_saved_count,
         equivalent_callee_saved_preserved_count,
         equivalent_leaf_count,
         equivalent_call_count,
@@ -3593,11 +3674,15 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
         has_cyclic_or_loop_bound_outcome,
     );
     let callee_saved_coverage = machine_tv_callee_saved_preservation_checks(
-        counts.equivalent_count,
+        counts.equivalent_callee_saved_count,
         counts.equivalent_callee_saved_preserved_count,
     );
     coverage.0.extend(callee_saved_coverage.0);
     coverage.1.extend(callee_saved_coverage.1);
+    let entry_wrapper_coverage =
+        machine_tv_entry_wrapper_checks(entry_wrapper_applicable, outcomes.get("main").copied());
+    coverage.0.extend(entry_wrapper_coverage.0);
+    coverage.1.extend(entry_wrapper_coverage.1);
     let scope = if data.object_link_correspondence {
         MACHINE_CODE_TV_SCOPE
     } else {
@@ -3611,6 +3696,7 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
         coverage,
         input_domain,
         scope,
+        entry_wrapper_applicable,
     })
 }
 
@@ -3630,12 +3716,23 @@ fn write_machine_tv(
     for (function_name, outcome) in &evaluation.outcomes {
         match outcome {
             FunctionOutcome::Different => {
-                eprintln!("machine code of {function_name} differs from its source atom");
+                if function_name == "main" && evaluation.entry_wrapper_applicable {
+                    eprintln!("machine code of the entry wrapper differs from its model");
+                } else {
+                    eprintln!("machine code of {function_name} differs from its source atom");
+                }
                 drop(data);
                 std::process::exit(1);
             }
             FunctionOutcome::Unknown => {
                 eprintln!("Machine-code TV inconclusive; Z3 returned unknown.");
+                drop(data);
+                std::process::exit(3);
+            }
+            FunctionOutcome::OutsideProfile(_)
+                if function_name == "main" && evaluation.entry_wrapper_applicable =>
+            {
+                eprintln!("Machine-code TV inconclusive; entry wrapper is outside the profile.");
                 drop(data);
                 std::process::exit(3);
             }
@@ -3684,8 +3781,14 @@ fn write_machine_tv(
                     .map_err(|_| BundleError("cannot write machine-code TV descriptor"))
             })
     } else {
+        let wrapper_summary =
+            if evaluation.outcomes.get("main") == Some(&FunctionOutcome::Equivalent) {
+                " Entry wrapper is equivalent within the machine-code TV profile."
+            } else {
+                ""
+            };
         println!(
-            "Machine-code TV: {} of {} object functions equivalent to their source atoms within the acyclic-branch, conditional-call, and bounded-loop profile ({} bounded-loop functions).\nScope: {}",
+            "Machine-code TV: {} of {} object functions equivalent to their source atoms within the acyclic-branch, conditional-call, and bounded-loop profile ({} bounded-loop functions).{wrapper_summary}\nScope: {}",
             evaluation.counts.equivalent_count,
             evaluation.counts.object_function_count,
             evaluation.counts.equivalent_bounded_loop_count,
@@ -3697,12 +3800,13 @@ fn write_machine_tv(
 
 fn object_machine_tv_source_atom_count(outcomes: &BTreeMap<String, FunctionOutcome>) -> usize {
     outcomes
-        .values()
-        .filter(|outcome| {
-            !matches!(
-                **outcome,
-                FunctionOutcome::OutsideProfile("not_a_source_atom")
-            )
+        .iter()
+        .filter(|(name, outcome)| {
+            name.as_str() != "main"
+                && !matches!(
+                    **outcome,
+                    FunctionOutcome::OutsideProfile("not_a_source_atom")
+                )
         })
         .count()
 }
@@ -3719,6 +3823,7 @@ fn object_machine_tv_acceptance_checks(
     family: RecordFamily,
     canonical_argv_compared: bool,
     object_link_correspondence: bool,
+    entry_wrapper_equivalent: bool,
     coverage: &(Vec<&'static str>, Vec<&'static str>),
 ) -> (Vec<&'static str>, Vec<&'static str>) {
     let mut checks_performed = vec!["bundle_identity_binding"];
@@ -3751,8 +3856,10 @@ fn object_machine_tv_acceptance_checks(
     if !object_link_correspondence {
         checks_not_performed.push("object_link_correspondence");
     }
+    if !entry_wrapper_equivalent {
+        checks_not_performed.push("object_entry_wrapper_semantics");
+    }
     checks_not_performed.extend([
-        "object_entry_wrapper_semantics",
         "register_convention_validation",
         "optimizer_semantics",
         "abi_runtime_semantics",
@@ -3797,6 +3904,8 @@ fn write_object_machine_tv_acceptance(
             data.family,
             data.canonical_argv_compared,
             data.object_link_correspondence,
+            evaluation.entry_wrapper_applicable
+                && evaluation.outcomes.get("main") == Some(&FunctionOutcome::Equivalent),
             &evaluation.coverage,
         );
         let descriptor = serde_json::json!({
@@ -3821,9 +3930,24 @@ fn write_object_machine_tv_acceptance(
             .write_all(&bytes)
             .map_err(|_| BundleError("cannot write native object acceptance descriptor"))
     } else {
+        let wrapper_equivalent = evaluation.entry_wrapper_applicable
+            && evaluation.outcomes.get("main") == Some(&FunctionOutcome::Equivalent);
+        let wrapper_summary = if wrapper_equivalent {
+            " Entry wrapper is equivalent within the machine-code TV profile."
+        } else {
+            ""
+        };
         println!(
-            "Native object accepted within the machine-code TV profile: {} source-atom functions equivalent under the assumed register convention and input domain.\nAcceptance scope excludes producer authenticity, historical execution, object-entry wrapper semantics, register-convention validation, optimizer/ABI/runtime/OS observations, grade promotion, and Lean checks; scope: {scope}.",
+            "Native object accepted within the machine-code TV profile: {} source-atom functions equivalent under the assumed register convention and input domain.{wrapper_summary}",
             object_machine_tv_source_atom_count(&evaluation.outcomes),
+        );
+        let wrapper_exclusion = if wrapper_equivalent {
+            ""
+        } else {
+            "object-entry wrapper semantics, "
+        };
+        println!(
+            "Acceptance scope excludes producer authenticity, historical execution, {wrapper_exclusion}register-convention validation, optimizer/ABI/runtime/OS observations, grade promotion, and Lean checks; scope: {scope}."
         );
         Ok(())
     }
@@ -4024,41 +4148,81 @@ mod tests {
     fn object_machine_tv_acceptance_decision_is_fail_closed() {
         let accepted = BTreeMap::from([
             ("__mumei_user_main".to_owned(), FunctionOutcome::Equivalent),
-            (
-                "main".to_owned(),
-                FunctionOutcome::OutsideProfile("not_a_source_atom"),
-            ),
+            ("main".to_owned(), FunctionOutcome::Equivalent),
         ]);
         assert_eq!(
-            machine_tv_acceptance_decision(&accepted),
+            machine_tv_acceptance_decision(&accepted, true),
             ObjectMachineTvAcceptanceDecision::Accepted
         );
-
-        let different = BTreeMap::from([
-            ("__mumei_user_main".to_owned(), FunctionOutcome::Different),
-            (
-                "main".to_owned(),
-                FunctionOutcome::OutsideProfile("not_a_source_atom"),
-            ),
-        ]);
         assert_eq!(
-            machine_tv_acceptance_decision(&different),
-            ObjectMachineTvAcceptanceDecision::Different
-        );
-
-        let unknown = BTreeMap::from([
-            ("__mumei_user_main".to_owned(), FunctionOutcome::Unknown),
-            (
-                "main".to_owned(),
-                FunctionOutcome::OutsideProfile("not_a_source_atom"),
+            machine_tv_acceptance_decision(
+                &BTreeMap::from([("main".to_owned(), FunctionOutcome::Equivalent)]),
+                true,
             ),
-        ]);
-        assert_eq!(
-            machine_tv_acceptance_decision(&unknown),
             ObjectMachineTvAcceptanceDecision::Inconclusive
         );
 
-        let outside_profile = BTreeMap::from([
+        let different_source = BTreeMap::from([
+            ("__mumei_user_main".to_owned(), FunctionOutcome::Different),
+            ("main".to_owned(), FunctionOutcome::Equivalent),
+        ]);
+        assert_eq!(
+            machine_tv_acceptance_decision(&different_source, true),
+            ObjectMachineTvAcceptanceDecision::Different
+        );
+
+        let different_wrapper = BTreeMap::from([
+            ("__mumei_user_main".to_owned(), FunctionOutcome::Equivalent),
+            ("main".to_owned(), FunctionOutcome::Different),
+        ]);
+        assert_eq!(
+            machine_tv_acceptance_decision(&different_wrapper, true),
+            ObjectMachineTvAcceptanceDecision::Different
+        );
+
+        let unknown_wrapper = BTreeMap::from([
+            ("__mumei_user_main".to_owned(), FunctionOutcome::Equivalent),
+            ("main".to_owned(), FunctionOutcome::Unknown),
+        ]);
+        assert_eq!(
+            machine_tv_acceptance_decision(&unknown_wrapper, true),
+            ObjectMachineTvAcceptanceDecision::Inconclusive
+        );
+
+        let outside_wrapper = BTreeMap::from([
+            ("__mumei_user_main".to_owned(), FunctionOutcome::Equivalent),
+            (
+                "main".to_owned(),
+                FunctionOutcome::OutsideProfile("unsupported_instruction"),
+            ),
+        ]);
+        assert_eq!(
+            machine_tv_acceptance_decision(&outside_wrapper, true),
+            ObjectMachineTvAcceptanceDecision::Inconclusive
+        );
+
+        let unknown_source = BTreeMap::from([
+            ("__mumei_user_main".to_owned(), FunctionOutcome::Unknown),
+            ("main".to_owned(), FunctionOutcome::Equivalent),
+        ]);
+        assert_eq!(
+            machine_tv_acceptance_decision(&unknown_source, true),
+            ObjectMachineTvAcceptanceDecision::Inconclusive
+        );
+
+        let absent_wrapper = BTreeMap::from([
+            ("__mumei_user_main".to_owned(), FunctionOutcome::Equivalent),
+            (
+                "main".to_owned(),
+                FunctionOutcome::OutsideProfile("not_a_source_atom"),
+            ),
+        ]);
+        assert_eq!(
+            machine_tv_acceptance_decision(&absent_wrapper, false),
+            ObjectMachineTvAcceptanceDecision::Accepted
+        );
+
+        let unsupported_source = BTreeMap::from([
             (
                 "__mumei_user_main".to_owned(),
                 FunctionOutcome::OutsideProfile("unsupported_instruction"),
@@ -4069,79 +4233,116 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            machine_tv_acceptance_decision(&outside_profile),
+            machine_tv_acceptance_decision(&unsupported_source, false),
             ObjectMachineTvAcceptanceDecision::Inconclusive
         );
 
-        let only_wrapper = BTreeMap::from([(
+        let only_non_source = BTreeMap::from([(
             "main".to_owned(),
             FunctionOutcome::OutsideProfile("not_a_source_atom"),
         )]);
         assert_eq!(
-            machine_tv_acceptance_decision(&only_wrapper),
+            machine_tv_acceptance_decision(&only_non_source, false),
             ObjectMachineTvAcceptanceDecision::Inconclusive
         );
     }
 
     #[test]
-    fn object_machine_tv_acceptance_checks_follow_record_and_recheck_gates() {
-        let coverage = (
-            vec![
-                "machine_code_leaf_function_tv",
-                "machine_code_leaf_function_tv",
-            ],
-            vec![
-                "machine_code_direct_call_site_tv",
-                "machine_code_leaf_function_tv",
-            ],
+    fn machine_tv_entry_wrapper_check_coverage_tracks_applicability_and_outcome() {
+        assert_eq!(
+            machine_tv_entry_wrapper_checks(false, None),
+            (Vec::new(), Vec::new())
         );
-        for family in [
-            RecordFamily::Single,
-            RecordFamily::Module,
-            RecordFamily::Multifile,
+        assert_eq!(
+            machine_tv_entry_wrapper_checks(true, Some(FunctionOutcome::Equivalent)),
+            (vec!["machine_code_entry_wrapper_tv"], Vec::new())
+        );
+        for outcome in [
+            FunctionOutcome::Different,
+            FunctionOutcome::Unknown,
+            FunctionOutcome::OutsideProfile("unsupported_instruction"),
         ] {
-            for canonical_argv_compared in [false, true] {
-                for object_link_correspondence in [false, true] {
-                    let (performed, not_performed) = object_machine_tv_acceptance_checks(
-                        family,
-                        canonical_argv_compared,
-                        object_link_correspondence,
-                        &coverage,
-                    );
-                    assert_eq!(performed.first(), Some(&"bundle_identity_binding"));
-                    assert_eq!(
-                        performed.contains(&"pinned_member_merge_rederivation"),
-                        family == RecordFamily::Multifile
-                    );
-                    assert_eq!(
-                        performed.contains(&"canonical_link_argument_vector_reproduction"),
-                        canonical_argv_compared
-                    );
-                    assert_eq!(
-                        not_performed.contains(&"canonical_link_argument_vector_reproduction"),
-                        !canonical_argv_compared
-                    );
-                    assert_eq!(
-                        performed.contains(&"object_link_correspondence"),
-                        object_link_correspondence
-                    );
-                    assert_eq!(
-                        not_performed.contains(&"object_link_correspondence"),
-                        !object_link_correspondence
-                    );
-                    assert!(performed.contains(&"machine_code_leaf_function_tv"));
-                    assert!(not_performed.contains(&"machine_code_direct_call_site_tv"));
-                    assert_eq!(
-                        performed.last(),
-                        Some(&"object_source_machine_code_correspondence")
-                    );
-                    assert!(!performed.contains(&"object_translation_correspondence"));
-                    assert!(!not_performed.contains(&"object_translation_correspondence"));
-                    let performed_set: BTreeSet<_> = performed.iter().copied().collect();
-                    let not_performed_set: BTreeSet<_> = not_performed.iter().copied().collect();
-                    assert_eq!(performed_set.len(), performed.len());
-                    assert_eq!(not_performed_set.len(), not_performed.len());
-                    assert!(performed_set.is_disjoint(&not_performed_set));
+            assert_eq!(
+                machine_tv_entry_wrapper_checks(true, Some(outcome)),
+                (Vec::new(), vec!["machine_code_entry_wrapper_tv"])
+            );
+        }
+    }
+
+    #[test]
+    fn object_machine_tv_acceptance_checks_follow_record_and_recheck_gates() {
+        for entry_wrapper_equivalent in [false, true] {
+            let mut coverage = (
+                vec![
+                    "machine_code_leaf_function_tv",
+                    "machine_code_leaf_function_tv",
+                ],
+                vec![
+                    "machine_code_direct_call_site_tv",
+                    "machine_code_leaf_function_tv",
+                ],
+            );
+            if entry_wrapper_equivalent {
+                coverage.0.push("machine_code_entry_wrapper_tv");
+            }
+            for family in [
+                RecordFamily::Single,
+                RecordFamily::Module,
+                RecordFamily::Multifile,
+            ] {
+                for canonical_argv_compared in [false, true] {
+                    for object_link_correspondence in [false, true] {
+                        let (performed, not_performed) = object_machine_tv_acceptance_checks(
+                            family,
+                            canonical_argv_compared,
+                            object_link_correspondence,
+                            entry_wrapper_equivalent,
+                            &coverage,
+                        );
+                        assert_eq!(performed.first(), Some(&"bundle_identity_binding"));
+                        assert_eq!(
+                            performed.contains(&"pinned_member_merge_rederivation"),
+                            family == RecordFamily::Multifile
+                        );
+                        assert_eq!(
+                            performed.contains(&"canonical_link_argument_vector_reproduction"),
+                            canonical_argv_compared
+                        );
+                        assert_eq!(
+                            not_performed.contains(&"canonical_link_argument_vector_reproduction"),
+                            !canonical_argv_compared
+                        );
+                        assert_eq!(
+                            performed.contains(&"object_link_correspondence"),
+                            object_link_correspondence
+                        );
+                        assert_eq!(
+                            not_performed.contains(&"object_link_correspondence"),
+                            !object_link_correspondence
+                        );
+                        assert!(performed.contains(&"machine_code_leaf_function_tv"));
+                        assert!(not_performed.contains(&"machine_code_direct_call_site_tv"));
+                        assert_eq!(
+                            performed.contains(&"machine_code_entry_wrapper_tv"),
+                            entry_wrapper_equivalent
+                        );
+                        assert_eq!(
+                            not_performed.contains(&"object_entry_wrapper_semantics"),
+                            !entry_wrapper_equivalent
+                        );
+                        assert_eq!(
+                            performed.last(),
+                            Some(&"object_source_machine_code_correspondence")
+                        );
+                        assert!(!performed.contains(&"object_translation_correspondence"));
+                        assert!(!not_performed.contains(&"object_translation_correspondence"));
+                        let performed_set: BTreeSet<_> = performed.iter().copied().collect();
+                        let not_performed_set: BTreeSet<_> =
+                            not_performed.iter().copied().collect();
+                        assert_eq!(performed_set.len(), performed.len());
+                        assert_eq!(not_performed_set.len(), not_performed.len());
+                        assert!(performed_set.is_disjoint(&not_performed_set));
+                    }
                 }
             }
         }

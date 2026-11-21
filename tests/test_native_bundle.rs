@@ -378,7 +378,7 @@ fn recheck_object_reports_module_and_multifile_symbol_surfaces() {
                 "outcome": "equivalent_within_profile",
                 "callee_saved_preservation": "preserved"
             },
-            "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
+            "main": {"outcome": "equivalent_within_profile", "callee_saved_preservation": "preserved", "role": "entry_wrapper"},
         })
     );
     assert!(multifile_tv_descriptor["checks_performed"]
@@ -418,6 +418,7 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     assert!(text.contains(
         "Scope: artifact_reproduction_object_link_correspondence_and_acyclic_branch_and_conditional_call_function_machine_code_tv_only/no_abi_or_runtime_semantics"
     ));
+    assert!(text.contains("Entry wrapper is equivalent within the machine-code TV profile."));
 
     let output = recheck_machine_tv(&source, &bundle, &id, true);
     assert_success(&output);
@@ -442,7 +443,7 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
                 "outcome": "equivalent_within_profile",
                 "callee_saved_preservation": "preserved"
             },
-            "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
+            "main": {"outcome": "equivalent_within_profile", "callee_saved_preservation": "preserved", "role": "entry_wrapper"},
         })
     );
     assert_eq!(
@@ -454,6 +455,7 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
             "object_link_correspondence",
             "machine_code_leaf_function_tv",
             "machine_code_callee_saved_register_preservation",
+            "machine_code_entry_wrapper_tv",
         ])
     );
     assert_eq!(
@@ -509,7 +511,7 @@ fn recheck_machine_tv_reports_module_direct_call_and_wrapper_outcomes() {
                 "outcome": "equivalent_within_profile",
                 "callee_saved_preservation": "preserved"
             },
-            "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
+            "main": {"outcome": "equivalent_within_profile", "callee_saved_preservation": "preserved", "role": "entry_wrapper"},
         })
     );
     assert!(descriptor["checks_performed"]
@@ -522,6 +524,11 @@ fn recheck_machine_tv_reports_module_direct_call_and_wrapper_outcomes() {
         .unwrap()
         .iter()
         .any(|check| check == "machine_code_callee_saved_register_preservation"));
+    assert!(descriptor["checks_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check == "machine_code_entry_wrapper_tv"));
     assert!(descriptor["checks_not_performed"]
         .as_array()
         .unwrap()
@@ -584,7 +591,7 @@ fn recheck_machine_tv_checks_forward_and_acyclic_branches() {
                 "outcome": "equivalent_within_profile",
                 "callee_saved_preservation": "preserved"
             },
-            "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
+            "main": {"outcome": "equivalent_within_profile", "callee_saved_preservation": "preserved", "role": "entry_wrapper"},
             "pick": {
                 "outcome": "equivalent_within_profile",
                 "callee_saved_preservation": "preserved"
@@ -634,9 +641,10 @@ fn recheck_machine_tv_checks_integer_division() {
         "equivalent_within_profile"
     );
     assert_eq!(
-        descriptor["functions"]["main"]["reason"],
-        "not_a_source_atom"
+        descriptor["functions"]["main"]["outcome"],
+        "equivalent_within_profile"
     );
+    assert_eq!(descriptor["functions"]["main"]["role"], "entry_wrapper");
 }
 
 #[test]
@@ -696,7 +704,7 @@ fn recheck_machine_tv_checks_branching_calls() {
                 "outcome": "equivalent_within_profile",
                 "callee_saved_preservation": "preserved"
             },
-            "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
+            "main": {"outcome": "equivalent_within_profile", "callee_saved_preservation": "preserved", "role": "entry_wrapper"},
         })
     );
     let performed = descriptor["checks_performed"].as_array().unwrap();
@@ -5159,7 +5167,7 @@ fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
                 "outcome": "equivalent_within_profile",
                 "callee_saved_preservation": "preserved"
             },
-            "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
+            "main": {"outcome": "equivalent_within_profile", "callee_saved_preservation": "preserved", "role": "entry_wrapper"},
         })
     );
     let performed = descriptor["checks_performed"].as_array().unwrap();
@@ -5175,6 +5183,10 @@ fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
     assert!(!performed
         .iter()
         .any(|check| check == "pinned_member_merge_rederivation"));
+    let not_performed = descriptor["checks_not_performed"].as_array().unwrap();
+    assert!(!not_performed
+        .iter()
+        .any(|check| check == "object_entry_wrapper_semantics"));
     let descriptor_text = String::from_utf8_lossy(&output.stdout);
     assert!(!descriptor_text.contains("object_translation_correspondence"));
 
@@ -5183,6 +5195,7 @@ fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
     let text = String::from_utf8_lossy(&text.stdout);
     assert!(text.contains("Native object accepted within the machine-code TV profile:"));
     assert!(text.contains("2 source-atom functions equivalent"));
+    assert!(text.contains("Entry wrapper is equivalent within the machine-code TV profile."));
     assert_eq!(text.lines().count(), 2);
 
     let wrong_id = "0".repeat(64);
@@ -5211,6 +5224,11 @@ fn accept_object_accepts_loop_bundle_without_object_link() {
         descriptor["functions"]["loop_count"]["callee_saved_preservation"],
         "preserved"
     );
+    assert_eq!(
+        descriptor["functions"]["main"]["outcome"],
+        "equivalent_within_profile"
+    );
+    assert_eq!(descriptor["functions"]["main"]["role"], "entry_wrapper");
     let performed = descriptor["checks_performed"].as_array().unwrap();
     assert!(performed
         .iter()
@@ -5218,6 +5236,9 @@ fn accept_object_accepts_loop_bundle_without_object_link() {
     assert!(performed
         .iter()
         .any(|check| check == "machine_code_callee_saved_register_preservation"));
+    assert!(performed
+        .iter()
+        .any(|check| check == "machine_code_entry_wrapper_tv"));
     assert!(!performed
         .iter()
         .any(|check| check == "object_link_correspondence"));
