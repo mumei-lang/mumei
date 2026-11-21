@@ -99,7 +99,7 @@ impl<'a> NominalChecker<'a> {
     }
 
     /// Declared type of a uniquely-owned named enum payload.
-    fn enum_payload_type(&self, key: &str, field: &str) -> Option<&'a str> {
+    fn enum_payload_type(&self, key: &str, field: &str) -> Option<String> {
         let enum_def = self.module_env.enums.get(key)?;
         let mut payload_type = None;
         for variant in &enum_def.variants {
@@ -112,15 +112,18 @@ impl<'a> NominalChecker<'a> {
             if payload_type.is_some() {
                 return None;
             }
-            payload_type = variant.field_types.get(index).map(|ty| ty.name.as_str());
+            payload_type = variant
+                .field_types
+                .get(index)
+                .map(crate::verification::support::datatype::payload_field_type_name);
         }
         payload_type
     }
 
-    fn field_or_payload_type(&self, base_type: &str, field: &str) -> Option<&'a str> {
+    fn field_or_payload_type(&self, base_type: &str, field: &str) -> Option<String> {
         if let Some(base_key) = self.struct_key(base_type) {
             if let Some(field_type) = self.field_type(&base_key, field) {
-                return Some(field_type);
+                return Some(field_type.to_string());
             }
         }
         if field == "tag" {
@@ -201,7 +204,6 @@ impl<'a> NominalChecker<'a> {
             Expr::FieldAccess(base, field) => {
                 let base_type = self.declared_type_name(base)?;
                 self.field_or_payload_type(&base_type, field)
-                    .map(str::to_string)
             }
             Expr::IfThenElse {
                 then_branch,
@@ -317,7 +319,7 @@ impl<'a> NominalChecker<'a> {
             let Some(field_decl) = self.field_type(&skey, head) else {
                 return Ok(());
             };
-            (field_decl, false)
+            (field_decl.to_string(), false)
         } else {
             let Some(ekey) = self.enum_key(declared) else {
                 return Ok(());
@@ -330,9 +332,9 @@ impl<'a> NominalChecker<'a> {
             (field_decl, true)
         };
         for segment in &segments[1..] {
-            let next_decl = if let Some(skey) = self.struct_key(field_decl) {
-                self.field_type(&skey, segment)
-            } else if let Some(ekey) = self.enum_key(field_decl) {
+            let next_decl = if let Some(skey) = self.struct_key(&field_decl) {
+                self.field_type(&skey, segment).map(str::to_string)
+            } else if let Some(ekey) = self.enum_key(&field_decl) {
                 self.enum_payload_type(&ekey, segment)
             } else {
                 None
@@ -342,7 +344,7 @@ impl<'a> NominalChecker<'a> {
             };
             field_decl = next_decl;
         }
-        let Some(expected) = self.struct_key(field_decl) else {
+        let Some(expected) = self.struct_key(&field_decl) else {
             return Ok(());
         };
         if let Some(actual) = self.struct_type_of(value) {

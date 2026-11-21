@@ -34,13 +34,15 @@ use crate::verification::types::{Env, MumeiError, MumeiResult};
 /// `is_recursive`, this covers cycles the flag does not name).
 const MAX_ENUM_PAYLOAD_NEST: u8 = 8;
 
-/// `true` when `enum_def` is finite + non-recursive + scalar-payload only
+/// `true` when `enum_def` is finite + non-recursive and every payload
+/// flattens to supported scalar leaves
 /// (a declared *struct* payload whose direct fields are all scalar also
 /// counts: its leaves flatten into the constructor, mirroring the trusted
 /// verifier's `pure-i64-composite/v18` layout; a payload field typed as
 /// another finite enum counts too, carrying one accessor of the inner
-/// enum's datatype sort — `pure-i64-composite/v23`). Array and deeper-
-/// than-`MAX_ENUM_PAYLOAD_NEST` composite payloads keep the Int-tag path.
+/// enum's datatype sort — `pure-i64-composite/v23`). Direct arrays of
+/// scalar elements contribute array and length accessors; arrays nested in
+/// structs or containing non-scalar elements keep the Int-tag path.
 pub(crate) fn is_finite_adt(enum_def: &EnumDef, module_env: &ModuleEnv) -> bool {
     is_finite_adt_fueled(
         enum_def,
@@ -76,7 +78,8 @@ fn is_finite_adt_fueled(
         && !enum_def.variants.is_empty()
         && enum_def.variants.iter().all(|variant| {
             variant.field_types.iter().all(|field| {
-                field_leaf_types_fueled(field.name.as_str(), module_env, fuel, memo).is_some()
+                field_leaf_types_fueled(&payload_field_type_name(field), module_env, fuel, memo)
+                    .is_some()
             })
         });
     memo.insert(key, finite);
@@ -87,7 +90,9 @@ fn is_finite_adt_fueled(
 /// the Z3 constructor: a scalar field is a single unnamed leaf; a declared
 /// struct expands to its scalar leaves, with a struct-typed field recursing
 /// under a `{field}_{leaf}` name (`b.inner.x` → leaf `inner_x`, matching the
-/// `<binding>_<path>` env-key convention). Enum and array leaves, a
+/// `<binding>_<path>` env-key convention). A direct `[T]` field with scalar
+/// `T` contributes an array leaf and a `#len` leaf. Nested arrays and arrays
+/// within struct payloads, a
 /// recursive struct on the flattening path, a leaf-name collision
 /// (`inner_x` scalar beside `inner: {x}`), or more than
 /// `MAX_PAYLOAD_LEAVES` leaves return `None` and keep the enum on the
@@ -102,6 +107,14 @@ pub(crate) fn field_leaf_types(
         MAX_ENUM_PAYLOAD_NEST,
         &mut FiniteFuelMemo::default(),
     )
+}
+
+pub(crate) fn payload_field_type_name(field: &crate::ast::TypeRef) -> String {
+    if field.name == "[]" {
+        field.display_name()
+    } else {
+        field.name.clone()
+    }
 }
 
 fn field_leaf_types_fueled(
@@ -145,6 +158,18 @@ fn field_leaf_types_fueled(
     Some(leaves)
 }
 
+pub(crate) fn array_payload_element_type(leaves: &[(String, String)]) -> Option<&str> {
+    if leaves.len() == 2
+        && leaves[0].0.is_empty()
+        && leaves[1].0 == "#len"
+        && leaves[1].1 == "array_len"
+    {
+        leaves[0].1.strip_prefix("array:")
+    } else {
+        None
+    }
+}
+
 /// Widest leaf set one payload field may flatten to — the same budget the
 /// composite fragment allows a bound struct. Exponential blowup from shared
 /// nested declarations is rejected as a whole rather than truncated.
@@ -182,6 +207,26 @@ fn collect_field_leaves(
         return Some(());
     }
     let base = module_env.resolve_base_type(field_type);
+    if let Some(element_type) = base
+        .strip_prefix('[')
+        .and_then(|ty| ty.strip_suffix(']'))
+        .map(str::trim)
+    {
+        if !name.is_empty()
+            || !field_is_scalar(element_type, module_env)
+            || leaves.len() + 2 > MAX_PAYLOAD_LEAVES
+            || !seen.insert(String::new())
+            || !seen.insert("#len".to_string())
+        {
+            return None;
+        }
+        leaves.push((
+            String::new(),
+            format!("array:{}", module_env.resolve_base_type(element_type)),
+        ));
+        leaves.push(("#len".to_string(), "array_len".to_string()));
+        return Some(());
+    }
     // An enum-typed payload leaf contributes a single `enum:`-marked leaf —
     // it is ONE constructor accessor carrying the inner enum's own datatype
     // sort (`pure-i64-composite/v23` in the trusted fragment). The inner
@@ -238,6 +283,12 @@ pub(crate) fn flattened_value_leaves<'a>(
     value: &Dynamic<'a>,
     leaf_types: &[(String, String)],
 ) -> Option<Vec<Dynamic<'a>>> {
+    if leaf_types
+        .iter()
+        .any(|(_, base)| base.starts_with("array:") || base == "array_len")
+    {
+        return None;
+    }
     if leaf_types.len() == 1 && leaf_types[0].0.is_empty() {
         return Some(vec![value.clone()]);
     }
@@ -265,11 +316,34 @@ fn field_leaf_sorts<'a>(
     let single = leaves.len() == 1 && leaves[0].0.is_empty();
     let mut out = Vec::with_capacity(leaves.len());
     for (leaf_name, base) in leaves {
-        let name = if single {
+        let name = if base.starts_with("array:") {
+            format!("{variant_name}_{field_idx}")
+        } else if base == "array_len" {
+            format!("{variant_name}_{field_idx}#len")
+        } else if single {
             format!("{variant_name}_{field_idx}")
         } else {
             format!("{variant_name}_{field_idx}_{leaf_name}")
         };
+        if let Some(element_type) = base.strip_prefix("array:") {
+            let index = Sort::int(vc.ctx);
+            let range = super::super::translator::z3_types::z3_element_sort(
+                vc.ctx,
+                element_type,
+                vc.ieee754_f64,
+            );
+            out.push((name, Sort::array(vc.ctx, &index, &range)));
+            continue;
+        }
+        if base == "array_len" {
+            let sort = if vc.bitvec_i64 {
+                Sort::bitvector(vc.ctx, 64)
+            } else {
+                Sort::int(vc.ctx)
+            };
+            out.push((name, sort));
+            continue;
+        }
         // `enum:`-marked leaves carry the inner enum's own datatype sort —
         // Z3 nests ADTs, so the inner sort object (cached per context) is
         // the accessor domain directly. A sort under construction recurses
@@ -309,7 +383,7 @@ pub(crate) fn payload_leaf_range(
     let variant = enum_def.variants.get(variant_idx)?;
     let mut offset = 0;
     for (i, field_type) in variant.field_types.iter().enumerate() {
-        let leaves = field_leaf_types(&field_type.name, module_env)?;
+        let leaves = field_leaf_types(&payload_field_type_name(field_type), module_env)?;
         if i == field_idx {
             return Some((offset, leaves.len()));
         }
@@ -397,9 +471,16 @@ fn enum_leaf_domain_for<'a>(
         let mut accessor_idx = 0usize;
         let mut bounds: Vec<Bool> = Vec::new();
         for field in &variant.field_types {
-            for (_leaf_name, base) in field_leaf_types(&field.name, vc.module_env)? {
+            for (_leaf_name, base) in
+                field_leaf_types(&payload_field_type_name(field), vc.module_env)?
+            {
                 let sel = variant_selector_apply(&sort, vidx, accessor_idx, value);
-                if let Some(inner_name) = base.strip_prefix("enum:") {
+                if base == "array_len" {
+                    let value = sel?;
+                    bounds.push(crate::verification::translator::nonneg_constraint(
+                        vc.ctx, &value,
+                    )?);
+                } else if let Some(inner_name) = base.strip_prefix("enum:") {
                     let inner = (fuel > 0 && *budget > 0)
                         .then(|| vc.module_env.enums.get(inner_name))
                         .flatten();
@@ -448,11 +529,10 @@ pub(crate) fn assert_enum_value_domains<'a>(vc: &VCtx<'a>, solver: &Solver<'a>, 
     }
 }
 
-/// `true` when a variant field type lowers to a scalar Z3 sort. Enum, struct,
-/// and array payloads keep the enum on the Int-tag path. `usize`/`isize`
-/// resolve to `u64`/`i64` inside `resolve_base_type`; `i128`/`u128` and
-/// `f32` stay out (`LoweredType` has no 128-bit variant, and `f32` has no
-/// sort mapping yet).
+/// `true` when a variant field type lowers to a supported scalar Z3 sort.
+/// `usize`/`isize` resolve to `u64`/`i64` inside `resolve_base_type`;
+/// `i128`/`u128` and `f32` stay out (`LoweredType` has no 128-bit variant,
+/// and `f32` has no sort mapping yet).
 fn field_is_scalar(field_type: &str, module_env: &ModuleEnv) -> bool {
     let base = module_env.resolve_base_type(field_type);
     if module_env.enums.contains_key(&base)
@@ -493,7 +573,9 @@ pub(crate) fn enum_datatype_sort<'a>(
         let mut names = Vec::new();
         let mut sorts = Vec::new();
         for (i, field_type) in variant.field_types.iter().enumerate() {
-            for (name, sort) in field_leaf_sorts(vc, &variant.name, i, &field_type.name)? {
+            for (name, sort) in
+                field_leaf_sorts(vc, &variant.name, i, &payload_field_type_name(field_type))?
+            {
                 names.push(name);
                 sorts.push(sort);
             }
@@ -600,21 +682,40 @@ pub(crate) fn resolve_enum_ctor<'a>(
 /// `Event::Move(Point { x, y })` and `Event::Move(p)` reach the leaves.
 fn expand_ctor_args<'a>(
     vc: &VCtx<'a>,
-    env: &crate::verification::types::Env<'a>,
+    env: &mut crate::verification::types::Env<'a>,
     variant: &crate::parser::ast::EnumVariant,
     args: &[Dynamic<'a>],
+    arg_exprs: &[crate::parser::ast::Expr],
+    solver_opt: Option<&Solver<'a>>,
 ) -> MumeiResult<Vec<Dynamic<'a>>> {
     let mut leaves: Vec<Dynamic> = Vec::new();
     for (i, arg) in args.iter().enumerate() {
-        let field_type = &variant.field_types[i].name;
-        let base = vc.module_env.resolve_base_type(field_type);
-        if vc.module_env.structs.contains_key(&base) {
-            let Some(leaf_types) = field_leaf_types(field_type, vc.module_env) else {
+        let field_type = payload_field_type_name(&variant.field_types[i]);
+        let base = vc.module_env.resolve_base_type(&field_type);
+        let Some(field_leaves) = field_leaf_types(&field_type, vc.module_env) else {
+            return Err(MumeiError::type_error(format!(
+                "enum constructor payload '{field_type}' has no flattened leaves"
+            )));
+        };
+        if array_payload_element_type(&field_leaves).is_some() {
+            if arg.as_array().is_none() {
                 return Err(MumeiError::type_error(format!(
-                    "enum constructor payload '{field_type}' has no flattened leaves"
+                    "enum constructor payload '{field_type}' expects an array value"
                 )));
-            };
-            let Some(fields) = flattened_value_leaves(env, arg, &leaf_types) else {
+            }
+            let len = crate::verification::translator::z3_types::array_len_for_expr(
+                vc,
+                env,
+                arg_exprs.get(i),
+                arg,
+                solver_opt,
+            );
+            leaves.push(arg.clone());
+            leaves.push(len);
+            continue;
+        }
+        if vc.module_env.structs.contains_key(&base) {
+            let Some(fields) = flattened_value_leaves(env, arg, &field_leaves) else {
                 return Err(MumeiError::type_error(format!(
                     "enum constructor payload '{field_type}' expects a '{base}' struct value"
                 )));
@@ -637,7 +738,7 @@ fn ctor_leaf_sorts<'a>(vc: &VCtx<'a>, enum_def: &EnumDef, idx: usize) -> Option<
     let mut sorts = Vec::new();
     for (i, ft) in variant.field_types.iter().enumerate() {
         sorts.extend(
-            field_leaf_sorts(vc, &variant.name, i, &ft.name)?
+            field_leaf_sorts(vc, &variant.name, i, &payload_field_type_name(ft))?
                 .into_iter()
                 .map(|(_, s)| s),
         );
@@ -690,9 +791,11 @@ pub(crate) fn enum_ctor_apply_leaves<'a>(
 /// wrong — callers then keep the previous behaviour (unknown/atom call).
 pub(crate) fn enum_ctor_apply<'a>(
     vc: &VCtx<'a>,
-    env: &crate::verification::types::Env<'a>,
+    env: &mut crate::verification::types::Env<'a>,
     ctor_path: &str,
     args: &[Dynamic<'a>],
+    arg_exprs: &[crate::parser::ast::Expr],
+    solver_opt: Option<&Solver<'a>>,
 ) -> MumeiResult<Option<Dynamic<'a>>> {
     let Some((enum_def, idx)) = resolve_enum_ctor(vc, ctor_path)? else {
         return Ok(None);
@@ -703,7 +806,14 @@ pub(crate) fn enum_ctor_apply<'a>(
     if enum_def.variants[idx].fields.len() != args.len() {
         return Ok(None);
     }
-    let leaf_args = expand_ctor_args(vc, env, &enum_def.variants[idx], args)?;
+    let leaf_args = expand_ctor_args(
+        vc,
+        env,
+        &enum_def.variants[idx],
+        args,
+        arg_exprs,
+        solver_opt,
+    )?;
     Ok(enum_ctor_apply_leaves(vc, enum_def, idx, &leaf_args))
 }
 

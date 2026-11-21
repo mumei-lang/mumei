@@ -1611,8 +1611,8 @@ fn enum_field_assign<'a>(
         }
     }
     if segments.len() > 1 {
-        let field_type = &edef.variants[vidx].field_types[fidx].name;
-        let resolved_type = vc.module_env.resolve_base_type(field_type);
+        let field_type = datatype::payload_field_type_name(&edef.variants[vidx].field_types[fidx]);
+        let resolved_type = vc.module_env.resolve_base_type(&field_type);
         if let Some(inner_enum) = vc.module_env.get_enum(&resolved_type) {
             if !datatype::is_finite_adt(inner_enum, vc.module_env) {
                 return Ok(None);
@@ -1676,17 +1676,30 @@ fn enum_field_assign<'a>(
     // one-for-one. Scalar slots keep the single-accessor check.
     let (leaf_off, leaf_width) =
         datatype::payload_leaf_range(edef, vc.module_env, vidx, fidx).unwrap_or((fidx, 1));
-    let composite_sdef = vc.module_env.structs.get(
-        &vc.module_env
-            .resolve_base_type(&edef.variants[vidx].field_types[fidx].name),
-    );
-    let val_leaves: Vec<Dynamic> = if composite_sdef.is_some() {
+    let field_type = datatype::payload_field_type_name(&edef.variants[vidx].field_types[fidx]);
+    let composite_sdef = vc
+        .module_env
+        .structs
+        .get(&vc.module_env.resolve_base_type(&field_type));
+    let field_leaves = datatype::field_leaf_types(&field_type, vc.module_env);
+    let array_payload = field_leaves
+        .as_ref()
+        .and_then(|leaves| datatype::array_payload_element_type(leaves))
+        .is_some();
+    let val_leaves: Vec<Dynamic> = if array_payload {
+        if val.as_array().is_none() {
+            return Err(MumeiError::type_error(format!(
+                "enum field '{var}' expects an array value"
+            )));
+        }
+        let length = super::z3_types::array_len_for_expr(vc, env, Some(value), &val, solver_opt);
+        vec![val.clone(), length]
+    } else if composite_sdef.is_some() {
         // Flatten deeper than direct fields — nested payloads bind leaves
         // like `inner_x`, keyed the same way `nested_field_bindings` reports
         // the value's env entries.
         let Some(fields) =
-            datatype::field_leaf_types(&edef.variants[vidx].field_types[fidx].name, vc.module_env)
-                .and_then(|lt| datatype::flattened_value_leaves(env, &val, &lt))
+            field_leaves.and_then(|lt| datatype::flattened_value_leaves(env, &val, &lt))
         else {
             return Err(MumeiError::type_error(format!(
                 "enum field '{var}' expects a struct value"
@@ -1935,8 +1948,8 @@ fn enum_struct_payload_field_assign<'a>(
     env: &mut Env<'a>,
     solver_opt: Option<&Solver<'a>>,
 ) -> Result<Option<Dynamic<'a>>, MumeiError> {
-    let field_type = &edef.variants[vidx].field_types[fidx].name;
-    let Some(leaf_types) = datatype::field_leaf_types(field_type, vc.module_env) else {
+    let field_type = datatype::payload_field_type_name(&edef.variants[vidx].field_types[fidx]);
+    let Some(leaf_types) = datatype::field_leaf_types(&field_type, vc.module_env) else {
         return Ok(None);
     };
     let Some((leaf_off, leaf_width)) =

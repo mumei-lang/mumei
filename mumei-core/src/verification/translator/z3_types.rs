@@ -665,7 +665,46 @@ pub(crate) fn array_len_for_value<'a>(
             solver_opt,
         );
     }
+    if let Some(len) = env.get(&array_value_len_key(&root)) {
+        return len.clone();
+    }
     fresh_array_len(vc, solver_opt)
+}
+
+pub(crate) fn array_len_for_expr<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    value_expr: Option<&crate::parser::ast::Expr>,
+    value: &Dynamic<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> Dynamic<'a> {
+    match value_expr {
+        Some(crate::parser::ast::Expr::Variable(name)) => {
+            array_len_value(vc.ctx, env, name, vc.bitvec_i64, solver_opt)
+        }
+        Some(crate::parser::ast::Expr::ArrayLit(elements)) => {
+            concrete_len_value(vc.ctx, elements.len(), vc.bitvec_i64)
+        }
+        _ => value
+            .as_array()
+            .map(|arr| array_len_for_value(vc, env, &arr, solver_opt))
+            .unwrap_or_else(|| fresh_array_len(vc, solver_opt)),
+    }
+}
+
+pub(crate) fn register_array_value_len<'a>(
+    env: &mut Env<'a>,
+    arr: &Array<'a>,
+    len: Dynamic<'a>,
+) -> String {
+    let root = array_root_value(arr);
+    let key = array_value_len_key(&root);
+    env.insert(key.clone(), len);
+    key
+}
+
+fn array_value_len_key(root: &Dynamic<'_>) -> String {
+    format!("__array_len#{root}")
 }
 
 pub(crate) fn mark_string_constraints(vc: &VCtx<'_>) {
@@ -699,7 +738,11 @@ fn z3_sort_for_lowered<'a>(
 /// Z3 element sort for a resolved element type *name* — the sort-valued
 /// counterpart of `array_element_sort_from_type`, able to express the `Str`
 /// and nested `[T]` elements the flat tag cannot.
-fn z3_element_sort<'a>(ctx: &'a Context, type_name: &str, ieee754_f64: bool) -> z3::Sort<'a> {
+pub(crate) fn z3_element_sort<'a>(
+    ctx: &'a Context,
+    type_name: &str,
+    ieee754_f64: bool,
+) -> z3::Sort<'a> {
     z3_sort_for_lowered(ctx, &lower(type_name), ieee754_f64)
 }
 
