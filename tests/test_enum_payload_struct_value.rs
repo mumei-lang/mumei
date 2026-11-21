@@ -78,6 +78,59 @@ fn u64_leaf_through_struct_valued_payload_uses_unsigned_comparison() {
 }
 
 #[test]
+fn aliased_struct_payloads_preserve_unsigned_leaf_semantics() {
+    let output = run_verify(
+        "test_enum_payload_struct_value_alias_u64.mm",
+        &["--bitvec-i64", "--json", "--disable-spurious-detection"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "false u64 comparison claims must be rejected:\n{stdout}\n{stderr}"
+    );
+    let json_start = stdout
+        .find('{')
+        .unwrap_or_else(|| panic!("verify --json emitted no JSON:\n{stdout}\n{stderr}"));
+    let payload: serde_json::Value = serde_json::from_str(&stdout[json_start..])
+        .unwrap_or_else(|err| panic!("{err}: invalid verify JSON:\n{stdout}\n{stderr}"));
+    let diagnostics = payload["diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("verify JSON has no diagnostics array:\n{payload:#}"));
+    for atom in ["alias_positive_top", "alias_positive_nested"] {
+        assert!(
+            !diagnostics.iter().any(|entry| {
+                entry["atom"].as_str() == Some(atom)
+                    && entry["code"] == "failed"
+                    && entry["severity"] == "error"
+            }),
+            "correct unsigned result must verify for '{atom}':\n{payload:#}"
+        );
+    }
+    for atom in ["alias_false_claim_top", "alias_false_claim_nested"] {
+        let errors: Vec<_> = diagnostics
+            .iter()
+            .filter(|entry| {
+                entry["atom"].as_str() == Some(atom)
+                    && entry["code"] == "failed"
+                    && entry["severity"] == "error"
+            })
+            .collect();
+        assert_eq!(
+            errors.len(),
+            1,
+            "false unsigned result claim must fail for '{atom}':\n{payload:#}"
+        );
+        assert!(
+            errors[0]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("Postcondition (ensures) is not satisfied")),
+            "false unsigned result claim failed for the wrong reason:\n{payload:#}"
+        );
+    }
+}
+
+#[test]
 fn struct_valued_enum_payload_negatives_are_attributed_per_atom() {
     let output = run_verify(
         "test_enum_payload_struct_value_negative.mm",

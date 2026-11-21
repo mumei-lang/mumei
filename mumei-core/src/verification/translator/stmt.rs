@@ -450,10 +450,11 @@ fn record_binding_enum_type(vc: &VCtx, var: &str, value: &Expr) {
 fn record_binding_struct_type(vc: &VCtx, var: &str, value: &Expr) {
     let ty = match value {
         Expr::StructInit { type_name, .. } => Some(type_name.clone()),
-        _ => crate::verification::support::datatype::declared_type_of_expr(vc, value)
-            .map(|t| crate::verification::support::datatype::type_name_base(&t).to_string())
-            .filter(|t| vc.module_env.get_struct(t).is_some()),
-    };
+        _ => crate::verification::support::datatype::declared_type_of_expr(vc, value),
+    }
+    .map(|ty| vc.module_env.resolve_base_type(&ty))
+    .map(|ty| crate::verification::support::datatype::type_name_base(&ty).to_string())
+    .filter(|ty| vc.module_env.get_struct(ty).is_some());
     match ty {
         Some(name) => {
             vc.local_struct_types
