@@ -3446,12 +3446,20 @@ fn write_machine_tv(
         );
         checks_performed.extend(machine_tv_checks);
         checks_not_performed.extend(machine_tv_checks_not_performed);
+        let input_domain = if equivalent_bounded_loop_count > 0 {
+            format!(
+                "{MACHINE_CODE_TV_INPUT_DOMAIN}_and_loops_exiting_within_bound_{}",
+                semantic_contract::LOOP_BOUND
+            )
+        } else {
+            MACHINE_CODE_TV_INPUT_DOMAIN.to_owned()
+        };
         let descriptor = serde_json::json!({
             "schema_version": "mumei.machine-code-tv/v1",
             "scope": scope,
             "build_id": expected_build_id,
             "register_convention_assumed": MACHINE_CODE_REGISTER_CONVENTION,
-            "input_domain": MACHINE_CODE_TV_INPUT_DOMAIN,
+            "input_domain": input_domain,
             "functions": functions,
             "checks_performed": checks_performed,
             "checks_not_performed": checks_not_performed,

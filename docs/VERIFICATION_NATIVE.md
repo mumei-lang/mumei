@@ -1883,6 +1883,10 @@ The `input_domain` is
 The comparison asserts the source model's signature-bounded parameter domains,
 division/shift definedness, and bounded-loop exit domain when present, but does
 not restrict inputs by `requires`.
+When machine-TV establishes an equivalent bounded-loop function, its JSON
+`input_domain` appends
+`_and_loops_exiting_within_bound_{LOOP_BOUND}`; loop-free bundles keep the
+base label above.
 Unknown per-path equivalence queries retry the identical obligations with
 `simplify → smt` under the same budget; constant-divisor magic-number
 sequences may remain inconclusive.

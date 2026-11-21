@@ -4833,6 +4833,10 @@ fn loop_bundle_links_and_pins_runtime_but_keeps_runtime_out_of_claims() {
         descriptor["functions"]["loop_count"],
         serde_json::json!({"outcome": "equivalent_within_profile"})
     );
+    assert_eq!(
+        descriptor["input_domain"],
+        "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires_and_loops_exiting_within_bound_4"
+    );
     let performed = descriptor["checks_performed"].as_array().unwrap();
     assert!(performed
         .iter()
