@@ -3462,18 +3462,9 @@ fn machine_tv_entry_wrapper_checks(
     }
 }
 
-fn machine_tv_input_domain(
-    source_loops: bool,
-    refined_signatures: bool,
-    u64_features: bool,
-    definedness: bool,
-) -> String {
+fn machine_tv_input_domain(source_loops: bool, refined_signatures: bool) -> String {
     let domain = if refined_signatures {
         MACHINE_CODE_TV_REFINED_INPUT_DOMAIN
-    } else if u64_features && definedness {
-        "module_members_signed_i64_inputs_where_division_and_shift_defined_not_process_exit_status"
-    } else if u64_features {
-        "module_members_all_signed_i64_inputs_not_process_exit_status"
     } else {
         MACHINE_CODE_TV_INPUT_DOMAIN
     };
@@ -3681,12 +3672,6 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
             return Err("Machine-code TV inconclusive; source atom names do not map uniquely to object functions.");
         }
     }
-    let u64_features = source_models
-        .values()
-        .any(|model| model.has_non_i64_scalar_features && !model.has_wide_scalar_features);
-    let definedness = source_models
-        .values()
-        .any(|model| !model.definedness.is_empty());
     let entry_wrapper_applicable = data.object_surface.defined.contains("main")
         && data.object_surface.defined.contains("__mumei_user_main")
         && source_models.get("__mumei_user_main").is_some_and(|model| {
@@ -3957,8 +3942,6 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
     let input_domain = machine_tv_input_domain(
         counts.equivalent_source_loop_count > 0,
         counts.equivalent_refined_signature_count > 0,
-        u64_features,
-        definedness,
     );
     Ok(MachineTvEvaluation {
         functions,
@@ -4778,7 +4761,7 @@ mod tests {
         let (checks_performed, checks_not_performed) =
             machine_tv_coverage_checks(0, 0, 0, 0, 0, loop_counts, false);
         assert_eq!(
-            machine_tv_input_domain(true, false, false, false),
+            machine_tv_input_domain(true, false),
             format!(
                 "{MACHINE_CODE_TV_INPUT_DOMAIN}_and_loops_exiting_within_bound_{}",
                 semantic_contract::LOOP_BOUND
@@ -4798,34 +4781,26 @@ mod tests {
     #[test]
     fn machine_tv_refined_domain_label_matches_the_llvm_module_domain() {
         assert_eq!(
-            machine_tv_input_domain(false, true, false, false),
+            machine_tv_input_domain(false, true),
             "module_members_signed_i64_inputs_with_refined_scalar_signature_predicate_domains_not_process_exit_status"
         );
         assert_eq!(
-            machine_tv_input_domain(true, true, false, false),
+            machine_tv_input_domain(true, true),
             format!(
                 "{MACHINE_CODE_TV_REFINED_INPUT_DOMAIN}_and_loops_exiting_within_bound_{}",
                 semantic_contract::LOOP_BOUND
             )
         );
         assert_eq!(
-            machine_tv_input_domain(true, false, false, false),
+            machine_tv_input_domain(true, false),
             format!(
                 "{MACHINE_CODE_TV_INPUT_DOMAIN}_and_loops_exiting_within_bound_{}",
                 semantic_contract::LOOP_BOUND
             )
         );
         assert_eq!(
-            machine_tv_input_domain(false, false, true, false),
-            "module_members_all_signed_i64_inputs_not_process_exit_status"
-        );
-        assert_eq!(
-            machine_tv_input_domain(false, false, true, true),
-            "module_members_signed_i64_inputs_where_division_and_shift_defined_not_process_exit_status"
-        );
-        assert_eq!(
-            machine_tv_input_domain(true, false, true, true),
-            "module_members_signed_i64_inputs_where_division_and_shift_defined_not_process_exit_status_and_loops_exiting_within_bound_4"
+            machine_tv_input_domain(false, false),
+            MACHINE_CODE_TV_INPUT_DOMAIN
         );
     }
 

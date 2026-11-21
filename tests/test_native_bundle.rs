@@ -3891,6 +3891,7 @@ fn recheck_machine_tv_accept_object_u64_module() {
          atom pass(p: Pair) -> Pair requires: true; ensures: true; body: { p };\n\
          atom callee(x: u64) -> u64 requires: true; ensures: true; body: { x + 1 };\n\
          atom caller(x: u64) -> u64 requires: true; ensures: true; body: { callee(x) };\n\
+         atom bool_flag(b: bool) -> i64 requires: true; ensures: true; body: { 0 };\n\
          atom main() -> i64 requires: true; ensures: true; body: { 0 };",
     );
     let record = module_record(&bundle);
@@ -3903,7 +3904,7 @@ fn recheck_machine_tv_accept_object_u64_module() {
     let machine_tv = recheck_machine_tv(&source, &bundle, &id, true);
     assert_success(&machine_tv);
     let machine_tv: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
-    for function in ["add", "pass", "callee", "caller"] {
+    for function in ["add", "pass", "callee", "caller", "bool_flag"] {
         assert_eq!(
             machine_tv["functions"][function]["outcome"],
             "equivalent_within_profile"
@@ -3914,7 +3915,7 @@ fn recheck_machine_tv_accept_object_u64_module() {
     assert_success(&llvm);
     assert_eq!(
         machine_tv["input_domain"],
-        "module_members_all_signed_i64_inputs_not_process_exit_status"
+        "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires"
     );
 
     let accepted = accept_object(&source, &bundle, &id, true);
