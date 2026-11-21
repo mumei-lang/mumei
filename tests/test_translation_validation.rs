@@ -4040,3 +4040,27 @@ fn composite_v23_does_not_admit_direct_enum_payload_reads() {
         "direct enum payload reads must not expand CompositeV23 admission"
     );
 }
+
+#[test]
+fn composite_v23_does_not_admit_struct_valued_enum_payload_reads() {
+    let source = "struct Inner { x: i64, y: i64 }\n\
+        struct P { inner: Inner, z: i64 }\n\
+        enum Ev { Move(p: P), Stop }\n\
+        atom main() -> i64 requires: true; ensures: true; body: {\n\
+            let e = Ev::Move(P { inner: Inner { x: 1, y: 2 }, z: 3 });\n\
+            let q = e.p;\n\
+            q.inner.x\n\
+        };";
+    let items = parse_module_checked(source).unwrap();
+    let ir = emitted_module(&items);
+    assert!(
+        tv::validate_native_module(
+            source,
+            &ir,
+            Options::default(),
+            RefinedAdmission::CompositeV23,
+        )
+        .is_err(),
+        "struct-valued direct enum payload reads must not expand CompositeV23 admission"
+    );
+}

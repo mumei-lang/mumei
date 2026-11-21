@@ -175,17 +175,31 @@ pub(crate) fn nested_field_bindings<'a>(
     env: &Env<'a>,
     value: &Dynamic<'a>,
 ) -> Vec<(String, Dynamic<'a>)> {
-    let Some(fields) = project_struct_fields(env, value) else {
-        return Vec::new();
-    };
-    let mut out = Vec::with_capacity(fields.len());
-    for (name, inner) in fields {
-        for (deep, v) in nested_field_bindings(env, &inner) {
-            out.push((format!("{name}_{deep}"), v));
+    fn collect<'a>(
+        env: &Env<'a>,
+        value: &Dynamic<'a>,
+        visiting: &mut std::collections::HashSet<usize>,
+    ) -> Vec<(String, Dynamic<'a>)> {
+        let ast = value.get_z3_ast() as usize;
+        if !visiting.insert(ast) {
+            return Vec::new();
         }
-        out.push((name, inner));
+        let Some(fields) = project_struct_fields(env, value) else {
+            visiting.remove(&ast);
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(fields.len());
+        for (name, inner) in fields {
+            for (deep, v) in collect(env, &inner, visiting) {
+                out.push((format!("{name}_{deep}"), v));
+            }
+            out.push((name, inner));
+        }
+        visiting.remove(&ast);
+        out
     }
-    out
+
+    collect(env, value, &mut std::collections::HashSet::new())
 }
 
 /// Register the fields of the struct value `value` under the new binding
@@ -209,6 +223,32 @@ pub(crate) fn alias_struct_fields<'a>(env: &mut Env<'a>, alias: &str, value: &Dy
     }
     if let Some(fields) = fields {
         bind_struct_fields(env, alias, &fields);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use z3::ast::Int;
+    use z3::{Config, Context};
+
+    #[test]
+    fn nested_field_bindings_stop_at_cyclic_handles() {
+        let context = Context::new(&Config::new());
+        let root: Dynamic<'_> = Int::new_const(&context, "root").into();
+        let next: Dynamic<'_> = Int::new_const(&context, "next").into();
+        let mut env: Env<'_> = std::collections::HashMap::new();
+        bind_struct_fields(&mut env, "root", &[("next".to_string(), next.clone())]);
+        bind_struct_fields(&mut env, "next", &[("self".to_string(), next)]);
+
+        let fields = nested_field_bindings(&env, &root);
+        assert_eq!(
+            fields
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["next_self", "next"]
+        );
     }
 }
 

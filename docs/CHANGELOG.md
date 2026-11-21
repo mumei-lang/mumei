@@ -1,3 +1,18 @@
+### Unreleased: struct-valued direct enum payload reads
+
+- Named struct payloads and nested struct fields can be read as values, aliased
+  with `let`, and passed to calls when every owning enum tag is proven. The
+  materialized handles preserve declared struct types and reuse payload
+  selectors; they do not re-assume or re-check struct invariants. Solverless
+  contracts, unproven tags, arrays and recursive shapes remain conservative.
+
+### Unreleased: nested struct aliases after loop havoc
+
+- Loop havoc now registers nested field projections under fresh struct handles,
+  preserving invariant-backed reads through aliases such as
+  `let inner = q.inner; inner.x`. `VERIFIER_POLICY_VERSION` is bumped 22 → 23
+  so cached verdicts are re-derived.
+
 ### Unreleased: direct enum payload reads
 
 - Finite enums now model direct reads from uniquely owned named payloads when

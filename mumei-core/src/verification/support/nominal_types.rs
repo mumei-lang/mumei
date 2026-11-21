@@ -26,7 +26,7 @@ use super::super::module_env::ModuleEnv;
 use super::super::types::{MumeiError, MumeiResult};
 use crate::lowering::chan_payload_type;
 use crate::mir::resolve_alias_base;
-use crate::parser::{Atom, Expr, JoinSemantics, Span, Stmt};
+use crate::parser::{Atom, Expr, JoinSemantics, Pattern, Span, Stmt};
 use std::collections::HashMap;
 
 /// Declared type name of each variable in scope (`None` = unknown).
@@ -117,24 +117,91 @@ impl<'a> NominalChecker<'a> {
         payload_type
     }
 
-    /// Struct type of `expr` when it is syntactically evident.
-    fn struct_type_of(&self, expr: &Expr) -> Option<String> {
+    fn field_or_payload_type(&self, base_type: &str, field: &str) -> Option<&'a str> {
+        if let Some(base_key) = self.struct_key(base_type) {
+            if let Some(field_type) = self.field_type(&base_key, field) {
+                return Some(field_type);
+            }
+        }
+        if field == "tag" {
+            return None;
+        }
+        let base_key = self.enum_key(base_type)?;
+        self.enum_payload_type(&base_key, field)
+    }
+
+    fn canonical_pattern_type(&self, type_name: &str) -> String {
+        self.struct_key(type_name)
+            .or_else(|| self.enum_key(type_name))
+            .unwrap_or_else(|| {
+                let base = type_name.split('<').next().unwrap_or(type_name).trim();
+                resolve_alias_base(self.module_env, base)
+            })
+    }
+
+    fn bind_pattern_types(&mut self, pattern: &Pattern, type_name: Option<&str>) {
+        match pattern {
+            Pattern::Variable(name) => {
+                let ty = type_name.map(|type_name| self.canonical_pattern_type(type_name));
+                self.types.insert(name.clone(), ty);
+            }
+            Pattern::Variant {
+                variant_name,
+                fields,
+            } => {
+                let field_types = type_name
+                    .and_then(|type_name| self.enum_key(type_name))
+                    .and_then(|enum_key| self.module_env.enums.get(&enum_key))
+                    .and_then(|enum_def| {
+                        enum_def.variants.iter().find(|variant| {
+                            variant.name == variant_name.rsplit("::").next().unwrap_or(variant_name)
+                        })
+                    })
+                    .filter(|variant| variant.field_types.len() == fields.len())
+                    .map(|variant| {
+                        variant
+                            .field_types
+                            .iter()
+                            .map(|field_type| field_type.display_name())
+                            .collect::<Vec<_>>()
+                    });
+                if let Some(field_types) = field_types {
+                    for (field_pattern, field_type) in fields.iter().zip(field_types) {
+                        self.bind_pattern_types(field_pattern, Some(&field_type));
+                    }
+                } else {
+                    for field_pattern in fields {
+                        self.bind_pattern_types(field_pattern, None);
+                    }
+                }
+            }
+            Pattern::Wildcard | Pattern::Literal(_) => {}
+        }
+    }
+
+    /// Declared type name of `expr` when it is syntactically evident.
+    fn declared_type_name(&self, expr: &Expr) -> Option<String> {
         match expr {
-            Expr::StructInit { type_name, .. } => self.struct_key(type_name),
-            Expr::Variable(v) => self
-                .types
-                .get(v)
-                .and_then(|t| t.as_deref())
-                .and_then(|t| self.struct_key(t)),
-            Expr::Call(name, _) => self
-                .lookup_atom(name)
-                .and_then(|a| a.return_type.as_deref())
-                .and_then(|t| self.struct_key(t)),
-            Expr::ChanRecv { channel } => self.chan_payload_struct(channel).map(|(_, key)| key),
+            Expr::StructInit { type_name, .. } => Some(type_name.clone()),
+            Expr::Variable(v) => self.types.get(v).and_then(|ty| ty.clone()),
+            Expr::Call(name, _) => {
+                if let Some(atom) = self.lookup_atom(name) {
+                    atom.return_type.clone()
+                } else {
+                    self.module_env
+                        .resolve_variant_owner_by_hint(name, None)
+                        .ok()
+                        .flatten()
+                        .map(|def| def.name.clone())
+                }
+            }
+            Expr::ChanRecv { channel } => self
+                .chan_payload_struct(channel)
+                .map(|(payload, _)| payload),
             Expr::FieldAccess(base, field) => {
-                let base_key = self.struct_type_of(base)?;
-                let ty = self.field_type(&base_key, field)?;
-                self.struct_key(ty)
+                let base_type = self.declared_type_name(base)?;
+                self.field_or_payload_type(&base_type, field)
+                    .map(str::to_string)
             }
             Expr::IfThenElse {
                 then_branch,
@@ -149,27 +216,18 @@ impl<'a> NominalChecker<'a> {
         }
     }
 
+    /// Struct type of `expr` when it is syntactically evident.
+    fn struct_type_of(&self, expr: &Expr) -> Option<String> {
+        self.declared_type_name(expr)
+            .and_then(|type_name| self.struct_key(&type_name))
+    }
+
     /// Enum type of a constructor or a variable already known to be an enum.
     fn enum_type_of(&self, expr: &Expr) -> Option<String> {
         match expr {
-            Expr::Call(name, _) => {
-                if let Some(atom) = self.lookup_atom(name) {
-                    atom.return_type
-                        .as_deref()
-                        .and_then(|type_name| self.enum_key(type_name))
-                } else {
-                    self.module_env
-                        .resolve_variant_owner_by_hint(name, None)
-                        .ok()
-                        .flatten()
-                        .and_then(|def| self.enum_key(&def.name))
-                }
-            }
-            Expr::Variable(v) => self
-                .types
-                .get(v)
-                .and_then(|t| t.as_deref())
-                .and_then(|t| self.enum_key(t)),
+            Expr::Call(..) | Expr::Variable(..) | Expr::FieldAccess(..) => self
+                .declared_type_name(expr)
+                .and_then(|type_name| self.enum_key(&type_name)),
             _ => None,
         }
     }
@@ -399,12 +457,35 @@ impl<'a> NominalChecker<'a> {
             Expr::FieldAccess(base, _) => self.expr(base, span),
             Expr::Match { target, arms } => {
                 self.expr(target, span)?;
+                let target_type = self.enum_type_of(target);
+                let mut first: Option<String> = None;
                 for arm in arms {
-                    if let Some(guard) = &arm.guard {
-                        self.expr(guard, span)?;
+                    let target_type = target_type.clone();
+                    let ty = self.scoped(|checker| {
+                        checker.bind_pattern_types(&arm.pattern, target_type.as_deref());
+                        if let Some(guard) = &arm.guard {
+                            checker.expr(guard, span)?;
+                        }
+                        checker.stmt_result_type(&arm.body)
+                    })?;
+                    let Some(ty) = ty else {
+                        continue;
+                    };
+                    match &first {
+                        Some(existing) if *existing != ty => {
+                            return Err(self.mismatch(
+                                format!(
+                                    "match branches yield struct '{}' and struct '{}'",
+                                    existing, ty
+                                ),
+                                span,
+                            ));
+                        }
+                        Some(_) => {}
+                        None => first = Some(ty),
                     }
                 }
-                self.branches_agree("match", arms.iter().map(|arm| arm.body.as_ref()), span)
+                Ok(())
             }
             Expr::Async { body } | Expr::Lambda { body, .. } => self.scoped(|c| c.stmt(body)),
             Expr::Await { expr } => self.expr(expr, span),
