@@ -3252,19 +3252,21 @@ compiler type metadata, finite replay nor C08 hash binding supplies that claim.
 
 ### Wave 4 per-language lexical binding reports (Rust, Solidity, TypeScript)
 
-The C06 lexical binding reports add opt-in, single-file, tree-sitter producers for
-Rust ([mumei-agent #1033](https://github.com/mumei-lang/mumei-agent/pull/1033)),
-Solidity ([#1038](https://github.com/mumei-lang/mumei-agent/pull/1038)) and
-TypeScript ([#1042](https://github.com/mumei-lang/mumei-agent/pull/1042)). Each one emits a `mumei.<lang>-lexical-bindings/v1` report
-with the same shape and reads it through one shared fail-closed reader. The
-report covers bindings tied to the full source hash, declaration and scope UTF-8
-byte spans, read/write/call references, explicit type facts, function records,
-conservative callee kinds, unresolved names and analysis gaps. Fixtures for each
-language keep shadowing and reassignment distinct: an initializer still sees the
-outer binding, and a write refers to the existing binding rather than creating a
-new one. TypeScript member and index assignments do not rebind, so they read the
-root binding. Solidity inherited overloads collapse only when a more-derived
-override or implementation has identical parameter type text.
+The C06 lexical binding reports add opt-in, single-file, tree-sitter producers
+for Rust ([mumei-agent
+#1033](https://github.com/mumei-lang/mumei-agent/pull/1033)), Solidity
+([#1038](https://github.com/mumei-lang/mumei-agent/pull/1038)) and TypeScript
+([#1042](https://github.com/mumei-lang/mumei-agent/pull/1042)). Each one emits a
+`mumei.<lang>-lexical-bindings/v1` report with the same shape and reads it
+through one shared fail-closed reader. The report covers bindings tied to the
+full source hash, declaration and scope UTF-8 byte spans, read/write/call
+references, explicit type facts, function records, conservative callee kinds,
+unresolved names and analysis gaps. Fixtures for each language keep shadowing
+and reassignment distinct: an initializer still sees the outer binding, and a
+write refers to the existing binding rather than creating a new one. TypeScript
+member and index assignments do not rebind, so they read the root binding.
+Solidity inherited overloads collapse only when a more-derived override or
+implementation has identical parameter type text.
 
 Type facts come only from explicit annotations. Rust `isize`/`usize` need an
 explicit pointer width. Solidity `uintN`/`intN`, `address` and `bytesN` widths
@@ -3273,12 +3275,15 @@ recorded as its own kind. Nothing is inferred from initializers or identifier
 spelling.
 
 Unresolved names never become trusted targets: prelude and builtin names,
-qualified paths, glob or imported names, module/item boundaries, overloads,
-private or external bases, implicit globals and `arguments` stay unresolved.
+qualified paths, module/item boundaries, overloads, private or external bases,
+implicit globals and `arguments` stay unresolved. Imported names bind only to
+an import declaration, calls through them stay opaque, and glob imports are
+gaps.
 Macros, `cfg`, inline assembly, `eval`/`new Function`, decorators, temporal
 dead zone uses and unsupported syntax are gaps. Any unresolved name or gap makes
 `complete` false. A `direct_local` call is a declaration lookup to a
-body-bearing, non-generic, non-async local function. It says nothing about
+body-bearing, non-generic, non-async local function (also non-virtual in
+Solidity and non-generator in TypeScript). It says nothing about
 purity, termination or effect transfer.
 
 The reader rejects stale reports (source hash, profile or target mismatch),
