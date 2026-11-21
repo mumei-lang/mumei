@@ -1941,6 +1941,40 @@ vocabulary changed from `machine_code_tv_backward_branch_functions` to
 `machine_code_tv_cyclic_control_flow_functions`; mumei-agent consumers must
 adopt the new bounded-loop descriptor names and this conditional vocabulary.
 
+### Object-stage machine-code acceptance (C10 Option B)
+
+`mumei native-bundle accept-object` runs the same artifact, object-correspondence
+and machine-TV pipeline as `recheck-machine-tv`, then emits an acceptance
+descriptor only when at least one source-atom function is present, every
+source-atom function defined in the reproduced object is
+`equivalent_within_profile`, and every other object function has the exact
+`outside_profile` reason `not_a_source_atom` (the C `main` wrapper). A machine
+code difference exits 1. Unknown, any other outside-profile result, or no
+source-atom functions exits 3 with no descriptor; identity or artifact
+mismatches exit 1 as well.
+
+On acceptance, `--json` emits the
+`mumei.native-evidence-acceptance/v1` family with `acceptance: "evaluated"` and
+`accepted: true`. It reports the expected build ID and SHA-256 digests of the
+staged, reproduced `program.ll` and `program.o`, together with the machine-TV
+function entries, input domain and dynamically composed checks. Its
+`object_source_machine_code_correspondence` check means every source-atom
+function in the reproduced `program.o` matches its verified source model within
+the machine-code TV profile, under the assumed register convention and
+input domain. If object-to-executable link correspondence is uncheckable, the
+accepted descriptor uses the `_without_object_link` scope and leaves
+`object_link_correspondence` not performed.
+
+This is not reusable Evidence or a certificate and does not promote a grade.
+The register convention is assumed, not validated; the C `main` wrapper,
+producer authenticity, historical execution, optimizer semantics, ABI/runtime
+semantics, OS observations, and grade/Lean checks remain outside the claim.
+Core deliberately does not emit the agent-owned
+`object_translation_correspondence` name. The future mumei-agent
+`native-object-accept` route maps Core's
+`object_source_machine_code_correspondence` check to its
+`object_translation_correspondence` check.
+
 ### Pinned executable exit-status recheck
 
 `mumei native-bundle recheck-exit-status` is the execution slice of the

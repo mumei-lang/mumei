@@ -4092,8 +4092,26 @@ counts only, the route is not a recovery performer, and
 `machine_code_direct_call_site_tv` check added by mumei #1201 is not yet in
 the agent vocabulary, so the agent never discharges it until a follow-up
 adds it. No
-`accept-object` / `accept-machine-tv` acceptance producer exists yet, so the
-agent has no object-stage accept route.
+`accept-machine-tv` acceptance producer exists yet.
+
+Core's new `mumei native-bundle accept-object` producer reruns artifact
+reproduction, object symbol/call-edge checks and bounded machine-TV. It emits
+the `mumei.native-evidence-acceptance/v1` descriptor only when at least one
+source-atom function exists, all such functions are equivalent within the
+machine-TV profile, and other defined functions are exactly outside the
+source-atom set (the C `main` wrapper). The descriptor binds the expected
+build ID and reproduced LLVM/object hashes, performs the Core-owned
+`object_source_machine_code_correspondence` check, and carries machine-TV's
+dynamic coverage names. When linked object correspondence is uncheckable, the
+scope explicitly uses `_without_object_link` and leaves that check
+not performed. Different exits 1; inconclusive outcomes emit no descriptor and
+exit 3. This does not validate the register convention, wrapper semantics,
+ABI/runtime behavior, authenticity or historical execution.
+
+The future mumei-agent `native-object-accept` route maps the Core check
+`object_source_machine_code_correspondence` to its agent-owned
+`object_translation_correspondence` vocabulary. The Core descriptor does not
+emit the agent-owned name, and no mumei-agent code is changed in this slice.
 
 ### Wave 5 declared producer-identity gate (C02 consumer)
 
