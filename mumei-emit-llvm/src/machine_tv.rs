@@ -2918,8 +2918,12 @@ entry:
     }
 
     fn poll_call_targets() -> BTreeMap<u64, CallTarget> {
+        poll_call_targets_at(0x11)
+    }
+
+    fn poll_call_targets_at(field_offset: u64) -> BTreeMap<u64, CallTarget> {
         BTreeMap::from([(
-            0x11,
+            field_offset,
             CallTarget {
                 name: crate::translation_validation::CANCEL_POLL_INTRINSIC.to_owned(),
                 relocation_kind: CallRelocationKind::ElfX86_64Plt32,
@@ -2965,6 +2969,30 @@ entry:
         assert_eq!(
             check_function(&bytes, 0, &model, &poll_call_targets(), &context),
             FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn machine_loop_exceeding_the_bound_fails_closed() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model_named(WHILE_PROBE_SOURCE, "loop_count", &context);
+        let mut bytes = loop_count_machine_bytes();
+        // Only n=3 gets an n+2 threshold; all other inputs keep the original threshold and cannot differ first.
+        bytes.splice(
+            4..16,
+            [
+                0x4c, 0x8d, 0x77, 0x02, // leaq 2(%rdi), %r14
+                0x48, 0x83, 0xff, 0x03, // cmpq $3, %rdi
+                0x4c, 0x0f, 0x45, 0xf7, // cmovneq %rdi, %r14
+                0x31, 0xdb, // xorl %ebx, %ebx
+            ],
+        );
+        assert_eq!(
+            check_function(&bytes, 0, &model, &poll_call_targets_at(0x13), &context),
+            FunctionOutcome::OutsideProfile("loop_bound")
         );
     }
 
