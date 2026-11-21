@@ -1898,6 +1898,41 @@ historical-execution claim. Existing `accept-*` descriptors remain
 unchanged; composing this descriptor with acceptance and `recovery-eval`
 is the planned Option A slice 3.
 
+### Pinned executable runtime-observation acceptance
+
+`mumei native-bundle accept-observations` runs the same artifact
+reproduction and one-invocation comparison as `recheck-observations`,
+then emits an anonymous acceptance descriptor only when the reproduced
+executable matches all three runtime-observation pins:
+
+```sh
+mumei native-bundle accept-observations module-bundle module.mm \
+  --expected-build-id <trusted-64-character-lowercase-sha256>
+mumei native-bundle accept-observations module-bundle module.mm \
+  --expected-build-id <trusted-64-character-lowercase-sha256> --json
+```
+
+Exit 0 means the artifact chain and the one-run observation matched; exit
+1 means the artifact or an observation differed; exit 3 means a pin or
+observation was inconclusive. JSON emits
+`mumei.native-evidence-acceptance/v1` with `accepted: true` and scope
+`native_bundle_source_llvm_toolchain_reproduction_and_runtime_observation_semantics`
+(multifile bundles use the corresponding
+`native_multifile_bundle_...` scope). Its `checks_performed` includes
+`os_exit_status_observation`, `os_stdout_observation`,
+`os_stderr_observation` and `runtime_observation_semantics` after the
+artifact-reproduction checks. `checks_not_performed` retains producer
+authenticity, historical execution, raw argv reproduction,
+optimizer/ABI/runtime semantics, grade promotion and Lean checks; the
+canonical-argv check is also not performed when its pin is absent.
+
+This is the only acceptance descriptor that performs
+`runtime_observation_semantics`: each per-channel `accept-*` command runs
+its channel observation separately, so those descriptors cannot claim
+that all channels matched in the same invocation. The descriptor is not
+reusable Evidence or a certificate. The Agent-side performer registration
+in `RUNTIME_CHECK_VOCABULARY` (mumei-agent#1034) is a follow-up.
+
 ### First native consumer Evidence producer
 
 `mumei native-bundle recheck-llvm <bundle> <source> --expected-build-id <trusted-id> --json`

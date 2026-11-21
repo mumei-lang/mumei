@@ -748,6 +748,17 @@ pub(crate) enum NativeBundleCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Accept the artifact chain plus one invocation of the reproduced executable matching every runtime-observation pin; no runtime/ABI semantics
+    AcceptObservations {
+        bundle: String,
+        source: String,
+        /// SHA-256 of native-bundle.json obtained through a separately trusted channel
+        #[arg(long)]
+        expected_build_id: String,
+        /// Emit a bounded acceptance descriptor on an accepted outcome, not reusable Evidence or a certificate
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

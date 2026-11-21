@@ -3039,6 +3039,12 @@ observation are inconclusive, and any mismatch is `Different`. The scope
 is one invocation's observations only — no runtime/ABI or
 historical-execution claim. See the [runtime-observation recheck
 boundary](VERIFICATION_NATIVE.md#pinned-executable-runtime-observation-recheck).
+The paired `native-bundle accept-observations` emits an anonymous
+acceptance descriptor only when the artifact chain and all three
+observations match in one invocation; it is the only descriptor that
+performs `runtime_observation_semantics`. Agent-side performer
+registration is a follow-up. See the [runtime-observation acceptance
+boundary](VERIFICATION_NATIVE.md#pinned-executable-runtime-observation-acceptance).
 General optimizer/ABI/runtime assurance and producer authenticity stay
 open — the records now pin the intra-source call graph as
 `source_dependencies_sha256`, the canonical JSON of the Claim Book

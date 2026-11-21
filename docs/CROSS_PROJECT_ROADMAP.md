@@ -3907,6 +3907,16 @@ process-semantics or historical-execution proof. Existing accept
 descriptors stay unchanged; composition with acceptance and
 `recovery-eval` is Option A slice 3.
 
+### Wave 5 pinned executable runtime-observation acceptance (C10 consumer)
+
+Core's `mumei native-bundle accept-observations` emits the anonymous
+acceptance descriptor only after artifact reproduction and one invocation
+match exit status, stdout and stderr together. Its checks include
+`runtime_observation_semantics`, the conjunction no per-channel
+`accept-*` command can claim because those observations are made in
+separate runs. The Agent-side `RUNTIME_CHECK_VOCABULARY` performer
+registration (mumei-agent#1034) follows this Core descriptor.
+
 ### Wave 5 declared producer-identity gate (C02 consumer)
 
 Core's `mumei evidence check|check-list|check-consistency`
