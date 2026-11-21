@@ -189,12 +189,18 @@ where
             match piped.read(&mut chunk) {
                 Ok(0) => break,
                 Err(_) => {
+                    // A read error mid-stream means the captured bytes
+                    // are truncated — fail closed, never pin a partial
+                    // digest.
                     overflow = true;
                     break;
                 }
                 Ok(n) => {
                     let room = OBSERVED_CHANNEL_MAX_BYTES.saturating_sub(captured.len());
                     if n > room {
+                        // Any byte past the cap makes the channel
+                        // unobservable — the pin must cover the whole
+                        // stream, never a truncation.
                         overflow = true;
                     }
                     captured.extend_from_slice(&chunk[..n.min(room)]);
@@ -238,6 +244,8 @@ fn observed_invocation(executable: &Path) -> Result<InvocationObservation, Obser
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
             Ok(None) | Err(_) => {
+                // Kill before joining the readers — a live child holding
+                // the pipes open would leave join() blocked indefinitely.
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = stdout_reader.join();
