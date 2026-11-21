@@ -2005,6 +2005,22 @@ equivalent function has a scalar f64 leaf,
 `sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_result_rax_or_xmm0`;
 otherwise the descriptor retains the integer-only convention string.
 
+Small integer struct parameters and results are admitted only when each
+aggregate has one or two 64-bit integer leaves and every leaf in the
+struct-bearing signature is integer; enum signatures, f64/u64/i128 leaves,
+larger aggregates, post-writes, and bounded memory remain outside the profile.
+Flattened integer leaves consume `rdi`–`r9` in order.
+A two-leaf aggregate that cannot fit wholly in the remaining argument
+registers is outside as `argument_count`; aggregates are never split between
+registers and the stack, and stack arguments remain scalar-only. Result leaf 0
+is compared exactly with `rax`, and leaf 1 with `rdx`. Calls with composite
+arguments or results remain outside as `call_arguments`. When an equivalent
+function has a struct parameter or result, the descriptor performs
+`machine_code_composite_register_aggregate_tv` and appends
+`_two_eightbyte_integer_aggregates_in_consecutive_gprs_result_rax_rdx` to its
+active integer or f64 `register_convention_assumed` string. This is bounded
+profile evidence under an assumed SysV convention, not general ABI validation.
+
 ### Object-stage machine-code acceptance (C10 Option B)
 
 `mumei native-bundle accept-object` runs the same artifact, object-correspondence

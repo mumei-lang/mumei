@@ -9036,6 +9036,20 @@ Wave 6（P25、現在）: P31 `task_group` — `task` / `task_group:all` lowerin
 
 ---
 
+### C10 Option B machine-TV profile update
+
+Core machine-TV admits one- or two-leaf struct parameters/results only when
+every leaf in the struct-bearing signature is integer, under the recorded
+composite profile. Leaves use consecutive GPRs and results use `rax`/`rdx`;
+aggregate splitting, enum signatures, and composite call arguments/results
+remain fail-closed. Equivalent aggregate functions report
+`machine_code_composite_register_aggregate_tv` and the corresponding
+register-convention suffix. Core #1238 also admits scalar f64 call arguments
+only when NaN-aware value matching and a per-path exact-bit proof both hold;
+computed arguments without that proof and f64 tail calls remain
+`call_arguments`. These are bounded machine-TV assumptions, not general ABI
+or runtime claims.
+
 ## Related Documents
 
 - [`docs/ROADMAP.md`](ROADMAP.md) — mumei compiler strategic roadmap (P1-P3, Plans 1-24)
