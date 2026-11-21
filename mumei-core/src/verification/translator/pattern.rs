@@ -22,7 +22,11 @@ pub(crate) fn rebuild_payload_direct_fields<'a>(
     let mut direct = Vec::with_capacity(sdef.fields.len());
     let mut cursor = 0usize;
     for field in &sdef.fields {
-        let width = datatype::field_leaf_types(&field.type_name, vc.module_env)?.len();
+        let field_leaves = datatype::field_leaf_types(&field.type_name, vc.module_env)?;
+        if datatype::array_payload_element_type(&field_leaves).is_some() {
+            return None;
+        }
+        let width = field_leaves.len();
         let slice = leaves.get(cursor..cursor + width)?;
         cursor += width;
         // Aliases resolve like the variant-field lookup above does — an
@@ -85,7 +89,7 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                 if let Some((sort, is_v, variant_idx, enum_def)) =
                     datatype::variant_tester_condition(vc, target, variant_name)
                 {
-                    let mut field_conditions: Vec<Bool> = vec![is_v];
+                    let mut field_conditions: Vec<Bool> = vec![is_v.clone()];
                     // arity comes from the matched sort's accessors — the sort
                     // already disambiguates same-named variants across enums.
                     let enum_def = Some(enum_def);
@@ -98,6 +102,42 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                                 datatype::payload_leaf_range(edef, vc.module_env, variant_idx, i)
                             })
                             .unwrap_or((i, 1));
+                        let has_array_payload = enum_def
+                            .and_then(|edef| {
+                                datatype::field_leaf_types(
+                                    &datatype::payload_field_type_name(
+                                        edef.variants[variant_idx].field_types.get(i)?,
+                                    ),
+                                    vc.module_env,
+                                )
+                            })
+                            .is_some_and(|leaves| {
+                                datatype::array_payload_element_type(&leaves).is_some()
+                            });
+                        if has_array_payload {
+                            if !matches!(field_pattern, Pattern::Variable(_) | Pattern::Wildcard) {
+                                return Err(MumeiError::verification(format!(
+                                    "match pattern on array payload field '{variant_leaf}.{i}' must be a variable or '_'"
+                                )));
+                            }
+                            let Some(len) = datatype::variant_selector_apply(
+                                &sort,
+                                variant_idx,
+                                off + 1,
+                                target,
+                            ) else {
+                                return Err(MumeiError::verification(
+                                    "array payload length selector is unavailable",
+                                ));
+                            };
+                            if let (Some(solver), Some(nonnegative)) =
+                                (solver_opt, nonneg_constraint(ctx, &len))
+                            {
+                                solver.assert(&is_v.implies(&nonnegative));
+                            }
+                            field_conditions.push(Bool::from_bool(ctx, true));
+                            continue;
+                        }
                         let sdef = enum_def.and_then(|edef| {
                             // The pattern may bind more fields than the
                             // variant declares — `V(a, b)` on `V(i64)` —
@@ -109,8 +149,10 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                             // `Pair::P(..)` pattern recurses on the inner
                             // enum (and so a prelude struct of the same
                             // name cannot hijack the slot).
-                            let ft = &edef.variants[variant_idx].field_types.get(i)?.name;
-                            let resolved = vc.module_env.resolve_base_type(ft);
+                            let ft = datatype::payload_field_type_name(
+                                edef.variants[variant_idx].field_types.get(i)?,
+                            );
+                            let resolved = vc.module_env.resolve_base_type(&ft);
                             if vc.module_env.enums.contains_key(&resolved) {
                                 return None;
                             }
@@ -123,7 +165,9 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                             // (`inner_x` for `b.inner.x`).
                             let leaf_types = enum_def.and_then(|edef| {
                                 datatype::field_leaf_types(
-                                    &edef.variants[variant_idx].field_types.get(i)?.name,
+                                    &datatype::payload_field_type_name(
+                                        edef.variants[variant_idx].field_types.get(i)?,
+                                    ),
                                     vc.module_env,
                                 )
                             });
@@ -348,6 +392,55 @@ pub(crate) fn pattern_bind_variables<'a>(
                                     )
                                 })
                                 .unwrap_or((i, 1));
+                            let array_element = enum_def
+                                .and_then(|edef| {
+                                    datatype::field_leaf_types(
+                                        &datatype::payload_field_type_name(
+                                            edef.variants[variant_idx].field_types.get(i)?,
+                                        ),
+                                        vc.module_env,
+                                    )
+                                })
+                                .and_then(|leaves| {
+                                    datatype::array_payload_element_type(&leaves).map(str::to_owned)
+                                });
+                            if let Some(element_type) = array_element {
+                                let Some(array) = datatype::variant_selector_apply(
+                                    &sort,
+                                    variant_idx,
+                                    off,
+                                    target,
+                                ) else {
+                                    continue;
+                                };
+                                let Some(len) = datatype::variant_selector_apply(
+                                    &sort,
+                                    variant_idx,
+                                    off + 1,
+                                    target,
+                                ) else {
+                                    continue;
+                                };
+                                if let Pattern::Variable(name) = field_pattern {
+                                    env.insert(name.clone(), array.clone());
+                                    env.insert(format!("__z3_arr_{name}"), array.clone());
+                                    let len_key = super::z3_types::array_len_key(name);
+                                    env.insert(len_key.clone(), len.clone());
+                                    if let Some(array_ast) = array.as_array() {
+                                        let array_key = super::z3_types::register_array_value_len(
+                                            env, &array_ast, len,
+                                        );
+                                        bound.insert(name.clone());
+                                        bound.insert(format!("__z3_arr_{name}"));
+                                        bound.insert(len_key);
+                                        bound.insert(array_key);
+                                        vc.local_array_elem_types
+                                            .borrow_mut()
+                                            .insert(name.clone(), element_type.clone());
+                                    }
+                                }
+                                continue;
+                            }
                             let sdef = enum_def.and_then(|edef| {
                                 // Over-wide patterns (`V(a, b)` on
                                 // `V(i64)`) index past the declared
@@ -356,8 +449,10 @@ pub(crate) fn pattern_bind_variables<'a>(
                                 // accessor, not a flattened struct, so a
                                 // nested variant pattern binds through
                                 // the scalar path below.
-                                let ft = &edef.variants[variant_idx].field_types.get(i)?.name;
-                                let resolved = vc.module_env.resolve_base_type(ft);
+                                let ft = datatype::payload_field_type_name(
+                                    edef.variants[variant_idx].field_types.get(i)?,
+                                );
+                                let resolved = vc.module_env.resolve_base_type(&ft);
                                 if vc.module_env.enums.contains_key(&resolved) {
                                     return None;
                                 }
@@ -373,7 +468,9 @@ pub(crate) fn pattern_bind_variables<'a>(
                                 // `<name>_<path>` keys reads resolve.
                                 let leaf_types = enum_def.and_then(|edef| {
                                     datatype::field_leaf_types(
-                                        &edef.variants[variant_idx].field_types.get(i)?.name,
+                                        &datatype::payload_field_type_name(
+                                            edef.variants[variant_idx].field_types.get(i)?,
+                                        ),
                                         vc.module_env,
                                     )
                                 });

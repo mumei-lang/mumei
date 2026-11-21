@@ -1960,7 +1960,7 @@ fn enum_payload_field_read<'a>(
     let Some(field_type) = enum_def.variants[variant_idx]
         .field_types
         .get(field_idx)
-        .map(|field| field.name.as_str())
+        .map(datatype::payload_field_type_name)
     else {
         return Ok(None);
     };
@@ -1969,14 +1969,15 @@ fn enum_payload_field_read<'a>(
     else {
         return Ok(None);
     };
-    let Some(field_leaves) = datatype::field_leaf_types(field_type, vc.module_env) else {
+    let Some(field_leaves) = datatype::field_leaf_types(&field_type, vc.module_env) else {
         return Ok(None);
     };
     if field_leaves.len() != payload_width {
         return Ok(None);
     }
+    let direct_array_payload = datatype::array_payload_element_type(&field_leaves).is_some();
 
-    let mut terminal_type = field_type.to_string();
+    let mut terminal_type = field_type;
     for segment in &path[1..] {
         let resolved = vc.module_env.resolve_base_type(&terminal_type);
         let Some(sdef) = vc.module_env.get_struct(&resolved).or_else(|| {
@@ -2031,10 +2032,13 @@ fn enum_payload_field_read<'a>(
         (leaf_offset, selected_leaf_names.len())
     } else {
         let leaf_offset = if path.len() == 1 {
-            if payload_width != 1 || !field_leaves[0].0.is_empty() {
+            if direct_array_payload {
+                0
+            } else if payload_width != 1 || !field_leaves[0].0.is_empty() {
                 return Ok(None);
+            } else {
+                0
             }
-            0
         } else {
             let leaf_name = path[1..].join("_");
             let Some(leaf_offset) = field_leaves.iter().position(|(name, _)| name == &leaf_name)
@@ -2095,7 +2099,7 @@ fn enum_payload_field_read<'a>(
             let Some(outer_field_type) = outer_enum_def.variants[outer_variant_idx]
                 .field_types
                 .get(outer_field_idx)
-                .map(|field| field.name.as_str())
+                .map(datatype::payload_field_type_name)
             else {
                 return Ok(None);
             };
@@ -2107,7 +2111,7 @@ fn enum_payload_field_read<'a>(
             ) else {
                 return Ok(None);
             };
-            let Some(leaves) = datatype::field_leaf_types(outer_field_type, vc.module_env) else {
+            let Some(leaves) = datatype::field_leaf_types(&outer_field_type, vc.module_env) else {
                 return Ok(None);
             };
             if width == 0 || leaves.len() != width {
@@ -2155,6 +2159,27 @@ fn enum_payload_field_read<'a>(
         let Some(value) = super::z3_types::dynamic_ite(&gate, &selector, &fresh) else {
             return Ok(None);
         };
+        if direct_array_payload {
+            let Some(length_selector) =
+                datatype::variant_selector_apply(&sort, variant_idx, payload_offset + 1, &base)
+            else {
+                return Ok(None);
+            };
+            let Some(length_fresh) = super::z3_types::dynamic_fresh_const(
+                vc.ctx,
+                "__enum_payload_len_read",
+                &length_selector,
+            ) else {
+                return Ok(None);
+            };
+            let Some(length) = super::z3_types::dynamic_ite(&gate, &length_selector, &length_fresh)
+            else {
+                return Ok(None);
+            };
+            if let Some(array) = value.as_array() {
+                super::z3_types::register_array_value_len(env, &array, length);
+            }
+        }
         return Ok(Some(value));
     }
     let Some(solver) = solver_opt else {
@@ -2203,7 +2228,7 @@ fn enum_payload_field_read<'a>(
         let Some(outer_field_type) = outer_enum_def.variants[outer_variant_idx]
             .field_types
             .get(outer_field_idx)
-            .map(|field| field.name.as_str())
+            .map(datatype::payload_field_type_name)
         else {
             return Ok(None);
         };
@@ -2215,7 +2240,7 @@ fn enum_payload_field_read<'a>(
         ) else {
             return Ok(None);
         };
-        let Some(leaves) = datatype::field_leaf_types(outer_field_type, vc.module_env) else {
+        let Some(leaves) = datatype::field_leaf_types(&outer_field_type, vc.module_env) else {
             return Ok(None);
         };
         if width == 0 || leaves.len() != width {
@@ -2290,12 +2315,23 @@ fn enum_payload_field_read<'a>(
         crate::verification::translator::bind_struct_fields(env, &handle_name, &direct);
         return Ok(Some(handle));
     }
-    Ok(datatype::variant_selector_apply(
-        &sort,
-        variant_idx,
-        payload_offset + leaf_offset,
-        &base,
-    ))
+    let value =
+        datatype::variant_selector_apply(&sort, variant_idx, payload_offset + leaf_offset, &base);
+    if direct_array_payload {
+        let Some(length) =
+            datatype::variant_selector_apply(&sort, variant_idx, payload_offset + 1, &base)
+        else {
+            return Ok(None);
+        };
+        let Some(nonnegative) = super::z3_types::nonneg_constraint(vc.ctx, &length) else {
+            return Ok(None);
+        };
+        solver.assert(&is_variant.implies(&nonnegative));
+        if let Some(array) = value.as_ref().and_then(|value| value.as_array()) {
+            super::z3_types::register_array_value_len(env, &array, length);
+        }
+    }
+    Ok(value)
 }
 
 pub(crate) fn expr_to_z3<'a>(
@@ -2364,7 +2400,7 @@ pub(crate) fn expr_to_z3<'a>(
             // finite ADT (e.g. `Red` for `enum Color { Red, Green, Blue }`)
             // constructs the datatype value.
             if name.chars().next().is_some_and(|c| c.is_uppercase()) {
-                if let Some(value) = datatype::enum_ctor_apply(vc, env, name, &[])? {
+                if let Some(value) = datatype::enum_ctor_apply(vc, env, name, &[], &[])? {
                     return Ok(value);
                 }
             }
@@ -3740,9 +3776,49 @@ pub(crate) fn expr_to_z3<'a>(
                         // datatype constructor.
                         if name.contains("::") || vc.module_env.find_enum_by_variant(name).is_some()
                         {
-                            let mut ctor_args = Vec::new();
-                            for arg in args {
-                                ctor_args.push(expr_to_z3(vc, arg, env, solver_opt)?);
+                            let enum_ctor = datatype::resolve_enum_ctor(vc, name)?;
+                            let mut ctor_args = Vec::with_capacity(args.len());
+                            let mut array_payload_snapshots = Vec::with_capacity(args.len());
+                            for (i, arg) in args.iter().enumerate() {
+                                let arg_z3 = expr_to_z3(vc, arg, env, solver_opt)?;
+                                let is_array_payload = enum_ctor
+                                    .and_then(|(enum_def, idx)| enum_def.variants.get(idx))
+                                    .and_then(|variant| variant.field_types.get(i))
+                                    .is_some_and(|field_type| {
+                                        let field_type =
+                                            datatype::payload_field_type_name(field_type);
+                                        datatype::field_leaf_types(&field_type, vc.module_env)
+                                            .is_some_and(|leaves| {
+                                                datatype::array_payload_element_type(&leaves)
+                                                    .is_some()
+                                            })
+                                    });
+                                let snapshot = if is_array_payload {
+                                    let array = match arg {
+                                        Expr::Variable(name) => env
+                                            .get(&format!("__z3_arr_{name}"))
+                                            .and_then(|value| value.as_array())
+                                            .map(Into::into)
+                                            .unwrap_or_else(|| arg_z3.clone()),
+                                        _ => arg_z3.clone(),
+                                    };
+                                    if array.as_array().is_some() {
+                                        let len = super::z3_types::array_len_for_expr(
+                                            vc,
+                                            env,
+                                            Some(arg),
+                                            &array,
+                                            solver_opt,
+                                        );
+                                        Some(datatype::ArrayPayloadSnapshot { array, len })
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
+                                ctor_args.push(arg_z3);
+                                array_payload_snapshots.push(snapshot);
                             }
                             // A payload argument must satisfy the declared
                             // field type — `Chan::Tcp(0)` with `p: Port`
@@ -3750,8 +3826,7 @@ pub(crate) fn expr_to_z3<'a>(
                             // not a value a later match may assume the
                             // refined bounds on (the same contract a caller
                             // satisfies for a refined callee parameter).
-                            if let (Some(solver), Some((enum_def, vidx))) =
-                                (solver_opt, datatype::resolve_enum_ctor(vc, name)?)
+                            if let (Some(solver), Some((enum_def, vidx))) = (solver_opt, enum_ctor)
                             {
                                 let variant_def = &enum_def.variants[vidx];
                                 for (i, arg_z3) in ctor_args.iter().enumerate() {
@@ -3805,9 +3880,13 @@ pub(crate) fn expr_to_z3<'a>(
                                     }
                                 }
                             }
-                            if let Some(value) =
-                                datatype::enum_ctor_apply(vc, env, name, &ctor_args)?
-                            {
+                            if let Some(value) = datatype::enum_ctor_apply(
+                                vc,
+                                env,
+                                name,
+                                &ctor_args,
+                                &array_payload_snapshots,
+                            )? {
                                 return Ok(value);
                             }
                             // A resolved enum+variant whose construction still
@@ -3974,6 +4053,8 @@ pub(crate) fn expr_to_z3<'a>(
             let idx =
                 as_int_like(&idx_value).ok_or(MumeiError::type_error("Index must be integer"))?;
 
+            let array = z3_dynamic_array(vc, name, env);
+
             // 配列名に紐づく長さシンボルを使った境界チェック
             if let Some(solver) = solver_opt {
                 let len = array_len_value(ctx, env, name, vc.bitvec_i64, Some(solver));
@@ -3997,7 +4078,7 @@ pub(crate) fn expr_to_z3<'a>(
                 }
                 solver.pop(1);
             }
-            Ok(z3_dynamic_array(vc, name, env).select(&idx))
+            Ok(array.select(&idx))
         }
         Expr::BinaryOp(left, op, right) => {
             if matches!(op, Op::Pow) {
@@ -4860,6 +4941,7 @@ pub(crate) fn expr_to_z3<'a>(
                 *vc.local_lambdas.borrow_mut() = lambdas_before.clone();
                 let mut arm_env = env.clone();
                 let int_types_before_arm = vc.local_int_types.borrow().clone();
+                let array_elem_types_before_arm = vc.local_array_elem_types.borrow().clone();
                 if let Pattern::Variable(name) = &arm.pattern {
                     let ty = fixed_width_int_type(vc, target).unwrap_or("i64");
                     vc.local_int_types.borrow_mut().insert(name.clone(), ty);
@@ -4993,8 +5075,17 @@ pub(crate) fn expr_to_z3<'a>(
                         stack.pop();
                     }
                 }
+                *vc.local_array_elem_types.borrow_mut() = array_elem_types_before_arm;
                 let body_val = body_val?;
                 *vc.local_int_types.borrow_mut() = int_types_before_arm.clone();
+                for key in arm_bound
+                    .iter()
+                    .filter(|key| key.starts_with("__array_len#"))
+                {
+                    if let Some(len) = arm_env.get(key) {
+                        env.insert(key.clone(), len.clone());
+                    }
+                }
                 arm_states.push((full_cond.clone(), arm_env, arm_bound));
                 arm_results.push((full_cond.clone(), body_val));
                 accumulated_negations.push(full_cond.not());
@@ -6089,6 +6180,7 @@ pub(crate) fn expr_to_z3<'a>(
                         vc,
                         env,
                         &format!("{}::{}", name, field_name),
+                        &[],
                         &[],
                     )? {
                         return Ok(value);
