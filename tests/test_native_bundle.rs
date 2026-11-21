@@ -13,6 +13,7 @@ const GOOD: &str = "atom main() -> i64 requires: true; ensures: result == 7; bod
 const BRANCH: &str = "atom absd(x: i64, y: i64) -> i64 requires: x >= 0 && x <= 1000 && y >= 0 && y <= 1000; ensures: result >= 0; body: { if x > y { x - y } else { y - x } };\n\
 atom clamp(x: i64) -> i64 requires: true; ensures: result <= 10; body: { if x > 10 { 10 } else { x } };\n\
 atom pick(b: bool, x: i64) -> i64 requires: true; ensures: true; body: { if b { x } else { 0 } };\n\
+atom band(x: i64, y: i64) -> i64 requires: x >= 0 && x <= 100 && y >= 0 && y <= 100; ensures: true; body: { if x > 5 && y > 5 { x + y } else { 0 } };\n\
 atom main() -> i64 requires: true; ensures: result >= 0; body: { absd(7, 3) };";
 const SETCC_SHIFTS: &str =
     "atom lt(x: i64, y: i64) -> bool requires: true; ensures: true; body: { x < y };\n\
@@ -346,10 +347,10 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     assert_success(&text);
     let text = String::from_utf8_lossy(&text.stdout);
     assert!(text.contains(
-        "Machine-code TV: 1 of 2 object functions equivalent to their source atoms within the forward-branch profile."
+        "Machine-code TV: 1 of 2 object functions equivalent to their source atoms within the acyclic-branch profile."
     ));
     assert!(text.contains(
-        "Scope: artifact_reproduction_object_link_correspondence_and_forward_branch_function_machine_code_tv_only/no_abi_or_runtime_semantics"
+        "Scope: artifact_reproduction_object_link_correspondence_and_acyclic_branch_function_machine_code_tv_only/no_abi_or_runtime_semantics"
     ));
 
     let output = recheck_machine_tv(&source, &bundle, &id, true);
@@ -358,7 +359,7 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     assert_eq!(descriptor["schema_version"], "mumei.machine-code-tv/v1");
     assert_eq!(
         descriptor["scope"],
-        "artifact_reproduction_object_link_correspondence_and_forward_branch_function_machine_code_tv_only/no_abi_or_runtime_semantics"
+        "artifact_reproduction_object_link_correspondence_and_acyclic_branch_function_machine_code_tv_only/no_abi_or_runtime_semantics"
     );
     assert_eq!(
         descriptor["register_convention_assumed"],
@@ -395,9 +396,10 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
             "os_stdout_observation",
             "os_stderr_observation",
             "runtime_observation_semantics",
-            "machine_code_tv_backward_branch_functions",
+            "machine_code_tv_cyclic_control_flow_functions",
             "machine_code_direct_call_site_tv",
             "machine_code_forward_branch_function_tv",
+            "machine_code_acyclic_branch_function_tv",
         ])
     );
 }
@@ -446,11 +448,11 @@ fn recheck_machine_tv_reports_module_direct_call_and_wrapper_outcomes() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|check| check == "machine_code_tv_backward_branch_functions"));
+        .any(|check| check == "machine_code_tv_cyclic_control_flow_functions"));
 }
 
 #[test]
-fn recheck_machine_tv_checks_probe_forward_branches() {
+fn recheck_machine_tv_checks_forward_and_acyclic_branches() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build_source(root.path(), BRANCH);
     for (symbol, expected) in [
@@ -460,6 +462,13 @@ fn recheck_machine_tv_checks_probe_forward_branches() {
         ),
         ("clamp", vec!["movl", "cmpq", "jle", "retq", "movq", "retq"]),
         ("pick", vec!["movq", "testq", "je", "retq", "xorl", "retq"]),
+        (
+            "band",
+            vec![
+                "movq", "cmpq", "jl", "cmpq", "setge", "testb", "je", "addq", "retq", "xorl",
+                "testb", "jne", "xorl", "retq",
+            ],
+        ),
     ] {
         let disassembly = object_function_disassembly(&bundle, symbol);
         assert_eq!(
@@ -478,6 +487,7 @@ fn recheck_machine_tv_checks_probe_forward_branches() {
         serde_json::json!({
             "__mumei_user_main": {"outcome": "equivalent_within_profile"},
             "absd": {"outcome": "equivalent_within_profile"},
+            "band": {"outcome": "equivalent_within_profile"},
             "clamp": {"outcome": "equivalent_within_profile"},
             "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
             "pick": {"outcome": "equivalent_within_profile"},
@@ -489,11 +499,14 @@ fn recheck_machine_tv_checks_probe_forward_branches() {
         .any(|check| check == "machine_code_forward_branch_function_tv"));
     assert!(performed
         .iter()
+        .any(|check| check == "machine_code_acyclic_branch_function_tv"));
+    assert!(performed
+        .iter()
         .any(|check| check == "machine_code_direct_call_site_tv"));
     let not_performed = descriptor["checks_not_performed"].as_array().unwrap();
     assert!(not_performed
         .iter()
-        .any(|check| check == "machine_code_tv_backward_branch_functions"));
+        .any(|check| check == "machine_code_tv_cyclic_control_flow_functions"));
     assert!(not_performed
         .iter()
         .any(|check| check == "machine_code_leaf_function_tv"));
