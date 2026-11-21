@@ -60,6 +60,17 @@ fn direct_enum_payload_reads_verify_in_default_and_bitvec_modes() {
 }
 
 #[test]
+fn block_root_enum_payload_read_evaluates_side_effect_once() {
+    let out = run_verify("test_enum_payload_direct_read_side_effect.mm", &[]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("Verification passed"),
+        "block-root payload read must evaluate its root once:\n{stdout}\n{stderr}"
+    );
+}
+
+#[test]
 fn direct_enum_payload_read_negatives_keep_their_own_diagnostics() {
     let out = run_verify(
         "test_enum_payload_direct_read_negative.mm",

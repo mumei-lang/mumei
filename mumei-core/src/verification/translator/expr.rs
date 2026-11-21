@@ -1886,6 +1886,9 @@ fn enum_payload_field_read<'a>(
         base_expr = inner;
     }
     fields.reverse();
+    if !matches!(base_expr, Expr::Variable(_)) {
+        return Ok(None);
+    }
     if fields.iter().any(|field| field == "tag") {
         return Ok(None);
     }
