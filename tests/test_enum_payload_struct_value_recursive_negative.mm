@@ -9,6 +9,12 @@ enum RecursiveEv {
 }
 
 atom bad_recursive_payload(e: RecursiveEv) -> i64
-requires: true;
+requires: match e {
+    RecursiveEv::Move(_) => true,
+    _ => false
+};
 ensures: result == 0;
-body: e.node.value;
+body: {
+    let q = e.node;
+    q.value
+};
