@@ -183,6 +183,22 @@ pub fn branch_shape(
     }
 }
 
+pub fn has_conditional_branch_and_call(
+    bytes: &[u8],
+    address: u64,
+    call_targets: &BTreeMap<u64, CallTarget>,
+) -> bool {
+    let Ok(instructions) = disassemble(bytes, address) else {
+        return false;
+    };
+    instructions
+        .iter()
+        .any(|instruction| is_conditional_branch(&instruction.mnemonic))
+        && instructions.iter().any(|instruction| {
+            instruction.mnemonic == "callq" || is_tail_call(instruction, call_targets)
+        })
+}
+
 pub fn check_function<'ctx>(
     bytes: &[u8],
     address: u64,
@@ -279,6 +295,7 @@ struct LiftedPath<'ctx> {
     return_value: BV<'ctx>,
     path_conditions: Vec<Bool<'ctx>>,
     call_argument_obligations: Vec<Bool<'ctx>>,
+    used_call_targets: BTreeSet<u64>,
 }
 
 #[derive(Clone)]
@@ -323,15 +340,6 @@ fn lift<'ctx>(
     call_targets: &BTreeMap<u64, CallTarget>,
     context: &'ctx Context,
 ) -> Result<LiftedFunction<'ctx>, FunctionOutcome> {
-    let has_conditional_branch = instructions
-        .iter()
-        .any(|instruction| is_conditional_branch(&instruction.mnemonic));
-    let has_call = instructions.iter().any(|instruction| {
-        instruction.mnemonic == "callq" || is_tail_call(instruction, call_targets)
-    });
-    if has_conditional_branch && has_call {
-        return Err(FunctionOutcome::OutsideProfile("branching_call"));
-    }
     let branch_targets = resolve_branch_targets(instructions, function_size, call_targets)?;
     let successors = control_flow_successors(instructions, &branch_targets, call_targets);
     let reachable = reachable_instructions(&successors);
@@ -341,7 +349,7 @@ fn lift<'ctx>(
     let registers = (0..16)
         .map(|_| BV::fresh_const(context, "machine_initial_register", 64))
         .collect::<Vec<_>>();
-    let arguments = ARGUMENT_REGISTERS
+    let arguments: Vec<_> = ARGUMENT_REGISTERS
         .iter()
         .map(|index| registers[*index].extract(63, 0))
         .collect();
@@ -375,12 +383,12 @@ fn lift<'ctx>(
                 let target = *branch_targets
                     .get(&index)
                     .ok_or(FunctionOutcome::OutsideProfile("branch_target"))?;
-                let mut fallthrough = state.clone();
-                fallthrough.path_conditions.push(condition.not());
-                fallthrough.instruction_index = index + 1;
-                pending.push(fallthrough);
-                state.path_conditions.push(condition);
-                state.instruction_index = target;
+                let mut taken = state.clone();
+                taken.path_conditions.push(condition.clone());
+                taken.instruction_index = target;
+                pending.push(taken);
+                state.path_conditions.push(condition.not());
+                state.instruction_index = index + 1;
                 continue;
             }
             if is_unconditional_jump(&instruction.mnemonic) {
@@ -397,10 +405,12 @@ fn lift<'ctx>(
                         call_targets,
                         &mut state.call_state,
                         &mut state.registers,
+                        &state.path_conditions,
+                        &arguments,
                         context,
                     )?;
                     state.flags = FlagState::Unknown;
-                    paths.push(finish_path(state, model, call_targets)?);
+                    paths.push(finish_path(state, model, &arguments, context)?);
                     if paths.len() > MAX_COMPLETED_PATHS {
                         return Err(FunctionOutcome::OutsideProfile("path_bound"));
                     }
@@ -418,7 +428,7 @@ fn lift<'ctx>(
                 {
                     return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
                 }
-                paths.push(finish_path(state, model, call_targets)?);
+                paths.push(finish_path(state, model, &arguments, context)?);
                 if paths.len() > MAX_COMPLETED_PATHS {
                     return Err(FunctionOutcome::OutsideProfile("path_bound"));
                 }
@@ -435,6 +445,8 @@ fn lift<'ctx>(
                     call_targets,
                     &mut state.call_state,
                     &mut state.registers,
+                    &state.path_conditions,
+                    &arguments,
                     context,
                 )?;
                 state.flags = FlagState::Unknown;
@@ -560,6 +572,13 @@ fn lift<'ctx>(
         }
     }
     if paths.is_empty() {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let used_call_targets = paths
+        .iter()
+        .flat_map(|path| path.used_call_targets.iter().copied())
+        .collect::<BTreeSet<_>>();
+    if used_call_targets.len() != call_targets.len() {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
     Ok(LiftedFunction { arguments, paths })
@@ -799,21 +818,29 @@ fn most_significant_bit<'ctx>(value: &BV<'ctx>, width: u32, context: &'ctx Conte
 fn finish_path<'ctx>(
     state: MachineState<'ctx>,
     model: &PureI64Body<'ctx>,
-    call_targets: &BTreeMap<u64, CallTarget>,
+    arguments: &[BV<'ctx>],
+    context: &'ctx Context,
 ) -> Result<LiftedPath<'ctx>, FunctionOutcome> {
     if !state.rsp_is_known {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    if state.call_state.call_index != model.call_sites.len() {
-        return Err(FunctionOutcome::OutsideProfile("call_order"));
-    }
-    if state.call_state.used_call_targets.len() != call_targets.len() {
-        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    for call_site in model.call_sites.iter().skip(state.call_state.call_index) {
+        if call_guard_status(
+            model,
+            &call_site.guard,
+            &state.path_conditions,
+            arguments,
+            context,
+        ) != Some(false)
+        {
+            return Err(FunctionOutcome::OutsideProfile("call_order"));
+        }
     }
     Ok(LiftedPath {
         return_value: state.registers[0].extract(63, 0),
         path_conditions: state.path_conditions,
         call_argument_obligations: state.call_state.argument_obligations,
+        used_call_targets: state.call_state.used_call_targets,
     })
 }
 
@@ -1086,12 +1113,15 @@ fn lift_rsp_adjustment<'ctx>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lift_call<'ctx>(
     instruction: &Instruction,
     model: &PureI64Body<'ctx>,
     call_targets: &BTreeMap<u64, CallTarget>,
     call_state: &mut CallState<'ctx>,
     registers: &mut [BV<'ctx>],
+    path_conditions: &[Bool<'ctx>],
+    arguments: &[BV<'ctx>],
     context: &'ctx Context,
 ) -> Result<(), FunctionOutcome> {
     let operands = split_operands(&instruction.operands);
@@ -1108,17 +1138,29 @@ fn lift_call<'ctx>(
     if !target.is_entry_target_relocation() {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    let Some(call_site) = model.call_sites.get(call_state.call_index) else {
-        return Err(FunctionOutcome::OutsideProfile("call_order"));
+    let mut skipped_false_guard = false;
+    let call_site = loop {
+        let Some(call_site) = model.call_sites.get(call_state.call_index) else {
+            return Err(FunctionOutcome::OutsideProfile(if skipped_false_guard {
+                "conditional_call"
+            } else {
+                "call_order"
+            }));
+        };
+        match call_guard_status(model, &call_site.guard, path_conditions, arguments, context) {
+            Some(false) => {
+                call_state.call_index += 1;
+                skipped_false_guard = true;
+            }
+            Some(true) => break call_site,
+            None => return Err(FunctionOutcome::OutsideProfile("conditional_call")),
+        }
     };
     if target.name != crate::translation_validation::native_function_name(&call_site.callee) {
         return Err(FunctionOutcome::OutsideProfile("call_order"));
     }
     if call_site.args.len() > ARGUMENT_REGISTERS.len() {
         return Err(FunctionOutcome::OutsideProfile("argument_count"));
-    }
-    if !call_guard_is_true(model, &call_site.guard, context) {
-        return Err(FunctionOutcome::OutsideProfile("conditional_call"));
     }
     for (argument, register_index) in call_site.args.iter().zip(ARGUMENT_REGISTERS) {
         call_state
@@ -1134,11 +1176,13 @@ fn lift_call<'ctx>(
     Ok(())
 }
 
-fn call_guard_is_true<'ctx>(
+fn call_guard_status<'ctx>(
     model: &PureI64Body<'ctx>,
     guard: &Bool<'ctx>,
+    path_conditions: &[Bool<'ctx>],
+    arguments: &[BV<'ctx>],
     context: &'ctx Context,
-) -> bool {
+) -> Option<bool> {
     let solver = Solver::new(context);
     set_solver_budget(&solver, context);
     for assumption in model
@@ -1149,8 +1193,32 @@ fn call_guard_is_true<'ctx>(
     {
         solver.assert(assumption);
     }
+    for (input, argument) in model.inputs.iter().zip(arguments) {
+        solver.assert(&input._eq(argument));
+    }
+    for path_condition in path_conditions {
+        solver.assert(path_condition);
+    }
+    if solver.check() != SatResult::Sat {
+        return None;
+    }
+    solver.push();
     solver.assert(&guard.not());
-    solver.check() == SatResult::Unsat
+    let guard_true = solver.check();
+    solver.pop(1);
+    match guard_true {
+        SatResult::Unsat => return Some(true),
+        SatResult::Unknown => return None,
+        SatResult::Sat => {}
+    }
+    solver.push();
+    solver.assert(guard);
+    let guard_false = solver.check();
+    solver.pop(1);
+    match guard_false {
+        SatResult::Unsat => Some(false),
+        SatResult::Sat | SatResult::Unknown => None,
+    }
 }
 
 fn adjust_rsp<'ctx>(
@@ -1577,6 +1645,23 @@ mod tests {
             .into_iter()
             .find(|model| model.function_name == name)
             .unwrap()
+    }
+
+    fn helper_call_targets(offsets: &[u64]) -> BTreeMap<u64, CallTarget> {
+        offsets
+            .iter()
+            .map(|offset| {
+                (
+                    *offset,
+                    CallTarget {
+                        name: "helper".to_owned(),
+                        relocation_kind: CallRelocationKind::ElfX86_64Plt32,
+                        relocation_size: 32,
+                        addend: -4,
+                    },
+                )
+            })
+            .collect()
     }
 
     fn compiled_helper() -> (u64, Vec<u8>) {
@@ -2461,25 +2546,124 @@ entry:
     }
 
     #[test]
-    fn conditional_branch_with_a_call_is_outside_profile() {
+    fn branching_call_probe_matches_real_bytes_and_rejects_inverted_call_guard() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
         config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
         let context = Context::new(&config);
-        let model = source_model(
-            "atom callee(x: i64) -> i64 requires: true; ensures: true; body: { x };\n\
-             atom helper(x: i64) -> i64 requires: true; ensures: true; body: { callee(x) };",
-            &context,
-        );
+        let source = "atom helper(x: i64) -> i64 requires: x >= 0 && x <= 100; ensures: result >= 1; body: { x + 1 };\n\
+            atom cc(x: i64) -> i64 requires: x >= 0 && x <= 100; ensures: true; body: { if x > 5 { helper(x) } else { 0 } };";
+        let model = source_model_named(source, "cc", &context);
         let bytes = [
-            0x48, 0x85, 0xff, // testq %rdi, %rdi
-            0x74, 0x05, // je to retq
-            0xe8, 0x00, 0x00, 0x00, 0x00, // callq
-            0xc3,
+            0x48, 0x83, 0xff, 0x06, // cmpq $6, %rdi
+            0x7c, 0x0b, // jl to xorl %eax, %eax
+            0x50, // pushq %rax
+            0xe8, 0x00, 0x00, 0x00, 0x00, // callq helper
+            0x48, 0x83, 0xc4, 0x08, // addq $8, %rsp
+            0xc3, // retq
+            0x31, 0xc0, // xorl %eax, %eax
+            0xc3, // retq
+        ];
+        let call_targets = helper_call_targets(&[8]);
+        assert_eq!(
+            check_function(&bytes, 0, &model, &call_targets, &context),
+            FunctionOutcome::Equivalent
+        );
+        let mut inverted = bytes;
+        inverted[4] = 0x7d; // jge: the machine call runs where the source guard is false
+        assert_eq!(
+            check_function(&inverted, 0, &model, &call_targets, &context),
+            FunctionOutcome::OutsideProfile("conditional_call")
+        );
+    }
+
+    #[test]
+    fn calls_on_both_branch_arms_match_guarded_sites_and_union_relocations() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "atom helper(x: i64) -> i64 requires: x >= 0 && x <= 100; ensures: result >= 1; body: { x + 1 };\n\
+            atom cc_both(x: i64) -> i64 requires: x >= 0 && x <= 100; ensures: result >= 1; body: { if x > 5 { helper(x) } else { helper(5) } };";
+        let model = source_model_named(source, "cc_both", &context);
+        let bytes = [
+            0x50, // pushq %rax
+            0x48, 0x83, 0xff, 0x06, // cmpq $6, %rdi
+            0x7d, 0x05, // jge to shared call with %rdi
+            0xbf, 0x05, 0x00, 0x00, 0x00, // movl $5, %edi
+            0xe8, 0x00, 0x00, 0x00, 0x00, // shared callq helper
+            0x59, // popq %rcx
+            0xc3, // retq
         ];
         assert_eq!(
-            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
-            FunctionOutcome::OutsideProfile("branching_call")
+            check_function(&bytes, 0, &model, &helper_call_targets(&[13]), &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let separate_calls = [
+            0x48, 0x83, 0xff, 0x06, // cmpq $6, %rdi
+            0x7c, 0x06, // jl to second call
+            0xe8, 0x00, 0x00, 0x00, 0x00, // first callq helper
+            0xc3, // retq
+            0xbf, 0x05, 0x00, 0x00, 0x00, // movl $5, %edi
+            0xe8, 0x00, 0x00, 0x00, 0x00, // second callq helper
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(
+                &separate_calls,
+                0,
+                &model,
+                &helper_call_targets(&[7, 18]),
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn call_result_can_feed_a_later_branch() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "atom helper(x: i64) -> i64 requires: x >= 0 && x <= 100; ensures: result >= 1; body: { x + 1 };\n\
+            atom cc_result(x: i64) -> i64 requires: x >= 0 && x <= 100; ensures: true; body: { if helper(x) > 5 { 10 } else { 0 } };";
+        let model = source_model_named(source, "cc_result", &context);
+        let bytes = [
+            0x50, // pushq %rax
+            0xe8, 0x00, 0x00, 0x00, 0x00, // callq helper
+            0x48, 0x89, 0xc1, // movq %rax, %rcx
+            0xb8, 0x0a, 0x00, 0x00, 0x00, // movl $10, %eax
+            0x48, 0x83, 0xf9, 0x05, // cmpq $5, %rcx
+            0x7e, 0x02, // jle to zero result
+            0x59, 0xc3, // popq %rcx; retq
+            0x31, 0xc0, 0x59, 0xc3, // xorl %eax,%eax; popq %rcx; retq
+        ];
+        assert_eq!(
+            check_function(&bytes, 0, &model, &helper_call_targets(&[2]), &context),
+            FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn branch_arm_tail_call_remains_supported_at_function_end() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "atom helper(x: i64) -> i64 requires: x >= 0 && x <= 100; ensures: result >= 1; body: { x + 1 };\n\
+            atom cc(x: i64) -> i64 requires: x >= 0 && x <= 100; ensures: true; body: { if x > 5 { helper(x) } else { 0 } };";
+        let model = source_model_named(source, "cc", &context);
+        let bytes = [
+            0x48, 0x83, 0xff, 0x06, // cmpq $6, %rdi
+            0x7d, 0x03, // jge to tail jmp helper
+            0x31, 0xc0, 0xc3, // xorl %eax,%eax; retq
+            0xe9, 0x00, 0x00, 0x00, 0x00, // tail jmp helper
+        ];
+        assert_eq!(
+            check_function(&bytes, 0, &model, &helper_call_targets(&[10]), &context),
+            FunctionOutcome::Equivalent
         );
     }
 }

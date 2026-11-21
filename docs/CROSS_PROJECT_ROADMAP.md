@@ -4025,9 +4025,10 @@ functions in a fixed instruction whitelist. Conditional and unconditional
 local branches must target decoded instruction starts inside the function.
 Backward edges are supported if the reachable CFG remains acyclic; reachable
 cycles are outside the profile. Symbolic execution is bounded at 64 completed
-paths. Direct calls are matched to source `CallSite`s in order and compared
-as uninterpreted sites, including call arguments and result terms; functions
-mixing calls and conditional branches are outside the profile. The x86-64
+paths. Direct calls are matched per path to ordered source `CallSite`s;
+provably false guards are skipped, while undecided guards remain outside the
+profile as `conditional_call`. Call arguments and result terms are compared
+as uninterpreted sites. The x86-64
 integer-register convention and callee-saved preservation are assumed, not
 verified, and make no ABI claim.
 The instruction profile includes `setcc`, byte-register views and extensions,
@@ -4037,7 +4038,10 @@ forward-only meaning; `machine_code_acyclic_branch_function_tv` covers
 equivalent functions with backward but acyclic edges. The not-performed
 vocabulary changed from `machine_code_tv_backward_branch_functions` to
 `machine_code_tv_cyclic_control_flow_functions`; agent consumers should
-update it. The C `main` wrapper, CRT/startup code, loader, libc and runtime
+update it. `machine_code_conditional_call_function_tv` is performed when an
+equivalent function has both a conditional branch and a call; such functions
+remain direct-call functions and are not counted as forward- or
+acyclic-branch functions. The C `main` wrapper, CRT/startup code, loader, libc and runtime
 are not covered. This is a bounded per-instruction profile; full object-code
 TV remains the deep endpoint.
 

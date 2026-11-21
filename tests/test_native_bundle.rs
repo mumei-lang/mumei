@@ -19,6 +19,12 @@ const SETCC_SHIFTS: &str =
     "atom lt(x: i64, y: i64) -> bool requires: true; ensures: true; body: { x < y };\n\
 atom half(x: i64) -> i64 requires: x >= 0 && x <= 1000; ensures: result >= 0; body: { x / 2 };\n\
 atom main() -> i64 requires: true; ensures: result >= 0; body: { half(4) };";
+const BRANCHING_CALLS: &str =
+    "atom helper(x: i64) -> i64 requires: x >= 0 && x <= 100; ensures: result >= 1; body: { x + 1 };\n\
+atom cc(x: i64) -> i64 requires: x >= 0 && x <= 100; ensures: true; body: { if x > 5 { helper(x) } else { 0 } };\n\
+atom cc_both(x: i64) -> i64 requires: x >= 0 && x <= 100; ensures: result >= 1; body: { if x > 5 { helper(x) } else { helper(5) } };\n\
+atom cc_result(x: i64) -> i64 requires: x >= 0 && x <= 100; ensures: true; body: { if helper(x) > 5 { 10 } else { 0 } };\n\
+atom main() -> i64 requires: true; ensures: true; body: { cc(1) };";
 
 fn cli(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_mumei"))
@@ -347,10 +353,10 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     assert_success(&text);
     let text = String::from_utf8_lossy(&text.stdout);
     assert!(text.contains(
-        "Machine-code TV: 1 of 2 object functions equivalent to their source atoms within the acyclic-branch profile."
+        "Machine-code TV: 1 of 2 object functions equivalent to their source atoms within the acyclic-branch and conditional-call profile."
     ));
     assert!(text.contains(
-        "Scope: artifact_reproduction_object_link_correspondence_and_acyclic_branch_function_machine_code_tv_only/no_abi_or_runtime_semantics"
+        "Scope: artifact_reproduction_object_link_correspondence_and_acyclic_branch_and_conditional_call_function_machine_code_tv_only/no_abi_or_runtime_semantics"
     ));
 
     let output = recheck_machine_tv(&source, &bundle, &id, true);
@@ -359,7 +365,7 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     assert_eq!(descriptor["schema_version"], "mumei.machine-code-tv/v1");
     assert_eq!(
         descriptor["scope"],
-        "artifact_reproduction_object_link_correspondence_and_acyclic_branch_function_machine_code_tv_only/no_abi_or_runtime_semantics"
+        "artifact_reproduction_object_link_correspondence_and_acyclic_branch_and_conditional_call_function_machine_code_tv_only/no_abi_or_runtime_semantics"
     );
     assert_eq!(
         descriptor["register_convention_assumed"],
@@ -400,6 +406,7 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
             "machine_code_direct_call_site_tv",
             "machine_code_forward_branch_function_tv",
             "machine_code_acyclic_branch_function_tv",
+            "machine_code_conditional_call_function_tv",
         ])
     );
 }
@@ -510,6 +517,73 @@ fn recheck_machine_tv_checks_forward_and_acyclic_branches() {
     assert!(not_performed
         .iter()
         .any(|check| check == "machine_code_leaf_function_tv"));
+}
+
+#[test]
+fn recheck_machine_tv_checks_branching_calls() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), BRANCHING_CALLS);
+    for (symbol, expected) in [
+        (
+            "cc",
+            vec![
+                "cmpq", "jl", "pushq", "callq", "addq", "retq", "xorl", "retq",
+            ],
+        ),
+        (
+            "cc_both",
+            vec!["pushq", "cmpq", "jge", "movl", "callq", "popq", "retq"],
+        ),
+        (
+            "cc_result",
+            vec![
+                "pushq", "callq", "movq", "movl", "cmpq", "jle", "popq", "retq", "xorl", "popq",
+                "retq",
+            ],
+        ),
+    ] {
+        assert_eq!(
+            object_function_disassembly(&bundle, symbol)
+                .iter()
+                .map(|instruction| instruction.split_whitespace().next().unwrap())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+    let output = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        descriptor["functions"],
+        serde_json::json!({
+            "__mumei_user_main": {"outcome": "equivalent_within_profile"},
+            "cc": {"outcome": "equivalent_within_profile"},
+            "cc_both": {"outcome": "equivalent_within_profile"},
+            "cc_result": {"outcome": "equivalent_within_profile"},
+            "helper": {"outcome": "equivalent_within_profile"},
+            "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
+        })
+    );
+    let performed = descriptor["checks_performed"].as_array().unwrap();
+    assert!(performed
+        .iter()
+        .any(|check| check == "machine_code_direct_call_site_tv"));
+    assert!(performed
+        .iter()
+        .any(|check| check == "machine_code_conditional_call_function_tv"));
+    assert!(!performed
+        .iter()
+        .any(|check| check == "machine_code_forward_branch_function_tv"));
+    assert!(!performed
+        .iter()
+        .any(|check| check == "machine_code_acyclic_branch_function_tv"));
+    let not_performed = descriptor["checks_not_performed"].as_array().unwrap();
+    assert!(not_performed
+        .iter()
+        .any(|check| check == "machine_code_forward_branch_function_tv"));
+    assert!(not_performed
+        .iter()
+        .any(|check| check == "machine_code_acyclic_branch_function_tv"));
 }
 
 #[test]
