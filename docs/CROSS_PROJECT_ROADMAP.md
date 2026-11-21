@@ -4145,8 +4145,13 @@ f64 call results remain supported. MXCSR RNE, masked exceptions, disabled
 FTZ/DAZ, and NaN payload bits are not established. Core
 performs `machine_code_f64_scalar_function_tv` for equivalent scalar-f64
 functions and lists `machine_code_tv_mxcsr_control_state` and
-`machine_code_tv_nan_payload_bits` as not performed. Composite f64 and
-`ucomisd` remain outside the profile; agent consumers must adopt these names.
+`machine_code_tv_nan_payload_bits` as not performed. Composite f64 remains
+outside the profile. Register-only `ucomisd`/`comisd` model
+unordered/equal/less flags exactly (`ZF = unordered || fp.eq`,
+`CF = unordered || fp.lt`, `PF = unordered`; `OF/SF/AF = 0`); their branch,
+`setcc`, and `cmovcc` conditions are supported. Memory operands and parity
+conditions after integer flag producers remain outside the profile. Agent
+consumers must adopt these names.
 
 ### Wave 5 declared producer-identity gate (C02 consumer)
 

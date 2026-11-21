@@ -4214,6 +4214,28 @@ fn recheck_machine_tv_accept_object_f64_module_bundle() {
 }
 
 #[test]
+fn recheck_machine_tv_accepts_f64_equality_branch() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "atom eq_branch(x: f64, y: f64) -> i64 requires: true; ensures: true; body: { if x == y { 1 } else { 0 } };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    );
+
+    let output = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        descriptor["functions"]["eq_branch"]["outcome"],
+        "equivalent_within_profile"
+    );
+    assert_eq!(
+        descriptor["functions"]["eq_branch"]["callee_saved_preservation"],
+        "preserved"
+    );
+}
+
+#[test]
 fn module_bundle_rejects_a_nan_refutable_f64_ensures() {
     // `result == x + y` reads as `fp.eq(result, result)` under the
     // admitted IEEE encoding — false whenever `x + y` is NaN, so the

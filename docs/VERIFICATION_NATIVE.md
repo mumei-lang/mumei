@@ -1982,9 +1982,13 @@ and disabled FTZ/DAZ are assumptions, reported as
 `machine_code_tv_mxcsr_control_state`; `machine_code_tv_nan_payload_bits` is
 also not performed. When an equivalent function has a scalar f64 leaf,
 `machine_code_f64_scalar_function_tv` is performed. Memory operands fail
-closed. `ucomisd` remains outside the profile because the current flags model
-does not encode its unordered ZF/PF/CF state exactly. Agent consumers must adopt
-the three f64 check names.
+closed. Register-only `ucomisd` and `comisd` compare the low 64-bit XMM
+operands and model `ZF = unordered || fp.eq`, `CF = unordered || fp.lt`,
+`PF = unordered`, with `OF = SF = AF = 0`. Their conditions are supported for
+branches, `setcc`, and `cmovcc`; memory operands remain outside the profile.
+Parity conditions after integer flag-producing instructions remain outside the
+profile because integer PF is not modeled. Agent consumers must adopt the
+three f64 check names.
 Scalar f64 function parameters use the XMM entry registers, but direct call
 sites with an f64 argument fail closed as `call_arguments`: source NaN payload
 bits are unspecified, while a callee may observe them when producing an integer

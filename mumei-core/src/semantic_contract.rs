@@ -1384,6 +1384,14 @@ pub fn f64_eq<'ctx>(ctx: &'ctx Context, a: &BV<'ctx>, b: &BV<'ctx>) -> Bool<'ctx
     float_eq(ctx, &fa, &fb)
 }
 
+/// IEEE 754 binary64 less-than (`fp.lt`) on bit-pattern leaves.
+pub fn f64_lt<'ctx>(ctx: &'ctx Context, a: &BV<'ctx>, b: &BV<'ctx>) -> Bool<'ctx> {
+    use crate::verification::translator::z3_types::float_from_ieee_bv;
+    let fa = float_from_ieee_bv(ctx, a);
+    let fb = float_from_ieee_bv(ctx, b);
+    fa.lt(&fb)
+}
+
 /// Whether a 64-bit bit-pattern leaf carries an IEEE 754 binary64 NaN —
 /// the `fpa.isNaN` predicate on the decoded value.
 pub fn f64_is_nan<'ctx>(ctx: &'ctx Context, a: &BV<'ctx>) -> Bool<'ctx> {
@@ -13975,6 +13983,32 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
             report.as_ref().is_ok_and(|contracts| !contracts.is_empty()),
             "bound composite must shadow the scalar param: {report:?}"
         );
+    }
+
+    #[test]
+    fn f64_lt_uses_ieee_ordering() {
+        let context = z3::Context::new(&z3::Config::new());
+        let one = BV::from_u64(&context, 0x3ff0_0000_0000_0000, 64);
+        let two = BV::from_u64(&context, 0x4000_0000_0000_0000, 64);
+        let positive_zero = BV::from_u64(&context, 0, 64);
+        let negative_zero = BV::from_u64(&context, 0x8000_0000_0000_0000, 64);
+        let nan = BV::from_u64(&context, 0x7ff8_0000_0000_0000, 64);
+
+        let solver = z3::Solver::new(&context);
+        solver.assert(&f64_lt(&context, &one, &two));
+        assert_eq!(solver.check(), z3::SatResult::Sat);
+
+        let solver = z3::Solver::new(&context);
+        solver.assert(&f64_lt(&context, &two, &one));
+        assert_eq!(solver.check(), z3::SatResult::Unsat);
+
+        let solver = z3::Solver::new(&context);
+        solver.assert(&f64_lt(&context, &negative_zero, &positive_zero));
+        assert_eq!(solver.check(), z3::SatResult::Unsat);
+
+        let solver = z3::Solver::new(&context);
+        solver.assert(&f64_lt(&context, &nan, &one));
+        assert_eq!(solver.check(), z3::SatResult::Unsat);
     }
 
     #[test]
