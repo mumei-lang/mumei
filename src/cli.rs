@@ -545,7 +545,7 @@ pub(crate) enum EvidenceCommand {
     },
     /// Validate one verifier-adapter manifest's representation and consistency only
     #[command(
-        long_about = "Core checks only the static representation and manifest consistency. Manifest-declared argv and stdin remain inert unless host policy opts in through allow_manifest_attempt_argv and allow_manifest_attempt_stdin; a host argv map takes precedence. Verdict markers describe an adapter self-report vocabulary, never a verdict. max_memory_mb is the adapter's declared ceiling and is used only when host policy declares none; Core does not enforce it. No adapter is executed and no grade is promoted."
+        long_about = "Core checks only the static representation and manifest consistency. Manifest-declared argv and stdin remain inert unless host policy opts in through allow_manifest_attempt_argv and allow_manifest_attempt_stdin; a host argv map takes precedence. Verdict markers describe an adapter self-report vocabulary, never a verdict. max_memory_mb is the adapter's declared ceiling: planning uses the smaller of it and the policy memory bound; a scheduled attempt uses it only when the host declares no memory bound. Core does not enforce it. No adapter is executed and no grade is promoted."
     )]
     CheckAdapter {
         /// Regular mumei.verifier-adapter/v1 JSON file (at most 65,536 bytes)

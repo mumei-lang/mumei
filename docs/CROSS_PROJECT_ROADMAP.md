@@ -6184,8 +6184,9 @@ enforcement. Declared argv and stdin remain inert unless host policy opts
 in through `allow_manifest_attempt_argv` and
 `allow_manifest_attempt_stdin`; a host argv map takes precedence.
 Verdict markers describe adapter self-report vocabulary, never a verdict.
-`max_memory_mb` is the declared ceiling used only when host policy declares
-none; Core does not enforce it. No grade is promoted.
+`max_memory_mb` is the adapter's declared ceiling: planning uses the smaller
+of it and the policy memory bound; a scheduled attempt uses it only when the
+host declares no memory bound. Core does not enforce it. No grade is promoted.
 
 C11 stays partial; Evidence acceptance of adapter claims, C12's demand
 gate and grade promotion are unchanged.
