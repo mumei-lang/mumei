@@ -3170,8 +3170,10 @@ Agent consumers must adopt both check names and the function field.
 
 The next C10 Option B machine-TV slice proves register-only scalar f64
 functions with a bounded SSE2 profile, NaN-aware result comparison, `xmm0`–`xmm7`
-argument registers and the low 64 bits of `xmm0` for f64 results. MXCSR RNE,
-masked exceptions, disabled FTZ/DAZ, and NaN payload bits remain unverified.
+entry registers for f64 parameters and the low 64 bits of `xmm0` for f64
+results. Direct call sites with f64 arguments fail closed as `call_arguments`;
+f64 call results remain supported. MXCSR RNE, masked exceptions, disabled
+FTZ/DAZ, and NaN payload bits remain unverified.
 The descriptor performs `machine_code_f64_scalar_function_tv` and lists
 `machine_code_tv_mxcsr_control_state` and `machine_code_tv_nan_payload_bits` as
 not performed. Composite f64 and `ucomisd` remain outside the profile; agent

@@ -1985,6 +1985,11 @@ also not performed. When an equivalent function has a scalar f64 leaf,
 closed. `ucomisd` remains outside the profile because the current flags model
 does not encode its unordered ZF/PF/CF state exactly. Agent consumers must adopt
 the three f64 check names.
+Scalar f64 function parameters use the XMM entry registers, but direct call
+sites with an f64 argument fail closed as `call_arguments`: source NaN payload
+bits are unspecified, while a callee may observe them when producing an integer
+result. f64 call results remain supported and are bound from the low 64 bits of
+`xmm0`.
 
 ### Object-stage machine-code acceptance (C10 Option B)
 

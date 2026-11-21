@@ -4139,8 +4139,10 @@ must adopt this and both preservation check names and the function field.
 
 The C10 Option B machine-TV slice admits register-only scalar f64 functions
 under the record's f64 profile, with NaN-aware result comparison, `xmm0`–`xmm7`
-f64 arguments and the low 64 bits of `xmm0` for f64 results. MXCSR RNE, masked
-exceptions, disabled FTZ/DAZ, and NaN payload bits are not established. Core
+entry registers for f64 parameters and the low 64 bits of `xmm0` for f64
+results. Direct call sites with f64 arguments fail closed as `call_arguments`;
+f64 call results remain supported. MXCSR RNE, masked exceptions, disabled
+FTZ/DAZ, and NaN payload bits are not established. Core
 performs `machine_code_f64_scalar_function_tv` for equivalent scalar-f64
 functions and lists `machine_code_tv_mxcsr_control_state` and
 `machine_code_tv_nan_payload_bits` as not performed. Composite f64 and

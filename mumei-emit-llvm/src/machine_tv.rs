@@ -282,6 +282,13 @@ fn check_function_with_result_width<'ctx>(
     context: &'ctx Context,
     result_width: ResultWidth,
 ) -> (FunctionOutcome, Option<CalleeSavedPreservation>) {
+    if model
+        .call_sites
+        .iter()
+        .any(|site| site.arg_leaf_doubles.iter().any(|is_double| *is_double))
+    {
+        return (FunctionOutcome::OutsideProfile("call_arguments"), None);
+    }
     if model.inputs.len() > MAX_ARGUMENT_COUNT
         || model
             .call_sites
@@ -294,13 +301,6 @@ fn check_function_with_result_width<'ctx>(
             .filter(|is_double| **is_double)
             .count()
             > FLOAT_ARGUMENT_REGISTER_COUNT
-        || model.call_sites.iter().any(|site| {
-            site.arg_leaf_doubles
-                .iter()
-                .filter(|is_double| **is_double)
-                .count()
-                > FLOAT_ARGUMENT_REGISTER_COUNT
-        })
     {
         return (FunctionOutcome::OutsideProfile("argument_count"), None);
     }
@@ -1892,42 +1892,23 @@ fn lift_call<'ctx>(
     if call_site.args.len() > MAX_ARGUMENT_COUNT {
         return Err(FunctionOutcome::OutsideProfile("argument_count"));
     }
-    let integer_argument_indices = call_site
+    if call_site
         .arg_leaf_doubles
         .iter()
-        .enumerate()
-        .filter_map(|(index, is_double)| (!*is_double).then_some(index))
-        .collect::<Vec<_>>();
-    let float_argument_indices = call_site
-        .arg_leaf_doubles
-        .iter()
-        .enumerate()
-        .filter_map(|(index, is_double)| (*is_double).then_some(index))
-        .collect::<Vec<_>>();
-    if float_argument_indices.len() > FLOAT_ARGUMENT_REGISTER_COUNT {
-        return Err(FunctionOutcome::OutsideProfile("argument_count"));
+        .any(|is_double| *is_double)
+    {
+        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
     }
-    if tail_call && integer_argument_indices.len() > ARGUMENT_REGISTERS.len() {
+    if tail_call && call_site.args.len() > ARGUMENT_REGISTERS.len() {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    if integer_argument_indices.len() > ARGUMENT_REGISTERS.len()
-        && (!rsp_is_known || rsp_offset % 8 != 0)
-    {
+    if call_site.args.len() > ARGUMENT_REGISTERS.len() && (!rsp_is_known || rsp_offset % 8 != 0) {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
     let mut outgoing_slots = BTreeSet::new();
     let mut integer_argument_index = 0usize;
-    let mut float_argument_index = 0usize;
-    for (argument, is_double) in call_site.args.iter().zip(&call_site.arg_leaf_doubles) {
-        if *is_double {
-            let machine_argument = xmm_registers[float_argument_index].extract(63, 0);
-            call_state.argument_obligations.push(f64_values_match(
-                context,
-                argument,
-                &machine_argument,
-            ));
-            float_argument_index += 1;
-        } else if let Some(register_index) = ARGUMENT_REGISTERS.get(integer_argument_index) {
+    for argument in &call_site.args {
+        if let Some(register_index) = ARGUMENT_REGISTERS.get(integer_argument_index) {
             call_state
                 .argument_obligations
                 .push(argument._eq(&registers[*register_index]));
@@ -3378,6 +3359,7 @@ entry:
             &context,
             RefinedAdmission::CompositeV19,
         );
+        assert_eq!(caller.call_sites[0].arg_leaf_doubles, vec![true]);
         let caller_ir = r#"target triple = "x86_64-unknown-linux-gnu"
 define double @callee(double %x) {
 entry:
@@ -3392,6 +3374,29 @@ entry:
         let (address, bytes, call_targets) = compiled_function_with_targets(caller_ir, "caller");
         assert_eq!(
             check_function(&bytes, address, &caller, &call_targets, &context),
+            FunctionOutcome::OutsideProfile("call_arguments")
+        );
+
+        let float_result = BV::fresh_const(&context, "f64_call_result", 64);
+        let mut float_result_caller =
+            PureI64Body::synthetic_scalar("float_result_caller", float_result.clone());
+        float_result_caller.result_leaf_doubles = vec![true];
+        float_result_caller.call_sites.push(CallSite {
+            callee: "helper".to_owned(),
+            args: Vec::new(),
+            arg_leaf_doubles: Vec::new(),
+            result: float_result,
+            result_is_double: true,
+            guard: Bool::from_bool(&context, true),
+        });
+        assert_eq!(
+            check_function(
+                &[0xe8, 0, 0, 0, 0, 0xc3],
+                0,
+                &float_result_caller,
+                &helper_call_targets(&[1]),
+                &context,
+            ),
             FunctionOutcome::Equivalent
         );
     }
