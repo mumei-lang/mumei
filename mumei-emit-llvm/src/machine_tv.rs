@@ -317,7 +317,7 @@ enum FlagState<'ctx> {
         value: BV<'ctx>,
         width: u32,
     },
-    ShiftResult {
+    ZeroFlagResult {
         value: BV<'ctx>,
         width: u32,
     },
@@ -483,6 +483,28 @@ fn lift<'ctx>(
                     context,
                 )?;
                 state.flags = FlagState::Unknown;
+            } else if matches!(
+                instruction.mnemonic.as_str(),
+                "incl" | "incq" | "decl" | "decq"
+            ) {
+                let (value, width) = lift_inc_dec(instruction, &mut state, context)?;
+                state.flags = FlagState::ZeroFlagResult { value, width };
+            } else if matches!(instruction.mnemonic.as_str(), "negl" | "negq") {
+                let width = instruction_width(&instruction.mnemonic)?;
+                let operands = split_operands(&instruction.operands);
+                let [destination] = operands.as_slice() else {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                };
+                let right = register_value(destination, &state.registers, width)
+                    .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+                if !lift_neg(&operands, &mut state.registers, width) {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                }
+                state.flags = FlagState::Compare {
+                    left: BV::from_u64(context, 0, width),
+                    right,
+                    width,
+                };
             } else if instruction.mnemonic == "pushq" {
                 let operands = split_operands(&instruction.operands);
                 let [source] = operands.as_slice() else {
@@ -607,6 +629,8 @@ fn lift<'ctx>(
                         | "movsbl"
                         | "movsbq"
                         | "leaq"
+                        | "notl"
+                        | "notq"
                 );
                 if !lift_instruction(
                     instruction,
@@ -629,6 +653,14 @@ fn lift<'ctx>(
                 "movl" => {
                     if let Some((index, 32)) = split_operands(&instruction.operands)
                         .get(1)
+                        .and_then(|destination| parse_register(destination))
+                    {
+                        state.known_upper_32_zero[index] = true;
+                    }
+                }
+                "incl" | "decl" => {
+                    if let Some((index, 32)) = split_operands(&instruction.operands)
+                        .first()
                         .and_then(|destination| parse_register(destination))
                     {
                         state.known_upper_32_zero[index] = true;
@@ -856,7 +888,7 @@ fn condition_for_flags<'ctx>(
             let sign = most_significant_bit(value, *width, context);
             (zero, sign.clone(), sign, Bool::from_bool(context, false))
         }
-        FlagState::ShiftResult { value, width } => {
+        FlagState::ZeroFlagResult { value, width } => {
             let zero = value._eq(&BV::from_u64(context, 0, *width));
             return match suffix {
                 "e" | "z" => Ok(zero),
@@ -1108,7 +1140,7 @@ fn lift_shift<'ctx>(
     };
     let flags = match masked_immediate {
         Some(0) => previous_flags.clone(),
-        Some(_) => FlagState::ShiftResult {
+        Some(_) => FlagState::ZeroFlagResult {
             value: shifted.clone(),
             width,
         },
@@ -1116,7 +1148,7 @@ fn lift_shift<'ctx>(
             let count_is_zero = shift_count._eq(&BV::from_u64(context, 0, width));
             match call_guard_status(model, &count_is_zero, path_conditions, arguments, context) {
                 Some(true) => previous_flags.clone(),
-                Some(false) => FlagState::ShiftResult {
+                Some(false) => FlagState::ZeroFlagResult {
                     value: shifted.clone(),
                     width,
                 },
@@ -1714,8 +1746,8 @@ fn lift_instruction<'ctx>(
         "subq" => lift_binary(&operands, registers, context, 64, BinaryOp::Sub),
         "imull" => lift_imul(&operands, registers, context, 32),
         "imulq" => lift_imul(&operands, registers, context, 64),
-        "negl" => lift_neg(&operands, registers, 32),
-        "negq" => lift_neg(&operands, registers, 64),
+        "notl" => lift_not(&operands, registers, 32),
+        "notq" => lift_not(&operands, registers, 64),
         "xorl" => lift_xor(&operands, registers, 32),
         "xorq" => lift_xor(&operands, registers, 64),
         _ => false,
@@ -1882,6 +1914,60 @@ fn lift_neg<'ctx>(operands: &[&str], registers: &mut [BV<'ctx>], width: u32) -> 
     write_register(registers, index, destination.bvneg(), width)
 }
 
+fn lift_inc_dec<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    context: &'ctx Context,
+) -> Result<(BV<'ctx>, u32), FunctionOutcome> {
+    let width = instruction_width(&instruction.mnemonic)?;
+    let operands = split_operands(&instruction.operands);
+    let [destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let (index, destination_width) = parse_register(destination)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    if destination_width != width || (index == 4 && width != 64) {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let previous = state.registers[index].extract(width - 1, 0);
+    let is_decrement = matches!(instruction.mnemonic.as_str(), "decl" | "decq");
+    let one = BV::from_u64(context, 1, width);
+    let value = if is_decrement {
+        previous.bvsub(&one)
+    } else {
+        previous.bvadd(&one)
+    };
+    if index == 4 {
+        let delta = if is_decrement { -1 } else { 1 };
+        if !adjust_rsp(
+            &mut state.registers,
+            &mut state.stack,
+            &mut state.rsp_offset,
+            delta,
+            context,
+        ) {
+            return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+        }
+    } else if !write_register(&mut state.registers, index, value.clone(), width) {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    Ok((value, width))
+}
+
+fn lift_not<'ctx>(operands: &[&str], registers: &mut [BV<'ctx>], width: u32) -> bool {
+    let [destination] = operands else {
+        return false;
+    };
+    let Some((index, destination_width)) = parse_register(destination) else {
+        return false;
+    };
+    if destination_width != width || index == 4 {
+        return false;
+    }
+    let value = registers[index].extract(width - 1, 0).bvnot();
+    write_register(registers, index, value, width)
+}
+
 fn lift_xor<'ctx>(operands: &[&str], registers: &mut [BV<'ctx>], width: u32) -> bool {
     let [source, destination] = operands else {
         return false;
@@ -1961,10 +2047,13 @@ fn lea_value<'ctx>(
         [base] if !base.is_empty() => {
             value = value.bvadd(&register_value(base, registers, 64)?);
         }
-        [base, index, scale] if !index.is_empty() && !scale.is_empty() => {
-            if base.is_empty() && displacement != 0 {
-                return None;
+        [base, index] if !index.is_empty() => {
+            if !base.is_empty() {
+                value = value.bvadd(&register_value(base, registers, 64)?);
             }
+            value = value.bvadd(&register_value(index, registers, 64)?);
+        }
+        [base, index, scale] if !index.is_empty() && !scale.is_empty() => {
             if !base.is_empty() {
                 value = value.bvadd(&register_value(base, registers, 64)?);
             }
@@ -3232,6 +3321,304 @@ entry:
             check_function(&inverted, 0, &model, &call_targets, &context),
             FunctionOutcome::OutsideProfile("conditional_call")
         );
+    }
+
+    #[test]
+    fn survey_call_chain_bytes_match_and_many_live_lea_is_inconclusive() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+
+        let chain_source =
+            "atom helper(x: i64) -> i64 requires: true; ensures: true; body: { x + 1 };\n\
+            atom chain_two(x: i64) -> i64 requires: true; ensures: true; body: { helper(x) + 1 };";
+        let chain_model = source_model_named(chain_source, "chain_two", &context);
+        let chain_two_bytes = [
+            0x50, // pushq %rax
+            0xe8, 0x00, 0x00, 0x00, 0x00, // callq helper
+            0x48, 0xff, 0xc0, // incq %rax
+            0x59, // popq %rcx
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(
+                &chain_two_bytes,
+                0,
+                &chain_model,
+                &helper_call_targets(&[2]),
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let many_live_model = source_model(
+            "atom many_live(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 \
+            requires: true; ensures: true; body: {\n\
+                let v0 = a + b;\n\
+                let v1 = b + c;\n\
+                let v2 = c + d;\n\
+                let v3 = d + e;\n\
+                let v4 = e + f;\n\
+                let v5 = a + f;\n\
+                let v6 = a + c + e;\n\
+                let v7 = b + d + f;\n\
+                if a < b {\n\
+                    v0 + v1 + v2 + v3 + v4 + v5 + v6 + v7\n\
+                } else {\n\
+                    v0 - v1 + v2 - v3 + v4 - v5 + v6 - v7\n\
+                }\n\
+            };",
+            &context,
+        );
+        let many_live_bytes = [
+            0x41, 0x56, // pushq %r14
+            0x53, // pushq %rbx
+            0x4c, 0x89, 0xc0, // movq %r8, %rax
+            0x4c, 0x8d, 0x04, 0x37, // leaq (%rdi,%rsi,1), %r8
+            0x4c, 0x8d, 0x34, 0x16, // leaq (%rsi,%rdx,1), %r14
+            0x48, 0x8d, 0x1c, 0x01, // leaq (%rcx,%rax,1), %rbx
+            0x4e, 0x8d, 0x1c, 0x0f, // leaq (%rdi,%r9,1), %r11
+            0x4c, 0x8d, 0x14, 0x17, // leaq (%rdi,%rdx,1), %r10
+            0x48, 0x01, 0xca, // addq %rcx, %rdx
+            0x49, 0x01, 0xc2, // addq %rax, %r10
+            0x4c, 0x01, 0xc8, // addq %r9, %rax
+            0x48, 0x01, 0xf1, // addq %rsi, %rcx
+            0x4c, 0x01, 0xc9, // addq %r9, %rcx
+            0x48, 0x39, 0xf7, // cmpq %rsi, %rdi
+            0x7d, 0x17, // jge to the else arm
+            0x4d, 0x01, 0xf0, // addq %r14, %r8
+            0x48, 0x01, 0xda, // addq %rbx, %rdx
+            0x4c, 0x01, 0xc2, // addq %r8, %rdx
+            0x4c, 0x01, 0xd8, // addq %r11, %rax
+            0x4c, 0x01, 0xd0, // addq %r10, %rax
+            0x48, 0x01, 0xd0, // addq %rdx, %rax
+            0x48, 0x01, 0xc8, // addq %rcx, %rax
+            0xeb, 0x18, // jmp to the join
+            0x4d, 0x29, 0xf0, // subq %r14, %r8
+            0x49, 0x01, 0xd0, // addq %rdx, %r8
+            0x49, 0x29, 0xd8, // subq %rbx, %r8
+            0x49, 0x01, 0xc0, // addq %rax, %r8
+            0x4d, 0x29, 0xd8, // subq %r11, %r8
+            0x4d, 0x01, 0xd0, // addq %r10, %r8
+            0x49, 0x29, 0xc8, // subq %rcx, %r8
+            0x4c, 0x89, 0xc0, // movq %r8, %rax
+            0x5b, // popq %rbx
+            0x41, 0x5e, // popq %r14
+            0xc3, // retq
+        ];
+        let many_live_outcome = check_function(
+            &many_live_bytes,
+            0,
+            &many_live_model,
+            &BTreeMap::new(),
+            &context,
+        );
+        assert_eq!(many_live_outcome, FunctionOutcome::Unknown);
+        assert_ne!(many_live_outcome, FunctionOutcome::Different);
+        assert!(!matches!(
+            many_live_outcome,
+            FunctionOutcome::OutsideProfile(_)
+        ));
+    }
+
+    #[test]
+    fn compiled_base_index_lea_matches_sum_model() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom lea_sum(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { x + y };",
+            &context,
+        );
+        let compiled_lea_bytes = [
+            0x48, 0x8d, 0x04, 0x37, // leaq (%rdi,%rsi), %rax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&compiled_lea_bytes, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn inc_dec_flags_and_32_bit_results_are_modeled() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+
+        let increment_zero_model = source_model(
+            "atom increment_zero(x: i64) -> i64 requires: true; ensures: true; body: { if x == -1 { 1 } else { 2 } };",
+            &context,
+        );
+        let increment_then_je = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0xff, 0xc0, // incq %rax
+            0x74, 0x06, // je to result 1
+            0xb8, 0x02, 0x00, 0x00, 0x00, // movl $2, %eax
+            0xc3, 0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(
+                &increment_then_je,
+                0,
+                &increment_zero_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let increment_then_jl = [
+            0x48, 0xff, 0xc7, // incq %rdi
+            0x7c, 0x01, // jl
+            0xc3, 0xc3,
+        ];
+        assert_eq!(
+            check_function(
+                &increment_then_jl,
+                0,
+                &increment_zero_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::OutsideProfile("unsupported_flags")
+        );
+
+        let constant_32_model = source_model(
+            "atom result() -> i64 requires: true; ensures: true; body: { 4294967295 };",
+            &context,
+        );
+        let increment_32 = [
+            0xb8, 0xfe, 0xff, 0xff, 0xff, // movl $0xfffffffe, %eax
+            0xff, 0xc0, // incl %eax
+            0xc3,
+        ];
+        let decrement_32 = [
+            0xb8, 0x00, 0x00, 0x00, 0x00, // movl $0, %eax
+            0xff, 0xc8, // decl %eax
+            0xc3,
+        ];
+        for bytes in [&increment_32[..], &decrement_32[..]] {
+            assert_eq!(
+                check_function(bytes, 0, &constant_32_model, &BTreeMap::new(), &context),
+                FunctionOutcome::Equivalent
+            );
+        }
+    }
+
+    #[test]
+    fn neg_condition_codes_match_subtract_from_zero_including_minimum() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        for (condition, body) in [
+            ("b", "if x != 0 { 1 } else { 0 }"),
+            ("a", "0"),
+            ("l", "if x > 0 { 1 } else { 0 }"),
+            ("g", "if x < 0 { 1 } else { 0 }"),
+        ] {
+            let source = format!(
+                "atom neg_result(x: i64) -> i64 requires: true; ensures: true; body: {{ {body} }};"
+            );
+            let model = source_model(&source, &context);
+            let setcc = match condition {
+                "b" => 0x92,
+                "a" => 0x97,
+                "l" => 0x9c,
+                "g" => 0x9f,
+                _ => unreachable!(),
+            };
+            let bytes = [
+                0x48, 0xf7, 0xdf, // negq %rdi
+                0x0f, setcc, 0xc0, // set<cc> %al
+                0x0f, 0xb6, 0xc0, // movzbl %al, %eax
+                0xc3,
+            ];
+            assert_eq!(
+                check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+                FunctionOutcome::Equivalent,
+                "set{condition}"
+            );
+        }
+    }
+
+    #[test]
+    fn not_preserves_comparison_flags_and_unary_memory_forms_are_unsupported() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom not_after_compare(x: i64) -> i64 requires: true; ensures: true; body: { if x < 5 { 1 } else { 0 } };",
+            &context,
+        );
+        let not_preserves_flags = [
+            0x48, 0x83, 0xff, 0x05, // cmpq $5, %rdi
+            0x48, 0xf7, 0xd7, // notq %rdi
+            0x0f, 0x9c, 0xc0, // setl %al
+            0x0f, 0xb6, 0xc0, // movzbl %al, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&not_preserves_flags, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let constant_model = source_model(
+            "atom result() -> i64 requires: true; ensures: true; body: { 0 };",
+            &context,
+        );
+        for bytes in [
+            &[0x48, 0xff, 0x07, 0xc3][..], // incq (%rdi)
+            &[0x48, 0xff, 0x0f, 0xc3][..], // decq (%rdi)
+            &[0x48, 0xf7, 0x1f, 0xc3][..], // negq (%rdi)
+            &[0x48, 0xf7, 0x17, 0xc3][..], // notq (%rdi)
+        ] {
+            assert_eq!(
+                check_function(bytes, 0, &constant_model, &BTreeMap::new(), &context),
+                FunctionOutcome::OutsideProfile("unsupported_instruction")
+            );
+        }
+    }
+
+    #[test]
+    fn lea_accepts_implicit_scales_and_displaced_index_only_forms() {
+        let config = Config::new();
+        let context = Context::new(&config);
+        let registers = (0..16)
+            .map(|_| BV::fresh_const(&context, "lea_register", 64))
+            .collect::<Vec<_>>();
+        let cases = [
+            ("(%rdi,%rsi)", registers[7].bvadd(&registers[6])),
+            (
+                "16(%rdi,%rsi)",
+                BV::from_u64(&context, 16, 64)
+                    .bvadd(&registers[7])
+                    .bvadd(&registers[6]),
+            ),
+            ("(,%rsi)", registers[6].clone()),
+            (
+                "(,%rsi,4)",
+                registers[6].bvmul(&BV::from_u64(&context, 4, 64)),
+            ),
+            (
+                "8(,%rsi,2)",
+                BV::from_u64(&context, 8, 64)
+                    .bvadd(&registers[6].bvmul(&BV::from_u64(&context, 2, 64))),
+            ),
+        ];
+        for (operand, expected) in cases {
+            let value = lea_value(operand, &registers, &context).unwrap();
+            let solver = Solver::new(&context);
+            solver.assert(&value._eq(&expected).not());
+            assert_eq!(solver.check(), SatResult::Unsat, "{operand}");
+        }
+        assert!(lea_value("(,%rsi,3)", &registers, &context).is_none());
     }
 
     #[test]

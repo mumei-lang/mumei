@@ -1817,6 +1817,19 @@ a symbolic `%cl` count, the bounded path context must prove whether the masked
 count is zero or nonzero to select those flag behaviors; otherwise flags
 become unknown and a later flag read is outside the profile.
 
+Register-only `incl`/`incq` and `decl`/`decq` wrap at the operand width, with
+32-bit results zero-extended. Their flags are modeled only through the result
+zero flag, so only `e`/`z` and `ne`/`nz` reads are supported after these
+instructions. Register-only `negl`/`negq` model `0 - operand` and its compare
+flags, including carry and signed overflow. `notl`/`notq` complement a
+register without changing flags. These unary operations do not admit
+memory-operand forms.
+
+`leaq` models address arithmetic, not a memory access. Its supported forms
+include a base plus index with implicit scale 1, with or without displacement,
+as well as explicit scales 1, 2, 4, or 8. A missing base with an index is
+supported; other unmodeled addressing forms remain outside the profile.
+
 `cqto` sign-fills `%rax` into `%rdx`; `cltd` sign-fills `%eax` into `%edx`,
 with the usual zero-extension of the 32-bit destination. Register-source
 `idivq`, `divq`, and `divl` model the architectural dividend, quotient, and
@@ -1828,10 +1841,10 @@ input/register bindings. Failure to prove that obligation is
 `division_trap`; memory operands and other division forms remain unsupported.
 This is a bounded no-trap obligation, not a runtime or ABI guarantee.
 
-`mov`, `movabsq`, `lea`, `push`, `pop`, and `nop` preserve flags. Initial flags
-and flags after other arithmetic or calls are unknown, so a condition that
-reads them is outside the profile. At conditional forks, paths proved
-infeasible under the declared domain, definedness, call-result bounds,
+`mov`, `movabsq`, `lea`, `not`, `push`, `pop`, and `nop` preserve flags.
+Initial flags and flags after other arithmetic or calls are unknown, so a
+condition that reads them is outside the profile. At conditional forks, paths
+proved infeasible under the declared domain, definedness, call-result bounds,
 input/register bindings, and accumulated path conditions are pruned; paths
 with Sat or Unknown solver results are retained. Symbolic execution is bounded
 at 64 completed paths; exceeding that bound is `path_bound`.
@@ -1840,6 +1853,8 @@ The `input_domain` is
 `signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires`.
 The comparison asserts the source model's signature-bounded parameter domains
 and division/shift definedness, but does not restrict inputs by `requires`.
+Larger multiply-heavy functions may remain inconclusive within the solver
+budget; this is fail-closed and does not imply inequivalence.
 Outside-profile reasons include `argument_count`, `branch_target`,
 `call_order`, `conditional_call`, `cyclic_control_flow`,
 `division_trap`, `not_a_source_atom`, `path_bound`, `unsupported_flags`,
