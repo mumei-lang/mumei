@@ -1804,11 +1804,15 @@ slots are discarded after a call, so later memory reads from them fail closed.
 function containing one cannot complete a supported return path.
 
 Conditional branches and local unconditional jumps must target a decoded
-instruction start inside the function. A reachable CFG cycle is
-`cyclic_control_flow`; acyclic backward edges are supported. Multiple `retq`
-instructions are supported, and every explored path must return with the
-stack balanced; falling off the function is outside the profile. Targets
-outside the function or not at an instruction boundary are `branch_target`.
+instruction start inside the function. Bounded loops use `LOOP_BOUND = 4` and
+the same `loop_bound_exits` input domain as LLVM translation validation. A
+per-path sixth visit to an instruction is dropped only when its path
+conditions, input bindings, parameter domains, definedness, call-result
+bounds, and `loop_bound_exits` prove Unsat; Sat or Unknown returns
+`loop_bound`. Multiple `retq` instructions are supported, and every explored
+path must return with the stack balanced; falling off the function is outside
+the profile. Targets outside the function or not at an instruction boundary
+are `branch_target`.
 
 `cmpb`/`cmpl`/`cmpq` and `testb`/`testl`/`testq` set flags without changing
 registers. `subl`/`subq` and `xorl`/`xorq` also set flags; `andl`/`andq` and
@@ -1861,23 +1865,24 @@ with the usual zero-extension of the 32-bit destination. Register-source
 remainder widths. A register-source one-operand `imulq` models the signed
 128-bit product in `%rdx:%rax`. Each division path must prove a nonzero
 divisor and that the quotient fits the destination width under the bounded
-input domain, source definedness, call-result bounds, path conditions, and
-input/register bindings. Failure to prove that obligation is
+input domain, loop-exit domain when present, source definedness, call-result
+bounds, path conditions, and input/register bindings. Failure to prove that obligation is
 `division_trap`; memory operands and other division forms remain unsupported.
 This is a bounded no-trap obligation, not a runtime or ABI guarantee.
 
 `mov`, `movabsq`, `lea`, `not`, `push`, `pop`, and `nop` preserve flags.
 Initial flags and flags after other arithmetic or calls are unknown, so a
 condition that reads them is outside the profile. At conditional forks, paths
-proved infeasible under the declared domain, definedness, call-result bounds,
-input/register bindings, and accumulated path conditions are pruned; paths
+proved infeasible under the declared domain, loop-exit domain when present,
+definedness, call-result bounds, input/register bindings, and accumulated path conditions are pruned; paths
 with Sat or Unknown solver results are retained. Symbolic execution is bounded
 at 64 completed paths; exceeding that bound is `path_bound`.
 
 The `input_domain` is
 `signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires`.
-The comparison asserts the source model's signature-bounded parameter domains
-and division/shift definedness, but does not restrict inputs by `requires`.
+The comparison asserts the source model's signature-bounded parameter domains,
+division/shift definedness, and bounded-loop exit domain when present, but does
+not restrict inputs by `requires`.
 Unknown per-path equivalence queries retry the identical obligations with
 `simplify → smt` under the same budget; constant-divisor magic-number
 sequences may remain inconclusive.
@@ -1885,24 +1890,30 @@ Larger multiply-heavy functions may remain inconclusive within the solver
 budget; this is fail-closed and does not imply inequivalence.
 Outside-profile reasons include `argument_count`, `branch_target`,
 `call_arguments`, `call_order`, `conditional_call`, `cyclic_control_flow`,
-`division_trap`, `not_a_source_atom`, `path_bound`, `unsupported_flags`,
-`unsupported_instruction`, and `unsupported_signature`. A direct-call callee
+`division_trap`, `loop_bound`, `not_a_source_atom`, `path_bound`,
+`unsupported_flags`, `unsupported_instruction`, and `unsupported_signature`.
+A direct-call callee
 or count mismatch is reported as `call_order`. Direct calls in branching
 functions are matched per path against ordered source `CallSite`s. Provably
-false source guards are skipped under the parameter domain, definedness,
-call-result bounds, current path conditions, and input-to-initial-register
+false source guards are skipped under the parameter domain, loop-exit domain
+when present, definedness, call-result bounds, current path conditions, and input-to-initial-register
 bindings; a guard that is undecided, or a machine call with no active source
-site, is `conditional_call`. A missing outgoing stack slot is
+site, is `conditional_call`. The emitted cancellation-poll call returns zero
+under the no-cancellation-requested assumption and clobbers the other
+caller-saved registers; cancellation and runtime semantics are not verified.
+A missing outgoing stack slot is
 `call_arguments`; an argument count above 16 is `argument_count`. At path
 completion, remaining source sites must all be provably false. Relocation
 coverage is checked across the union of
 completed paths. A terminal direct tail-call `jmp` is supported on a branch
 arm; a tail-call jump that is not the final decoded instruction remains
-outside the profile as `unsupported_instruction`. Unsupported signatures,
-reachable control-flow cycles, invalid branch targets, other instructions
-outside the profile, and functions without a matching source atom are outside
-the profile. The C `main` wrapper, CRT/startup code, dynamic loader, libc and
-runtime are not covered. This remains a bounded per-instruction Option B
+outside the profile as `unsupported_instruction`. Unsupported-signature
+functions with reachable cycles remain `cyclic_control_flow`; other
+unsupported signatures, invalid branch targets, other instructions outside the
+profile, and functions without a matching source atom are outside the profile.
+The C `main` wrapper,
+CRT/startup code, dynamic loader, libc and runtime are not covered. This
+remains a bounded per-instruction Option B
 profile, not full object-code translation validation or runtime assurance.
 The descriptor performs `machine_code_leaf_function_tv` only when an
 equivalent call-free, branch-free function is checked,
@@ -1914,12 +1925,15 @@ has a backward but acyclic branch. The new
 `machine_code_conditional_call_function_tv` is performed when an equivalent
 function has both a conditional branch and a call; those functions remain
 counted as direct-call functions and are not also counted as forward- or
-acyclic-branch functions. Leaf, forward-branch, and acyclic-branch checks are
-mutually exclusive. It lists `machine_code_tv_cyclic_control_flow_functions`
-as not performed; cycles remain outside the profile. The not-performed vocabulary
-changed from `machine_code_tv_backward_branch_functions` to
-`machine_code_tv_cyclic_control_flow_functions`; agent consumers should
-update it.
+acyclic-branch functions. `machine_code_bounded_loop_function_tv` is performed
+when an equivalent function has a reachable loop. The descriptor then lists
+`machine_code_tv_loop_executions_beyond_bound` and
+`runtime_cancellation_semantics` as not performed. It lists
+`machine_code_tv_cyclic_control_flow_functions` as not performed only when a
+function outcome is `cyclic_control_flow` or `loop_bound`. The not-performed
+vocabulary changed from `machine_code_tv_backward_branch_functions` to
+`machine_code_tv_cyclic_control_flow_functions`; mumei-agent consumers must
+adopt the new bounded-loop descriptor names and this conditional vocabulary.
 
 ### Pinned executable exit-status recheck
 

@@ -3228,6 +3228,8 @@ fn machine_tv_coverage_checks(
     equivalent_forward_branch_count: usize,
     equivalent_acyclic_branch_count: usize,
     equivalent_conditional_call_count: usize,
+    equivalent_bounded_loop_count: usize,
+    has_cyclic_or_loop_bound_outcome: bool,
 ) -> (Vec<&'static str>, Vec<&'static str>) {
     let mut checks_performed = Vec::new();
     let mut checks_not_performed = Vec::new();
@@ -3255,6 +3257,18 @@ fn machine_tv_coverage_checks(
         checks_performed.push("machine_code_conditional_call_function_tv");
     } else {
         checks_not_performed.push("machine_code_conditional_call_function_tv");
+    }
+    if equivalent_bounded_loop_count > 0 {
+        checks_performed.push("machine_code_bounded_loop_function_tv");
+        checks_not_performed.extend([
+            "machine_code_tv_loop_executions_beyond_bound",
+            "runtime_cancellation_semantics",
+        ]);
+    } else {
+        checks_not_performed.push("machine_code_bounded_loop_function_tv");
+    }
+    if has_cyclic_or_loop_bound_outcome {
+        checks_not_performed.push("machine_code_tv_cyclic_control_flow_functions");
     }
     (checks_performed, checks_not_performed)
 }
@@ -3313,12 +3327,15 @@ fn write_machine_tv(
     let mut equivalent_forward_branch_count = 0usize;
     let mut equivalent_acyclic_branch_count = 0usize;
     let mut equivalent_conditional_call_count = 0usize;
+    let mut equivalent_bounded_loop_count = 0usize;
+    let mut has_cyclic_or_loop_bound_outcome = false;
     for function_name in &object_surface.defined {
         let has_source_calls = source_models
             .get(function_name)
             .is_some_and(|model| !model.call_sites.is_empty());
         let mut branch_shape = machine_tv::BranchShape::None;
         let mut has_conditional_call = false;
+        let mut has_reachable_cycle = false;
         let outcome = if let Some(model) = source_models.get(function_name) {
             if model.inputs.len() > machine_tv::MAX_ARGUMENT_COUNT {
                 FunctionOutcome::OutsideProfile("argument_count")
@@ -3330,6 +3347,16 @@ fn write_machine_tv(
                     .get(function_name)
                     .cloned()
                     .unwrap_or_default();
+                has_reachable_cycle =
+                    machine_tv::disassemble(&bytes, address)
+                        .ok()
+                        .is_some_and(|instructions| {
+                            machine_tv::function_has_reachable_cycle(
+                                &instructions,
+                                bytes.len() as u64,
+                                &call_targets,
+                            )
+                        });
                 branch_shape = machine_tv::branch_shape(&bytes, address, &call_targets);
                 has_conditional_call =
                     machine_tv::has_conditional_branch_and_call(&bytes, address, &call_targets);
@@ -3343,12 +3370,15 @@ fn write_machine_tv(
         let value = match outcome {
             FunctionOutcome::Equivalent => {
                 equivalent_count += 1;
+                if has_reachable_cycle {
+                    equivalent_bounded_loop_count += 1;
+                }
                 if has_source_calls {
                     equivalent_call_count += 1;
                     if has_conditional_call {
                         equivalent_conditional_call_count += 1;
                     }
-                } else {
+                } else if !has_reachable_cycle {
                     match branch_shape {
                         machine_tv::BranchShape::None => equivalent_leaf_count += 1,
                         machine_tv::BranchShape::Forward => {
@@ -3372,6 +3402,9 @@ fn write_machine_tv(
                 std::process::exit(3);
             }
             FunctionOutcome::OutsideProfile(reason) => {
+                if matches!(reason, "cyclic_control_flow" | "loop_bound") {
+                    has_cyclic_or_loop_bound_outcome = true;
+                }
                 serde_json::json!({"outcome": "outside_profile", "reason": reason})
             }
         };
@@ -3391,7 +3424,6 @@ fn write_machine_tv(
             "os_stdout_observation",
             "os_stderr_observation",
             "runtime_observation_semantics",
-            "machine_code_tv_cyclic_control_flow_functions",
         ];
         if object_link_correspondence {
             checks_performed.push("object_link_correspondence");
@@ -3409,6 +3441,8 @@ fn write_machine_tv(
             equivalent_forward_branch_count,
             equivalent_acyclic_branch_count,
             equivalent_conditional_call_count,
+            equivalent_bounded_loop_count,
+            has_cyclic_or_loop_bound_outcome,
         );
         checks_performed.extend(machine_tv_checks);
         checks_not_performed.extend(machine_tv_checks_not_performed);
@@ -3438,7 +3472,7 @@ fn write_machine_tv(
             MACHINE_CODE_TV_WITHOUT_OBJECT_LINK_SCOPE
         };
         println!(
-            "Machine-code TV: {equivalent_count} of {} object functions equivalent to their source atoms within the acyclic-branch and conditional-call profile.\nScope: {scope}",
+            "Machine-code TV: {equivalent_count} of {} object functions equivalent to their source atoms within the acyclic-branch, conditional-call, and bounded-loop profile ({equivalent_bounded_loop_count} bounded-loop functions).\nScope: {scope}",
             object_surface.defined.len(),
         );
         Ok(())
@@ -3630,7 +3664,8 @@ mod tests {
 
     #[test]
     fn machine_tv_descriptor_omits_leaf_check_for_caller_only_equivalence() {
-        let (checks_performed, checks_not_performed) = machine_tv_coverage_checks(0, 1, 0, 0, 0);
+        let (checks_performed, checks_not_performed) =
+            machine_tv_coverage_checks(0, 1, 0, 0, 0, 0, false);
         assert_eq!(checks_performed, vec!["machine_code_direct_call_site_tv"]);
         assert_eq!(
             checks_not_performed,
@@ -3639,13 +3674,15 @@ mod tests {
                 "machine_code_forward_branch_function_tv",
                 "machine_code_acyclic_branch_function_tv",
                 "machine_code_conditional_call_function_tv",
+                "machine_code_bounded_loop_function_tv",
             ]
         );
     }
 
     #[test]
     fn machine_tv_descriptor_counts_branch_functions_separately_from_leaves() {
-        let (checks_performed, checks_not_performed) = machine_tv_coverage_checks(0, 0, 1, 0, 0);
+        let (checks_performed, checks_not_performed) =
+            machine_tv_coverage_checks(0, 0, 1, 0, 0, 0, false);
         assert_eq!(
             checks_performed,
             vec!["machine_code_forward_branch_function_tv"]
@@ -3657,13 +3694,15 @@ mod tests {
                 "machine_code_direct_call_site_tv",
                 "machine_code_acyclic_branch_function_tv",
                 "machine_code_conditional_call_function_tv",
+                "machine_code_bounded_loop_function_tv",
             ]
         );
     }
 
     #[test]
     fn machine_tv_descriptor_counts_acyclic_backward_branches_separately() {
-        let (checks_performed, checks_not_performed) = machine_tv_coverage_checks(0, 0, 0, 1, 0);
+        let (checks_performed, checks_not_performed) =
+            machine_tv_coverage_checks(0, 0, 0, 1, 0, 0, false);
         assert_eq!(
             checks_performed,
             vec!["machine_code_acyclic_branch_function_tv"]
@@ -3675,13 +3714,15 @@ mod tests {
                 "machine_code_direct_call_site_tv",
                 "machine_code_forward_branch_function_tv",
                 "machine_code_conditional_call_function_tv",
+                "machine_code_bounded_loop_function_tv",
             ]
         );
     }
 
     #[test]
     fn machine_tv_descriptor_counts_conditional_call_functions_as_callers() {
-        let (checks_performed, checks_not_performed) = machine_tv_coverage_checks(0, 1, 0, 0, 1);
+        let (checks_performed, checks_not_performed) =
+            machine_tv_coverage_checks(0, 1, 0, 0, 1, 0, false);
         assert_eq!(
             checks_performed,
             vec![
@@ -3694,9 +3735,40 @@ mod tests {
             vec![
                 "machine_code_leaf_function_tv",
                 "machine_code_forward_branch_function_tv",
-                "machine_code_acyclic_branch_function_tv"
+                "machine_code_acyclic_branch_function_tv",
+                "machine_code_bounded_loop_function_tv",
             ]
         );
+    }
+
+    #[test]
+    fn machine_tv_descriptor_counts_bounded_loop_functions() {
+        let (checks_performed, checks_not_performed) =
+            machine_tv_coverage_checks(0, 0, 0, 0, 0, 1, false);
+        assert_eq!(
+            checks_performed,
+            vec!["machine_code_bounded_loop_function_tv"]
+        );
+        assert_eq!(
+            checks_not_performed,
+            vec![
+                "machine_code_leaf_function_tv",
+                "machine_code_direct_call_site_tv",
+                "machine_code_forward_branch_function_tv",
+                "machine_code_acyclic_branch_function_tv",
+                "machine_code_conditional_call_function_tv",
+                "machine_code_tv_loop_executions_beyond_bound",
+                "runtime_cancellation_semantics",
+            ]
+        );
+    }
+
+    #[test]
+    fn machine_tv_descriptor_reports_cyclic_outcomes_conditionally() {
+        let (_, not_performed) = machine_tv_coverage_checks(0, 0, 0, 0, 0, 0, true);
+        assert!(not_performed.contains(&"machine_code_tv_cyclic_control_flow_functions"));
+        let (_, not_performed) = machine_tv_coverage_checks(0, 0, 0, 0, 0, 0, false);
+        assert!(!not_performed.contains(&"machine_code_tv_cyclic_control_flow_functions"));
     }
 
     #[test]

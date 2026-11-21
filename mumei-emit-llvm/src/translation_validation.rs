@@ -1362,7 +1362,7 @@ unsafe fn check_module(
 /// does not model: the poll is admitted as a declaration-only runtime
 /// intrinsic whose result binds to 0 — the claim covers executions
 /// where no cancellation is requested.
-const CANCEL_POLL_INTRINSIC: &str = "__mumei_task_group_should_cancel_current";
+pub(crate) const CANCEL_POLL_INTRINSIC: &str = "__mumei_task_group_should_cancel_current";
 
 unsafe fn callee_name(value: LLVMValueRef) -> Option<String> {
     let mut len = 0;

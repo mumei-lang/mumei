@@ -2,7 +2,7 @@ use inkwell::targets::{InitializationConfig, Target};
 use llvm_sys::disassembler::{
     LLVMCreateDisasm, LLVMDisasmContextRef, LLVMDisasmDispose, LLVMDisasmInstruction,
 };
-use mumei_core::semantic_contract::PureI64Body;
+use mumei_core::semantic_contract::{PureI64Body, LOOP_BOUND};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{CStr, CString},
@@ -277,7 +277,7 @@ pub fn check_function<'ctx>(
     }
 }
 
-fn function_has_reachable_cycle(
+pub fn function_has_reachable_cycle(
     instructions: &[Instruction],
     function_size: u64,
     call_targets: &BTreeMap<u64, CallTarget>,
@@ -300,7 +300,6 @@ pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
             .flatten()
             .any(|is_double| *is_double)
         && !model.result_leaf_doubles.iter().any(|is_double| *is_double)
-        && model.loop_bound_exits.is_none()
         && !model.bounded_memory
 }
 
@@ -326,6 +325,7 @@ fn assert_path_equivalence_query<'ctx>(
         .iter()
         .chain(&model.definedness)
         .chain(&model.call_result_bounds)
+        .chain(model.loop_bound_exits.iter())
     {
         solver.assert(assumption);
     }
@@ -380,6 +380,7 @@ enum FlagState<'ctx> {
 #[derive(Clone)]
 struct MachineState<'ctx> {
     instruction_index: usize,
+    instruction_visits: Vec<usize>,
     registers: Vec<BV<'ctx>>,
     known_upper_32_zero: [bool; 16],
     stack: Vec<(i64, BV<'ctx>)>,
@@ -401,11 +402,6 @@ fn lift<'ctx>(
     context: &'ctx Context,
 ) -> Result<LiftedFunction<'ctx>, FunctionOutcome> {
     let branch_targets = resolve_branch_targets(instructions, function_size, call_targets)?;
-    let successors = control_flow_successors(instructions, &branch_targets, call_targets);
-    let reachable = reachable_instructions(&successors);
-    if reachable_control_flow_has_cycle(&successors, &reachable) {
-        return Err(FunctionOutcome::OutsideProfile("cyclic_control_flow"));
-    }
     let registers = (0..16)
         .map(|_| BV::fresh_const(context, "machine_initial_register", 64))
         .collect::<Vec<_>>();
@@ -419,6 +415,7 @@ fn lift<'ctx>(
         .collect();
     let mut pending = vec![MachineState {
         instruction_index: 0,
+        instruction_visits: vec![0; instructions.len()],
         registers,
         known_upper_32_zero: [false; 16],
         stack: Vec::new(),
@@ -440,6 +437,15 @@ fn lift<'ctx>(
             let Some(instruction) = instructions.get(index) else {
                 return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
             };
+            if state.instruction_visits[index] > LOOP_BOUND {
+                match path_feasibility_status(model, &state.path_conditions, &arguments, context) {
+                    SatResult::Unsat => break,
+                    SatResult::Sat | SatResult::Unknown => {
+                        return Err(FunctionOutcome::OutsideProfile("loop_bound"));
+                    }
+                }
+            }
+            state.instruction_visits[index] += 1;
             if is_conditional_branch(&instruction.mnemonic) {
                 let suffix = instruction
                     .mnemonic
@@ -1533,6 +1539,14 @@ fn lift_call<'ctx>(
     if !target.is_entry_target_relocation() {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
+    if target.name == crate::translation_validation::CANCEL_POLL_INTRINSIC {
+        if tail_call {
+            return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+        }
+        apply_call_result_and_clobbers(registers, BV::from_i64(context, 0, 64), context);
+        call_state.used_call_targets.insert(field_offset);
+        return Ok(());
+    }
     let mut skipped_false_guard = false;
     let call_site = loop {
         let Some(call_site) = model.call_sites.get(call_state.call_index) else {
@@ -1600,13 +1614,21 @@ fn lift_call<'ctx>(
         stack.retain(|(stack_slot, _)| !outgoing_slots.contains(stack_slot));
         outgoing_cleanup_slots.extend(outgoing_slots);
     }
-    registers[0] = call_site.result.clone();
-    for register_index in [1, 2, 6, 7, 8, 9, 10, 11] {
-        registers[register_index] = BV::fresh_const(context, "machine_call_clobber", 64);
-    }
+    apply_call_result_and_clobbers(registers, call_site.result.clone(), context);
     call_state.used_call_targets.insert(field_offset);
     call_state.call_index += 1;
     Ok(())
+}
+
+fn apply_call_result_and_clobbers<'ctx>(
+    registers: &mut [BV<'ctx>],
+    result: BV<'ctx>,
+    context: &'ctx Context,
+) {
+    registers[0] = result;
+    for register_index in [1, 2, 6, 7, 8, 9, 10, 11] {
+        registers[register_index] = BV::fresh_const(context, "machine_call_clobber", 64);
+    }
 }
 
 fn path_solver<'ctx>(
@@ -1622,6 +1644,7 @@ fn path_solver<'ctx>(
         .iter()
         .chain(&model.definedness)
         .chain(&model.call_result_bounds)
+        .chain(model.loop_bound_exits.iter())
     {
         solver.assert(assumption);
     }
@@ -2844,7 +2867,7 @@ entry:
     }
 
     #[test]
-    fn loop_signature_is_outside_profile() {
+    fn loop_model_can_refute_a_non_looping_machine_function() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
         config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
@@ -2864,7 +2887,122 @@ entry:
         );
         assert_eq!(
             check_function(&bytes, address, &model, &BTreeMap::new(), &context),
-            FunctionOutcome::OutsideProfile("unsupported_signature")
+            FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn unsupported_signature_cycles_remain_classified_as_cyclic_control_flow() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let mut model = source_model(
+            "atom helper() -> i64 requires: true; ensures: true; body: { 7 };",
+            &context,
+        );
+        model.composite_signature = true;
+        assert_eq!(
+            check_function(&[0x90, 0xeb, 0xfd], 0, &model, &BTreeMap::new(), &context,),
+            FunctionOutcome::OutsideProfile("cyclic_control_flow")
+        );
+    }
+
+    fn loop_count_machine_bytes() -> Vec<u8> {
+        vec![
+            0x41, 0x56, 0x53, 0x50, 0x49, 0x89, 0xfe, 0x31, 0xdb, 0x0f, 0x1f, 0x80, 0x00, 0x00,
+            0x00, 0x00, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x48, 0x85, 0xc0, 0x75, 0x0a, 0x4c, 0x39,
+            0xf3, 0x7d, 0x05, 0x48, 0xff, 0xc3, 0xeb, 0xec, 0x48, 0x89, 0xd8, 0x48, 0x83, 0xc4,
+            0x08, 0x5b, 0x41, 0x5e, 0xc3,
+        ]
+    }
+
+    fn poll_call_targets() -> BTreeMap<u64, CallTarget> {
+        BTreeMap::from([(
+            0x11,
+            CallTarget {
+                name: crate::translation_validation::CANCEL_POLL_INTRINSIC.to_owned(),
+                relocation_kind: CallRelocationKind::ElfX86_64Plt32,
+                relocation_size: 32,
+                addend: -4,
+            },
+        )])
+    }
+
+    const WHILE_PROBE_SOURCE: &str =
+        "atom loop_count(n: i64) -> i64 requires: n >= 0 && n <= 10; ensures: true; body: { let i = 0; while i < n invariant: i >= 0 && i <= n decreases: n - i { i = i + 1; }; i };\
+         atom main() -> i64 requires: true; ensures: true; body: { loop_count(3) };";
+
+    #[test]
+    fn real_loop_count_object_bytes_are_equivalent_within_the_loop_domain() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model_named(WHILE_PROBE_SOURCE, "loop_count", &context);
+        assert!(model.loop_bound_exits.is_some());
+        assert_eq!(
+            check_function(
+                &loop_count_machine_bytes(),
+                0,
+                &model,
+                &poll_call_targets(),
+                &context,
+            ),
+            FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn extra_machine_loop_iteration_is_different_inside_the_source_domain() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model_named(WHILE_PROBE_SOURCE, "loop_count", &context);
+        let mut bytes = loop_count_machine_bytes();
+        bytes[0x1d] = 0x7f; // jge -> jg
+        assert_eq!(
+            check_function(&bytes, 0, &model, &poll_call_targets(), &context),
+            FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn non_intrinsic_external_call_without_a_source_site_fails_closed() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom helper(x: i64) -> i64 requires: true; ensures: true; body: { x };",
+            &context,
+        );
+        let targets = BTreeMap::from([(
+            1,
+            CallTarget {
+                name: "not_the_cancel_poll".to_owned(),
+                relocation_kind: CallRelocationKind::ElfX86_64Plt32,
+                relocation_size: 32,
+                addend: -4,
+            },
+        )]);
+        assert_eq!(
+            check_function(&[0xe8, 0, 0, 0, 0, 0xc3], 0, &model, &targets, &context),
+            FunctionOutcome::OutsideProfile("call_order")
+        );
+        let poll_tail = BTreeMap::from([(
+            1,
+            CallTarget {
+                name: crate::translation_validation::CANCEL_POLL_INTRINSIC.to_owned(),
+                relocation_kind: CallRelocationKind::ElfX86_64Plt32,
+                relocation_size: 32,
+                addend: -4,
+            },
+        )]);
+        assert_eq!(
+            check_function(&[0xe9, 0, 0, 0, 0], 0, &model, &poll_tail, &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
         );
     }
 
@@ -3462,7 +3600,7 @@ entry:
         );
         assert_eq!(
             check_function(&[0x90, 0xeb, 0xfd], 0, &model, &BTreeMap::new(), &context),
-            FunctionOutcome::OutsideProfile("cyclic_control_flow")
+            FunctionOutcome::OutsideProfile("loop_bound")
         );
         let jump_into_instruction = [0xeb, 0x01, 0x48, 0x89, 0xf8, 0xc3];
         assert_eq!(
