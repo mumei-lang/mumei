@@ -14,6 +14,10 @@ const BRANCH: &str = "atom absd(x: i64, y: i64) -> i64 requires: x >= 0 && x <= 
 atom clamp(x: i64) -> i64 requires: true; ensures: result <= 10; body: { if x > 10 { 10 } else { x } };\n\
 atom pick(b: bool, x: i64) -> i64 requires: true; ensures: true; body: { if b { x } else { 0 } };\n\
 atom main() -> i64 requires: true; ensures: result >= 0; body: { absd(7, 3) };";
+const SETCC_SHIFTS: &str =
+    "atom lt(x: i64, y: i64) -> bool requires: true; ensures: true; body: { x < y };\n\
+atom half(x: i64) -> i64 requires: x >= 0 && x <= 1000; ensures: result >= 0; body: { x / 2 };\n\
+atom main() -> i64 requires: true; ensures: result >= 0; body: { half(4) };";
 
 fn cli(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_mumei"))
@@ -493,6 +497,43 @@ fn recheck_machine_tv_checks_probe_forward_branches() {
     assert!(not_performed
         .iter()
         .any(|check| check == "machine_code_leaf_function_tv"));
+}
+
+#[test]
+fn recheck_machine_tv_checks_setcc_and_shift_probe() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), SETCC_SHIFTS);
+    let lt_disassembly = object_function_disassembly(&bundle, "lt");
+    assert_eq!(
+        lt_disassembly
+            .iter()
+            .map(|instruction| instruction.split_whitespace().next().unwrap())
+            .collect::<Vec<_>>(),
+        ["xorl", "cmpq", "setl", "retq"]
+    );
+    let half_disassembly = object_function_disassembly(&bundle, "half");
+    assert_eq!(
+        half_disassembly
+            .iter()
+            .map(|instruction| instruction.split_whitespace().next().unwrap())
+            .collect::<Vec<_>>(),
+        ["movq", "shrq", "addq", "sarq", "retq"]
+    );
+    assert!(half_disassembly
+        .iter()
+        .any(|instruction| instruction == "sarq %rax"));
+
+    let output = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        descriptor["functions"]["lt"],
+        serde_json::json!({"outcome": "equivalent_within_profile"})
+    );
+    assert_eq!(
+        descriptor["functions"]["half"],
+        serde_json::json!({"outcome": "equivalent_within_profile"})
+    );
 }
 
 #[test]

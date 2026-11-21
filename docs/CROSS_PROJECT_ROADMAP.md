@@ -4028,6 +4028,8 @@ to source `CallSite`s in order and compared as uninterpreted sites, including
 call arguments and result terms; functions mixing calls and conditional
 branches are outside the profile. The x86-64 integer-register convention and
 callee-saved preservation are assumed, not verified, and make no ABI claim.
+The instruction profile includes `setcc`, byte-register views and extensions,
+masked immediate or implicit-one shifts, and `or` logical flags.
 Backward branches/loops, the C `main` wrapper, CRT/startup code, the loader,
 libc and runtime are not covered. This is a bounded per-instruction profile;
 full object-code TV remains the deep endpoint.

@@ -3082,11 +3082,13 @@ calls are matched in order to source `CallSite`s and compared as
 uninterpreted sites, including argument expressions and call-result terms;
 functions mixing calls and conditional branches are outside the profile.
 Forward branches must land on decoded instruction starts and symbolic path
-exploration is bounded at 64 completed paths. The x86-64 integer-register
-convention and callee-saved preservation are assumed, not verified; this makes
-no ABI claim. Backward branches/loops, the C `main` wrapper, CRT/startup code,
-loader, libc and runtime are not covered. Full object-code TV remains the
-deeper endpoint.
+exploration is bounded at 64 completed paths. The instruction profile now
+includes `setcc`, byte-register views and extensions, masked immediate or
+implicit-one shifts, and `or` logical flags. The x86-64 integer-register
+convention and callee-saved preservation are assumed, not verified; this
+makes no ABI claim. Backward branches/loops, the C `main` wrapper, CRT/startup
+code, loader, libc and runtime are not covered. Full object-code TV remains
+the deeper endpoint.
 
 Sibling descriptors now name the exit-status observation only as
 `os_exit_status_observation` (formerly bare `os_exit_status` in
