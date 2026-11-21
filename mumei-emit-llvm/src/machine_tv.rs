@@ -258,7 +258,7 @@ fn lift<'ctx>(
             let Some(value) = register_value(source, &registers, 64) else {
                 return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
             };
-            if !adjust_rsp(&mut registers, &mut rsp_offset, -8, context) {
+            if !adjust_rsp(&mut registers, &mut stack, &mut rsp_offset, -8, context) {
                 return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
             }
             stack.push((rsp_offset, value));
@@ -277,7 +277,7 @@ fn lift<'ctx>(
                 return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
             }
             let (_, value) = stack.pop().expect("stack was checked as non-empty");
-            if !adjust_rsp(&mut registers, &mut rsp_offset, 8, context)
+            if !adjust_rsp(&mut registers, &mut stack, &mut rsp_offset, 8, context)
                 || !write_register(&mut registers, register_index, value, 64)
             {
                 return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
@@ -303,7 +303,7 @@ fn lift<'ctx>(
                 };
                 delta
             };
-            if !adjust_rsp(&mut registers, &mut rsp_offset, delta, context) {
+            if !adjust_rsp(&mut registers, &mut stack, &mut rsp_offset, delta, context) {
                 return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
             }
         } else if !lift_instruction(instruction, &mut registers, context) {
@@ -392,6 +392,7 @@ fn call_guard_is_true<'ctx>(
 
 fn adjust_rsp<'ctx>(
     registers: &mut [BV<'ctx>],
+    stack: &mut Vec<(i64, BV<'ctx>)>,
     rsp_offset: &mut i64,
     delta: i64,
     context: &'ctx Context,
@@ -401,6 +402,9 @@ fn adjust_rsp<'ctx>(
     };
     registers[4] = registers[4].bvadd(&BV::from_u64(context, delta as u64, 64));
     *rsp_offset = next_offset;
+    if delta > 0 {
+        stack.retain(|(stack_slot, _)| *stack_slot >= next_offset);
+    }
     true
 }
 
@@ -943,6 +947,30 @@ entry:
         );
         assert_eq!(
             check_function(&[0x5b, 0xc3], 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+    }
+
+    #[test]
+    fn abstract_stack_rejects_slots_invalidated_by_rsp_increase() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom helper(x: i64) -> i64 requires: true; ensures: true; body: { x };",
+            &context,
+        );
+        let bytes = [
+            0x48, 0x83, 0xec, 0x08, // subq $8, %rsp
+            0x57, // pushq %rdi
+            0x48, 0x83, 0xc4, 0x10, // addq $16, %rsp
+            0x48, 0x83, 0xec, 0x10, // subq $16, %rsp
+            0x58, // popq %rax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("unsupported_instruction")
         );
     }
