@@ -654,6 +654,13 @@ fn runtime_observations_are_rechecked_on_one_invocation() {
     let (source, bundle, id) = build(root.path());
     let record: serde_json::Value =
         serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+    assert_eq!(
+        record["link_build"]["observation_envelope"],
+        serde_json::json!({
+            "environment": "empty",
+            "working_directory": "executable_directory",
+        })
+    );
     let recheck_observations = |source: &Path, bundle: &Path, id: &str, json: bool| {
         let mut args = vec![
             "native-bundle",
@@ -680,7 +687,7 @@ fn runtime_observations_are_rechecked_on_one_invocation() {
     assert_success(&json);
     assert!(json.stdout.ends_with(b"\n"));
     let descriptor: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-    assert_eq!(descriptor.as_object().unwrap().len(), 9);
+    assert_eq!(descriptor.as_object().unwrap().len(), 10);
     assert_eq!(descriptor["schema_version"], "mumei.runtime-observation/v1");
     assert_eq!(descriptor["verdict"], "observed_matching");
     assert_eq!(
@@ -707,6 +714,7 @@ fn runtime_observations_are_rechecked_on_one_invocation() {
             "family": std::env::consts::FAMILY,
         })
     );
+    assert_eq!(descriptor["pin_envelope"], "recorded");
     assert_eq!(
         descriptor["observations"],
         serde_json::json!({
@@ -776,6 +784,29 @@ fn runtime_observations_are_rechecked_on_one_invocation() {
         assert_eq!(output.status.code(), Some(1), "{pin}");
         assert!(output.stdout.is_empty(), "{pin}");
     }
+
+    let mut legacy_record = record.clone();
+    legacy_record["link_build"]
+        .as_object_mut()
+        .unwrap()
+        .remove("observation_envelope");
+    let bytes = serde_json::to_vec(&legacy_record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    let legacy_id = native_bundle::sha256(&bytes);
+    let legacy = recheck_observations(&source, &bundle, &legacy_id, true);
+    assert_success(&legacy);
+    let legacy_descriptor: serde_json::Value = serde_json::from_slice(&legacy.stdout).unwrap();
+    assert_eq!(legacy_descriptor["pin_envelope"], "unrecorded");
+
+    let mut mismatched_record = record.clone();
+    mismatched_record["link_build"]["observation_envelope"]["environment"] =
+        serde_json::json!("inherited");
+    let bytes = serde_json::to_vec(&mismatched_record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    let mismatched_id = native_bundle::sha256(&bytes);
+    let mismatched = recheck_observations(&source, &bundle, &mismatched_id, true);
+    assert_eq!(mismatched.status.code(), Some(3));
+    assert!(mismatched.stdout.is_empty());
 }
 
 #[test]
@@ -784,6 +815,13 @@ fn runtime_observations_are_accepted_on_one_invocation() {
     let (source, bundle, id) = build(root.path());
     let record: serde_json::Value =
         serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+    assert_eq!(
+        record["link_build"]["observation_envelope"],
+        serde_json::json!({
+            "environment": "empty",
+            "working_directory": "executable_directory",
+        })
+    );
     assert!(
         record["link_build"]["canonical_arguments_sha256"].is_string(),
         "the build fixture pins canonical link arguments"
@@ -811,6 +849,7 @@ fn runtime_observations_are_accepted_on_one_invocation() {
         "mumei.native-evidence-acceptance/v1"
     );
     assert_eq!(descriptor["accepted"], true);
+    assert_eq!(descriptor["pin_envelope"], "recorded");
     assert_eq!(
         descriptor["scope"],
         "native_bundle_source_llvm_toolchain_reproduction_and_runtime_observation_semantics"
@@ -925,6 +964,7 @@ fn stderr_acceptance_emits_the_observation_descriptor() {
     assert_eq!(descriptor["accepted"], true);
     assert!(descriptor.get("invocation").is_none());
     assert!(descriptor.get("host").is_none());
+    assert!(descriptor.get("pin_envelope").is_none());
     assert!(
         descriptor["checks_performed"]
             .as_array()

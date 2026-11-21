@@ -1908,11 +1908,14 @@ cap are enforced, and none of those properties is covered by
 
 Every native observation uses this spawn policy: build-time pins,
 per-channel `recheck-*`/`accept-*`, and
-`recheck-observations`/`accept-observations`. The bundle record does not
-pin the envelope: older Core bundles may have build-time pins from the
-inherited environment and cwd but are now rechecked with an empty
-environment and executable-directory cwd. A match is the claim; a
-mismatch fails closed.
+`recheck-observations`/`accept-observations`. New records optionally pin
+the context of their `expected_*` observations in
+`link_build.observation_envelope`; it is absent when no observation pin
+was obtained. Pins recorded under a different envelope are not compared,
+so runtime rechecks are inconclusive (exit 3). Legacy records without the
+field are still compared and runtime descriptors report
+`pin_envelope: "unrecorded"`; matching recorded envelopes report
+`pin_envelope: "recorded"`.
 
 Both runtime-observation descriptors also carry `host` (`os`, `arch`,
 `family`), the running consumer binary's compile-time target, recorded

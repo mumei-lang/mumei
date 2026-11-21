@@ -3049,9 +3049,10 @@ performs `runtime_observation_semantics`. Its JSON envelope declares
 invocations, non-empty argv, stdin bytes or CPU/memory limits. Every
 native observation uses this policy, including build-time pins and all
 per-channel and runtime-observation recheck/accept commands. The record
-does not pin the envelope: older Core bundles may have build-time pins
-under inherited environment/cwd but are now rechecked with the pinned
-environment and cwd; a match is claimed and a mismatch fails closed. The Agent
+now optionally pins `link_build.observation_envelope`; pins from a
+different envelope are not compared, so runtime rechecks are inconclusive
+(exit 3). Legacy records without the field are still compared and report
+`pin_envelope: "unrecorded"`. The Agent
 `native-observations-accept` route (mumei-agent#1039) now performs this
 check from the descriptor; its acceptance rests on Core's exit code and
 input recheck, and it does not validate the Core-reported envelope. See the [runtime-observation acceptance

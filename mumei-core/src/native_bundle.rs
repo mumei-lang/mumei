@@ -536,6 +536,18 @@ pub struct LinkBuild {
     /// or output over the capture cap).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_stderr_sha256: Option<String>,
+    /// Spawn context the `expected_*` pins were observed under. Optional so
+    /// records pinned before the field existed still deserialize; absent
+    /// whenever no observation pin was observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_envelope: Option<ObservationEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationEnvelope {
+    pub environment: String,
+    pub working_directory: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -553,6 +565,54 @@ pub struct BuildSettings {
     pub project_config: String,
     pub proof_cache: String,
     pub solver_timeout_ms: u64,
+}
+
+#[cfg(test)]
+mod observation_envelope_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn legacy_link_build() -> Value {
+        json!({
+            "driver": "cc",
+            "driver_version": "1",
+            "driver_target": "x86_64-linux",
+            "linker": "gnu-ld",
+            "linker_version": "1",
+            "arguments_sha256": "args",
+        })
+    }
+
+    #[test]
+    fn observation_envelope_is_optional_and_omitted_when_absent() {
+        let value = legacy_link_build();
+        let link_build: LinkBuild = serde_json::from_value(value).unwrap();
+        assert_eq!(link_build.observation_envelope, None);
+
+        let serialized = serde_json::to_value(link_build).unwrap();
+        assert!(serialized.get("observation_envelope").is_none());
+    }
+
+    #[test]
+    fn observation_envelope_roundtrips_and_rejects_unknown_fields() {
+        let mut value = legacy_link_build();
+        value["observation_envelope"] = json!({
+            "environment": "empty",
+            "working_directory": "executable_directory",
+        });
+        let link_build: LinkBuild = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            link_build.observation_envelope,
+            Some(ObservationEnvelope {
+                environment: "empty".into(),
+                working_directory: "executable_directory".into(),
+            })
+        );
+        assert_eq!(serde_json::to_value(link_build).unwrap(), value);
+
+        value["observation_envelope"]["unexpected"] = json!(true);
+        assert!(serde_json::from_value::<LinkBuild>(value).is_err());
+    }
 }
 
 impl Default for BuildSettings {
