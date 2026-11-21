@@ -854,11 +854,11 @@ fn struct_field_assign<'a>(
     Ok(Some(val))
 }
 
-/// `e.p = v` on an enum binding: defined only when `field` names a payload
-/// slot of exactly one declared variant `V` and the tag is provably `V`
-/// under the path condition — the same `is-V` gate a match arm applies
-/// before projecting a payload. Rebuilds `e = V(sel_0(e),…,v,…)` so every
-/// accessor keeps agreeing with the written slot. `None` falls through to
+/// A named enum payload write is defined only when the payload belongs to
+/// exactly one declared variant `V` and the tag is provably `V` under the
+/// path condition. Deep paths through struct payloads reuse
+/// `struct_field_assign` before rebuilding `e = V(sel_0(e),…,v,…)`, so the
+/// ordinary field obligations apply at every depth. `None` falls through to
 /// the resource-state error.
 fn enum_field_assign<'a>(
     vc: &VCtx<'a>,
@@ -870,17 +870,14 @@ fn enum_field_assign<'a>(
     let Some((base, field)) = var.split_once('.') else {
         return Ok(None);
     };
-    // A deeper path (`e.p.q`) would need the struct-write desugar
-    // recursion replayed inside a payload — closed for now.
-    if field.contains('.') {
-        return Ok(None);
-    }
     let Some(type_name) = vc.local_enum_types.borrow().get(base).cloned() else {
         return Ok(None);
     };
     let Some(edef) = vc.module_env.get_enum(&type_name) else {
         return Ok(None);
     };
+    let segments: Vec<&str> = field.split('.').collect();
+    let payload_field = segments[0];
     // Admit a field owned by exactly one variant: an ambiguous `e.p`
     // could be a write under either tag and has no single slot to land
     // on.
@@ -891,15 +888,13 @@ fn enum_field_assign<'a>(
     for (vidx, variant) in edef.variants.iter().enumerate() {
         let Some(fidx) = variant.fields.iter().position(|f| {
             f.split_once(':')
-                .map(|(n, _)| n.trim())
-                .unwrap_or(f.as_str())
-                == field
+                .is_some_and(|(n, _)| n.trim() == payload_field)
         }) else {
             continue;
         };
         if owner.is_some() {
             return Err(MumeiError::type_error(format!(
-                "enum field write '{var}': field '{field}' is a payload of more than one variant — narrow the tag with a match",
+                "enum field write '{var}': field '{payload_field}' is a payload of more than one variant — narrow the tag with a match",
             )));
         }
         owner = Some((vidx, fidx));
@@ -934,6 +929,28 @@ fn enum_field_assign<'a>(
             ))
             .with_verdict(crate::verification::VerdictKind::Rejected));
         }
+    }
+    if segments.len() > 1 {
+        let field_type = &edef.variants[vidx].field_types[fidx].name;
+        let resolved_type = vc.module_env.resolve_base_type(field_type);
+        let Some(sdef) = vc.module_env.structs.get(&resolved_type) else {
+            return Ok(None);
+        };
+        return enum_struct_payload_field_assign(
+            vc,
+            base,
+            payload_field,
+            &segments[1..].join("."),
+            value,
+            edef,
+            vidx,
+            fidx,
+            &sort,
+            &target,
+            sdef,
+            env,
+            solver_opt,
+        );
     }
     let val = expr_to_z3(vc, value, env, solver_opt)?;
     // A struct-typed payload slot flattens into `width` consecutive
@@ -1052,6 +1069,226 @@ fn enum_field_assign<'a>(
     env.insert(base.to_string(), rebuilt);
     profile_solver_assertion(vc, &format!("assign_{}", var), None);
     Ok(Some(val))
+}
+
+fn enum_payload_temp_name(vc: &VCtx<'_>, env: &Env<'_>) -> String {
+    static TEMP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    loop {
+        let id = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = format!("__enum_payload_{id}");
+        let field_prefix = format!("{name}_");
+        let struct_prefix = format!("__struct_{name}_");
+        let occupied = env.keys().any(|key| {
+            key == &name || key.starts_with(&field_prefix) || key.starts_with(&struct_prefix)
+        }) || vc.local_struct_types.borrow().contains_key(&name)
+            || vc.local_enum_types.borrow().contains_key(&name);
+        if !occupied {
+            return name;
+        }
+    }
+}
+
+fn collect_struct_handle_names(
+    vc: &VCtx<'_>,
+    env: &Env<'_>,
+    value: &Dynamic<'_>,
+    type_name: &str,
+    depth: usize,
+    handles: &mut std::collections::HashSet<String>,
+) {
+    if depth > 32 || value.kind() != z3::AstKind::App {
+        return;
+    }
+    let decl = value.decl();
+    if decl.kind() == z3::DeclKind::ITE {
+        for child in value.children().iter().skip(1) {
+            collect_struct_handle_names(vc, env, child, type_name, depth + 1, handles);
+        }
+        return;
+    }
+    if decl.kind() != z3::DeclKind::UNINTERPRETED || decl.arity() != 0 {
+        return;
+    }
+    if !handles.insert(decl.name().to_string()) {
+        return;
+    }
+    let resolved_type = vc.module_env.resolve_base_type(type_name);
+    let Some(sdef) = vc.module_env.structs.get(&resolved_type) else {
+        return;
+    };
+    let Some(fields) = struct_fields_of_value(env, value, sdef) else {
+        return;
+    };
+    for field in &sdef.fields {
+        let resolved_field_type = vc.module_env.resolve_base_type(&field.type_name);
+        if vc.module_env.structs.contains_key(&resolved_field_type) {
+            if let Some((_, field_value)) = fields.iter().find(|(name, _)| name == &field.name) {
+                collect_struct_handle_names(
+                    vc,
+                    env,
+                    field_value,
+                    &field.type_name,
+                    depth + 1,
+                    handles,
+                );
+            }
+        }
+    }
+}
+
+fn enum_payload_path_type(vc: &VCtx<'_>, mut type_name: String, path: &str) -> Option<String> {
+    for segment in path.split('.') {
+        let resolved_type = vc.module_env.resolve_base_type(&type_name);
+        let sdef = vc.module_env.structs.get(&resolved_type)?;
+        type_name = sdef
+            .fields
+            .iter()
+            .find(|field| field.name == segment)?
+            .type_name
+            .clone();
+    }
+    Some(type_name)
+}
+
+fn remove_struct_handle_fields(env: &mut Env<'_>, handles: &std::collections::HashSet<String>) {
+    let prefixes: Vec<String> = handles
+        .iter()
+        .flat_map(|handle| [format!("__struct_{handle}_"), format!("{handle}_")])
+        .collect();
+    let keys: Vec<String> = env
+        .keys()
+        .filter(|key| prefixes.iter().any(|prefix| key.starts_with(prefix)))
+        .cloned()
+        .collect();
+    for key in keys {
+        env.remove(&key);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn enum_struct_payload_field_assign<'a>(
+    vc: &VCtx<'a>,
+    base: &str,
+    payload_field: &str,
+    path: &str,
+    value: &Expr,
+    edef: &crate::parser::EnumDef,
+    vidx: usize,
+    fidx: usize,
+    sort: &z3::DatatypeSort<'a>,
+    target: &Dynamic<'a>,
+    sdef: &StructDef,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> Result<Option<Dynamic<'a>>, MumeiError> {
+    let field_type = &edef.variants[vidx].field_types[fidx].name;
+    let Some(leaf_types) = datatype::field_leaf_types(field_type, vc.module_env) else {
+        return Ok(None);
+    };
+    let Some((leaf_off, leaf_width)) =
+        datatype::payload_leaf_range(edef, vc.module_env, vidx, fidx)
+    else {
+        return Ok(None);
+    };
+    if leaf_width != leaf_types.len() {
+        return Ok(None);
+    }
+    let mut leaves = Vec::with_capacity(leaf_width);
+    for (offset, leaf_type) in leaf_types.iter().enumerate() {
+        let Some(leaf) = datatype::variant_selector_apply(sort, vidx, leaf_off + offset, target)
+        else {
+            return Ok(None);
+        };
+        leaves.push((leaf_type.0.clone(), leaf));
+    }
+
+    let temp = enum_payload_temp_name(vc, env);
+    let setup_keys_before: std::collections::HashSet<String> = env.keys().cloned().collect();
+    let leaf_values: Vec<Dynamic> = leaves.iter().map(|(_, leaf)| leaf.clone()).collect();
+    let Some(direct) = crate::verification::translator::pattern::rebuild_payload_direct_fields(
+        vc.ctx,
+        vc,
+        env,
+        sdef,
+        &leaf_values,
+    ) else {
+        let new_keys: Vec<String> = env
+            .keys()
+            .filter(|key| !setup_keys_before.contains(*key))
+            .cloned()
+            .collect();
+        for key in new_keys {
+            env.remove(&key);
+        }
+        return Ok(None);
+    };
+    let handle = fresh_struct_handle(vc.ctx, &sdef.name);
+    let handle_name = handle.decl().name();
+    bind_struct_fields(env, &handle_name, &direct);
+    bind_struct_fields(env, &temp, &leaves);
+    bind_struct_fields(env, &temp, &direct);
+    env.insert(temp.clone(), handle);
+    vc.local_struct_types
+        .borrow_mut()
+        .insert(temp.clone(), sdef.name.clone());
+    let setup_keys: Vec<String> = env
+        .keys()
+        .filter(|key| !setup_keys_before.contains(*key))
+        .cloned()
+        .collect();
+
+    let path_type = enum_payload_path_type(vc, sdef.name.clone(), path);
+    let env_keys_before_write: std::collections::HashSet<String> = env.keys().cloned().collect();
+    let result = (|| {
+        let temp_path = format!("{temp}.{path}");
+        let Some(written) = struct_field_assign(vc, &temp_path, value, env, solver_opt)? else {
+            return Ok(None);
+        };
+        let enum_path = format!("{base}.{payload_field}");
+        let temp_expr = Expr::Variable(temp.clone());
+        let Some(_) = enum_field_assign(vc, &enum_path, &temp_expr, env, solver_opt)? else {
+            return Ok(None);
+        };
+        Ok(Some(written))
+    })();
+
+    let mut temp_handles = std::collections::HashSet::new();
+    if let Some(temp_value) = env.get(&temp) {
+        collect_struct_handle_names(vc, env, temp_value, &sdef.name, 0, &mut temp_handles);
+    }
+    if let (Ok(Some(written)), Some(path_type)) = (&result, path_type.as_deref()) {
+        let mut result_handles = std::collections::HashSet::new();
+        collect_struct_handle_names(vc, env, written, path_type, 0, &mut result_handles);
+        temp_handles.retain(|handle| !result_handles.contains(handle));
+    }
+    remove_struct_handle_fields(env, &temp_handles);
+    for key in setup_keys {
+        env.remove(&key);
+    }
+    let temp_prefix = format!("{temp}_");
+    let struct_prefix = format!("__struct_{temp}_");
+    let temp_keys: Vec<String> = env
+        .keys()
+        .filter(|key| {
+            key.as_str() == temp || key.starts_with(&temp_prefix) || key.starts_with(&struct_prefix)
+        })
+        .cloned()
+        .collect();
+    for key in temp_keys {
+        env.remove(&key);
+    }
+    vc.local_struct_types.borrow_mut().remove(&temp);
+    if result.is_err() || matches!(&result, Ok(None)) {
+        let new_keys: Vec<String> = env
+            .keys()
+            .filter(|key| !env_keys_before_write.contains(*key))
+            .cloned()
+            .collect();
+        for key in new_keys {
+            env.remove(&key);
+        }
+    }
+    result
 }
 
 /// `let a = arr` / `a = arr` where `arr` is an array name: alias the backing
