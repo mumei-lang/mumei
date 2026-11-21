@@ -6342,9 +6342,9 @@ lands in the group, while `call_targets` excludes synthetic ids so
 unchanged source reuses the summary. `d := s[0][0]` on `[][]chan`
 stays closed.
 
-### close on a bound chan element (mumei-agent #1020)
+### close on a bound chan element (mumei-agent #1023)
 
-[mumei-agent#1020](https://github.com/mumei-lang/mumei-agent/pull/1020)
+[mumei-agent#1023](https://github.com/mumei-lang/mumei-agent/pull/1023)
 admits `close(s[i])` on a bound chan-element container: a purely local
 group tracks no synchronization fact so the close is a no-op like
 `close(ch)`, while a group holding a param/external member records an
@@ -6380,6 +6380,19 @@ into `indirect_writes`, reads return `indirect_writes` plus the
 index's deps, and `select` alternatives resolve through the same
 operand paths. `[][]chan` nests, `[]chan chan`, `d := GS[i]`
 extraction and `map[string]chan` variable keys stay closed.
+
+### Append on a chan-element collection (mumei-agent #1024)
+
+[mumei-agent#1024](https://github.com/mumei-lang/mumei-agent/pull/1024)
+admits `append` on a bound chan-element collection —
+`s = append(s, c2)`, `b := append(s, c2)` and `var b = append(s,
+c2)`: the result may reuse the argument's backing so it keeps the
+group's tokens, and each appended `chan` argument joins the
+result's share group exactly like a `[]chan{c2}` literal seed —
+carrying the queue's token in the result's set alone is not
+enough, since a member only reads and writes through the group
+once its own token entry exists. `[]chan chan T` payloads stay
+closed.
 
 ## No-`.mm` front door and V1 order
 
