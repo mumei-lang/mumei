@@ -50,6 +50,11 @@ requires: match e {
 ensures: result == v;
 body: e.port;
 
+atom read_port_constrained_by_requires(e: Chan, v: i64) -> i64
+requires: e.tag == 0 && e.port == v;
+ensures: result == v;
+body: e.port;
+
 atom read_match_arm_port(e: Chan, v: i64) -> i64
 requires: match e {
     Chan::Tcp(port, _) => port == v,

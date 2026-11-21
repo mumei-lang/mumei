@@ -1997,6 +1997,113 @@ fn enum_payload_field_read<'a>(
         leaf_offset
     };
 
+    if solver_opt.is_none() {
+        let mut tag_conditions = Vec::with_capacity(enum_prefixes.len());
+        for (outer_root, consumed, outer_enum_name) in enum_prefixes
+            .iter()
+            .take(enum_prefixes.len().saturating_sub(1))
+        {
+            let outer_enum_def = datatype::declared_type_of_expr(vc, outer_root)
+                .map(|ty| vc.module_env.resolve_base_type(&ty))
+                .and_then(|ty| {
+                    vc.module_env
+                        .get_enum(&ty)
+                        .or_else(|| vc.module_env.get_enum(datatype::type_name_base(&ty)))
+                })
+                .or_else(|| vc.module_env.get_enum(outer_enum_name));
+            let Some(outer_enum_def) = outer_enum_def else {
+                return Ok(None);
+            };
+            if !datatype::is_finite_adt(outer_enum_def, vc.module_env)
+                || datatype::enum_datatype_sort(vc, outer_enum_def).is_none()
+            {
+                return Ok(None);
+            }
+            let Some(outer_payload_name) = field_path.get(*consumed) else {
+                return Ok(None);
+            };
+            let mut outer_owner = None;
+            for (variant_idx, variant) in outer_enum_def.variants.iter().enumerate() {
+                let Some(field_idx) = variant.fields.iter().position(|payload| {
+                    payload
+                        .split_once(':')
+                        .is_some_and(|(name, _)| name.trim() == outer_payload_name)
+                }) else {
+                    continue;
+                };
+                if outer_owner.is_some() {
+                    return Ok(None);
+                }
+                outer_owner = Some((variant_idx, field_idx));
+            }
+            let Some((outer_variant_idx, outer_field_idx)) = outer_owner else {
+                return Ok(None);
+            };
+            let Some(outer_field_type) = outer_enum_def.variants[outer_variant_idx]
+                .field_types
+                .get(outer_field_idx)
+                .map(|field| field.name.as_str())
+            else {
+                return Ok(None);
+            };
+            let Some((_, width)) = datatype::payload_leaf_range(
+                outer_enum_def,
+                vc.module_env,
+                outer_variant_idx,
+                outer_field_idx,
+            ) else {
+                return Ok(None);
+            };
+            let Some(leaves) = datatype::field_leaf_types(outer_field_type, vc.module_env) else {
+                return Ok(None);
+            };
+            if width == 0 || leaves.len() != width {
+                return Ok(None);
+            }
+            let outer_base = expr_to_z3(vc, outer_root, env, None)?;
+            let Some((_, is_variant, resolved_idx, resolved_enum)) =
+                datatype::variant_tester_condition(
+                    vc,
+                    &outer_base,
+                    &outer_enum_def.variants[outer_variant_idx].name,
+                )
+            else {
+                return Ok(None);
+            };
+            if resolved_idx != outer_variant_idx || resolved_enum.name != outer_enum_def.name {
+                return Ok(None);
+            }
+            tag_conditions.push(is_variant);
+        }
+        let base = expr_to_z3(vc, &root, env, None)?;
+        let Some((sort, is_variant, resolved_idx, resolved_enum)) =
+            datatype::variant_tester_condition(vc, &base, &enum_def.variants[variant_idx].name)
+        else {
+            return Ok(None);
+        };
+        if resolved_idx != variant_idx || resolved_enum.name != enum_def.name {
+            return Ok(None);
+        }
+        let Some(selector) = datatype::variant_selector_apply(
+            &sort,
+            variant_idx,
+            payload_offset + leaf_offset,
+            &base,
+        ) else {
+            return Ok(None);
+        };
+        tag_conditions.push(is_variant);
+        let gate = Bool::and(vc.ctx, &tag_conditions.iter().collect::<Vec<_>>());
+        let Some(fresh) =
+            super::z3_types::dynamic_fresh_const(vc.ctx, "__enum_payload_read", &selector)
+        else {
+            return Ok(None);
+        };
+        let Some(value) = super::z3_types::dynamic_ite(&gate, &selector, &fresh) else {
+            return Ok(None);
+        };
+        return Ok(Some(value));
+    }
     let Some(solver) = solver_opt else {
         return Ok(None);
     };

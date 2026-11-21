@@ -42,6 +42,16 @@ requires: match e {
 ensures: result == v;
 body: e.port;
 
+atom bad_requires_without_tag_does_not_narrow(e: Chan, v: i64) -> i64
+requires: e.port == v;
+ensures: result == v;
+body: e.port;
+
+atom bad_wrong_variant_requires_does_not_bind_payload(e: Chan, v: i64) -> i64
+requires: e.tag == 1 && e.port == v;
+ensures: result == v;
+body: e.port;
+
 atom bad_outer_wrong_variant_path(o: Outer, v: i64) -> i64
 requires: match o {
     Outer::Nil => true,

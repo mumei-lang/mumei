@@ -149,6 +149,8 @@ fn direct_enum_payload_read_negatives_keep_their_own_diagnostics() {
         "bad_sibling_read",
         "bad_unnarrowed_parameter",
         "bad_wrong_variant_path",
+        "bad_requires_without_tag_does_not_narrow",
+        "bad_wrong_variant_requires_does_not_bind_payload",
         "bad_outer_wrong_variant_path",
         "bad_unknown_field",
         "bad_positional_payload",

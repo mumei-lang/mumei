@@ -318,7 +318,11 @@ pub(crate) fn as_bv_i64<'a>(value: &Dynamic<'a>) -> Option<BV<'a>> {
 
 /// `ite(c, t, e)` over two `Dynamic`s of the same sort. Returns `None` when
 /// the sorts differ or are not a sort an `ite` can merge here.
-fn dynamic_ite<'a>(c: &Bool<'a>, t: &Dynamic<'a>, e: &Dynamic<'a>) -> Option<Dynamic<'a>> {
+pub(crate) fn dynamic_ite<'a>(
+    c: &Bool<'a>,
+    t: &Dynamic<'a>,
+    e: &Dynamic<'a>,
+) -> Option<Dynamic<'a>> {
     if t.get_sort() != e.get_sort() {
         return None;
     }
@@ -331,6 +335,34 @@ fn dynamic_ite<'a>(c: &Bool<'a>, t: &Dynamic<'a>, e: &Dynamic<'a>) -> Option<Dyn
         z3::SortKind::FloatingPoint => Some(c.ite(&t.as_float()?, &e.as_float()?).into()),
         z3::SortKind::Datatype => Some(c.ite(&t.as_datatype()?, &e.as_datatype()?).into()),
         z3::SortKind::Seq => Some(c.ite(&t.as_string()?, &e.as_string()?).into()),
+        _ => None,
+    }
+}
+
+pub(crate) fn dynamic_fresh_const<'a>(
+    ctx: &'a Context,
+    prefix: &str,
+    template: &Dynamic<'a>,
+) -> Option<Dynamic<'a>> {
+    let sort = template.get_sort();
+    match sort.kind() {
+        z3::SortKind::Bool => Some(z3::ast::Bool::fresh_const(ctx, prefix).into()),
+        z3::SortKind::Int => Some(z3::ast::Int::fresh_const(ctx, prefix).into()),
+        z3::SortKind::Real => Some(z3::ast::Real::fresh_const(ctx, prefix).into()),
+        z3::SortKind::BV => {
+            Some(z3::ast::BV::fresh_const(ctx, prefix, template.as_bv()?.get_size()).into())
+        }
+        z3::SortKind::FloatingPoint => Some(
+            z3::ast::Float::fresh_const(
+                ctx,
+                prefix,
+                sort.float_exponent_size()?,
+                sort.float_significand_size()?,
+            )
+            .into(),
+        ),
+        z3::SortKind::Datatype => Some(z3::ast::Datatype::fresh_const(ctx, prefix, &sort).into()),
+        z3::SortKind::Seq => Some(z3::ast::String::fresh_const(ctx, prefix).into()),
         _ => None,
     }
 }
