@@ -27,6 +27,12 @@ atom cc_result(x: i64) -> i64 requires: x >= 0 && x <= 100; ensures: true; body:
 atom main() -> i64 requires: true; ensures: true; body: { cc(1) };";
 const DIVISION: &str = "atom md(x: i64, y: i64) -> i64 requires: x >= 0 && x <= 1000 && y >= 1 && y <= 100; ensures: true; body: { x / y };\n\
 atom main() -> i64 requires: true; ensures: true; body: { md(6, 2) };";
+const VARIABLE_SHIFTS: &str =
+    "atom shl_v(x: i64, n: i64) -> i64 requires: n >= 0 && n <= 62 && x >= 0 && x <= 1000; ensures: true; body: { x << n };\n\
+atom shr_pos(x: i64, n: i64) -> i64 requires: x >= 0 && x <= 1000 && n >= 0 && n <= 63; ensures: true; body: { x >> n };\n\
+atom shr_signed(x: i64, n: i64) -> i64 requires: x >= -1000 && x <= 1000 && n >= 0 && n <= 63; ensures: true; body: { x >> n };\n\
+atom shl32_v(x: i32, n: i32) -> i32 requires: x >= 0 && x <= 1000 && n >= 0 && n <= 30; ensures: true; body: { x << n };\n\
+atom main() -> i64 requires: true; ensures: true; body: { 0 };";
 
 fn cli(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_mumei"))
@@ -652,6 +658,34 @@ fn recheck_machine_tv_checks_setcc_and_shift_probe() {
         descriptor["functions"]["half"],
         serde_json::json!({"outcome": "equivalent_within_profile"})
     );
+}
+
+#[test]
+fn recheck_machine_tv_checks_variable_count_shifts() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), VARIABLE_SHIFTS);
+    let shl_disassembly = object_function_disassembly(&bundle, "shl_v");
+    assert_eq!(
+        shl_disassembly
+            .iter()
+            .map(|instruction| instruction.split_whitespace().next().unwrap())
+            .collect::<Vec<_>>(),
+        ["movq", "movq", "shlq", "retq"]
+    );
+    assert!(shl_disassembly
+        .iter()
+        .any(|instruction| instruction.starts_with("shlq") && instruction.contains("%cl")));
+
+    let output = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    for name in ["shl_v", "shr_pos", "shr_signed", "shl32_v"] {
+        assert_eq!(
+            descriptor["functions"][name],
+            serde_json::json!({"outcome": "equivalent_within_profile"}),
+            "{name}"
+        );
+    }
 }
 
 #[test]

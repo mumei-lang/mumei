@@ -1804,14 +1804,18 @@ The supported byte-register views are `al`, `cl`, `dl`, `bl`, `spl`, `bpl`,
 unsupported. `movzbl`/`movzbq` and `movsbl`/`movsbq` zero- or sign-extend an
 8-bit register source.
 
-`shlq`/`shll`, `shrq`/`shrl`, and `sarq`/`sarl` accept an immediate count or
-the implicit count of one printed without a count operand. Counts are masked
-to six bits for 64-bit operations and five bits for 32-bit operations; a
-masked zero leaves the destination unchanged. 32-bit shift results
-zero-extend. For nonzero shifts, only `e`/`z` and `ne`/`nz` conditions are
-modeled from the result's zero flag; other condition codes after a shift are
-unsupported. A masked-zero shift leaves flags unknown, and `%cl`-count shifts
-are unsupported.
+`shlq`/`shll`, `shrq`/`shrl`, and `sarq`/`sarl` accept an immediate count, the
+implicit count of one printed without a count operand, or a `%cl` count. Counts
+are masked to six bits for 64-bit operations and five bits for 32-bit
+operations; a masked zero leaves the destination unchanged, and 32-bit shift
+results zero-extend. Source definedness requires `0 <= n < 64`, excluding
+negative and 64-or-larger counts. A masked-zero shift preserves the prior
+flags. For nonzero shifts, only `e`/`z` and `ne`/`nz` conditions are modeled
+from the result's zero flag; other condition codes after a shift are
+unsupported. With
+a symbolic `%cl` count, the bounded path context must prove whether the masked
+count is zero or nonzero to select those flag behaviors; otherwise flags
+become unknown and a later flag read is outside the profile.
 
 `cqto` sign-fills `%rax` into `%rdx`; `cltd` sign-fills `%eax` into `%edx`,
 with the usual zero-extension of the 32-bit destination. Register-source
