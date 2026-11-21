@@ -1760,16 +1760,19 @@ control-flow functions in the fixed machine-instruction profile with their
 `pure-i64` source-atom models. Direct calls are matched in order to the source
 `CallSite`s and compared as uninterpreted sites: their argument expressions
 must match the SysV integer argument registers, while each call result is the
-corresponding source call-result term. Call guards must be provably true on
-the checked input domain; otherwise the function is outside this profile.
+corresponding source call-result term. On each path, a machine call skips
+source sites whose guards are provably false on that path and matches the
+first site whose guard is provably true; an undecided guard is
+`conditional_call`.
 
 The assumed convention places integer arguments in `rdi`, `rsi`, `rdx`,
 `rcx`, `r8`, and `r9`, with the result in `rax`; it is declared and assumed,
 not verified. Caller-saved registers are fresh after calls and callee-saved
 registers are preserved by assumption. The register convention and
 callee-saved preservation are not ABI claims. Direct final `jmp` tail calls
-are treated as calls followed by returns. A function containing both a
-conditional branch and a call is outside the profile. A small abstract stack
+are treated as calls followed by returns. Functions containing both
+conditional branches and calls use the per-path guarded call matching
+described below. A small abstract stack
 handles register `pushq`/`popq` and immediate `%rsp` adjustments;
 `%rsp`-relative memory accesses are unsupported.
 `%spl` byte writes are modeled, but make the stack pointer untrackable, so a
