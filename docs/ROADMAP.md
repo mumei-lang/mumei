@@ -3176,8 +3176,12 @@ f64 call results remain supported. MXCSR RNE, masked exceptions, disabled
 FTZ/DAZ, and NaN payload bits remain unverified.
 The descriptor performs `machine_code_f64_scalar_function_tv` and lists
 `machine_code_tv_mxcsr_control_state` and `machine_code_tv_nan_payload_bits` as
-not performed. Composite f64 and `ucomisd` remain outside the profile; agent
-consumers must adopt these names.
+not performed. Composite f64 remains outside the profile. Register-only
+`ucomisd`/`comisd` model unordered/equal/less flags exactly
+(`ZF = unordered || fp.eq`, `CF = unordered || fp.lt`, `PF = unordered`;
+`OF/SF/AF = 0`); their branch, `setcc`, and `cmovcc` conditions are supported.
+Memory operands and parity conditions after integer flag producers remain
+outside the profile. Agent consumers must adopt these names.
 
 Sibling descriptors now name the exit-status observation only as
 `os_exit_status_observation` (formerly bare `os_exit_status` in

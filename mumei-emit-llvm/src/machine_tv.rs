@@ -451,6 +451,7 @@ fn model_has_f64_leaves(model: &PureI64Body<'_>) -> bool {
         .flatten()
         .any(|is_double| *is_double)
         || model_result_is_double(model)
+        || model.call_sites.iter().any(|site| site.result_is_double)
 }
 
 fn f64_values_match<'ctx>(context: &'ctx Context, left: &BV<'ctx>, right: &BV<'ctx>) -> Bool<'ctx> {
@@ -608,6 +609,10 @@ enum FlagState<'ctx> {
         left: BV<'ctx>,
         right: BV<'ctx>,
         width: u32,
+    },
+    FloatCompare {
+        left: BV<'ctx>,
+        right: BV<'ctx>,
     },
     Result {
         value: BV<'ctx>,
@@ -952,6 +957,10 @@ fn lift<'ctx>(
                 let width = instruction_width(&instruction.mnemonic)?;
                 state.flags =
                     compare_flags(&instruction.operands, &state.registers, context, width)?;
+            } else if matches!(instruction.mnemonic.as_str(), "ucomisd" | "comisd")
+                && model_has_f64_leaves(model)
+            {
+                state.flags = float_compare_flags(&instruction.operands, &state.xmm_registers)?;
             } else if matches!(instruction.mnemonic.as_str(), "testb" | "testl" | "testq") {
                 let width = instruction_width(&instruction.mnemonic)?;
                 state.flags = test_flags(&instruction.operands, &state.registers, context, width)?;
@@ -1272,6 +1281,10 @@ fn is_supported_condition(suffix: &str) -> bool {
             | "nc"
             | "s"
             | "ns"
+            | "p"
+            | "pe"
+            | "np"
+            | "po"
     )
 }
 
@@ -1283,9 +1296,43 @@ fn condition_for_flags<'ctx>(
     if !is_supported_condition(suffix) {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
+    let is_parity_condition = matches!(suffix, "p" | "pe" | "np" | "po");
+    if is_parity_condition && !matches!(flags, FlagState::FloatCompare { .. }) {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_flags"));
+    }
     let (zero, sign, signed_less, unsigned_less) = match flags {
         FlagState::Unknown => {
             return Err(FunctionOutcome::OutsideProfile("unsupported_flags"));
+        }
+        FlagState::FloatCompare { left, right } => {
+            let unordered = Bool::or(
+                context,
+                &[
+                    &mumei_core::semantic_contract::f64_is_nan(context, left),
+                    &mumei_core::semantic_contract::f64_is_nan(context, right),
+                ],
+            );
+            let equal = mumei_core::semantic_contract::f64_eq(context, left, right);
+            let less = mumei_core::semantic_contract::f64_lt(context, left, right);
+            let zero = Bool::or(context, &[&unordered, &equal]);
+            let carry = Bool::or(context, &[&unordered, &less]);
+            let not_zero = zero.not();
+            let not_carry = carry.not();
+            return Ok(match suffix {
+                "e" | "z" => zero,
+                "ne" | "nz" => not_zero.clone(),
+                "b" | "c" | "nae" => carry.clone(),
+                "ae" | "nb" | "nc" => not_carry.clone(),
+                "be" | "na" => Bool::or(context, &[&carry, &zero]),
+                "a" | "nbe" => Bool::and(context, &[&not_carry, &not_zero]),
+                "p" | "pe" => unordered,
+                "np" | "po" => unordered.not(),
+                "s" | "l" | "nge" => Bool::from_bool(context, false),
+                "ns" | "ge" | "nl" => Bool::from_bool(context, true),
+                "le" | "ng" => zero,
+                "g" | "nle" => not_zero,
+                _ => return Err(FunctionOutcome::OutsideProfile("unsupported_instruction")),
+            });
         }
         FlagState::Compare { left, right, width } => {
             let difference = left.bvsub(right);
@@ -1413,6 +1460,25 @@ fn compare_flags<'ctx>(
 ) -> Result<FlagState<'ctx>, FunctionOutcome> {
     let (left, right) = binary_operands(operands, registers, context, width)?;
     Ok(FlagState::Compare { left, right, width })
+}
+
+fn float_compare_flags<'ctx>(
+    operands: &str,
+    xmm_registers: &[BV<'ctx>],
+) -> Result<FlagState<'ctx>, FunctionOutcome> {
+    let operands = split_operands(operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let (Some(right_index), Some(left_index)) =
+        (parse_xmm_register(source), parse_xmm_register(destination))
+    else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    Ok(FlagState::FloatCompare {
+        left: xmm_registers[left_index].extract(63, 0),
+        right: xmm_registers[right_index].extract(63, 0),
+    })
 }
 
 fn test_flags<'ctx>(
@@ -3290,6 +3356,14 @@ entry:
         ];
         assert_eq!(
             check_function(&unsupported_compare, 0, &add, &BTreeMap::new(), &context,),
+            FunctionOutcome::Different
+        );
+        let memory_compare = [
+            0x66, 0x0f, 0x2e, 0x00, // ucomisd (%rax), %xmm0
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&memory_compare, 0, &add, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("unsupported_instruction")
         );
 
@@ -3398,6 +3472,194 @@ entry:
                 &context,
             ),
             FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn ucomisd_and_comisd_flags_match_ieee_conditions() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "atom eq_branch(x: f64, y: f64) -> i64 requires: true; ensures: true; body: { if x == y { 1 } else { 0 } };\n\
+            atom feq(x: f64, y: f64) -> bool requires: true; ensures: true; body: { x == y };\n\
+            atom feq_self(x: f64) -> bool requires: true; ensures: true; body: { x == x };\n\
+            atom identity(x: i64) -> i64 requires: true; ensures: true; body: { x };";
+        let branch_model = source_model_named_with_admission(
+            source,
+            "eq_branch",
+            &context,
+            RefinedAdmission::CompositeV19,
+        );
+        let branch_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @eq_branch(double %x, double %y) {
+entry:
+  %equal = fcmp oeq double %x, %y
+  br i1 %equal, label %yes, label %no
+yes:
+  ret i64 1
+no:
+  ret i64 0
+}
+"#;
+        let (address, compiled_bytes, call_targets) =
+            compiled_function_with_targets(branch_ir, "eq_branch");
+        let instructions = disassemble(&compiled_bytes, address).unwrap();
+        let mnemonics = instructions
+            .iter()
+            .map(|instruction| instruction.mnemonic.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            mnemonics.contains(&"ucomisd") || mnemonics.contains(&"comisd"),
+            "{mnemonics:?}"
+        );
+        let has_branch_flags = (mnemonics.contains(&"jp") || mnemonics.contains(&"jpe"))
+            && (mnemonics.contains(&"jne")
+                || mnemonics.contains(&"je")
+                || mnemonics.contains(&"jz")
+                || mnemonics.contains(&"jnz"));
+        let has_set_flags = (mnemonics.contains(&"setnp") || mnemonics.contains(&"setpo"))
+            && mnemonics.contains(&"sete")
+            && (mnemonics.contains(&"andl") || mnemonics.contains(&"andq"));
+        assert!(has_branch_flags || has_set_flags, "{mnemonics:?}");
+        assert_eq!(
+            check_function(
+                &compiled_bytes,
+                address,
+                &branch_model,
+                &call_targets,
+                &context,
+            ),
+            FunctionOutcome::Equivalent,
+            "{mnemonics:?}"
+        );
+
+        let branch_bytes = [
+            0x66, 0x0f, 0x2e, 0xc1, // ucomisd %xmm1, %xmm0
+            0x7a, 0x08, // jp to false
+            0x75, 0x06, // jne to false
+            0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0xc3, // retq
+            0x31, 0xc0, // false: xorl %eax, %eax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&branch_bytes, 0, &branch_model, &BTreeMap::new(), &context,),
+            FunctionOutcome::Equivalent
+        );
+        let comisd_bytes = [
+            0x66, 0x0f, 0x2f, 0xc1, // comisd %xmm1, %xmm0
+            0x7a, 0x08, // jp to false
+            0x75, 0x06, // jne to false
+            0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0xc3, // retq
+            0x31, 0xc0, // false: xorl %eax, %eax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&comisd_bytes, 0, &branch_model, &BTreeMap::new(), &context,),
+            FunctionOutcome::Equivalent
+        );
+        let mut inverted_jp = branch_bytes;
+        inverted_jp[4] = 0x7b; // jnp
+        assert_eq!(
+            check_function(&inverted_jp, 0, &branch_model, &BTreeMap::new(), &context,),
+            FunctionOutcome::Different
+        );
+
+        let equality_model = source_model_named_with_admission(
+            source,
+            "feq",
+            &context,
+            RefinedAdmission::CompositeV19,
+        );
+        let set_equal_bytes = [
+            0x66, 0x0f, 0x2e, 0xc1, // ucomisd %xmm1, %xmm0
+            0x0f, 0x94, 0xc0, // sete %al
+            0x0f, 0x9b, 0xc2, // setnp %dl
+            0x0f, 0xb6, 0xc0, // movzbl %al, %eax
+            0x0f, 0xb6, 0xd2, // movzbl %dl, %edx
+            0x21, 0xd0, // andl %edx, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(
+                &set_equal_bytes,
+                0,
+                &equality_model,
+                &BTreeMap::new(),
+                &context,
+            ),
+            FunctionOutcome::Equivalent
+        );
+        let mut inverted_setnp = set_equal_bytes;
+        inverted_setnp[8] = 0x9a; // setp
+        assert_eq!(
+            check_function(
+                &inverted_setnp,
+                0,
+                &equality_model,
+                &BTreeMap::new(),
+                &context,
+            ),
+            FunctionOutcome::Different
+        );
+        let seta_bytes = [
+            0x66, 0x0f, 0x2e, 0xc1, // ucomisd %xmm1, %xmm0
+            0x0f, 0x97, 0xc0, // seta %al
+            0x0f, 0xb6, 0xc0, // movzbl %al, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&seta_bytes, 0, &equality_model, &BTreeMap::new(), &context,),
+            FunctionOutcome::Different
+        );
+
+        let self_equality_model = source_model_named_with_admission(
+            source,
+            "feq_self",
+            &context,
+            RefinedAdmission::CompositeV19,
+        );
+        let cmovp_bytes = [
+            0x66, 0x0f, 0x2e, 0xc0, // ucomisd %xmm0, %xmm0
+            0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0xb9, 0x00, 0x00, 0x00, 0x00, // movl $0, %ecx
+            0x48, 0x0f, 0x4a, 0xc1, // cmovpq %rcx, %rax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(
+                &cmovp_bytes,
+                0,
+                &self_equality_model,
+                &BTreeMap::new(),
+                &context,
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let identity_model = source_model_named_with_admission(
+            source,
+            "identity",
+            &context,
+            RefinedAdmission::CompositeV19,
+        );
+        let integer_compare_parity = [
+            0x48, 0x39, 0xf7, // cmpq %rsi, %rdi
+            0x0f, 0x9a, 0xc0, // setp %al
+            0x0f, 0xb6, 0xc0, // movzbl %al, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(
+                &integer_compare_parity,
+                0,
+                &identity_model,
+                &BTreeMap::new(),
+                &context,
+            ),
+            FunctionOutcome::OutsideProfile("unsupported_flags")
         );
     }
 
