@@ -339,6 +339,10 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
         "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax"
     );
     assert_eq!(
+        descriptor["input_domain"],
+        "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires"
+    );
+    assert_eq!(
         descriptor["functions"],
         serde_json::json!({
             "__mumei_user_main": {"outcome": "equivalent_within_profile"},

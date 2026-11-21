@@ -53,6 +53,8 @@ const MACHINE_CODE_TV_SCOPE: &str =
     "artifact_reproduction_object_link_correspondence_and_leaf_function_machine_code_tv_only/no_abi_or_runtime_semantics";
 const MACHINE_CODE_REGISTER_CONVENTION: &str =
     "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax";
+const MACHINE_CODE_TV_INPUT_DOMAIN: &str =
+    "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires";
 const EXIT_STATUS_RECHECK_SCOPE: &str =
     "artifact_reproduction_and_os_exit_status_observation_only/no_runtime_abi_or_semantic_proof";
 const STDOUT_RECHECK_SCOPE: &str =
@@ -3174,7 +3176,9 @@ fn write_machine_tv(
     let mut equivalent_count = 0usize;
     for function_name in &object_surface.defined {
         let outcome = if let Some(model) = source_models.get(function_name) {
-            if !model.call_sites.is_empty() {
+            if !machine_tv::supports_signature(model) {
+                FunctionOutcome::OutsideProfile("unsupported_signature")
+            } else if !model.call_sites.is_empty() {
                 FunctionOutcome::OutsideProfile("calls")
             } else if model.inputs.len() > 6 {
                 FunctionOutcome::OutsideProfile("argument_count")
@@ -3236,6 +3240,7 @@ fn write_machine_tv(
             "scope": MACHINE_CODE_TV_SCOPE,
             "build_id": expected_build_id,
             "register_convention_assumed": MACHINE_CODE_REGISTER_CONVENTION,
+            "input_domain": MACHINE_CODE_TV_INPUT_DOMAIN,
             "functions": functions,
             "checks_performed": checks_performed,
             "checks_not_performed": checks_not_performed,

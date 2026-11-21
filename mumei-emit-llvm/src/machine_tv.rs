@@ -113,6 +113,9 @@ pub fn check_function<'ctx>(
     model: &PureI64Body<'ctx>,
     context: &'ctx Context,
 ) -> FunctionOutcome {
+    if !supports_signature(model) {
+        return FunctionOutcome::OutsideProfile("unsupported_signature");
+    }
     if !model.call_sites.is_empty() {
         return FunctionOutcome::OutsideProfile("calls");
     }
@@ -134,12 +137,28 @@ pub fn check_function<'ctx>(
     for (input, register) in model.inputs.iter().zip(&lifted.arguments) {
         solver.assert(&input._eq(register));
     }
+    for assumption in model.param_domain.iter().chain(&model.definedness) {
+        solver.assert(assumption);
+    }
     solver.assert(&model.value._eq(&lifted.return_value).not());
     match solver.check() {
         SatResult::Unsat => FunctionOutcome::Equivalent,
         SatResult::Sat => FunctionOutcome::Different,
         SatResult::Unknown => FunctionOutcome::Unknown,
     }
+}
+
+pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
+    !model.composite_signature
+        && model.result_shape.is_none()
+        && !model
+            .param_leaf_doubles
+            .iter()
+            .flatten()
+            .any(|is_double| *is_double)
+        && !model.result_leaf_doubles.iter().any(|is_double| *is_double)
+        && model.loop_bound_exits.is_none()
+        && !model.bounded_memory
 }
 
 const ARGUMENT_REGISTERS: [usize; 6] = [7, 6, 2, 1, 8, 9];
@@ -527,11 +546,7 @@ mod tests {
     }
 
     fn compiled_helper() -> (u64, Vec<u8>) {
-        let directory = tempfile::tempdir().unwrap();
-        let ir_path = directory.path().join("helper.ll");
-        let object_path = directory.path().join("helper.o");
-        fs::write(
-            &ir_path,
+        compiled_function(
             r#"target triple = "x86_64-unknown-linux-gnu"
 define i64 @helper(i64 %x) {
 entry:
@@ -540,7 +555,13 @@ entry:
 }
 "#,
         )
-        .unwrap();
+    }
+
+    fn compiled_function(ir: &str) -> (u64, Vec<u8>) {
+        let directory = tempfile::tempdir().unwrap();
+        let ir_path = directory.path().join("helper.ll");
+        let object_path = directory.path().join("helper.o");
+        fs::write(&ir_path, ir).unwrap();
         crate::codegen::compile_llvm_ir_to_object_recorded(&ir_path, &object_path).unwrap();
         let bytes = fs::read(object_path).unwrap();
         let file = object::File::parse(bytes.as_slice()).unwrap();
@@ -588,6 +609,56 @@ entry:
         assert_eq!(
             check_function(&bytes, address, &model, &context),
             FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn bool_identity_uses_its_signature_bounded_input_domain() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom helper(b: bool) -> bool requires: true; ensures: true; body: { b };",
+            &context,
+        );
+        assert_eq!(model.param_domain.len(), 1);
+        let (address, bytes) = compiled_function(
+            r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @helper(i64 %b) {
+entry:
+  ret i64 %b
+}
+"#,
+        );
+        assert_eq!(
+            check_function(&bytes, address, &model, &context),
+            FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn loop_signature_is_outside_profile() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom helper(x: i64) -> i64 requires: true; ensures: true; body: { let n = x; while n > 0 invariant: n >= 0 decreases: n { n = n - 1 }; n };",
+            &context,
+        );
+        assert!(model.loop_bound_exits.is_some());
+        let (address, bytes) = compiled_function(
+            r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @helper(i64 %x) {
+entry:
+  ret i64 %x
+}
+"#,
+        );
+        assert_eq!(
+            check_function(&bytes, address, &model, &context),
+            FunctionOutcome::OutsideProfile("unsupported_signature")
         );
     }
 
