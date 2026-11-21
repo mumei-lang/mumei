@@ -57,6 +57,10 @@ const MACHINE_CODE_REGISTER_CONVENTION: &str =
     "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax";
 const MACHINE_CODE_F64_REGISTER_CONVENTION: &str =
     "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_result_rax_or_xmm0";
+const MACHINE_CODE_REGISTER_CONVENTION_WITH_WIDE_SCALARS: &str =
+    "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_128_bit_scalars_in_consecutive_gpr_pairs_low_first_result_rax_rdx";
+const MACHINE_CODE_F64_REGISTER_CONVENTION_WITH_WIDE_SCALARS: &str =
+    "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_result_rax_or_xmm0_128_bit_scalars_in_consecutive_gpr_pairs_low_first_result_rax_rdx";
 const MACHINE_CODE_REGISTER_CONVENTION_WITH_INTEGER_AGGREGATES: &str =
     "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax_two_eightbyte_integer_aggregates_in_consecutive_gprs_result_rax_rdx";
 const MACHINE_CODE_F64_REGISTER_CONVENTION_WITH_INTEGER_AGGREGATES: &str =
@@ -80,14 +84,38 @@ const STDERR_RECHECK_SCOPE: &str =
 const RUNTIME_OBSERVATION_RECHECK_SCOPE: &str =
     "artifact_reproduction_and_runtime_observation_semantics_on_one_invocation_only/no_runtime_abi_or_semantic_proof";
 
+#[cfg(test)]
 fn machine_tv_register_convention_assumed(
     equivalent_f64_leaf_count: usize,
     equivalent_composite_aggregate_count: usize,
     equivalent_f64_composite_aggregate_count: usize,
     equivalent_wide_composite_aggregate_count: usize,
 ) -> &'static str {
+    machine_tv_register_convention_assumed_with_wide_scalars(
+        equivalent_f64_leaf_count,
+        equivalent_composite_aggregate_count,
+        equivalent_f64_composite_aggregate_count,
+        equivalent_wide_composite_aggregate_count,
+        0,
+    )
+}
+
+fn machine_tv_register_convention_assumed_with_wide_scalars(
+    equivalent_f64_leaf_count: usize,
+    equivalent_composite_aggregate_count: usize,
+    equivalent_f64_composite_aggregate_count: usize,
+    equivalent_wide_composite_aggregate_count: usize,
+    equivalent_wide_scalar_count: usize,
+) -> &'static str {
     let has_f64_leaves =
         equivalent_f64_leaf_count > 0 || equivalent_f64_composite_aggregate_count > 0;
+    if equivalent_wide_scalar_count > 0 {
+        return if has_f64_leaves {
+            MACHINE_CODE_F64_REGISTER_CONVENTION_WITH_WIDE_SCALARS
+        } else {
+            MACHINE_CODE_REGISTER_CONVENTION_WITH_WIDE_SCALARS
+        };
+    }
     if equivalent_wide_composite_aggregate_count > 0 {
         return if has_f64_leaves {
             MACHINE_CODE_F64_REGISTER_CONVENTION_WITH_LLVM_AGGREGATES
@@ -153,6 +181,26 @@ fn machine_tv_model_uses_wide_composite_aggregate(
                 call_site.result_shape,
                 semantic_contract::CallValueShape::Struct { leaf_count, .. }
                     if leaf_count > 2
+            )
+        })
+}
+
+fn machine_tv_model_uses_wide_scalar(model: &semantic_contract::PureI64Body<'_>) -> bool {
+    model
+        .param_shapes
+        .iter()
+        .zip(&model.param_leaf_doubles)
+        .any(|(shape, leaves)| shape.is_none() && leaves.len() == 2)
+        || (model.result_shape.is_none() && model.value.get_size() == 128)
+        || model.call_sites.iter().any(|call_site| {
+            call_site.argument_shapes.iter().any(|shape| {
+                matches!(
+                    shape,
+                    semantic_contract::CallValueShape::Scalar { leaf_count: 2 }
+                )
+            }) || matches!(
+                call_site.result_shape,
+                semantic_contract::CallValueShape::Scalar { leaf_count: 2 }
             )
         })
 }
@@ -3579,6 +3627,7 @@ struct MachineTvCounts {
     equivalent_composite_aggregate_count: usize,
     equivalent_f64_composite_aggregate_count: usize,
     equivalent_wide_composite_aggregate_count: usize,
+    equivalent_wide_scalar_count: usize,
     object_function_count: usize,
 }
 
@@ -3695,6 +3744,7 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
     let mut equivalent_composite_aggregate_count = 0usize;
     let mut equivalent_f64_composite_aggregate_count = 0usize;
     let mut equivalent_wide_composite_aggregate_count = 0usize;
+    let mut equivalent_wide_scalar_count = 0usize;
     let mut has_cyclic_or_loop_bound_outcome = false;
     for function_name in &data.object_surface.defined {
         let is_entry_wrapper = function_name == "main";
@@ -3728,6 +3778,9 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
         let has_wide_composite_aggregate = source_models
             .get(function_name)
             .is_some_and(machine_tv_model_uses_wide_composite_aggregate);
+        let has_wide_scalar = source_models
+            .get(function_name)
+            .is_some_and(machine_tv_model_uses_wide_scalar);
         let has_source_loop = source_models
             .get(function_name)
             .is_some_and(|model| model.loop_bound_exits.is_some());
@@ -3836,6 +3889,9 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
                     if has_wide_composite_aggregate {
                         equivalent_wide_composite_aggregate_count += 1;
                     }
+                    if has_wide_scalar {
+                        equivalent_wide_scalar_count += 1;
+                    }
                     if has_source_loop {
                         equivalent_source_loop_count += 1;
                     }
@@ -3901,6 +3957,7 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
         equivalent_composite_aggregate_count,
         equivalent_f64_composite_aggregate_count,
         equivalent_wide_composite_aggregate_count,
+        equivalent_wide_scalar_count,
         object_function_count: data.object_surface.defined.len(),
     };
     let mut coverage = machine_tv_coverage_checks(
@@ -4019,11 +4076,12 @@ fn write_machine_tv(
             "schema_version": "mumei.machine-code-tv/v1",
             "scope": evaluation.scope,
             "build_id": expected_build_id,
-            "register_convention_assumed": machine_tv_register_convention_assumed(
+            "register_convention_assumed": machine_tv_register_convention_assumed_with_wide_scalars(
                 evaluation.counts.equivalent_f64_leaf_count,
                 evaluation.counts.equivalent_composite_aggregate_count,
                 evaluation.counts.equivalent_f64_composite_aggregate_count,
                 evaluation.counts.equivalent_wide_composite_aggregate_count,
+                evaluation.counts.equivalent_wide_scalar_count,
             ),
             "input_domain": evaluation.input_domain,
             "functions": evaluation.functions,
@@ -4177,11 +4235,12 @@ fn write_object_machine_tv_acceptance(
             "build_id": expected_build_id,
             "llvm_sha256": format!("{:x}", Sha256::digest(&data.llvm_bytes)),
             "object_sha256": format!("{:x}", Sha256::digest(&data.object_bytes)),
-            "register_convention_assumed": machine_tv_register_convention_assumed(
+            "register_convention_assumed": machine_tv_register_convention_assumed_with_wide_scalars(
                 evaluation.counts.equivalent_f64_leaf_count,
                 evaluation.counts.equivalent_composite_aggregate_count,
                 evaluation.counts.equivalent_f64_composite_aggregate_count,
                 evaluation.counts.equivalent_wide_composite_aggregate_count,
+                evaluation.counts.equivalent_wide_scalar_count,
             ),
             "input_domain": &evaluation.input_domain,
             "functions": &evaluation.functions,
@@ -4852,6 +4911,14 @@ mod tests {
         assert_eq!(
             machine_tv_register_convention_assumed(0, 0, 0, 0),
             "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax"
+        );
+        assert_eq!(
+            machine_tv_register_convention_assumed_with_wide_scalars(0, 0, 0, 0, 1),
+            MACHINE_CODE_REGISTER_CONVENTION_WITH_WIDE_SCALARS
+        );
+        assert_eq!(
+            machine_tv_register_convention_assumed_with_wide_scalars(1, 0, 0, 0, 1),
+            MACHINE_CODE_F64_REGISTER_CONVENTION_WITH_WIDE_SCALARS
         );
         assert_eq!(
             machine_tv_register_convention_assumed(0, 1, 0, 0),

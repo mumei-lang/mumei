@@ -3167,8 +3167,13 @@ matches LLVM's exact module label and retains the loop-bound suffix. U64 leaves
 use full-width 64-bit bitvectors without an extra signature-domain constraint;
 unsigned comparisons, `udiv`/`urem`, and `lshr` retain their source semantics.
 Unsupported memory, enums and composite operations beyond plain struct values,
-`i128`/`u128` leaves, and non-scalar f64 features remain outside the machine-TV
-profile.
+wide struct leaves, and non-scalar f64 features remain outside the machine-TV
+profile. Scalar `i128`/`u128` values use consecutive low/high GPR pairs and
+`rax`/`rdx` results for the bounded add/subtract/negate, comparison,
+pass-through and direct-call subset. Wide multiplication remains
+fail-closed as `unsupported_instruction` because the bounded solver returned
+`Unknown` for LLVM's limb-product sequence; external division libcalls also
+remain fail-closed.
 Agent consumers must adopt both check names and the function field.
 
 The C10 Option B machine-TV profile proves register-only scalar f64
@@ -3214,7 +3219,7 @@ C-ABI aggregate classification; SysV memory-class passing is not validated.
 F64 struct-call arguments use NaN-aware Query A matching plus a per-path
 exact-bit Query B obligation, whose failure is `call_arguments`, never
 `different`. F64 tail calls, enum signatures/call sites, structs with five
-or more leaves, i128/u128 leaves, post-writes, and bounded memory remain
+or more leaves, i128/u128 struct leaves, post-writes, and bounded memory remain
 fail-closed. Equivalent functions using struct signatures or direct calls
 perform `machine_code_composite_register_aggregate_tv`. Aggregates wider
 than two leaves use
