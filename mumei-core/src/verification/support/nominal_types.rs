@@ -408,12 +408,40 @@ impl<'a> NominalChecker<'a> {
             Expr::FieldAccess(base, _) => self.expr(base, span),
             Expr::Match { target, arms } => {
                 self.expr(target, span)?;
+                let mut first: Option<String> = None;
                 for arm in arms {
-                    if let Some(guard) = &arm.guard {
-                        self.expr(guard, span)?;
+                    let ty = self.scoped(|checker| {
+                        let mut bound = std::collections::HashSet::new();
+                        crate::hir::collect_pattern_bindings(
+                            &arm.pattern.clone().into(),
+                            &mut bound,
+                        );
+                        for name in bound {
+                            checker.types.insert(name, None);
+                        }
+                        if let Some(guard) = &arm.guard {
+                            checker.expr(guard, span)?;
+                        }
+                        checker.stmt_result_type(&arm.body)
+                    })?;
+                    let Some(ty) = ty else {
+                        continue;
+                    };
+                    match &first {
+                        Some(existing) if *existing != ty => {
+                            return Err(self.mismatch(
+                                format!(
+                                    "match branches yield struct '{}' and struct '{}'",
+                                    existing, ty
+                                ),
+                                span,
+                            ));
+                        }
+                        Some(_) => {}
+                        None => first = Some(ty),
                     }
                 }
-                self.branches_agree("match", arms.iter().map(|arm| arm.body.as_ref()), span)
+                Ok(())
             }
             Expr::Async { body } | Expr::Lambda { body, .. } => self.scoped(|c| c.stmt(body)),
             Expr::Await { expr } => self.expr(expr, span),
