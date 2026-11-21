@@ -8,8 +8,10 @@
 //! adapter execution, claim-truth check, resource enforcement, or grade
 //! promotion.
 
-use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
-use serde_json::Number;
+use crate::strict_json::{
+    self, boolean_field, field, is_integer, nullable_string_field, object, require_keys,
+    string_field, unsigned_field, Error as StrictJsonError, JsonValue,
+};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -88,111 +90,6 @@ pub struct Schedule {
     pub attempt_count: usize,
 }
 
-#[derive(Debug)]
-enum JsonValue {
-    Null,
-    Bool(bool),
-    Number(Number),
-    String(String),
-    Array(Vec<JsonValue>),
-    Object(BTreeMap<String, JsonValue>),
-}
-
-impl<'de> Deserialize<'de> for JsonValue {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_any(JsonValueVisitor)
-    }
-}
-
-struct JsonValueVisitor;
-
-impl<'de> Visitor<'de> for JsonValueVisitor {
-    type Value = JsonValue;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a JSON value")
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(JsonValue::Null)
-    }
-
-    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(JsonValue::Bool(value))
-    }
-
-    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(JsonValue::Number(Number::from(value)))
-    }
-
-    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(JsonValue::Number(Number::from(value)))
-    }
-
-    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Number::from_f64(value)
-            .map(JsonValue::Number)
-            .ok_or_else(|| E::custom("invalid JSON number"))
-    }
-
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(JsonValue::String(value.to_owned()))
-    }
-
-    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(JsonValue::String(value))
-    }
-
-    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let mut values = Vec::new();
-        while let Some(value) = sequence.next_element()? {
-            values.push(value);
-        }
-        Ok(JsonValue::Array(values))
-    }
-
-    fn visit_map<A>(self, mut mapping: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut values = BTreeMap::new();
-        while let Some(key) = mapping.next_key::<String>()? {
-            if values.contains_key(&key) {
-                return Err(de::Error::custom("duplicate JSON object key"));
-            }
-            values.insert(key, mapping.next_value()?);
-        }
-        Ok(JsonValue::Object(values))
-    }
-}
-
 pub fn decode(bytes: &[u8]) -> Result<Schedule, RepresentationError> {
     if bytes.len() > MAX_INPUT_BYTES {
         return Err(RepresentationError::InputTooLarge);
@@ -206,8 +103,8 @@ pub fn decode(bytes: &[u8]) -> Result<Schedule, RepresentationError> {
         return Err(RepresentationError::InvalidShape);
     }
 
-    let value: JsonValue =
-        serde_json::from_slice(bytes).map_err(|_| RepresentationError::InvalidShape)?;
+    let value = strict_json::parse(bytes)?;
+    strict_json::reject_unrepresentable_integers(&value)?;
     let root = object(&value)?;
     require_keys(root, TOP_LEVEL_KEYS)?;
 
@@ -386,82 +283,18 @@ fn validate_evidence_acceptance(
     Ok(true)
 }
 
-fn object(value: &JsonValue) -> Result<&BTreeMap<String, JsonValue>, RepresentationError> {
-    match value {
-        JsonValue::Object(object) => Ok(object),
-        _ => Err(RepresentationError::InvalidShape),
-    }
-}
-
-fn require_keys(
-    object: &BTreeMap<String, JsonValue>,
-    expected: &[&str],
-) -> Result<(), RepresentationError> {
-    if object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key)) {
-        Ok(())
-    } else {
-        Err(RepresentationError::InvalidShape)
-    }
-}
-
-fn field<'a>(
-    object: &'a BTreeMap<String, JsonValue>,
-    key: &str,
-) -> Result<&'a JsonValue, RepresentationError> {
-    object.get(key).ok_or(RepresentationError::InvalidShape)
-}
-
-fn string_field<'a>(
-    object: &'a BTreeMap<String, JsonValue>,
-    key: &str,
-) -> Result<&'a str, RepresentationError> {
-    match field(object, key)? {
-        JsonValue::String(value) => Ok(value),
-        _ => Err(RepresentationError::InvalidValue),
-    }
-}
-
-fn nullable_string_field<'a>(
-    object: &'a BTreeMap<String, JsonValue>,
-    key: &str,
-) -> Result<Option<&'a str>, RepresentationError> {
-    match field(object, key)? {
-        JsonValue::Null => Ok(None),
-        JsonValue::String(value) => Ok(Some(value)),
-        _ => Err(RepresentationError::InvalidValue),
-    }
-}
-
-fn unsigned_field(
-    object: &BTreeMap<String, JsonValue>,
-    key: &str,
-) -> Result<u64, RepresentationError> {
-    match field(object, key)? {
-        JsonValue::Number(number) => number.as_u64().ok_or(RepresentationError::InvalidValue),
-        _ => Err(RepresentationError::InvalidValue),
-    }
-}
-
-fn boolean_field(
-    object: &BTreeMap<String, JsonValue>,
-    key: &str,
-) -> Result<bool, RepresentationError> {
-    match field(object, key)? {
-        JsonValue::Bool(value) => Ok(*value),
-        _ => Err(RepresentationError::InvalidValue),
-    }
-}
-
-fn is_integer(value: &JsonValue) -> bool {
-    match value {
-        JsonValue::Number(number) => number.as_i64().is_some() || number.as_u64().is_some(),
-        _ => false,
-    }
-}
-
 fn valid_label(label: &str) -> bool {
     let length = label.chars().count();
     (1..=128).contains(&length) && !label.trim().is_empty() && label.trim() == label
+}
+
+impl From<StrictJsonError> for RepresentationError {
+    fn from(error: StrictJsonError) -> Self {
+        match error {
+            StrictJsonError::InvalidShape => Self::InvalidShape,
+            StrictJsonError::InvalidValue => Self::InvalidValue,
+        }
+    }
 }
 
 fn valid_fingerprint(fingerprint: &str) -> bool {
