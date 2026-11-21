@@ -25,6 +25,8 @@ atom cc(x: i64) -> i64 requires: x >= 0 && x <= 100; ensures: true; body: { if x
 atom cc_both(x: i64) -> i64 requires: x >= 0 && x <= 100; ensures: result >= 1; body: { if x > 5 { helper(x) } else { helper(5) } };\n\
 atom cc_result(x: i64) -> i64 requires: x >= 0 && x <= 100; ensures: true; body: { if helper(x) > 5 { 10 } else { 0 } };\n\
 atom main() -> i64 requires: true; ensures: true; body: { cc(1) };";
+const DIVISION: &str = "atom md(x: i64, y: i64) -> i64 requires: x >= 0 && x <= 1000 && y >= 1 && y <= 100; ensures: true; body: { x / y };\n\
+atom main() -> i64 requires: true; ensures: true; body: { md(6, 2) };";
 
 fn cli(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_mumei"))
@@ -517,6 +519,35 @@ fn recheck_machine_tv_checks_forward_and_acyclic_branches() {
     assert!(not_performed
         .iter()
         .any(|check| check == "machine_code_leaf_function_tv"));
+}
+
+#[test]
+fn recheck_machine_tv_checks_integer_division() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), DIVISION);
+    let disassembly = object_function_disassembly(&bundle, "md");
+    assert_eq!(
+        disassembly
+            .iter()
+            .map(|instruction| instruction.split_whitespace().next().unwrap())
+            .collect::<Vec<_>>(),
+        ["movq", "movq", "orq", "shrq", "je", "cqto", "idivq", "retq", "xorl", "divl", "retq",]
+    );
+    let output = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        descriptor["functions"]["md"]["outcome"],
+        "equivalent_within_profile"
+    );
+    assert_eq!(
+        descriptor["functions"]["__mumei_user_main"]["outcome"],
+        "equivalent_within_profile"
+    );
+    assert_eq!(
+        descriptor["functions"]["main"]["reason"],
+        "not_a_source_atom"
+    );
 }
 
 #[test]
