@@ -6572,7 +6572,37 @@ externality and origin facts. `Q` may be a local queue, a queue made
 caller-visible by an external member or #1040 promotion, a `chan chan T`
 parameter, or a multi-result binding whose temporary-receive form is already
 admitted. Direct call-result queue operands and aliases of a chan-chan
-parameter remain closed.
+parameter were admitted by #1047 below.
+
+### External chan-chan queue sources (mumei-agent #1047)
+
+[mumei-agent#1047](https://github.com/mumei-lang/mumei-agent/pull/1047)
+admits external scalar-element `chan chan T` queue sources with the same
+precision as the direct/temporary forms. Aliases (`q := E`, `var q = E`,
+`q = E`) of a chan-chan parameter, package/imported queue variable,
+external call result or another external alias carry selector dependencies
+and parameter origins; strong reassignments replace them and conditional
+branches union them. Reseating a local queue onto such a source
+(`cc = p`, `cc = G()`) conservatively promotes its whole previous share
+group. A direct local/imported call result may be used directly as a queue
+operand (`<-(<-G())`, `(<-G()) <- x`, `G() <- c`, `close`/`len`/`cap`,
+`range`, select cases, `d := <-G()`), equivalent to `cc := G()`; a channel
+received from an external queue and sent into a local queue
+(`dst <- <-G()`) joins the destination group.
+
+### Local chan-chan queues escaping to the caller (mumei-agent #1049)
+
+[mumei-agent#1049](https://github.com/mumei-lang/mumei-agent/pull/1049)
+admits returning a local scalar-element queue through a matching
+`chan chan T` result (aliases, multi-result, named results with bare
+`return`, conditional returns): the result dependencies include the
+readable contents of its share group, and the group becomes external at the
+return point. Storing a local queue in a package or imported `chan chan T`
+variable promotes its group and broadcasts its dependencies to later
+external reads, including channels that join the group after the store.
+Stores into struct fields, slices, maps or composite literals, closure
+capture, address-taking, `[]chan chan T`, deeper nesting and non-scalar
+inner elements remain closed.
 
 ## No-`.mm` front door and V1 order
 
