@@ -66,7 +66,10 @@ use std::path::Path;
 /// Version 23 registers nested struct projections under fresh loop-havoced
 /// handles, allowing invariant-backed nested aliases to use post-loop fields,
 /// so cached verdicts must be re-derived.
-pub const VERIFIER_POLICY_VERSION: u32 = 23;
+/// Version 24 keeps array types out of canonical struct binding detection,
+/// preventing array element fields from becoming struct projection slots, so
+/// cached verdicts must be re-derived.
+pub const VERIFIER_POLICY_VERSION: u32 = 25;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -2474,7 +2477,7 @@ body: { p.a };\n";
         let baseline = proof_hash_for(source, "g");
         assert_eq!(
             baseline,
-            "78c6e257fed1f1dd0eafe9ce4c8371c5303e97e79f1a8ebfbbf2d808db6a6dcb"
+            "cc6bec79a7e2f3ac697f6e489a698a0447869c92060b36b4aa69dd9663ee6571"
         );
         let changed = proof_hash_for(
             &source.replace(
@@ -2487,7 +2490,7 @@ body: { p.a };\n";
     }
 
     #[test]
-    fn effect_free_proof_hash_matches_policy_version_23() {
+    fn effect_free_proof_hash_matches_policy_version_25() {
         let hash = proof_hash_for(
             "atom main(x: i64) -> i64\n\
              requires: true;\n\
@@ -2498,7 +2501,7 @@ body: { p.a };\n";
 
         assert_eq!(
             hash,
-            "ec0a99080651b9cf8c45a6651e2648691222d2ebc9ff66c029ea1dfc37aa4214"
+            "a3be5b64bb7e53845d31e52c98fbbfaf5582717ce7e1145d663ecc7f6d37f275"
         );
     }
 }

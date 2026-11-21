@@ -1,3 +1,15 @@
+### Unreleased: keep array types out of struct projection slots
+
+- Array types and aliases resolving to arrays are no longer treated as struct
+  bindings when checking projected field slots. `VERIFIER_POLICY_VERSION` is
+  bumped 24 → 25 so cached verdicts are re-derived.
+
+### Unreleased: struct parameter projection-slot collisions
+
+- Reject atom parameters whose names or projected struct fields collide with
+  another struct parameter's field slots. `VERIFIER_POLICY_VERSION` is bumped
+  23 → 24 so cached verdicts are re-derived.
+
 ### Unreleased: struct-valued direct enum payload reads
 
 - Named struct payloads and nested struct fields can be read as values, aliased
