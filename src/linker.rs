@@ -322,6 +322,7 @@ pub fn link_recorded(
         expected_exit_status: None,
         expected_stdout_sha256: None,
         expected_stderr_sha256: None,
+        observation_envelope: None,
     })
 }
 

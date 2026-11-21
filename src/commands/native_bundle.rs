@@ -47,6 +47,8 @@ const STDERR_RECHECK_SCOPE: &str =
     "artifact_reproduction_and_os_stderr_observation_only/no_runtime_abi_or_semantic_proof";
 const RUNTIME_OBSERVATION_RECHECK_SCOPE: &str =
     "artifact_reproduction_and_runtime_observation_semantics_on_one_invocation_only/no_runtime_abi_or_semantic_proof";
+const OBSERVATION_ENVIRONMENT: &str = "empty";
+const OBSERVATION_WORKING_DIRECTORY: &str = "executable_directory";
 /// The build/recheck single-run cap for observing an executable: a
 /// bounded pure-i64 `main` is expected to return promptly, but the
 /// observation must never hang a command.
@@ -64,9 +66,16 @@ fn observation_invocation_envelope() -> serde_json::Value {
         "stdin": "closed",
         "timeout_ms": OBSERVATION_TIMEOUT.as_millis(),
         "channel_cap_bytes": OBSERVED_CHANNEL_MAX_BYTES,
-        "environment": "empty",
-        "working_directory": "executable_directory",
+        "environment": OBSERVATION_ENVIRONMENT,
+        "working_directory": OBSERVATION_WORKING_DIRECTORY,
     })
+}
+
+fn pinned_observation_envelope() -> ObservationEnvelope {
+    ObservationEnvelope {
+        environment: OBSERVATION_ENVIRONMENT.to_owned(),
+        working_directory: OBSERVATION_WORKING_DIRECTORY.to_owned(),
+    }
 }
 
 /// Record the running consumer binary's compile-time target as an observation
@@ -410,7 +419,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                     recheck_evidence_bytes(Path::new(&bundle), Path::new(&source), &saved, &expected_build_id)
                         .map(|outcome| (acceptance, outcome, saved))
                 })
-                .and_then(|(acceptance, outcome, saved)| write_native_acceptance(outcome, json, acceptance, Some(&saved), &mut std::io::stdout().lock()))
+                .and_then(|(acceptance, outcome, saved)| write_native_acceptance(outcome, json, acceptance, Some(&saved), None, &mut std::io::stdout().lock()))
             {
                 Ok(Outcome::EquivalentWithinProfile) => Ok(()),
                 Ok(Outcome::Different) => Err(BundleError("native LLVM body differs from source")),
@@ -448,7 +457,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                     (RecordFamily::Multifile, false) => &MULTIFILE_ARTIFACT_ACCEPTANCE_ARGV_UNPINNED,
                     (RecordFamily::Single | RecordFamily::Module, true) => &ARTIFACT_ACCEPTANCE,
                     (RecordFamily::Single | RecordFamily::Module, false) => &ARTIFACT_ACCEPTANCE_ARGV_UNPINNED,
-                }, None, &mut std::io::stdout().lock()))
+                }, None, None, &mut std::io::stdout().lock()))
             {
                 Ok(Outcome::EquivalentWithinProfile) => Ok(()),
                 Ok(Outcome::Inconclusive) => {
@@ -641,6 +650,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                                         Outcome::EquivalentWithinProfile,
                                         json,
                                         acceptance,
+                                        None,
                                         None,
                                         &mut std::io::stdout().lock(),
                                     )
@@ -848,6 +858,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                                         json,
                                         acceptance,
                                         None,
+                                        None,
                                         &mut std::io::stdout().lock(),
                                     )
                                     .map(|_| ())
@@ -919,6 +930,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                                         json,
                                         acceptance,
                                         None,
+                                        None,
                                         &mut std::io::stdout().lock(),
                                     )
                                     .map(|_| ())
@@ -975,6 +987,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                     expected_exit_status,
                     expected_stdout_sha256,
                     expected_stderr_sha256,
+                    pin_envelope,
                     stage,
                     ..
                 }) => match check_runtime_observations(
@@ -993,6 +1006,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                                 "build_id": expected_build_id,
                                 "invocation": observation_invocation_envelope(),
                                 "host": observation_host(),
+                                "pin_envelope": pin_envelope,
                                 "observations": {
                                     "exit_status": observation.exit_status,
                                     "stdout_sha256": observation.stdout_sha256,
@@ -1069,6 +1083,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                     expected_exit_status,
                     expected_stdout_sha256,
                     expected_stderr_sha256,
+                    pin_envelope,
                     stage,
                 }) => match check_runtime_observations(
                     expected_exit_status,
@@ -1096,6 +1111,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                             json,
                             acceptance,
                             None,
+                            Some(pin_envelope),
                             &mut std::io::stdout().lock(),
                         )
                         .map(|_| ())
@@ -1380,13 +1396,13 @@ const RUNTIME_OBSERVATION_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance = NativeAcc
 /// acceptance vocabulary. The descriptor binds no subject, digest or
 /// provenance so it cannot be replayed as Evidence; non-accepted outcomes
 /// write nothing. The runtime-observation envelope contains only fixed
-/// invocation constants and unpinned inherited context, not subject,
-/// digest or provenance.
+/// invocation constants, not subject, digest or provenance.
 fn write_native_acceptance(
     outcome: Outcome,
     json: bool,
     acceptance: &NativeAcceptance,
     evidence_bytes: Option<&[u8]>,
+    pin_envelope: Option<&'static str>,
     output: &mut impl std::io::Write,
 ) -> Result<Outcome, BundleError> {
     if outcome != Outcome::EquivalentWithinProfile {
@@ -1407,6 +1423,9 @@ fn write_native_acceptance(
         {
             value["invocation"] = observation_invocation_envelope();
             value["host"] = observation_host();
+            if let Some(pin_envelope) = pin_envelope {
+                value["pin_envelope"] = serde_json::json!(pin_envelope);
+            }
         }
         // Optional binding: sha256 of the accepted record's bytes lets a
         // holder prove WHICH record this descriptor evaluated, without the
@@ -1652,6 +1671,10 @@ fn build_single(source: &str, input: &Path, output: &Path) -> Result<String, Bun
         observed_stdout(&stage.path().join(BundleFile::Executable.file_name()));
     link_build.expected_stderr_sha256 =
         observed_stderr(&stage.path().join(BundleFile::Executable.file_name()));
+    let has_observation_pin = link_build.expected_exit_status.is_some()
+        || link_build.expected_stdout_sha256.is_some()
+        || link_build.expected_stderr_sha256.is_some();
+    link_build.observation_envelope = has_observation_pin.then(pinned_observation_envelope);
     let files = components(stage.path())?;
     let record = NativeBundleRecord {
         schema: SCHEMA.into(),
@@ -1780,6 +1803,10 @@ fn emit_module(
         observed_stdout(&stage.join(BundleFile::Executable.file_name()));
     link_build.expected_stderr_sha256 =
         observed_stderr(&stage.join(BundleFile::Executable.file_name()));
+    let has_observation_pin = link_build.expected_exit_status.is_some()
+        || link_build.expected_stdout_sha256.is_some()
+        || link_build.expected_stderr_sha256.is_some();
+    link_build.observation_envelope = has_observation_pin.then(pinned_observation_envelope);
     Ok((components(stage)?, object_build, link_build))
 }
 
@@ -2453,10 +2480,18 @@ struct ArtifactRecheckResult {
     result: ArtifactRecheck,
     family: RecordFamily,
     canonical_argv_compared: bool,
+    pin_envelope: &'static str,
     expected_exit_status: Option<u32>,
     expected_stdout_sha256: Option<String>,
     expected_stderr_sha256: Option<String>,
     stage: Option<tempfile::TempDir>,
+}
+
+fn observation_pins_comparable(link_build: &LinkBuild) -> bool {
+    match &link_build.observation_envelope {
+        None => true,
+        Some(envelope) => envelope == &pinned_observation_envelope(),
+    }
 }
 
 impl ArtifactRecheckResult {
@@ -2465,6 +2500,7 @@ impl ArtifactRecheckResult {
             result: ArtifactRecheck::Different,
             family,
             canonical_argv_compared: false,
+            pin_envelope: "unrecorded",
             expected_exit_status: None,
             expected_stdout_sha256: None,
             expected_stderr_sha256: None,
@@ -2477,6 +2513,7 @@ impl ArtifactRecheckResult {
             result: ArtifactRecheck::Inconclusive,
             family,
             canonical_argv_compared: false,
+            pin_envelope: "unrecorded",
             expected_exit_status: None,
             expected_stdout_sha256: None,
             expected_stderr_sha256: None,
@@ -2549,13 +2586,26 @@ fn recheck_artifact(
     }
     // Report whether the canonical argv comparison actually ran so the
     // acceptance descriptor never claims it for a pinless record.
+    let pins_comparable = observation_pins_comparable(&link_build);
+    let pin_envelope = if pins_comparable && link_build.observation_envelope.is_some() {
+        "recorded"
+    } else {
+        "unrecorded"
+    };
     Ok(ArtifactRecheckResult {
         result: ArtifactRecheck::Rechecked,
         family,
         canonical_argv_compared: link_build.canonical_arguments_sha256.is_some(),
-        expected_exit_status: link_build.expected_exit_status,
-        expected_stdout_sha256: link_build.expected_stdout_sha256.clone(),
-        expected_stderr_sha256: link_build.expected_stderr_sha256.clone(),
+        pin_envelope,
+        expected_exit_status: pins_comparable
+            .then_some(link_build.expected_exit_status)
+            .flatten(),
+        expected_stdout_sha256: pins_comparable
+            .then(|| link_build.expected_stdout_sha256.clone())
+            .flatten(),
+        expected_stderr_sha256: pins_comparable
+            .then(|| link_build.expected_stderr_sha256.clone())
+            .flatten(),
         stage: Some(stage),
     })
 }
@@ -2824,6 +2874,33 @@ mod tests {
     }
 
     #[test]
+    fn observation_pins_are_comparable_only_for_matching_or_legacy_envelopes() {
+        let link_build = |observation_envelope| LinkBuild {
+            driver: "cc".into(),
+            driver_version: "1".into(),
+            driver_target: "x86_64-linux".into(),
+            linker: "gnu-ld".into(),
+            linker_version: "1".into(),
+            arguments_sha256: "args".into(),
+            canonical_arguments_sha256: None,
+            expected_exit_status: None,
+            expected_stdout_sha256: None,
+            expected_stderr_sha256: None,
+            observation_envelope,
+        };
+        assert!(observation_pins_comparable(&link_build(None)));
+        assert!(observation_pins_comparable(&link_build(Some(
+            pinned_observation_envelope()
+        ))));
+        assert!(!observation_pins_comparable(&link_build(Some(
+            ObservationEnvelope {
+                environment: "inherited".into(),
+                working_directory: OBSERVATION_WORKING_DIRECTORY.into(),
+            }
+        ))));
+    }
+
+    #[test]
     fn observation_envelope_and_host_are_only_in_runtime_observation_acceptance() {
         let runtime_acceptances = [
             &MULTIFILE_RUNTIME_OBSERVATION_ACCEPTANCE,
@@ -2838,6 +2915,7 @@ mod tests {
                 true,
                 acceptance,
                 None,
+                Some("recorded"),
                 &mut json_output,
             )
             .unwrap();
@@ -2847,6 +2925,7 @@ mod tests {
             assert_eq!(descriptor["invocation"]["channel_cap_bytes"], 65536);
             assert_eq!(descriptor["host"], observation_host());
             assert_eq!(descriptor["host"]["os"], std::env::consts::OS);
+            assert_eq!(descriptor["pin_envelope"], "recorded");
 
             let mut text_output = Vec::new();
             write_native_acceptance(
@@ -2854,6 +2933,7 @@ mod tests {
                 false,
                 acceptance,
                 None,
+                Some("recorded"),
                 &mut text_output,
             )
             .unwrap();
@@ -2871,6 +2951,7 @@ mod tests {
                 true,
                 acceptance,
                 None,
+                None,
                 &mut json_output,
             )
             .unwrap();
@@ -2883,6 +2964,7 @@ mod tests {
                 Outcome::EquivalentWithinProfile,
                 false,
                 acceptance,
+                None,
                 None,
                 &mut text_output,
             )

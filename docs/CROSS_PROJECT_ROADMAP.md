@@ -3912,9 +3912,10 @@ non-empty argv, stdin bytes and CPU/memory limits are unsupported and
 unclaimed; only the timeout and per-channel cap are enforced. Every native
 observation uses this policy, including build-time pins, per-channel
 `recheck-*`/`accept-*`, and the paired runtime-observation commands. The
-record does not pin the envelope: older bundles' build-time pins used
-inherited environment/cwd but are now rechecked under the pinned
-environment and cwd; a match is claimed and a mismatch fails closed.
+record now optionally pins `link_build.observation_envelope`. Pins from a
+different envelope are not compared, making runtime rechecks inconclusive
+(exit 3); legacy records without the field are still compared and report
+`pin_envelope: "unrecorded"`.
 Composition landed via `accept-observations`; this raw
 descriptor is not an Agent performer, while Agent's
 `native-observations-accept` route (mumei-agent#1039) performs

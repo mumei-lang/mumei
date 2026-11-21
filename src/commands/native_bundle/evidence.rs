@@ -584,6 +584,7 @@ mod tests {
                 expected_exit_status: None,
                 expected_stdout_sha256: None,
                 expected_stderr_sha256: None,
+                observation_envelope: None,
             },
             settings: BuildSettings::default(),
             leaf_widths: BTreeMap::new(),
