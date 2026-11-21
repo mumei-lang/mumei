@@ -17,11 +17,7 @@ pub const MAX_INPUT_BYTES: usize = 65_536;
 const MAX_ATTEMPTS: u64 = 8;
 const SCHEDULE_SCHEMA_VERSION: &str = "mumei.attempt-schedule/v1";
 const EVIDENCE_CHECK_SCHEMA_VERSION: &str = "mumei.verifier-evidence-check/v1";
-const EVIDENCE_ACCEPTANCE_SCHEMA_VERSIONS: &[&str] = &[
-    "mumei.evidence-check-acceptance/v1",
-    "mumei.evidence-acceptance/v1",
-    "mumei.evidence-requirement-list-acceptance/v1",
-];
+const EVIDENCE_ACCEPTANCE_SCHEMA_VERSIONS: &[&str] = &["mumei.evidence-check-acceptance/v1"];
 const TOP_LEVEL_KEYS: &[&str] = &[
     "schema_version",
     "outcome",
@@ -250,7 +246,8 @@ pub fn decode(bytes: &[u8]) -> Result<Schedule, RepresentationError> {
     }
 
     let evidence_check = validate_evidence_check(field(root, "evidence_check")?)?;
-    let evidence_acceptance = validate_evidence_acceptance(field(root, "evidence_acceptance")?)?;
+    let evidence_acceptance =
+        validate_evidence_acceptance(field(root, "evidence_acceptance")?, evidence_check)?;
 
     let selected = outcome == ScheduleOutcome::Selected;
     if selected != selected_adapter_id.is_some() {
@@ -266,11 +263,18 @@ pub fn decode(bytes: &[u8]) -> Result<Schedule, RepresentationError> {
         {
             return Err(RepresentationError::InconsistentSchedule);
         }
+        if let Some(check) = evidence_check {
+            if nullable_string_field(last_attempt, "request_fingerprint")?
+                != Some(string_field(check, "request_fingerprint")?)
+            {
+                return Err(RepresentationError::InconsistentSchedule);
+            }
+        }
     }
-    if !selected && (evidence_check || evidence_acceptance) {
+    if !selected && (evidence_check.is_some() || evidence_acceptance) {
         return Err(RepresentationError::InconsistentSchedule);
     }
-    if evidence_acceptance && !evidence_check {
+    if evidence_acceptance && evidence_check.is_none() {
         return Err(RepresentationError::InconsistentSchedule);
     }
 
@@ -328,10 +332,12 @@ fn validate_attempt(value: &JsonValue, index: usize) -> Result<(), Representatio
     Ok(())
 }
 
-fn validate_evidence_check(value: &JsonValue) -> Result<bool, RepresentationError> {
+fn validate_evidence_check(
+    value: &JsonValue,
+) -> Result<Option<&BTreeMap<String, JsonValue>>, RepresentationError> {
     let JsonValue::Object(check) = value else {
         return if matches!(value, JsonValue::Null) {
-            Ok(false)
+            Ok(None)
         } else {
             Err(RepresentationError::InvalidValue)
         };
@@ -348,10 +354,13 @@ fn validate_evidence_check(value: &JsonValue) -> Result<bool, RepresentationErro
     {
         return Err(RepresentationError::InvalidValue);
     }
-    Ok(true)
+    Ok(Some(check))
 }
 
-fn validate_evidence_acceptance(value: &JsonValue) -> Result<bool, RepresentationError> {
+fn validate_evidence_acceptance(
+    value: &JsonValue,
+    evidence_check: Option<&BTreeMap<String, JsonValue>>,
+) -> Result<bool, RepresentationError> {
     let JsonValue::Object(acceptance) = value else {
         return if matches!(value, JsonValue::Null) {
             Ok(false)
@@ -362,6 +371,17 @@ fn validate_evidence_acceptance(value: &JsonValue) -> Result<bool, Representatio
     let schema_version = string_field(acceptance, "schema_version")?;
     if !EVIDENCE_ACCEPTANCE_SCHEMA_VERSIONS.contains(&schema_version) {
         return Err(RepresentationError::InvalidValue);
+    }
+    let evidence_check = evidence_check.ok_or(RepresentationError::InconsistentSchedule)?;
+    if string_field(acceptance, "request_fingerprint")?
+        != string_field(evidence_check, "request_fingerprint")?
+        || unsigned_field(acceptance, "attempt_number")?
+            != unsigned_field(evidence_check, "attempt_number")?
+        || string_field(acceptance, "output_fingerprint")?
+            != string_field(evidence_check, "output_fingerprint")?
+        || string_field(acceptance, "outcome")? != string_field(evidence_check, "outcome")?
+    {
+        return Err(RepresentationError::InconsistentSchedule);
     }
     Ok(true)
 }

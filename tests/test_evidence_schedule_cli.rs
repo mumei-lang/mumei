@@ -170,22 +170,76 @@ fn text_diagnostic_is_one_static_line() {
 
 #[test]
 fn accepts_only_the_declared_embedded_acceptance_schema_versions() {
+    let mut schedule: Value =
+        serde_json::from_str(SELECTED_WITH_CHECK).expect("agent schedule fixture");
+    schedule["evidence_acceptance"]["opaque_contents"] = json!({"not": ["revalidated"]});
+    assert!(stdin_check(&json_bytes(&schedule)).status.success());
+
     for schema_version in [
-        "mumei.evidence-check-acceptance/v1",
         "mumei.evidence-acceptance/v1",
         "mumei.evidence-requirement-list-acceptance/v1",
     ] {
         let mut schedule: Value =
             serde_json::from_str(SELECTED_WITH_CHECK).expect("agent schedule fixture");
-        schedule["evidence_acceptance"] = json!({
-            "schema_version": schema_version,
-            "opaque_contents": {"not": ["revalidated"]},
-        });
-        assert!(
-            stdin_check(&json_bytes(&schedule)).status.success(),
-            "{schema_version}"
+        schedule["evidence_acceptance"]["schema_version"] = json!(schema_version);
+        assert_invalid(
+            "producer-never-emitted acceptance schema",
+            &json_bytes(&schedule),
         );
     }
+}
+
+#[test]
+fn embedded_acceptance_fields_must_match_the_evidence_check() {
+    let mismatched = [
+        ("request_fingerprint", json!("a".repeat(64))),
+        ("attempt_number", json!(2)),
+        ("output_fingerprint", json!("a".repeat(64))),
+        ("outcome", json!("failed")),
+    ];
+    for (field, value) in mismatched {
+        let mut schedule: Value =
+            serde_json::from_str(SELECTED_WITH_CHECK).expect("agent schedule fixture");
+        schedule["evidence_acceptance"][field] = value;
+        assert_invalid("embedded acceptance field mismatch", &json_bytes(&schedule));
+    }
+
+    for field in [
+        "request_fingerprint",
+        "attempt_number",
+        "output_fingerprint",
+        "outcome",
+    ] {
+        let mut schedule: Value =
+            serde_json::from_str(SELECTED_WITH_CHECK).expect("agent schedule fixture");
+        schedule["evidence_acceptance"]
+            .as_object_mut()
+            .expect("acceptance object")
+            .remove(field);
+        assert_invalid(
+            "missing embedded acceptance binding field",
+            &json_bytes(&schedule),
+        );
+    }
+}
+
+#[test]
+fn evidence_check_must_bind_to_the_selected_attempt_request() {
+    let mut schedule: Value =
+        serde_json::from_str(SELECTED_WITH_CHECK).expect("agent schedule fixture");
+    schedule["attempts"][0]["request_fingerprint"] = json!("a".repeat(64));
+    assert_invalid(
+        "evidence check differs from selected attempt request",
+        &json_bytes(&schedule),
+    );
+
+    let mut schedule: Value =
+        serde_json::from_str(SELECTED_WITH_CHECK).expect("agent schedule fixture");
+    schedule["attempts"][0]["request_fingerprint"] = Value::Null;
+    assert_invalid(
+        "evidence check has no selected attempt request",
+        &json_bytes(&schedule),
+    );
 }
 
 #[test]
