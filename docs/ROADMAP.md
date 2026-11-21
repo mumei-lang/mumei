@@ -3139,7 +3139,7 @@ remain counted as direct-call functions rather than forward- or acyclic-branch
 functions.
 
 The next C10 Option B producer adds `native-bundle accept-object`. It performs
-the same bounded machine-TV evaluation and emits an anonymous acceptance
+the same bounded machine-TV evaluation and emits an acceptance
 descriptor only when at least one source-atom function is present, every such
 function is equivalent and every other defined function has the exact
 `not_a_source_atom` outcome (the C `main` wrapper). Its Core-owned

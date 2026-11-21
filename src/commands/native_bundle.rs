@@ -3863,13 +3863,17 @@ fn recheck_artifact(
     let ir_path = stage.path().join(BundleFile::LlvmIr.file_name());
     write(&ir_path, &files[&BundleFile::LlvmIr])?;
     let object_input_path = stage.path().join("recheck-input.ll");
+    // `compile_llvm_ir_to_object_recorded` rebinds and rewrites its input, so
+    // staged `program.ll` must stay byte-identical to the pin.
     write(&object_input_path, &files[&BundleFile::LlvmIr])?;
     let object_path = stage.path().join(BundleFile::Object.file_name());
     let fresh_object = mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(
         &object_input_path,
         &object_path,
-    )
-    .map_err(|_| BundleError("native object re-emission failed"))?;
+    );
+    fs::remove_file(&object_input_path)
+        .map_err(|_| BundleError("cannot remove staged native LLVM recheck input"))?;
+    let fresh_object = fresh_object.map_err(|_| BundleError("native object re-emission failed"))?;
     if fresh_object != object_build
         || read_regular(&object_path, MAX_COMPONENT_BYTES)? != files[&BundleFile::Object]
     {
