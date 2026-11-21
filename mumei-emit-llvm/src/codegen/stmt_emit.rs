@@ -168,7 +168,7 @@ fn emit_deep_aggregate_field_write<'ctx>(
     Ok(Some(written))
 }
 
-fn deep_aggregate_field_slot(
+pub(crate) fn deep_aggregate_field_slot(
     module_env: &ModuleEnv,
     parent_type: &str,
     field: &str,
@@ -200,7 +200,7 @@ fn deep_aggregate_field_slot(
         };
         if owner.is_some() {
             return Err(MumeiError::codegen(format!(
-                "enum field write '{var}' has an ambiguous payload owner"
+                "enum field path '{var}' has an ambiguous payload owner"
             )));
         }
         let Some(declared_type) = variant.field_types.get(index) else {
@@ -212,13 +212,13 @@ fn deep_aggregate_field_slot(
     }
     let Some((index, declared_type)) = owner else {
         return Err(MumeiError::codegen(format!(
-            "enum field write '{var}' has no unique named payload owner"
+            "enum field path '{var}' has no unique named payload owner"
         )));
     };
     Ok(Some((1 + index as u32, declared_type, true)))
 }
 
-fn deep_slot_type_error(
+pub(crate) fn deep_slot_type_error(
     module_env: &ModuleEnv,
     parent_type: &str,
     declared_type: &str,

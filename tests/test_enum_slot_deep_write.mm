@@ -60,15 +60,33 @@ body: match o {
 };
 
 atom struct_parameter_match_arm_slot(b: B, v: i64) -> i64
-requires: true;
-ensures: true;
+requires: match b.e {
+    Chan::Tcp(_, _) => true,
+    _ => false
+};
+ensures: result == v;
 body: match b.e {
     Chan::Tcp(_, _) => {
         b.e.port = v;
-        b.e.port
+        b.e.port;
+        v
     },
     _ => 0
 };
+
+atom outer_parameter_direct_slot_read(o: OuterEnum, v: i64) -> i64
+requires: match o {
+    OuterEnum::Wrap(c, _) => match c {
+        Chan::Tcp(_, _) => true,
+        _ => false
+    },
+    _ => false
+};
+ensures: true;
+body: {
+    o.c.port = v;
+    o.c.port
+}
 
 atom reread_outer_slot_preserves_siblings(v: i64) -> i64
 requires: true;

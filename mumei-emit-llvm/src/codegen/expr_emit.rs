@@ -6,7 +6,9 @@ use crate::codegen::lowering::{
 use crate::codegen::pattern_emit::{
     bind_pattern_variables, compile_pattern_test, find_field_index, find_field_index_by_name,
 };
-use crate::codegen::stmt_emit::compile_hir_stmt;
+use crate::codegen::stmt_emit::{
+    compile_hir_stmt, deep_aggregate_field_slot, deep_slot_type_error,
+};
 use crate::codegen::task_runtime::{
     compile_task_spawn, declare_task_group_any_externs, emit_task_join_only, emit_task_join_raw,
     emit_task_spawn_only, static_next_task_group_id, PendingTask, TaskGroupAnyContext,
@@ -1232,6 +1234,61 @@ pub(crate) fn hir_int_type_name(
     }
 }
 
+fn emit_enum_payload_field_read<'ctx>(
+    context: &'ctx Context,
+    builder: &Builder<'ctx>,
+    enum_value: inkwell::values::StructValue<'ctx>,
+    enum_type: &str,
+    field_name: &str,
+    module_env: &ModuleEnv,
+) -> MumeiResult<BasicValueEnum<'ctx>> {
+    let Some((index, declared_type, enum_payload_slot)) =
+        deep_aggregate_field_slot(module_env, enum_type, field_name, field_name)?
+    else {
+        return Err(MumeiError::codegen(format!(
+            "enum '{enum_type}' has no named payload '{field_name}'"
+        )));
+    };
+    if !enum_payload_slot {
+        return Err(MumeiError::codegen(format!(
+            "enum '{enum_type}' field '{field_name}' is not a named payload"
+        )));
+    }
+    let expected_type = resolve_param_type(context, Some(&declared_type), module_env);
+    let slot_type = enum_value
+        .get_type()
+        .get_field_type_at_index(index)
+        .ok_or_else(|| {
+            MumeiError::codegen(format!(
+                "enum '{enum_type}' has no payload slot for '{field_name}'"
+            ))
+        })?;
+    if slot_type != expected_type {
+        return Err(deep_slot_type_error(
+            module_env,
+            enum_type,
+            &declared_type,
+            index,
+            enum_payload_slot,
+        ));
+    }
+    let extracted = llvm!(builder.build_extract_value(
+        enum_value,
+        index,
+        &format!("enum_payload.{field_name}")
+    ));
+    if extracted.get_type() != expected_type {
+        return Err(deep_slot_type_error(
+            module_env,
+            enum_type,
+            &declared_type,
+            index,
+            enum_payload_slot,
+        ));
+    }
+    Ok(extracted)
+}
+
 /// The declared int type name of a statement's produced value —
 /// `HirStmt::Expr` delegates to `hir_int_type_name`, a `Block`'s
 /// `tail_expr` is its produced value; any other shape has no scalar
@@ -1425,10 +1482,25 @@ pub(crate) fn infer_struct_type_name(
                 }
             }
             let inner_ty = infer_struct_type_name(inner, var_types, module_env)?;
-            let sdef = module_env.get_struct(&inner_ty)?;
-            let f = sdef.fields.iter().find(|f| f.name == *field)?;
-            let base = module_env.resolve_base_type(&f.type_name);
-            if module_env.get_struct(&base).is_some() {
+            let parent_ty = resolve_named_type(module_env, &inner_ty);
+            let declared_type = if let Some(sdef) = module_env.get_struct(&parent_ty) {
+                sdef.fields
+                    .iter()
+                    .find(|f| f.name == *field)?
+                    .type_name
+                    .clone()
+            } else if module_env.get_enum(&parent_ty).is_some() {
+                let (_, declared_type, enum_payload_slot) =
+                    deep_aggregate_field_slot(module_env, &parent_ty, field, field).ok()??;
+                if !enum_payload_slot {
+                    return None;
+                }
+                declared_type
+            } else {
+                return None;
+            };
+            let base = resolve_named_type(module_env, &declared_type);
+            if module_env.get_struct(&base).is_some() || module_env.get_enum(&base).is_some() {
                 Some(base)
             } else {
                 None
@@ -3548,6 +3620,42 @@ pub(crate) fn compile_hir_expr<'a>(
                         &format!("{}.{}", resource_name, field_name)
                     )));
                 }
+                let receiver_type = infer_struct_type_name(inner_expr, var_types, module_env)
+                    .map(|name| resolve_named_type(module_env, &name));
+                if let Some(enum_type) = receiver_type
+                    .as_deref()
+                    .filter(|name| module_env.get_enum(name).is_some())
+                {
+                    let enum_value =
+                        variables.get(var_name.as_str()).copied().ok_or_else(|| {
+                            MumeiError::codegen(format!(
+                            "enum binding '{var_name}' has no LLVM value for field '{field_name}'"
+                        ))
+                        })?;
+                    if field_name == "tag" {
+                        if enum_value.is_int_value() {
+                            return Ok(enum_value);
+                        }
+                        let BasicValueEnum::StructValue(enum_value) = enum_value else {
+                            return Err(MumeiError::codegen(format!(
+                                "enum binding '{var_name}' is not an LLVM aggregate for its tag"
+                            )));
+                        };
+                        return Ok(llvm!(builder.build_extract_value(
+                            enum_value,
+                            0,
+                            &format!("{var_name}.tag")
+                        )));
+                    }
+                    let BasicValueEnum::StructValue(enum_value) = enum_value else {
+                        return Err(MumeiError::codegen(format!(
+                            "enum binding '{var_name}' is not an LLVM aggregate for field '{field_name}'"
+                        )));
+                    };
+                    return emit_enum_payload_field_read(
+                        context, builder, enum_value, enum_type, field_name, module_env,
+                    );
+                }
                 let candidates = [
                     format!("__struct_{}_{}", var_name, field_name),
                     format!("{}_{}", var_name, field_name),
@@ -3560,24 +3668,7 @@ pub(crate) fn compile_hir_expr<'a>(
                 if let Some(struct_val) = variables.get(var_name.as_str()) {
                     if struct_val.is_struct_value() {
                         let sv = struct_val.into_struct_value();
-                        let idx = match infer_struct_type_name(inner_expr, var_types, module_env) {
-                            // A bound enum carries its tagged-union
-                            // layout: `.tag` reads slot 0 — the index
-                            // `emit_enum_variant_init` writes and `match`
-                            // dispatch compares. No other name is a
-                            // field, so the struct scan below must not
-                            // pick a same-named struct's slot for an
-                            // enum receiver.
-                            Some(t) if module_env.get_enum(&t).is_some() => {
-                                if field_name == "tag" {
-                                    return Ok(llvm!(builder.build_extract_value(
-                                        sv,
-                                        0,
-                                        &format!("{}.tag", var_name)
-                                    )));
-                                }
-                                None
-                            }
+                        let idx = match receiver_type {
                             // A declared receiver only reads its own
                             // declared fields — an unrelated struct's
                             // same-named field must not resolve, so
@@ -3637,10 +3728,36 @@ pub(crate) fn compile_hir_expr<'a>(
                     context, builder, module, function, inner_expr, variables, var_types,
                     array_ptrs, module_env,
                 )?;
+                let receiver_type = infer_struct_type_name(inner_expr, var_types, module_env)
+                    .map(|name| resolve_named_type(module_env, &name));
+                if let Some(enum_type) = receiver_type
+                    .as_deref()
+                    .filter(|name| module_env.get_enum(name).is_some())
+                {
+                    if field_name == "tag" {
+                        if base_val.is_struct_value() {
+                            return Ok(llvm!(builder.build_extract_value(
+                                base_val.into_struct_value(),
+                                0,
+                                &format!("nested.{field_name}")
+                            )));
+                        }
+                        return Ok(base_val);
+                    }
+                    let BasicValueEnum::StructValue(enum_value) = base_val else {
+                        return Err(MumeiError::codegen(format!(
+                            "enum field base for '{field_name}' is not an LLVM aggregate"
+                        )));
+                    };
+                    return emit_enum_payload_field_read(
+                        context, builder, enum_value, enum_type, field_name, module_env,
+                    );
+                }
                 if base_val.is_struct_value() {
                     let sv = base_val.into_struct_value();
-                    let idx = infer_struct_type_name(inner_expr, var_types, module_env)
-                        .and_then(|t| find_field_index(&t, field_name, module_env))
+                    let idx = receiver_type
+                        .as_deref()
+                        .and_then(|t| find_field_index(t, field_name, module_env))
                         .or_else(|| find_field_index_by_name(field_name, module_env));
                     if let Some(idx) = idx {
                         let extracted = llvm!(builder.build_extract_value(

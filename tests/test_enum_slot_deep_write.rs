@@ -66,7 +66,7 @@ fn invalid_enum_slot_deep_writes_fail_for_their_own_diagnostics() {
     let diagnostics = payload["diagnostics"]
         .as_array()
         .unwrap_or_else(|| panic!("verify JSON has no diagnostics array:\n{payload:#}"));
-    let cases: [(&str, &[&str]); 14] = [
+    let cases: [(&str, &[&str]); 16] = [
         (
             "bad_wrong_inner_tag",
             &["requires '__enum_slot_", "to hold variant 'Tcp'"],
@@ -118,6 +118,14 @@ fn invalid_enum_slot_deep_writes_fail_for_their_own_diagnostics() {
         ),
         (
             "bad_slot_false_ensures",
+            &["Postcondition (ensures) is not satisfied"],
+        ),
+        (
+            "bad_slot_direct_read_false_ensures",
+            &["Postcondition (ensures) is not satisfied"],
+        ),
+        (
+            "bad_outer_slot_direct_read_false_ensures",
             &["Postcondition (ensures) is not satisfied"],
         ),
     ];
@@ -291,6 +299,24 @@ fn enum_slot_reread_extracts_from_the_rebuilt_aggregate() {
             .skip(insert_index + 1)
             .any(|line| line.contains("extractvalue") && line.contains(&format!(" {rebuilt}, "))),
         "post-write match must extract from the rebuilt struct aggregate:\n{ir}"
+    );
+}
+
+#[test]
+fn enum_slot_direct_read_extracts_the_payload_not_the_tag() {
+    let ir = emit_atom_ir(
+        &fixture("test_enum_slot_deep_write.mm"),
+        "struct_parameter_match_arm_slot",
+        "direct-read",
+    );
+    assert!(
+        ir.lines().any(|line| {
+            line.contains("extractvalue { i64, i64, i64 }")
+                && line
+                    .rsplit_once(", ")
+                    .is_some_and(|(_, index)| index == "1")
+        }),
+        "read after b.e.port write must extract Chan's named payload at index 1:\n{ir}"
     );
 }
 

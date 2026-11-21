@@ -204,6 +204,34 @@ body: {
     b.e.port = v
 }
 
+atom bad_slot_direct_read_false_ensures(b: B, v: i64) -> i64
+requires: match b.e {
+    Chan::Tcp(_, _) => true,
+    _ => false
+};
+ensures: result == v + 1;
+body: match b.e {
+    Chan::Tcp(_, _) => {
+        b.e.port = v;
+        b.e.port
+    },
+    _ => 0
+};
+
+atom bad_outer_slot_direct_read_false_ensures(o: OuterEnum, v: i64) -> i64
+requires: match o {
+    OuterEnum::Wrap(c) => match c {
+        Chan::Tcp(_, _) => true,
+        _ => false
+    },
+    _ => false
+};
+ensures: result == v + 1;
+body: {
+    o.c.port = v;
+    o.c.port
+}
+
 atom bad_nominal_enum_slot_write() -> i64
 requires: true;
 ensures: true;
