@@ -1818,11 +1818,19 @@ The `input_domain` is
 The comparison asserts the source model's signature-bounded parameter domains
 and division/shift definedness, but does not restrict inputs by `requires`.
 Outside-profile reasons include `argument_count`, `branch_target`,
-`branching_call`, `call_order`, `conditional_call`, `cyclic_control_flow`,
+`call_order`, `conditional_call`, `cyclic_control_flow`,
 `not_a_source_atom`, `path_bound`, `unsupported_flags`,
 `unsupported_instruction`, and `unsupported_signature`. A direct-call callee
-or count mismatch is reported as `call_order`; a call whose guard is not
-provably true is reported as `conditional_call`. Unsupported signatures,
+or count mismatch is reported as `call_order`. Direct calls in branching
+functions are matched per path against ordered source `CallSite`s. Provably
+false source guards are skipped under the parameter domain, definedness,
+call-result bounds, current path conditions, and input-to-initial-register
+bindings; a guard that is undecided, or a machine call with no active source
+site, is `conditional_call`. At path completion, remaining source sites must
+all be provably false. Relocation coverage is checked across the union of
+completed paths. A terminal direct tail-call `jmp` is supported on a branch
+arm; a tail-call jump that is not the final decoded instruction remains
+outside the profile as `unsupported_instruction`. Unsupported signatures,
 reachable control-flow cycles, invalid branch targets, other instructions
 outside the profile, and functions without a matching source atom are outside
 the profile. The C `main` wrapper, CRT/startup code, dynamic loader, libc and
@@ -1834,9 +1842,13 @@ equivalent call-free, branch-free function is checked,
 `machine_code_forward_branch_function_tv` only when an equivalent function
 has branches that all go forward, and
 `machine_code_acyclic_branch_function_tv` only when an equivalent function
-has a backward but acyclic branch. These three function checks are mutually
-exclusive. It lists `machine_code_tv_cyclic_control_flow_functions` as not
-performed; cycles remain outside the profile. The not-performed vocabulary
+has a backward but acyclic branch. The new
+`machine_code_conditional_call_function_tv` is performed when an equivalent
+function has both a conditional branch and a call; those functions remain
+counted as direct-call functions and are not also counted as forward- or
+acyclic-branch functions. Leaf, forward-branch, and acyclic-branch checks are
+mutually exclusive. It lists `machine_code_tv_cyclic_control_flow_functions`
+as not performed; cycles remain outside the profile. The not-performed vocabulary
 changed from `machine_code_tv_backward_branch_functions` to
 `machine_code_tv_cyclic_control_flow_functions`; agent consumers should
 update it.

@@ -3077,10 +3077,11 @@ validation remains the deep endpoint.
 The per-instruction C10 Option B TV profile adds opt-in
 `native-bundle recheck-machine-tv`, which runs the complete object recheck and
 then asks Z3 whether reproduced machine code for straight-line or acyclic
-branch functions matches each source atom's pure-i64 model. Direct
-calls are matched in order to source `CallSite`s and compared as
-uninterpreted sites, including argument expressions and call-result terms;
-functions mixing calls and conditional branches are outside the profile.
+branch functions matches each source atom's pure-i64 model. Direct calls in
+branching functions are matched per path to ordered source `CallSite`s;
+provably false guards are skipped and argument expressions and call-result
+terms are compared as uninterpreted sites. Unresolved guards remain outside
+the profile as `conditional_call`.
 Branches must land on decoded instruction starts; backward edges are
 supported when the reachable CFG is acyclic, while cycles remain outside the
 profile. Symbolic path exploration is bounded at 64 completed paths. The
@@ -3096,7 +3097,10 @@ deeper endpoint.
 backward but acyclic edges. The not-performed vocabulary changed from
 `machine_code_tv_backward_branch_functions` to
 `machine_code_tv_cyclic_control_flow_functions`; agent consumers should
-update it.
+update it. `machine_code_conditional_call_function_tv` is performed when an
+equivalent function has both a conditional branch and a call; those functions
+remain counted as direct-call functions rather than forward- or acyclic-branch
+functions.
 
 Sibling descriptors now name the exit-status observation only as
 `os_exit_status_observation` (formerly bare `os_exit_status` in
