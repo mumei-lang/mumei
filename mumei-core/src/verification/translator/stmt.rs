@@ -283,7 +283,7 @@ fn havoc_vars<'a>(vc: &VCtx<'a>, env: &mut Env<'a>, vars: &std::collections::Has
                     .and_then(|ty| canonical_struct_type(vc, &ty))
             {
                 if let Some(sdef) = vc.module_env.get_struct(&struct_type) {
-                    let slot_keys = struct_binding_slot_keys(vc, name, sdef, env);
+                    let slot_keys = struct_binding_slot_keys(vc.module_env, name, sdef, env);
                     havoc_vars(vc, env, &slot_keys);
                     if let Some(handle) = env.get(name).cloned() {
                         bind_havoced_struct_fields_to_handle(
@@ -449,14 +449,18 @@ fn record_binding_struct_type(vc: &VCtx, var: &str, value: &Expr) {
     }
 }
 
-fn canonical_struct_type(vc: &VCtx, type_name: &str) -> Option<String> {
-    let resolved = vc.module_env.resolve_base_type(type_name);
+fn canonical_struct_type_in_module(module_env: &ModuleEnv, type_name: &str) -> Option<String> {
+    let resolved = module_env.resolve_base_type(type_name);
     let base = crate::verification::support::datatype::type_name_base(&resolved).to_string();
-    vc.module_env.get_struct(&base).map(|_| base)
+    module_env.get_struct(&base).map(|_| base)
+}
+
+fn canonical_struct_type(vc: &VCtx, type_name: &str) -> Option<String> {
+    canonical_struct_type_in_module(vc.module_env, type_name)
 }
 
 fn struct_field_path_exists(
-    vc: &VCtx,
+    module_env: &ModuleEnv,
     sdef: &crate::parser::ast::StructDef,
     path: &str,
     memo: &mut std::collections::HashMap<(String, String), bool>,
@@ -475,25 +479,26 @@ fn struct_field_path_exists(
         else {
             return false;
         };
-        let resolved_field_type = vc.module_env.resolve_base_type(&field.type_name);
+        let resolved_field_type = module_env.resolve_base_type(&field.type_name);
         if resolved_field_type.trim().starts_with('[') || resolved_field_type.trim().ends_with("[]")
         {
             return false;
         }
-        let Some(nested_type) = canonical_struct_type(vc, &resolved_field_type) else {
+        let Some(nested_type) = canonical_struct_type_in_module(module_env, &resolved_field_type)
+        else {
             return false;
         };
-        let Some(nested) = vc.module_env.get_struct(&nested_type) else {
+        let Some(nested) = module_env.get_struct(&nested_type) else {
             return false;
         };
-        struct_field_path_exists(vc, nested, rest, memo)
+        struct_field_path_exists(module_env, nested, rest, memo)
     });
     memo.insert(key, found);
     found
 }
 
 fn is_struct_projection_slot_name(
-    vc: &VCtx,
+    module_env: &ModuleEnv,
     binding: &str,
     sdef: &crate::parser::ast::StructDef,
     name: &str,
@@ -505,7 +510,7 @@ fn is_struct_projection_slot_name(
     ]
     .iter()
     .filter_map(|prefix| name.strip_prefix(prefix))
-    .any(|path| struct_field_path_exists(vc, sdef, path, &mut memo))
+    .any(|path| struct_field_path_exists(module_env, sdef, path, &mut memo))
 }
 
 fn reject_struct_projection_slot_collisions(
@@ -525,7 +530,7 @@ fn reject_struct_projection_slot_collisions(
         else {
             continue;
         };
-        if is_struct_projection_slot_name(vc, binding, sdef, var) {
+        if is_struct_projection_slot_name(vc.module_env, binding, sdef, var) {
             return Err(MumeiError::type_error(format!(
                 "local '{var}' collides with a field projection slot for struct binding '{binding}'; rename the local"
             )));
@@ -547,7 +552,7 @@ fn reject_struct_projection_slot_collisions(
         return Ok(());
     };
     for name in env.keys() {
-        if is_struct_projection_slot_name(vc, var, sdef, name) {
+        if is_struct_projection_slot_name(vc.module_env, var, sdef, name) {
             return Err(MumeiError::type_error(format!(
                 "field projection slot '{name}' for local struct '{var}' collides with an existing local; rename the local"
             )));
@@ -557,13 +562,13 @@ fn reject_struct_projection_slot_collisions(
 }
 
 fn struct_binding_slot_keys<'a>(
-    vc: &VCtx<'a>,
+    module_env: &ModuleEnv,
     binding: &str,
     sdef: &crate::parser::ast::StructDef,
     env: &Env<'a>,
 ) -> std::collections::HashSet<String> {
     fn collect<'a>(
-        vc: &VCtx<'a>,
+        module_env: &ModuleEnv,
         binding: &str,
         sdef: &crate::parser::ast::StructDef,
         env: &Env<'a>,
@@ -580,14 +585,14 @@ fn struct_binding_slot_keys<'a>(
                     keys.insert(key);
                 }
             }
-            let resolved = vc.module_env.resolve_base_type(&field.type_name);
+            let resolved = module_env.resolve_base_type(&field.type_name);
             if depth >= MAX_NESTED_DEPTH
                 || resolved.trim().starts_with('[')
                 || resolved.trim().ends_with("[]")
             {
                 continue;
             }
-            let Some(nested_type) = canonical_struct_type(vc, &resolved) else {
+            let Some(nested_type) = canonical_struct_type_in_module(module_env, &resolved) else {
                 continue;
             };
             let direct_prefix = format!("{direct_key}_");
@@ -598,9 +603,17 @@ fn struct_binding_slot_keys<'a>(
             if !has_nested_slots || type_path.contains(&nested_type) {
                 continue;
             }
-            if let Some(nested) = vc.module_env.get_struct(&nested_type) {
+            if let Some(nested) = module_env.get_struct(&nested_type) {
                 type_path.push(nested_type);
-                collect(vc, &direct_key, nested, env, depth + 1, type_path, keys);
+                collect(
+                    module_env,
+                    &direct_key,
+                    nested,
+                    env,
+                    depth + 1,
+                    type_path,
+                    keys,
+                );
                 type_path.pop();
             }
         }
@@ -608,7 +621,7 @@ fn struct_binding_slot_keys<'a>(
 
     let mut keys = std::collections::HashSet::new();
     collect(
-        vc,
+        module_env,
         binding,
         sdef,
         env,
@@ -708,7 +721,7 @@ fn rebind_struct_binding_slots<'a>(
         return;
     };
 
-    let slot_keys = struct_binding_slot_keys(vc, binding, sdef, env);
+    let slot_keys = struct_binding_slot_keys(vc.module_env, binding, sdef, env);
     let fields = nested_field_bindings(env, value);
     let mut rebound = std::collections::HashSet::new();
     for (field, _) in &fields {
@@ -2345,5 +2358,86 @@ pub(crate) fn stmt_to_z3<'a>(
         Stmt::Expr(e, _) => expr_to_z3(vc, e, env, solver_opt),
         // Plan 8: Cancel statement — no-op in Z3 verification
         Stmt::Cancel { .. } => Ok(Int::from_i64(ctx, 0).into()),
+    }
+}
+
+#[cfg(test)]
+mod projection_slot_tests {
+    use super::{is_struct_projection_slot_name, struct_binding_slot_keys};
+    use crate::parser::{parse_module, Item};
+    use crate::verification::ModuleEnv;
+    use std::collections::HashSet;
+    use std::time::{Duration, Instant};
+    use z3::ast::Int;
+    use z3::{Config, Context};
+
+    fn module_env_with_structs(source: &str) -> ModuleEnv {
+        let mut module_env = ModuleEnv::new();
+        for item in parse_module(source) {
+            if let Item::StructDef(sdef) = item {
+                module_env.register_struct(&sdef);
+            }
+        }
+        module_env
+    }
+
+    #[test]
+    fn recursive_struct_projection_slot_keys_are_bounded() {
+        let module_env = module_env_with_structs(
+            "struct RecursiveWide { left: RecursiveWide, right: RecursiveWide, up: RecursiveWide, down: RecursiveWide }",
+        );
+        let sdef = module_env
+            .get_struct("RecursiveWide")
+            .expect("recursive struct is registered");
+        let context = Context::new(&Config::new());
+        let mut env: crate::verification::types::Env<'_> = std::collections::HashMap::new();
+        let fields = ["left", "right", "up", "down"];
+        for field in fields {
+            for key in [
+                format!("q_{field}"),
+                format!("__struct_q_{field}"),
+                format!("q_{field}_left"),
+                format!("__struct_q_{field}_left"),
+            ] {
+                env.insert(key, Int::from_i64(&context, 0).into());
+            }
+        }
+
+        let started = Instant::now();
+        let keys = struct_binding_slot_keys(&module_env, "q", sdef, &env);
+        let elapsed = started.elapsed();
+        eprintln!("recursive slot-key discovery: {elapsed:?}");
+        let expected = fields
+            .iter()
+            .flat_map(|field| [format!("q_{field}"), format!("__struct_q_{field}")])
+            .collect::<HashSet<_>>();
+
+        assert_eq!(keys, expected);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "recursive slot-key discovery took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn ambiguous_recursive_projection_path_search_is_bounded() {
+        let module_env = module_env_with_structs(
+            "struct RecursiveAmbiguous { a: RecursiveAmbiguous, a_a: RecursiveAmbiguous }",
+        );
+        let sdef = module_env
+            .get_struct("RecursiveAmbiguous")
+            .expect("recursive struct is registered");
+        let local = "q_a_a_a_a_a_a_a_a_a_a_a_a_a_a_a_a_a_a_a_a_z";
+
+        let started = Instant::now();
+        let collides = is_struct_projection_slot_name(&module_env, "q", sdef, local);
+        let elapsed = started.elapsed();
+
+        eprintln!("ambiguous projection-path search: {elapsed:?}");
+        assert!(!collides);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "projection-path search took {elapsed:?}"
+        );
     }
 }
