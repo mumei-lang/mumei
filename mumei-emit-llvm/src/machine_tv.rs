@@ -10,8 +10,8 @@ use std::{
     sync::Once,
 };
 use z3::{
-    ast::{Ast, Bool, BV},
-    Context, Params, SatResult, Solver, Tactic,
+    ast::{Array, Ast, Bool, BV},
+    Context, Params, SatResult, Solver, Sort, Tactic,
 };
 
 pub const TIMEOUT_MS: u32 = 5_000;
@@ -236,6 +236,18 @@ pub fn check_function_with_preservation<'ctx>(
     call_targets: &BTreeMap<u64, CallTarget>,
     context: &'ctx Context,
 ) -> (FunctionOutcome, Option<CalleeSavedPreservation>) {
+    let (outcome, preservation, _) =
+        check_function_with_frame_memory(bytes, address, model, call_targets, context);
+    (outcome, preservation)
+}
+
+pub fn check_function_with_frame_memory<'ctx>(
+    bytes: &[u8],
+    address: u64,
+    model: &PureI64Body<'ctx>,
+    call_targets: &BTreeMap<u64, CallTarget>,
+    context: &'ctx Context,
+) -> (FunctionOutcome, Option<CalleeSavedPreservation>, bool) {
     check_function_with_result_width(
         bytes,
         address,
@@ -270,14 +282,15 @@ pub fn check_entry_wrapper_with_preservation(
         result_leaf_doubles: vec![false],
         guard: Bool::from_bool(context, true),
     });
-    check_function_with_result_width(
+    let (outcome, preservation, _) = check_function_with_result_width(
         bytes,
         address,
         &model,
         call_targets,
         context,
         ResultWidth::I32,
-    )
+    );
+    (outcome, preservation)
 }
 
 fn check_function_with_result_width<'ctx>(
@@ -287,7 +300,7 @@ fn check_function_with_result_width<'ctx>(
     call_targets: &BTreeMap<u64, CallTarget>,
     context: &'ctx Context,
     result_width: ResultWidth,
-) -> (FunctionOutcome, Option<CalleeSavedPreservation>) {
+) -> (FunctionOutcome, Option<CalleeSavedPreservation>, bool) {
     if model.inputs.len() > MAX_ARGUMENT_COUNT
         || model
             .param_leaf_doubles
@@ -297,21 +310,33 @@ fn check_function_with_result_width<'ctx>(
             .count()
             > FLOAT_ARGUMENT_REGISTER_COUNT
     {
-        return (FunctionOutcome::OutsideProfile("argument_count"), None);
+        return (
+            FunctionOutcome::OutsideProfile("argument_count"),
+            None,
+            false,
+        );
     }
     if model
         .call_sites
         .iter()
         .any(call_site_has_unsupported_composite_shape)
     {
-        return (FunctionOutcome::OutsideProfile("call_arguments"), None);
+        return (
+            FunctionOutcome::OutsideProfile("call_arguments"),
+            None,
+            false,
+        );
     }
     if model
         .call_sites
         .iter()
         .any(|site| site.args.len() > MAX_ARGUMENT_COUNT)
     {
-        return (FunctionOutcome::OutsideProfile("argument_count"), None);
+        return (
+            FunctionOutcome::OutsideProfile("argument_count"),
+            None,
+            false,
+        );
     }
     let result_width = if result_width == ResultWidth::I64 && model_result_is_double(model) {
         ResultWidth::F64
@@ -327,12 +352,17 @@ fn check_function_with_result_width<'ctx>(
         if let Ok(instructions) = disassemble(bytes, address) {
             let function_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
             if function_has_reachable_cycle(&instructions, function_size, call_targets) {
-                return (FunctionOutcome::OutsideProfile("cyclic_control_flow"), None);
+                return (
+                    FunctionOutcome::OutsideProfile("cyclic_control_flow"),
+                    None,
+                    false,
+                );
             }
         }
         return (
             FunctionOutcome::OutsideProfile("unsupported_signature"),
             None,
+            false,
         );
     }
     let instructions = match disassemble(bytes, address) {
@@ -341,6 +371,7 @@ fn check_function_with_result_width<'ctx>(
             return (
                 FunctionOutcome::OutsideProfile("unsupported_instruction"),
                 None,
+                false,
             )
         }
     };
@@ -352,7 +383,7 @@ fn check_function_with_result_width<'ctx>(
         context,
     ) {
         Ok(lifted) => lifted,
-        Err(outcome) => return (outcome, None),
+        Err(outcome) => return (outcome, None, false),
     };
     let mut unknown_path = false;
     let mut unsupported_call_arguments = false;
@@ -384,15 +415,19 @@ fn check_function_with_result_width<'ctx>(
                     }
                 }
             }
-            SatResult::Sat => return (FunctionOutcome::Different, None),
+            SatResult::Sat => return (FunctionOutcome::Different, None, false),
             SatResult::Unknown => unknown_path = true,
         }
     }
     if unsupported_call_arguments {
-        return (FunctionOutcome::OutsideProfile("call_arguments"), None);
+        return (
+            FunctionOutcome::OutsideProfile("call_arguments"),
+            None,
+            false,
+        );
     }
     if unknown_path {
-        return (FunctionOutcome::Unknown, None);
+        return (FunctionOutcome::Unknown, None, false);
     }
 
     let mut preservation_violated = false;
@@ -421,7 +456,11 @@ fn check_function_with_result_width<'ctx>(
     } else {
         CalleeSavedPreservation::Preserved
     };
-    (FunctionOutcome::Equivalent, Some(preservation))
+    (
+        FunctionOutcome::Equivalent,
+        Some(preservation),
+        lifted.uses_frame_memory,
+    )
 }
 
 pub fn function_has_reachable_cycle(
@@ -495,7 +534,6 @@ pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
         && !model.has_enum_composite_features
         && !model.has_enum_signature
         && !wide_composite_values(model)
-        && !model.bounded_memory
 }
 
 fn wide_composite_values(model: &PureI64Body<'_>) -> bool {
@@ -784,6 +822,7 @@ struct LiftedFunction<'ctx> {
     arguments: Vec<BV<'ctx>>,
     callee_saved_initial: Vec<BV<'ctx>>,
     paths: Vec<LiftedPath<'ctx>>,
+    uses_frame_memory: bool,
 }
 
 struct LiftedPath<'ctx> {
@@ -794,6 +833,7 @@ struct LiftedPath<'ctx> {
     call_argument_obligations: Vec<Bool<'ctx>>,
     exact_f64_call_argument_obligations: Vec<Bool<'ctx>>,
     used_call_targets: BTreeSet<u64>,
+    used_frame_memory: bool,
 }
 
 #[derive(Clone)]
@@ -840,6 +880,8 @@ struct MachineState<'ctx> {
     xmm_registers: Vec<BV<'ctx>>,
     known_upper_32_zero: [bool; 16],
     stack: Vec<(i64, BV<'ctx>)>,
+    frame_memory: Array<'ctx>,
+    used_frame_memory: bool,
     outgoing_cleanup_slots: BTreeSet<i64>,
     rsp_offset: i64,
     rsp_is_known: bool,
@@ -858,6 +900,16 @@ fn lift<'ctx>(
     context: &'ctx Context,
 ) -> Result<LiftedFunction<'ctx>, FunctionOutcome> {
     let branch_targets = resolve_branch_targets(instructions, function_size, call_targets)?;
+    let function_has_calls = instructions.iter().any(|instruction| {
+        instruction.mnemonic == "callq" || is_tail_call(instruction, call_targets)
+    });
+    let memory_sort = Sort::bitvector(context, 64);
+    let frame_memory = Array::fresh_const(
+        context,
+        "machine_red_zone_frame_memory",
+        &memory_sort,
+        &memory_sort,
+    );
     let registers = (0..16)
         .map(|_| BV::fresh_const(context, "machine_initial_register", 64))
         .collect::<Vec<_>>();
@@ -916,6 +968,8 @@ fn lift<'ctx>(
         xmm_registers,
         known_upper_32_zero: [false; 16],
         stack: Vec::new(),
+        frame_memory,
+        used_frame_memory: false,
         outgoing_cleanup_slots: BTreeSet::new(),
         rsp_offset: 0,
         rsp_is_known: true,
@@ -1165,18 +1219,52 @@ fn lift<'ctx>(
                     .get(1)
                     .is_some_and(|destination| destination.contains('('))
             {
-                lift_stack_store(instruction, &mut state, context)?;
+                let operands = split_operands(&instruction.operands);
+                let destination = operands
+                    .get(1)
+                    .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+                if state.rsp_offset != 0
+                    || is_incoming_stack_argument_operand(destination, state.rsp_offset)
+                {
+                    lift_stack_store(instruction, &mut state, context)?;
+                } else {
+                    lift_frame_memory_store(
+                        instruction,
+                        &mut state,
+                        model,
+                        &arguments,
+                        function_has_calls,
+                        context,
+                    )?;
+                }
             } else if instruction.mnemonic == "movq"
                 && split_operands(&instruction.operands)
                     .first()
                     .is_some_and(|source| source.contains('('))
             {
-                lift_stack_argument_move(
-                    instruction,
-                    &mut state,
-                    &integer_argument_indices,
-                    &arguments,
-                )?;
+                let operands = split_operands(&instruction.operands);
+                let source = operands
+                    .first()
+                    .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+                if is_incoming_stack_argument_operand(source, state.rsp_offset)
+                    || state.rsp_offset != 0
+                {
+                    lift_stack_argument_move(
+                        instruction,
+                        &mut state,
+                        &integer_argument_indices,
+                        &arguments,
+                    )?;
+                } else {
+                    lift_frame_memory_load(
+                        instruction,
+                        &mut state,
+                        model,
+                        &arguments,
+                        function_has_calls,
+                        context,
+                    )?;
+                }
             } else if instruction.mnemonic == "addq"
                 && split_operands(&instruction.operands)
                     .first()
@@ -1383,10 +1471,12 @@ fn lift<'ctx>(
     if used_call_targets.len() != call_targets.len() {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
+    let uses_frame_memory = paths.iter().any(|path| path.used_frame_memory);
     Ok(LiftedFunction {
         arguments,
         callee_saved_initial,
         paths,
+        uses_frame_memory,
     })
 }
 
@@ -1811,6 +1901,7 @@ fn finish_path<'ctx>(
         call_argument_obligations: state.call_state.argument_obligations,
         exact_f64_call_argument_obligations: state.call_state.exact_f64_argument_obligations,
         used_call_targets: state.call_state.used_call_targets,
+        used_frame_memory: state.used_frame_memory,
     })
 }
 
@@ -2213,6 +2304,142 @@ fn lift_stack_store<'ctx>(
         state.stack.push((entry_offset, value));
     }
     state.outgoing_cleanup_slots.remove(&entry_offset);
+    Ok(())
+}
+
+fn is_incoming_stack_argument_operand(operand: &str, rsp_offset: i64) -> bool {
+    rsp_memory_entry_offset(operand, rsp_offset).is_ok_and(|entry_offset| entry_offset > 0)
+}
+
+fn parse_frame_memory_operand(operand: &str) -> Option<(i64, Option<usize>)> {
+    let open = operand.find('(')?;
+    let close = operand.rfind(')')?;
+    if close + 1 != operand.len() {
+        return None;
+    }
+    let displacement = operand[..open].trim();
+    let displacement = if displacement.is_empty() {
+        0
+    } else {
+        let parsed = parse_integer(displacement)?;
+        if operand[..open].trim().starts_with('-') {
+            parsed as i64
+        } else {
+            i64::try_from(parsed).ok()?
+        }
+    };
+    let address_parts = operand[open + 1..close]
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    match address_parts.as_slice() {
+        ["%rsp"] => Some((displacement, None)),
+        ["%rsp", index, "8"] => {
+            let (register, width) = parse_register(index)?;
+            (width == 64 && register != 4).then_some((displacement, Some(register)))
+        }
+        _ => None,
+    }
+}
+
+fn frame_memory_offset<'ctx>(
+    operand: &str,
+    state: &MachineState<'ctx>,
+    model: &PureI64Body<'ctx>,
+    arguments: &[BV<'ctx>],
+    function_has_calls: bool,
+    context: &'ctx Context,
+) -> Result<BV<'ctx>, FunctionOutcome> {
+    let (displacement, index) = parse_frame_memory_operand(operand)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    if !state.rsp_is_known || state.rsp_offset != 0 || displacement % 8 != 0 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    if function_has_calls {
+        return Err(FunctionOutcome::OutsideProfile("frame_memory_call"));
+    }
+    let displacement = BV::from_i64(context, displacement, 64);
+    let offset = index.map_or_else(
+        || displacement.clone(),
+        |index| {
+            state.registers[index]
+                .bvshl(&BV::from_u64(context, 3, 64))
+                .bvadd(&displacement)
+        },
+    );
+    let lower_bound = offset.bvsge(&BV::from_i64(context, -128, 64));
+    let upper_bound = offset.bvsle(&BV::from_i64(context, -8, 64));
+    let in_red_zone = Bool::and(context, &[&lower_bound, &upper_bound]);
+    if call_guard_status(
+        model,
+        &in_red_zone,
+        &state.path_conditions,
+        arguments,
+        context,
+    ) != Some(true)
+    {
+        return Err(FunctionOutcome::OutsideProfile("frame_memory_bounds"));
+    }
+    Ok(offset)
+}
+
+fn lift_frame_memory_store<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    model: &PureI64Body<'ctx>,
+    arguments: &[BV<'ctx>],
+    function_has_calls: bool,
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let offset = frame_memory_offset(
+        destination,
+        state,
+        model,
+        arguments,
+        function_has_calls,
+        context,
+    )?;
+    let value = if let Some(immediate) = source.strip_prefix('$') {
+        let immediate = parse_integer(immediate)
+            .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+        BV::from_i64(context, i64::from(immediate as u32 as i32), 64)
+    } else {
+        register_value(source, &state.registers, 64)
+            .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?
+    };
+    state.frame_memory = state.frame_memory.store(&offset, &value);
+    state.used_frame_memory = true;
+    Ok(())
+}
+
+fn lift_frame_memory_load<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    model: &PureI64Body<'ctx>,
+    arguments: &[BV<'ctx>],
+    function_has_calls: bool,
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let offset = frame_memory_offset(source, state, model, arguments, function_has_calls, context)?;
+    let (register, width) = parse_register(destination)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let value = state
+        .frame_memory
+        .select(&offset)
+        .as_bv()
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    if width != 64 || register == 4 || !write_register(&mut state.registers, register, value, 64) {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    state.used_frame_memory = true;
     Ok(())
 }
 
@@ -4076,6 +4303,166 @@ match.body_1:
     }
 
     #[test]
+    fn bounded_array_red_zone_lowering_is_modeled_and_bounded() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "atom sum() -> i64 requires: true; ensures: result == 13; body: { let a = [1, 2, 3]; a[1] = 9; a[0] + a[1] + a[2] };\n\
+            atom pick(a0: i64, i: i64) -> i64 requires: 0 <= i && i < 3; ensures: result == 7; body: { let a = [a0, 20, 30]; a[i] = 7; a[i] };\n\
+            atom get(a0: i64, a1: i64, i: i64) -> i64 requires: 0 <= i && i < 2; ensures: true; body: { let a = [a0, a1]; a[i] };";
+        let model = |name| {
+            source_model_named_with_admission(
+                source,
+                name,
+                &context,
+                RefinedAdmission::CompositeV11,
+            )
+        };
+        let sum_model = model("sum");
+        let pick_model = model("pick");
+        let get_model = model("get");
+
+        let sum_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @sum() {
+entry:
+  %a = alloca [3 x i64], align 8
+  %p0 = getelementptr [3 x i64], ptr %a, i64 0, i64 0
+  store i64 1, ptr %p0, align 8
+  %p1 = getelementptr [3 x i64], ptr %a, i64 0, i64 1
+  store i64 9, ptr %p1, align 8
+  %p2 = getelementptr [3 x i64], ptr %a, i64 0, i64 2
+  store i64 3, ptr %p2, align 8
+  %v0 = load i64, ptr %p0, align 8
+  %v1 = load i64, ptr %p1, align 8
+  %v2 = load i64, ptr %p2, align 8
+  %s0 = add i64 %v0, %v1
+  %s1 = add i64 %s0, %v2
+  ret i64 %s1
+}
+"#;
+        let (sum_address, sum_bytes, sum_targets) = compiled_function_with_targets(sum_ir, "sum");
+        assert_eq!(
+            check_function(&sum_bytes, sum_address, &sum_model, &sum_targets, &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let pick_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @pick(i64 %a0, i64 %i) {
+entry:
+  %a = alloca [3 x i64], align 8
+  %p0 = getelementptr [3 x i64], ptr %a, i64 0, i64 0
+  store i64 %a0, ptr %p0, align 8
+  %p1 = getelementptr [3 x i64], ptr %a, i64 0, i64 1
+  store i64 20, ptr %p1, align 8
+  %p2 = getelementptr [3 x i64], ptr %a, i64 0, i64 2
+  store i64 30, ptr %p2, align 8
+  %hi = icmp slt i64 %i, 3
+  %lo = icmp sge i64 %i, 0
+  %safe = and i1 %hi, %lo
+  br i1 %safe, label %store, label %loadcheck
+store:
+  %pi = getelementptr [3 x i64], ptr %a, i64 0, i64 %i
+  store i64 7, ptr %pi, align 8
+  br label %loadcheck
+loadcheck:
+  %hi2 = icmp slt i64 %i, 3
+  %lo2 = icmp sge i64 %i, 0
+  %safe2 = and i1 %hi2, %lo2
+  br i1 %safe2, label %load, label %oob
+load:
+  %pj = getelementptr [3 x i64], ptr %a, i64 0, i64 %i
+  %v = load i64, ptr %pj, align 8
+  br label %merge
+oob:
+  br label %merge
+merge:
+  %result = phi i64 [ %v, %load ], [ 0, %oob ]
+  ret i64 %result
+}
+"#;
+        let (pick_address, pick_bytes, pick_targets) =
+            compiled_function_with_targets(pick_ir, "pick");
+        assert_eq!(
+            check_function(
+                &pick_bytes,
+                pick_address,
+                &pick_model,
+                &pick_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+        let mut patched_pick = pick_bytes.clone();
+        let store = disassemble(&pick_bytes, pick_address)
+            .unwrap()
+            .into_iter()
+            .find(|instruction| {
+                instruction.mnemonic == "movq" && instruction.operands.contains("$7")
+            })
+            .unwrap();
+        patched_pick[store.offset as usize + 4] = 0xe0;
+        assert_eq!(
+            check_function(
+                &patched_pick,
+                pick_address,
+                &pick_model,
+                &pick_targets,
+                &context
+            ),
+            FunctionOutcome::Different
+        );
+
+        let get_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @get(i64 %a0, i64 %a1, i64 %i) {
+entry:
+  %a = alloca [2 x i64], align 8
+  %p0 = getelementptr [2 x i64], ptr %a, i64 0, i64 0
+  store i64 %a0, ptr %p0, align 8
+  %p1 = getelementptr [2 x i64], ptr %a, i64 0, i64 1
+  store i64 %a1, ptr %p1, align 8
+  %hi = icmp slt i64 %i, 2
+  %lo = icmp sge i64 %i, 0
+  %safe = and i1 %hi, %lo
+  br i1 %safe, label %load, label %oob
+load:
+  %pi = getelementptr [2 x i64], ptr %a, i64 0, i64 %i
+  %v = load i64, ptr %pi, align 8
+  br label %merge
+oob:
+  br label %merge
+merge:
+  %result = phi i64 [ %v, %load ], [ 0, %oob ]
+  ret i64 %result
+}
+"#;
+        let (get_address, get_bytes, get_targets) = compiled_function_with_targets(get_ir, "get");
+        assert_eq!(
+            check_function(&get_bytes, get_address, &get_model, &get_targets, &context),
+            FunctionOutcome::Equivalent
+        );
+        let out_of_bounds = [
+            0x48, 0xc7, 0x84, 0x24, 0x78, 0xff, 0xff, 0xff, 1, 0, 0, 0, 0xc3,
+        ];
+        assert_eq!(
+            check_function(&out_of_bounds, 0, &sum_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("frame_memory_bounds")
+        );
+        let memory_and_call = [
+            0x48, 0xc7, 0x44, 0x24, 0xf8, 1, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0xc3,
+        ];
+        assert_eq!(
+            check_function(&memory_and_call, 0, &sum_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("frame_memory_call")
+        );
+        let non_qword_store = [0xc7, 0x44, 0x24, 0xf8, 1, 0, 0, 0, 0xc3];
+        assert_eq!(
+            check_function(&non_qword_store, 0, &sum_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+    }
+
+    #[test]
     fn mixed_class_struct_signatures_match_real_llvm_codegen() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
@@ -5157,7 +5544,7 @@ entry:
         memory_model.bounded_memory = true;
         assert_eq!(
             check_function(&bytes, 0, &memory_model, &BTreeMap::new(), &context),
-            FunctionOutcome::OutsideProfile("unsupported_signature")
+            FunctionOutcome::Equivalent
         );
 
         let mut composite_model = source_model(source, &context);
@@ -7872,7 +8259,7 @@ entry:
                 &BTreeMap::new(),
                 &context
             ),
-            FunctionOutcome::OutsideProfile("unsupported_instruction")
+            FunctionOutcome::Different
         );
 
         let caller_source = format!(

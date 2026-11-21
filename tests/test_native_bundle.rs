@@ -3800,6 +3800,27 @@ fn module_bundle_with_bounded_arrays_builds_as_v14_and_rechecks() {
     assert_success(&check(&source, &bundle, &id));
     assert_success(&recheck(&source, &bundle, &id));
     assert_success(&recheck_llvm(&source, &bundle, &id));
+    let machine_tv = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&machine_tv);
+    let machine_tv: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
+    for function in ["sum", "pick", "main"] {
+        assert_eq!(
+            machine_tv["functions"][function]["outcome"],
+            "equivalent_within_profile"
+        );
+    }
+    assert!(machine_tv["register_convention_assumed"]
+        .as_str()
+        .unwrap()
+        .contains("_leaf_red_zone_frame_memory_assumed_unclobbered"));
+    let accepted = accept_object(&source, &bundle, &id, true);
+    assert_success(&accepted);
+    let accepted: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(accepted["accepted"], true);
+    assert!(accepted["register_convention_assumed"]
+        .as_str()
+        .unwrap()
+        .contains("_leaf_red_zone_frame_memory_assumed_unclobbered"));
     // A v14 record re-pinned as v13 is refused: v13 keeps arrays out of
     // the vocabulary.
     let mut record = module_record(&bundle);
