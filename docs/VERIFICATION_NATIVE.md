@@ -1824,13 +1824,13 @@ input/register bindings. Failure to prove that obligation is
 `division_trap`; memory operands and other division forms remain unsupported.
 This is a bounded no-trap obligation, not a runtime or ABI guarantee.
 
-`mov`, `lea`, `push`, `pop`, and `nop` preserve flags. Initial flags and flags
-after other arithmetic or calls are unknown, so a condition that reads them
-is outside the profile. At conditional forks, paths proved infeasible under
-the declared domain, definedness, call-result bounds, input/register bindings,
-and accumulated path conditions are pruned; paths with Sat or Unknown solver
-results are retained. Symbolic execution is bounded at 64 completed paths;
-exceeding that bound is `path_bound`.
+`mov`, `movabsq`, `lea`, `push`, `pop`, and `nop` preserve flags. Initial flags
+and flags after other arithmetic or calls are unknown, so a condition that
+reads them is outside the profile. At conditional forks, paths proved
+infeasible under the declared domain, definedness, call-result bounds,
+input/register bindings, and accumulated path conditions are pruned; paths
+with Sat or Unknown solver results are retained. Symbolic execution is bounded
+at 64 completed paths; exceeding that bound is `path_bound`.
 
 The `input_domain` is
 `signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires`.

@@ -590,7 +590,14 @@ fn lift<'ctx>(
             } else {
                 let leaves_flags_unchanged = matches!(
                     instruction.mnemonic.as_str(),
-                    "movl" | "movq" | "movzbl" | "movzbq" | "movsbl" | "movsbq" | "leaq"
+                    "movl"
+                        | "movq"
+                        | "movabsq"
+                        | "movzbl"
+                        | "movzbq"
+                        | "movsbl"
+                        | "movsbq"
+                        | "leaq"
                 );
                 if !lift_instruction(
                     instruction,
@@ -2946,6 +2953,29 @@ entry:
                 &context
             ),
             FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn movabsq_preserves_flags_for_conditional_move() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom min_five(x: i64) -> i64 requires: true; ensures: true; body: { if x < 5 { 5 } else { x } };",
+            &context,
+        );
+        let bytes = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0x83, 0xff, 0x05, // cmpq $5, %rdi
+            0x48, 0xb9, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabsq $5, %rcx
+            0x48, 0x0f, 0x4c, 0xc1, // cmovlq %rcx, %rax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
         );
     }
 
