@@ -1940,7 +1940,10 @@ its channel observation separately, so those descriptors cannot claim
 that all channels matched in the same invocation. The descriptor is not
 reusable Evidence or a certificate. The Agent
 `native-observations-accept` route (mumei-agent#1039) now performs
-`runtime_observation_semantics` from this descriptor.
+`runtime_observation_semantics` from this descriptor. The Agent decides
+acceptance from Core's exit code and its own declared-input recheck; it
+stores the JSON but does not validate the `invocation` envelope, which
+is what Core reports about its own run, not a condition the Agent checks.
 These descriptors name the exit-status observation only as
 `os_exit_status_observation` (formerly bare `os_exit_status` in the
 not-performed lists of the non-exit-status descriptors).

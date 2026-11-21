@@ -3049,7 +3049,8 @@ performs `runtime_observation_semantics`. Its JSON envelope declares
 claim multiple invocations, non-empty argv, stdin bytes, pinned context
 or CPU/memory limits. The Agent
 `native-observations-accept` route (mumei-agent#1039) now performs this
-check from the descriptor. See the [runtime-observation acceptance
+check from the descriptor; its acceptance rests on Core's exit code and
+input recheck, and it does not validate the Core-reported envelope. See the [runtime-observation acceptance
 boundary](VERIFICATION_NATIVE.md#pinned-executable-runtime-observation-acceptance).
 Sibling descriptors now name the exit-status observation only as
 `os_exit_status_observation` (formerly bare `os_exit_status` in

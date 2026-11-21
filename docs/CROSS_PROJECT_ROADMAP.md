@@ -3914,6 +3914,8 @@ cap are enforced. Composition landed via `accept-observations`; this raw
 descriptor is not an Agent performer, while Agent's
 `native-observations-accept` route (mumei-agent#1039) performs
 `runtime_observation_semantics` from the `accept-observations` descriptor.
+Agent acceptance rests on Core's exit code and input recheck; the
+envelope is Core-reported and not validated by the Agent.
 
 ### Wave 5 pinned executable runtime-observation acceptance (C10 consumer)
 
