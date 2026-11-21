@@ -1011,6 +1011,8 @@ fn hash_struct_contract(hasher: &mut Sha256, name: &str, module_env: &ModuleEnv)
             hasher.update(f.name.as_bytes());
             hasher.update(b":");
             hasher.update(f.type_name.as_bytes());
+            hasher.update(b":resolved:");
+            hasher.update(module_env.resolve_base_type(&f.type_name).as_bytes());
             if let Some(constraint) = &f.constraint {
                 hasher.update(b"|field_constraint:");
                 hasher.update(name.as_bytes());
@@ -2116,6 +2118,49 @@ body: { getx(Pair { a: 1, b: 2 }) };
             "trusted atom getx(p: Pair) -> i64\nrequires: true;\nensures: true;\nbody: { p.a };\n";
         let before = env_and_hash(&format!("struct Pair {{ a: i64, b: i64 }}\n{getx}{MAIN}"));
         let after = env_and_hash(&format!("struct Pair {{ a: f64, b: i64 }}\n{getx}{MAIN}"));
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn struct_field_alias_base_change_invalidates_the_proof_hash() {
+        fn hash(source: &str) -> String {
+            let items = parse_module(source);
+            let mut module_env = ModuleEnv::default();
+            let mut main = None;
+            for item in items {
+                match item {
+                    Item::Atom(atom) => main = Some(atom),
+                    Item::StructDef(sdef) => {
+                        module_env.structs.insert(sdef.name.clone(), sdef);
+                    }
+                    Item::TypeDef(refined) => module_env.register_type(&refined),
+                    _ => {}
+                }
+            }
+            compute_proof_hash(&main.expect("main atom parsed"), &module_env)
+        }
+
+        let before = hash(
+            "struct Inner { x: i64 }\n\
+             type U = i64;\n\
+             type T = U;\n\
+             struct S { inner: T, inner_x: i64 }\n\
+             atom main(s: S) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: 0;\n",
+        );
+        let after = hash(
+            "struct Inner { x: i64 }\n\
+             type U = Inner;\n\
+             type T = U;\n\
+             struct S { inner: T, inner_x: i64 }\n\
+             atom main(s: S) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: 0;\n",
+        );
+
         assert_ne!(before, after);
     }
 
