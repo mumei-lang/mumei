@@ -76,11 +76,10 @@ fn output_text(output: &Output) -> String {
 }
 
 /// This golden pins proof-hash bytes for local transitive, imported, and trusted
-/// callees, structs, refined types, and units. It was generated before the
-/// dependency-freshness change; regenerate it only for an intended proof-hash
-/// change.
+/// callees, structs, refined types, and units at the current verifier policy.
+/// Regenerate it only for an intended proof-hash change.
 #[test]
-fn proof_hashes_match_pre_dependency_freshness_golden() {
+fn proof_hashes_match_current_policy_golden() {
     let fixture = Fixture::new();
     let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     for name in ["proof_hash_compat.mm", "proof_hash_compat_lib.mm"] {
