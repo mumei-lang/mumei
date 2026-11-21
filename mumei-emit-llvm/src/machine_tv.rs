@@ -789,9 +789,12 @@ fn lift<'ctx>(
         if parameter_shape.is_some() {
             let integer_leaf_count = leaves.iter().filter(|is_double| !**is_double).count();
             let float_leaf_count = leaves.iter().filter(|is_double| **is_double).count();
-            if integer_argument_index.saturating_add(integer_leaf_count) > ARGUMENT_REGISTERS.len()
-                || float_argument_index.saturating_add(float_leaf_count)
-                    > FLOAT_ARGUMENT_REGISTER_COUNT
+            if (integer_leaf_count > 0
+                && integer_argument_index.saturating_add(integer_leaf_count)
+                    > ARGUMENT_REGISTERS.len())
+                || (float_leaf_count > 0
+                    && float_argument_index.saturating_add(float_leaf_count)
+                        > FLOAT_ARGUMENT_REGISTER_COUNT)
             {
                 return Err(FunctionOutcome::OutsideProfile("argument_count"));
             }
@@ -2199,10 +2202,12 @@ fn lift_call<'ctx>(
                 let integer_leaf_count =
                     leaf_doubles.iter().filter(|is_double| !**is_double).count();
                 let float_leaf_count = leaf_doubles.iter().filter(|is_double| **is_double).count();
-                if integer_argument_index.saturating_add(integer_leaf_count)
-                    > ARGUMENT_REGISTERS.len()
-                    || float_argument_index.saturating_add(float_leaf_count)
-                        > FLOAT_ARGUMENT_REGISTER_COUNT
+                if (integer_leaf_count > 0
+                    && integer_argument_index.saturating_add(integer_leaf_count)
+                        > ARGUMENT_REGISTERS.len())
+                    || (float_leaf_count > 0
+                        && float_argument_index.saturating_add(float_leaf_count)
+                            > FLOAT_ARGUMENT_REGISTER_COUNT)
                 {
                     return Err(FunctionOutcome::OutsideProfile("argument_count"));
                 }
@@ -3773,6 +3778,106 @@ entry:
         println!("mixed struct call disassembly:\n{disassembly}");
         assert_eq!(
             check_function(&bytes, address, &model, &targets, &context),
+            FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn f64_only_struct_after_integer_stack_arguments_uses_xmm_registers() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "struct R { x: f64, y: f64 }\n\
+            atom getx(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, r: R) -> f64 \
+            requires: true; ensures: true; body: { r.x };\n\
+            atom caller(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, x: f64, y: f64) \
+            -> f64 requires: true; ensures: true; body: { getx(a, b, c, d, e, f, g, R { x: x, y: y }) };";
+        let getx_model = source_model_named_with_admission(
+            source,
+            "getx",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let caller_model = source_model_named_with_admission(
+            source,
+            "caller",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(supports_signature(&getx_model));
+        assert!(supports_signature(&caller_model));
+        let call_site = caller_model.call_sites.first().unwrap();
+        assert_eq!(
+            call_site.arg_leaf_doubles,
+            [vec![false; 7], vec![true, true]].concat()
+        );
+        assert!(call_site.argument_shapes.iter().any(|shape| matches!(
+            shape,
+            CallValueShape::Struct {
+                leaf_count: 2,
+                has_f64: true,
+                ..
+            }
+        )));
+
+        let getx_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define double @getx(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, { double, double } %r) {
+entry:
+  %x = extractvalue { double, double } %r, 0
+  ret double %x
+}
+"#;
+        let (getx_address, getx_bytes, getx_targets) =
+            compiled_function_with_targets(getx_ir, "getx");
+        let getx_disassembly = disassemble(&getx_bytes, getx_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("f64 struct after integer stack arguments disassembly:\n{getx_disassembly}");
+        assert_eq!(getx_disassembly.trim(), "retq");
+        assert_eq!(
+            check_function(
+                &getx_bytes,
+                getx_address,
+                &getx_model,
+                &getx_targets,
+                &context,
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let caller_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+declare double @getx(i64, i64, i64, i64, i64, i64, i64, { double, double })
+define double @caller(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, double %x, double %y) {
+entry:
+  %first = insertvalue { double, double } undef, double %x, 0
+  %r = insertvalue { double, double } %first, double %y, 1
+  %result = call double @getx(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, { double, double } %r)
+  ret double %result
+}
+"#;
+        let (caller_address, caller_bytes, caller_targets) =
+            compiled_function_with_targets(caller_ir, "caller");
+        let caller_disassembly = disassemble(&caller_bytes, caller_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!(
+            "f64 struct call after integer stack arguments disassembly:\n{caller_disassembly}"
+        );
+        assert_eq!(
+            check_function(
+                &caller_bytes,
+                caller_address,
+                &caller_model,
+                &caller_targets,
+                &context,
+            ),
             FunctionOutcome::Equivalent
         );
     }
