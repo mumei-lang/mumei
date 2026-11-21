@@ -581,8 +581,17 @@ fn lift<'ctx>(
                     BitwiseOp::Or,
                 )?;
             } else if is_shift_mnemonic(&instruction.mnemonic) {
-                state.flags = lift_shift(instruction, &mut state.registers, context)
-                    .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+                let previous_flags = state.flags.clone();
+                state.flags = lift_shift(
+                    instruction,
+                    &mut state.registers,
+                    &previous_flags,
+                    model,
+                    &state.path_conditions,
+                    &arguments,
+                    context,
+                )
+                .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
             } else if instruction.mnemonic.starts_with("set") {
                 lift_setcc(instruction, &mut state, context)?;
             } else if instruction.mnemonic.starts_with("cmov") {
@@ -1052,6 +1061,10 @@ enum ShiftOp {
 fn lift_shift<'ctx>(
     instruction: &Instruction,
     registers: &mut [BV<'ctx>],
+    previous_flags: &FlagState<'ctx>,
+    model: &PureI64Body<'ctx>,
+    path_conditions: &[Bool<'ctx>],
+    arguments: &[BV<'ctx>],
     context: &'ctx Context,
 ) -> Option<FlagState<'ctx>> {
     let (width, operation) = match instruction.mnemonic.as_str() {
@@ -1064,12 +1077,13 @@ fn lift_shift<'ctx>(
         _ => return None,
     };
     let operands = split_operands(&instruction.operands);
-    let (count, destination) = match operands.as_slice() {
-        [destination] => (1, *destination),
-        [count, destination] => {
-            let count = count.strip_prefix('$').and_then(parse_integer)?;
-            (count, *destination)
-        }
+    let (immediate_count, destination) = match operands.as_slice() {
+        [destination] => (Some(1), *destination),
+        [count, destination] => match count.strip_prefix('$').and_then(parse_integer) {
+            Some(count) => (Some(count), *destination),
+            None if *count == "%cl" => (None, *destination),
+            None => return None,
+        },
         _ => return None,
     };
     let (index, destination_width) = parse_register(destination)?;
@@ -1077,24 +1091,37 @@ fn lift_shift<'ctx>(
         return None;
     }
     let count_mask = if width == 64 { 0x3f } else { 0x1f };
-    let count = count & count_mask;
-    let value = registers[index].extract(width - 1, 0);
-    let shifted = if count == 0 {
-        value
+    let masked_immediate = immediate_count.map(|count| count & count_mask);
+    let shift_count = if let Some(count) = masked_immediate {
+        BV::from_u64(context, count, width)
     } else {
-        let count = BV::from_u64(context, count, width);
-        match operation {
-            ShiftOp::Left => value.bvshl(&count),
-            ShiftOp::LogicalRight => value.bvlshr(&count),
-            ShiftOp::ArithmeticRight => value.bvashr(&count),
-        }
+        registers[1]
+            .extract(7, 0)
+            .bvand(&BV::from_u64(context, count_mask, 8))
+            .zero_ext(width - 8)
     };
-    let flags = if count == 0 {
-        FlagState::Unknown
-    } else {
-        FlagState::ShiftResult {
+    let value = registers[index].extract(width - 1, 0);
+    let shifted = match operation {
+        ShiftOp::Left => value.bvshl(&shift_count),
+        ShiftOp::LogicalRight => value.bvlshr(&shift_count),
+        ShiftOp::ArithmeticRight => value.bvashr(&shift_count),
+    };
+    let flags = match masked_immediate {
+        Some(0) => previous_flags.clone(),
+        Some(_) => FlagState::ShiftResult {
             value: shifted.clone(),
             width,
+        },
+        None => {
+            let count_is_zero = shift_count._eq(&BV::from_u64(context, 0, width));
+            match call_guard_status(model, &count_is_zero, path_conditions, arguments, context) {
+                Some(true) => previous_flags.clone(),
+                Some(false) => FlagState::ShiftResult {
+                    value: shifted.clone(),
+                    width,
+                },
+                None => FlagState::Unknown,
+            }
         }
     };
     write_register(registers, index, shifted, width).then_some(flags)
@@ -2703,16 +2730,25 @@ entry:
             check_function(&masked_zero, 0, &identity_model, &BTreeMap::new(), &context),
             FunctionOutcome::Equivalent
         );
-        let variable_count = [0x48, 0xd3, 0xe0, 0xc3]; // shlq %cl, %rax; retq
+        let variable_shift_model = source_model(
+            "atom helper(x: i64, n: i64) -> i64 requires: true; ensures: true; body: { x << n };",
+            &context,
+        );
+        let variable_count = [
+            0x48, 0x89, 0xf1, // movq %rsi, %rcx
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0xd3, 0xe0, // shlq %cl, %rax
+            0xc3,
+        ];
         assert_eq!(
             check_function(
                 &variable_count,
                 0,
-                &identity_model,
+                &variable_shift_model,
                 &BTreeMap::new(),
                 &context
             ),
-            FunctionOutcome::OutsideProfile("unsupported_instruction")
+            FunctionOutcome::Equivalent
         );
         let branch_after_shift = [0x48, 0xc1, 0xe8, 0x01, 0x7f, 0x01, 0xc3, 0xc3];
         assert_eq!(
@@ -2776,6 +2812,164 @@ entry:
         assert_eq!(
             check_function(&shl_32, 0, &shl_model, &BTreeMap::new(), &context),
             FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn variable_count_shifts_match_probe_and_distinguish_signed_right_shift() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let shl_model = source_model(
+            "atom shl_v(x: i64, n: i64) -> i64 requires: n >= 0 && n <= 62 && x >= 0 && x <= 1000; ensures: true; body: { x << n };",
+            &context,
+        );
+        let shr_pos_model = source_model(
+            "atom shr_pos(x: i64, n: i64) -> i64 requires: x >= 0 && x <= 1000 && n >= 0 && n <= 63; ensures: true; body: { x >> n };",
+            &context,
+        );
+        let shr_signed_model = source_model(
+            "atom shr_signed(x: i64, n: i64) -> i64 requires: x >= -1000 && x <= 1000 && n >= 0 && n <= 63; ensures: true; body: { x >> n };",
+            &context,
+        );
+        let shl32_model = source_model(
+            "atom shl32_v(x: i32, n: i32) -> i32 requires: x >= 0 && x <= 1000 && n >= 0 && n <= 30; ensures: true; body: { x << n };",
+            &context,
+        );
+        let shl_bytes = [
+            0x48, 0x89, 0xf1, // movq %rsi, %rcx
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0xd3, 0xe0, // shlq %cl, %rax
+            0xc3,
+        ];
+        let sar_bytes = [
+            0x48, 0x89, 0xf1, // movq %rsi, %rcx
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0xd3, 0xf8, // sarq %cl, %rax
+            0xc3,
+        ];
+        for (model, bytes, name) in [
+            (&shl_model, &shl_bytes[..], "shl_v"),
+            (&shr_pos_model, &sar_bytes[..], "shr_pos"),
+            (&shr_signed_model, &sar_bytes[..], "shr_signed"),
+            (&shl32_model, &shl_bytes[..], "shl32_v"),
+        ] {
+            assert_eq!(
+                check_function(bytes, 0, model, &BTreeMap::new(), &context),
+                FunctionOutcome::Equivalent,
+                "{name}"
+            );
+        }
+
+        let mut logical_right = sar_bytes;
+        logical_right[8] = 0xe8; // shrq %cl, %rax
+        assert_eq!(
+            check_function(
+                &logical_right,
+                0,
+                &shr_signed_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::Different
+        );
+
+        let constant_32_model = source_model(
+            "atom helper() -> i64 requires: true; ensures: true; body: { 4 };",
+            &context,
+        );
+        let shll_bytes = [
+            0xb8, 0x02, 0x00, 0x00, 0x00, // movl $2, %eax
+            0xb9, 0x01, 0x00, 0x00, 0x00, // movl $1, %ecx
+            0xd3, 0xe0, // shll %cl, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(
+                &shll_bytes,
+                0,
+                &constant_32_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn variable_shift_flags_follow_count_feasibility() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let shift_result_model = source_model(
+            "atom shift_result(x: i64) -> i64 requires: true; ensures: true; body: { if (x << 1) == 0 { 1 } else { 2 } };",
+            &context,
+        );
+        let nonzero_count = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0x83, 0xff, 0x00, // cmpq $0, %rdi
+            0xb9, 0x01, 0x00, 0x00, 0x00, // movl $1, %ecx
+            0x48, 0xd3, 0xe0, // shlq %cl, %rax
+            0x74, 0x06, // je to result 1
+            0xb8, 0x02, 0x00, 0x00, 0x00, // movl $2, %eax
+            0xc3, 0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(
+                &nonzero_count,
+                0,
+                &shift_result_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let compare_model = source_model(
+            "atom compare(x: i64) -> i64 requires: true; ensures: true; body: { if x < 0 { 1 } else { 2 } };",
+            &context,
+        );
+        let zero_count = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0x83, 0xff, 0x00, // cmpq $0, %rdi
+            0xb9, 0x00, 0x00, 0x00, 0x00, // movl $0, %ecx
+            0x48, 0xd3, 0xe0, // shlq %cl, %rax
+            0x7c, 0x06, // jl to result 1
+            0xb8, 0x02, 0x00, 0x00, 0x00, // movl $2, %eax
+            0xc3, 0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&zero_count, 0, &compare_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let undecided_model = source_model(
+            "atom undecided(x: i64, n: i64) -> i64 requires: true; ensures: true; body: { if (x << n) == 0 { 1 } else { 2 } };",
+            &context,
+        );
+        let undecided_count = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0x83, 0xff, 0x00, // cmpq $0, %rdi
+            0x48, 0x89, 0xf1, // movq %rsi, %rcx
+            0x48, 0xd3, 0xe0, // shlq %cl, %rax
+            0x74, 0x06, // je to result 1
+            0xb8, 0x02, 0x00, 0x00, 0x00, // movl $2, %eax
+            0xc3, 0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(
+                &undecided_count,
+                0,
+                &undecided_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::OutsideProfile("unsupported_flags")
         );
     }
 

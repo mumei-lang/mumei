@@ -4032,13 +4032,13 @@ as uninterpreted sites. The x86-64
 integer-register convention and callee-saved preservation are assumed, not
 verified, and make no ABI claim.
 The instruction profile includes `setcc`, byte-register views and extensions,
-masked immediate or implicit-one shifts, and `or` logical flags. The division
-slice adds `cqto`/`cltd`, register `idivq`/`divq`/`divl`, and one-operand
-`imulq` high-half products. Every path must prove the divisor is nonzero and
-the quotient fits, or the function remains outside profile as
-`division_trap`. Nonzero shifts model only zero-flag `e`/`z` and `ne`/`nz`
-conditions; other shift conditions remain unsupported. These are bounded
-proof obligations, not runtime or ABI claims.
+masked immediate, implicit-one, and `%cl`-count shifts, and `or` logical flags.
+The division slice adds `cqto`/`cltd`, register `idivq`/`divq`/`divl`, and
+one-operand `imulq` high-half products. Every path must prove the divisor is
+nonzero and the quotient fits, or the function remains outside profile as
+`division_trap`. Masked-zero shifts preserve the prior flags; nonzero shifts
+model only the result zero flag, and an undecided symbolic count makes flags
+unknown. These are bounded proof obligations, not runtime or ABI claims.
 The `machine_code_forward_branch_function_tv` descriptor keeps its
 forward-only meaning; `machine_code_acyclic_branch_function_tv` covers
 equivalent functions with backward but acyclic edges. The not-performed
