@@ -761,6 +761,116 @@ fn runtime_observations_are_rechecked_on_one_invocation() {
 }
 
 #[test]
+fn runtime_observations_are_accepted_on_one_invocation() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+    assert!(
+        record["link_build"]["canonical_arguments_sha256"].is_string(),
+        "the build fixture pins canonical link arguments"
+    );
+    let accept_observations = |id: &str, json: bool| {
+        let mut args = vec![
+            "native-bundle",
+            "accept-observations",
+            bundle.to_str().unwrap(),
+            source.to_str().unwrap(),
+            "--expected-build-id",
+            id,
+        ];
+        if json {
+            args.push("--json");
+        }
+        cli(&args)
+    };
+
+    let json = accept_observations(&id, true);
+    assert_success(&json);
+    let descriptor: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        descriptor["schema_version"],
+        "mumei.native-evidence-acceptance/v1"
+    );
+    assert_eq!(descriptor["accepted"], true);
+    assert_eq!(
+        descriptor["scope"],
+        "native_bundle_source_llvm_toolchain_reproduction_and_runtime_observation_semantics"
+    );
+    assert_eq!(
+        descriptor["checks_performed"],
+        serde_json::json!([
+            "bundle_identity_binding",
+            "fresh_same_profile_source_recheck",
+            "llvm_snapshot_translation_recheck",
+            "toolchain_object_executable_reproduction",
+            "canonical_link_argument_vector_reproduction",
+            "os_exit_status_observation",
+            "os_stdout_observation",
+            "os_stderr_observation",
+            "runtime_observation_semantics",
+        ])
+    );
+    assert_eq!(
+        descriptor["checks_not_performed"],
+        serde_json::json!([
+            "producer_authenticity",
+            "historical_execution",
+            "raw_link_argument_vector_reproduction",
+            "optimizer_semantics",
+            "abi_runtime_semantics",
+            "grade_promotion",
+            "lean_kernel_checks",
+        ])
+    );
+
+    let text = accept_observations(&id, false);
+    assert_success(&text);
+    assert!(!text.stdout.is_empty());
+
+    for pin in [
+        "expected_exit_status",
+        "expected_stdout_sha256",
+        "expected_stderr_sha256",
+    ] {
+        let mut pinless_record = record.clone();
+        pinless_record["link_build"]
+            .as_object_mut()
+            .unwrap()
+            .remove(pin);
+        let bytes = serde_json::to_vec(&pinless_record).unwrap();
+        fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+        let id = native_bundle::sha256(&bytes);
+        for json in [false, true] {
+            let output = accept_observations(&id, json);
+            assert_eq!(output.status.code(), Some(3), "{pin}, json={json}");
+            assert!(output.stdout.is_empty(), "{pin}, json={json}");
+        }
+    }
+
+    for pin in [
+        "expected_exit_status",
+        "expected_stdout_sha256",
+        "expected_stderr_sha256",
+    ] {
+        let mut wrong_record = record.clone();
+        if pin == "expected_exit_status" {
+            let expected = record["link_build"][pin].as_u64().unwrap();
+            wrong_record["link_build"][pin] =
+                serde_json::json!(if expected == 255 { 1 } else { expected + 1 });
+        } else {
+            wrong_record["link_build"][pin] = serde_json::json!("0".repeat(64));
+        }
+        let bytes = serde_json::to_vec(&wrong_record).unwrap();
+        fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+        let id = native_bundle::sha256(&bytes);
+        let output = accept_observations(&id, true);
+        assert_eq!(output.status.code(), Some(1), "{pin}");
+        assert!(output.stdout.is_empty(), "{pin}");
+    }
+}
+
+#[test]
 fn stderr_acceptance_emits_the_observation_descriptor() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build(root.path());

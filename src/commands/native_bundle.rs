@@ -218,6 +218,12 @@ struct InvocationObservation {
     stderr_sha256: String,
 }
 
+enum RuntimeObservationCheck {
+    Matching(InvocationObservation),
+    Different,
+    Inconclusive(&'static str),
+}
+
 fn observed_invocation(executable: &Path) -> Result<InvocationObservation, ObservedStreamFailure> {
     let mut child = std::process::Command::new(executable)
         .stdin(Stdio::null())
@@ -274,6 +280,45 @@ fn observed_invocation(executable: &Path) -> Result<InvocationObservation, Obser
         stdout_sha256: sha256(&stdout),
         stderr_sha256: sha256(&stderr),
     })
+}
+
+fn check_runtime_observations(
+    exit: Option<u32>,
+    stdout: Option<String>,
+    stderr: Option<String>,
+    stage: Option<tempfile::TempDir>,
+) -> RuntimeObservationCheck {
+    let (Some(expected_exit), Some(expected_stdout), Some(expected_stderr)) =
+        (exit, stdout, stderr)
+    else {
+        drop(stage);
+        return RuntimeObservationCheck::Inconclusive(
+            "Record does not pin every runtime observation (exit status, stdout and stderr); inconclusive.",
+        );
+    };
+    let Some(stage) = stage else {
+        return RuntimeObservationCheck::Inconclusive(
+            "Reproduced executable is unavailable for execution; inconclusive.",
+        );
+    };
+    let observation = observed_invocation(&stage.path().join(BundleFile::Executable.file_name()));
+    drop(stage);
+    let observation = match observation {
+        Ok(observation) => observation,
+        Err(_) => {
+            return RuntimeObservationCheck::Inconclusive(
+                "Executable runtime observation inconclusive; spawn failed, timed out, terminated by signal or exceeded the capture cap.",
+            );
+        }
+    };
+    if observation.exit_status != expected_exit
+        || observation.stdout_sha256 != expected_stdout
+        || observation.stderr_sha256 != expected_stderr
+    {
+        RuntimeObservationCheck::Different
+    } else {
+        RuntimeObservationCheck::Matching(observation)
+    }
 }
 
 /// The stdout channel observation — see `observed_stream`.
@@ -889,102 +934,141 @@ pub(crate) fn run(command: NativeBundleCommand) {
                     expected_stderr_sha256,
                     stage,
                     ..
-                }) => {
-                    let (
-                        Some(expected_exit_status),
-                        Some(expected_stdout_sha256),
-                        Some(expected_stderr_sha256),
-                    ) = (
-                        expected_exit_status,
-                        expected_stdout_sha256,
-                        expected_stderr_sha256,
-                    )
-                    else {
-                        eprintln!(
-                            "Record does not pin every runtime observation (exit status, stdout and stderr); inconclusive."
-                        );
-                        drop(stage);
-                        std::process::exit(3);
-                    };
-                    let Some(stage) = stage else {
-                        eprintln!("Reproduced executable is unavailable for execution; inconclusive.");
-                        std::process::exit(3);
-                    };
-                    match observed_invocation(
-                        &stage.path().join(BundleFile::Executable.file_name()),
-                    ) {
-                        Err(_) => {
-                            eprintln!(
-                                "Executable runtime observation inconclusive; spawn failed, timed out, terminated by signal or exceeded the capture cap."
-                            );
-                            drop(stage);
-                            std::process::exit(3);
-                        }
-                        Ok(observation)
-                            if observation.exit_status != expected_exit_status
-                                || observation.stdout_sha256 != expected_stdout_sha256
-                                || observation.stderr_sha256 != expected_stderr_sha256 =>
-                        {
-                            Err(BundleError(
-                                "reproduced executable's runtime observations differ from the record pins",
-                            ))
-                        }
-                        Ok(observation) => {
-                            if json {
-                                use std::io::Write;
-                                let descriptor = serde_json::json!({
-                                    "schema_version": "mumei.runtime-observation/v1",
-                                    "verdict": "observed_matching",
-                                    "scope": RUNTIME_OBSERVATION_RECHECK_SCOPE,
-                                    "build_id": expected_build_id,
-                                    "invocation": {
-                                        "argv": [],
-                                        "stdin": "closed",
-                                        "timeout_ms": OBSERVATION_TIMEOUT.as_millis(),
-                                        "channel_cap_bytes": OBSERVED_CHANNEL_MAX_BYTES,
-                                    },
-                                    "observations": {
-                                        "exit_status": observation.exit_status,
-                                        "stdout_sha256": observation.stdout_sha256,
-                                        "stderr_sha256": observation.stderr_sha256,
-                                    },
-                                    "checks_performed": [
-                                        "os_exit_status_observation",
-                                        "os_stdout_observation",
-                                        "os_stderr_observation",
-                                        "runtime_observation_semantics",
-                                    ],
-                                    "checks_not_performed": [
-                                        "producer_authenticity",
-                                        "historical_execution",
-                                        "optimizer_semantics",
-                                        "abi_runtime_semantics",
-                                        "grade_promotion",
-                                        "lean_kernel_checks",
-                                    ],
-                                });
-                                serde_json::to_vec_pretty(&descriptor)
-                                    .map_err(|_| {
-                                        BundleError("runtime observation descriptor encoding failed")
-                                    })
-                                    .and_then(|mut bytes| {
-                                        bytes.push(b'\n');
-                                        std::io::stdout()
-                                            .lock()
-                                            .write_all(&bytes)
-                                            .map_err(|_| {
-                                                BundleError(
-                                                    "cannot write runtime observation descriptor",
-                                                )
-                                            })
-                                    })
-                            } else {
-                                println!("Pinned toolchain outputs reproduce the pinned object and executable; one invocation of the reproduced executable matches every pinned runtime observation (exit status, stdout and stderr).\nScope: {RUNTIME_OBSERVATION_RECHECK_SCOPE}");
-                                Ok(())
-                            }
+                }) => match check_runtime_observations(
+                    expected_exit_status,
+                    expected_stdout_sha256,
+                    expected_stderr_sha256,
+                    stage,
+                ) {
+                    RuntimeObservationCheck::Matching(observation) => {
+                        if json {
+                            use std::io::Write;
+                            let descriptor = serde_json::json!({
+                                "schema_version": "mumei.runtime-observation/v1",
+                                "verdict": "observed_matching",
+                                "scope": RUNTIME_OBSERVATION_RECHECK_SCOPE,
+                                "build_id": expected_build_id,
+                                "invocation": {
+                                    "argv": [],
+                                    "stdin": "closed",
+                                    "timeout_ms": OBSERVATION_TIMEOUT.as_millis(),
+                                    "channel_cap_bytes": OBSERVED_CHANNEL_MAX_BYTES,
+                                },
+                                "observations": {
+                                    "exit_status": observation.exit_status,
+                                    "stdout_sha256": observation.stdout_sha256,
+                                    "stderr_sha256": observation.stderr_sha256,
+                                },
+                                "checks_performed": [
+                                    "os_exit_status_observation",
+                                    "os_stdout_observation",
+                                    "os_stderr_observation",
+                                    "runtime_observation_semantics",
+                                ],
+                                "checks_not_performed": [
+                                    "producer_authenticity",
+                                    "historical_execution",
+                                    "optimizer_semantics",
+                                    "abi_runtime_semantics",
+                                    "grade_promotion",
+                                    "lean_kernel_checks",
+                                ],
+                            });
+                            serde_json::to_vec_pretty(&descriptor)
+                                .map_err(|_| {
+                                    BundleError("runtime observation descriptor encoding failed")
+                                })
+                                .and_then(|mut bytes| {
+                                    bytes.push(b'\n');
+                                    std::io::stdout()
+                                        .lock()
+                                        .write_all(&bytes)
+                                        .map_err(|_| {
+                                            BundleError("cannot write runtime observation descriptor")
+                                        })
+                                })
+                        } else {
+                            println!("Pinned toolchain outputs reproduce the pinned object and executable; one invocation of the reproduced executable matches every pinned runtime observation (exit status, stdout and stderr).\nScope: {RUNTIME_OBSERVATION_RECHECK_SCOPE}");
+                            Ok(())
                         }
                     }
+                    RuntimeObservationCheck::Different => Err(BundleError(
+                        "reproduced executable's runtime observations differ from the record pins",
+                    )),
+                    RuntimeObservationCheck::Inconclusive(message) => {
+                        eprintln!("{message}");
+                        std::process::exit(3);
+                    }
+                },
+            }
+        }
+        NativeBundleCommand::AcceptObservations {
+            bundle,
+            source,
+            expected_build_id,
+            json,
+        } => {
+            match recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id) {
+                Err(error) => Err(error),
+                Ok(ArtifactRecheckResult {
+                    result: ArtifactRecheck::Different,
+                    ..
+                }) => Err(BundleError(
+                    "pinned artifact differs from the toolchain's output for the pinned inputs",
+                )),
+                Ok(ArtifactRecheckResult {
+                    result: ArtifactRecheck::Inconclusive,
+                    ..
+                }) => {
+                    eprintln!("Native source/LLVM recheck inconclusive; artifact not accepted.");
+                    std::process::exit(3);
                 }
+                Ok(ArtifactRecheckResult {
+                    result: ArtifactRecheck::Rechecked,
+                    family,
+                    canonical_argv_compared,
+                    expected_exit_status,
+                    expected_stdout_sha256,
+                    expected_stderr_sha256,
+                    stage,
+                }) => match check_runtime_observations(
+                    expected_exit_status,
+                    expected_stdout_sha256,
+                    expected_stderr_sha256,
+                    stage,
+                ) {
+                    RuntimeObservationCheck::Matching(_) => {
+                        let acceptance = match (family, canonical_argv_compared) {
+                            (RecordFamily::Multifile, true) => {
+                                &MULTIFILE_RUNTIME_OBSERVATION_ACCEPTANCE
+                            }
+                            (RecordFamily::Multifile, false) => {
+                                &MULTIFILE_RUNTIME_OBSERVATION_ACCEPTANCE_ARGV_UNPINNED
+                            }
+                            (RecordFamily::Single | RecordFamily::Module, true) => {
+                                &RUNTIME_OBSERVATION_ACCEPTANCE
+                            }
+                            (RecordFamily::Single | RecordFamily::Module, false) => {
+                                &RUNTIME_OBSERVATION_ACCEPTANCE_ARGV_UNPINNED
+                            }
+                        };
+                        write_native_acceptance(
+                            Outcome::EquivalentWithinProfile,
+                            json,
+                            acceptance,
+                            None,
+                            &mut std::io::stdout().lock(),
+                        )
+                        .map(|_| ())
+                    }
+                    RuntimeObservationCheck::Different => Err(BundleError(
+                        "reproduced executable's runtime observations differ from the record pins",
+                    )),
+                    RuntimeObservationCheck::Inconclusive(message) => {
+                        eprintln!("{message}");
+                        std::process::exit(3);
+                    }
+                },
             }
         }
     };
@@ -1199,6 +1283,57 @@ const STDERR_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance = NativeAcceptance {
     performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "os_stderr_observation"],
     not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "os_stdout_observation", "grade_promotion", "lean_kernel_checks"],
     text: "Native artifact accepted within the pinned bundle/toolchain profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, reproduced executable's stderr digest observed matching the record pin.\nAcceptance scope excludes producer authenticity, historical execution (one run is an observation, not a history), OS exit-status observation, stdout observation, canonical link argument-vector reproduction (the record pins no canonical argv), raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/process semantics, grade and Lean promotion.\n",
+};
+
+// Runtime-observation acceptance descriptors: all three channel
+// observations come from ONE run, so `runtime_observation_semantics` is
+// performed only when that same run observed all three.
+const MULTIFILE_RUNTIME_OBSERVATION_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
+    scope: "native_multifile_bundle_source_llvm_toolchain_reproduction_and_runtime_observation_semantics",
+    performed: &["bundle_identity_binding", "pinned_member_merge_rederivation", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "canonical_link_argument_vector_reproduction", "os_exit_status_observation", "os_stdout_observation", "os_stderr_observation", "runtime_observation_semantics"],
+    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "grade_promotion", "lean_kernel_checks"],
+    text: "Native multifile artifact accepted within the pinned bundle/toolchain profile: identities bound, import closure re-merged from pinned members, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, canonical link argument vector re-derived, one invocation of the reproduced executable observed matching every runtime-observation pin (exit status, stdout and stderr).\nAcceptance scope excludes producer authenticity, historical execution (one run is an observation, not a history), raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/process semantics, grade and Lean promotion.\n",
+};
+
+const MULTIFILE_RUNTIME_OBSERVATION_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance =
+    NativeAcceptance {
+        scope: "native_multifile_bundle_source_llvm_toolchain_reproduction_and_runtime_observation_semantics",
+        performed: &[
+            "bundle_identity_binding",
+            "pinned_member_merge_rederivation",
+            "fresh_same_profile_source_recheck",
+            "llvm_snapshot_translation_recheck",
+            "toolchain_object_executable_reproduction",
+            "os_exit_status_observation",
+            "os_stdout_observation",
+            "os_stderr_observation",
+            "runtime_observation_semantics",
+        ],
+        not_performed: &[
+            "producer_authenticity",
+            "historical_execution",
+            "canonical_link_argument_vector_reproduction",
+            "raw_link_argument_vector_reproduction",
+            "optimizer_semantics",
+            "abi_runtime_semantics",
+            "grade_promotion",
+            "lean_kernel_checks",
+        ],
+        text: "Native multifile artifact accepted within the pinned bundle/toolchain profile: identities bound, import closure re-merged from pinned members, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, one invocation of the reproduced executable observed matching every runtime-observation pin (exit status, stdout and stderr).\nAcceptance scope excludes producer authenticity, historical execution (one run is an observation, not a history), canonical link argument-vector reproduction (the record pins no canonical argv), raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/process semantics, grade and Lean promotion.\n",
+    };
+
+const RUNTIME_OBSERVATION_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
+    scope: "native_bundle_source_llvm_toolchain_reproduction_and_runtime_observation_semantics",
+    performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "canonical_link_argument_vector_reproduction", "os_exit_status_observation", "os_stdout_observation", "os_stderr_observation", "runtime_observation_semantics"],
+    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "grade_promotion", "lean_kernel_checks"],
+    text: "Native artifact accepted within the pinned bundle/toolchain profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, canonical link argument vector re-derived, one invocation of the reproduced executable observed matching every runtime-observation pin (exit status, stdout and stderr).\nAcceptance scope excludes producer authenticity, historical execution (one run is an observation, not a history), raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/process semantics, grade and Lean promotion.\n",
+};
+
+const RUNTIME_OBSERVATION_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance = NativeAcceptance {
+    scope: "native_bundle_source_llvm_toolchain_reproduction_and_runtime_observation_semantics",
+    performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "os_exit_status_observation", "os_stdout_observation", "os_stderr_observation", "runtime_observation_semantics"],
+    not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "grade_promotion", "lean_kernel_checks"],
+    text: "Native artifact accepted within the pinned bundle/toolchain profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, one invocation of the reproduced executable observed matching every runtime-observation pin (exit status, stdout and stderr).\nAcceptance scope excludes producer authenticity, historical execution (one run is an observation, not a history), canonical link argument-vector reproduction (the record pins no canonical argv), raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/process semantics, grade and Lean promotion.\n",
 };
 
 /// On an accepted outcome emits one anonymous acceptance descriptor — the
@@ -2570,6 +2705,32 @@ mod tests {
             observed_invocation(&dir.path().join("missing")),
             Err(ObservedStreamFailure::SpawnFailed)
         );
+    }
+
+    #[test]
+    fn runtime_observation_acceptance_checks_are_disjoint_and_same_run() {
+        let runtime_checks = [
+            "os_exit_status_observation",
+            "os_stdout_observation",
+            "os_stderr_observation",
+            "runtime_observation_semantics",
+        ];
+        let acceptances = [
+            &MULTIFILE_RUNTIME_OBSERVATION_ACCEPTANCE,
+            &MULTIFILE_RUNTIME_OBSERVATION_ACCEPTANCE_ARGV_UNPINNED,
+            &RUNTIME_OBSERVATION_ACCEPTANCE,
+            &RUNTIME_OBSERVATION_ACCEPTANCE_ARGV_UNPINNED,
+        ];
+        for acceptance in acceptances {
+            for check in runtime_checks {
+                assert!(acceptance.performed.contains(&check));
+            }
+            for check in acceptance.performed {
+                assert!(!acceptance.not_performed.contains(check));
+            }
+            assert!(!acceptance.performed.contains(&"os_exit_status"));
+            assert!(!acceptance.not_performed.contains(&"os_exit_status"));
+        }
     }
 
     #[test]
