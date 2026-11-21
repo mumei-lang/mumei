@@ -1772,6 +1772,8 @@ are treated as calls followed by returns. A function containing both a
 conditional branch and a call is outside the profile. A small abstract stack
 handles register `pushq`/`popq` and immediate `%rsp` adjustments;
 `%rsp`-relative memory accesses are unsupported.
+`%spl` byte writes are modeled, but make the stack pointer untrackable, so a
+function containing one cannot complete a supported return path.
 
 Conditional branches and local unconditional jumps must target the start of a
 decoded instruction strictly after the branch. Multiple `retq` instructions
@@ -1780,15 +1782,32 @@ falling off the function is outside the profile. Backward or equal branch
 targets are reported as `backward_branch`; targets outside the function or
 not at an instruction boundary are `branch_target`.
 
-`cmpl`/`cmpq` and `testl`/`testq` set flags without changing registers.
-`subl`/`subq` and `xorl`/`xorq` also set flags; `andl`/`andq` use the modeled
-logical-result flags. Compare/subtract flags retain operand width and model
-signed and unsigned comparisons, equality, and the result sign bit. Test,
-and, and xor flags model zero/sign with carry and overflow clear. The
+`cmpb`/`cmpl`/`cmpq` and `testb`/`testl`/`testq` set flags without changing
+registers. `subl`/`subq` and `xorl`/`xorq` also set flags; `andl`/`andq` and
+`orl`/`orq` update their destination and set logical-result flags.
+Compare/subtract flags retain operand width and model signed and unsigned
+comparisons, equality, and the result sign bit. Test, and, or, and xor flags
+model zero/sign with carry and overflow clear. The
 supported condition codes are `e`/`z`, `ne`/`nz`, `l`/`nge`, `le`/`ng`,
 `g`/`nle`, `ge`/`nl`, `b`/`c`/`nae`, `be`/`na`, `a`/`nbe`,
 `ae`/`nb`/`nc`, `s`, and `ns`. `cmov<cc>l` and `cmov<cc>q` with register
-operands are modeled as conditional expressions; `set<cc>` is unsupported.
+operands are modeled as conditional expressions. `set<cc>` with an 8-bit
+register destination writes the condition as zero or one; memory destinations
+are unsupported.
+
+The supported byte-register views are `al`, `cl`, `dl`, `bl`, `spl`, `bpl`,
+`sil`, `dil`, and `r8b` through `r15b`. An 8-bit write preserves bits 63..8;
+32-bit writes zero-extend. `ah`, `bh`, `ch`, `dh`, and 16-bit registers are
+unsupported. `movzbl`/`movzbq` and `movsbl`/`movsbq` zero- or sign-extend an
+8-bit register source.
+
+`shlq`/`shll`, `shrq`/`shrl`, and `sarq`/`sarl` accept an immediate count or
+the implicit count of one printed without a count operand. Counts are masked
+to six bits for 64-bit operations and five bits for 32-bit operations; a
+masked zero leaves the destination unchanged. 32-bit shift results
+zero-extend. Shifts set flags to unknown, and `%cl`-count shifts are
+unsupported.
+
 `mov`, `lea`, `push`, `pop`, and `nop` preserve flags. Initial flags and flags
 after other arithmetic or calls are unknown, so a condition that reads them
 is outside the profile. Symbolic execution is bounded at 64 completed paths;

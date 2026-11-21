@@ -279,6 +279,7 @@ struct MachineState<'ctx> {
     registers: Vec<BV<'ctx>>,
     stack: Vec<(i64, BV<'ctx>)>,
     rsp_offset: i64,
+    rsp_is_known: bool,
     flags: FlagState<'ctx>,
     call_state: CallState<'ctx>,
     path_conditions: Vec<Bool<'ctx>>,
@@ -315,6 +316,7 @@ fn lift<'ctx>(
         registers,
         stack: Vec::new(),
         rsp_offset: 0,
+        rsp_is_known: true,
         flags: FlagState::Unknown,
         call_state: CallState {
             call_index: 0,
@@ -451,11 +453,11 @@ fn lift<'ctx>(
                     .is_some_and(|destination| *destination == "%rsp")
             {
                 lift_rsp_adjustment(instruction, &mut state, context)?;
-            } else if matches!(instruction.mnemonic.as_str(), "cmpl" | "cmpq") {
+            } else if matches!(instruction.mnemonic.as_str(), "cmpb" | "cmpl" | "cmpq") {
                 let width = instruction_width(&instruction.mnemonic)?;
                 state.flags =
                     compare_flags(&instruction.operands, &state.registers, context, width)?;
-            } else if matches!(instruction.mnemonic.as_str(), "testl" | "testq") {
+            } else if matches!(instruction.mnemonic.as_str(), "testb" | "testl" | "testq") {
                 let width = instruction_width(&instruction.mnemonic)?;
                 state.flags = test_flags(&instruction.operands, &state.registers, context, width)?;
             } else if matches!(instruction.mnemonic.as_str(), "subl" | "subq") {
@@ -479,7 +481,7 @@ fn lift<'ctx>(
                     &mut state.registers,
                     context,
                     width,
-                    false,
+                    BitwiseOp::Xor,
                 )?;
             } else if matches!(instruction.mnemonic.as_str(), "andl" | "andq") {
                 let width = instruction_width(&instruction.mnemonic)?;
@@ -488,13 +490,31 @@ fn lift<'ctx>(
                     &mut state.registers,
                     context,
                     width,
-                    true,
+                    BitwiseOp::And,
                 )?;
+            } else if matches!(instruction.mnemonic.as_str(), "orl" | "orq") {
+                let width = instruction_width(&instruction.mnemonic)?;
+                state.flags = lift_bitwise_flags(
+                    &instruction.operands,
+                    &mut state.registers,
+                    context,
+                    width,
+                    BitwiseOp::Or,
+                )?;
+            } else if is_shift_mnemonic(&instruction.mnemonic) {
+                if !lift_shift(instruction, &mut state.registers, context) {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                }
+                state.flags = FlagState::Unknown;
+            } else if instruction.mnemonic.starts_with("set") {
+                lift_setcc(instruction, &mut state, context)?;
             } else if instruction.mnemonic.starts_with("cmov") {
                 lift_cmov(instruction, &mut state, context)?;
             } else {
-                let leaves_flags_unchanged =
-                    matches!(instruction.mnemonic.as_str(), "movl" | "movq" | "leaq");
+                let leaves_flags_unchanged = matches!(
+                    instruction.mnemonic.as_str(),
+                    "movl" | "movq" | "movzbl" | "movzbq" | "movsbl" | "movsbq" | "leaq"
+                );
                 if !lift_instruction(instruction, &mut state.registers, context) {
                     return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
                 }
@@ -677,6 +697,9 @@ fn finish_path<'ctx>(
     model: &PureI64Body<'ctx>,
     call_targets: &BTreeMap<u64, CallTarget>,
 ) -> Result<LiftedPath<'ctx>, FunctionOutcome> {
+    if !state.rsp_is_known {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
     if state.call_state.call_index != model.call_sites.len() {
         return Err(FunctionOutcome::OutsideProfile("call_order"));
     }
@@ -691,7 +714,9 @@ fn finish_path<'ctx>(
 }
 
 fn instruction_width(mnemonic: &str) -> Result<u32, FunctionOutcome> {
-    if mnemonic.ends_with('l') {
+    if mnemonic.ends_with('b') {
+        Ok(8)
+    } else if mnemonic.ends_with('l') {
         Ok(32)
     } else if mnemonic.ends_with('q') {
         Ok(64)
@@ -740,12 +765,19 @@ fn test_flags<'ctx>(
     })
 }
 
+#[derive(Clone, Copy)]
+enum BitwiseOp {
+    And,
+    Or,
+    Xor,
+}
+
 fn lift_bitwise_flags<'ctx>(
     operands: &str,
     registers: &mut [BV<'ctx>],
     context: &'ctx Context,
     width: u32,
-    and: bool,
+    operation: BitwiseOp,
 ) -> Result<FlagState<'ctx>, FunctionOutcome> {
     let operands = split_operands(operands);
     let [source, destination] = operands.as_slice() else {
@@ -758,21 +790,112 @@ fn lift_bitwise_flags<'ctx>(
     }
     let left = register_value(destination, registers, width)
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
-    let right = if and {
-        operand_value(source, registers, context, width)
-    } else {
-        register_value(source, registers, width)
+    let right = match operation {
+        BitwiseOp::And | BitwiseOp::Or => operand_value(source, registers, context, width),
+        BitwiseOp::Xor => register_value(source, registers, width),
     }
     .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
-    let value = if and {
-        left.bvand(&right)
-    } else {
-        left.bvxor(&right)
+    let value = match operation {
+        BitwiseOp::And => left.bvand(&right),
+        BitwiseOp::Or => left.bvor(&right),
+        BitwiseOp::Xor => left.bvxor(&right),
     };
     if !write_register(registers, index, value.clone(), width) {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
     Ok(FlagState::Result { value, width })
+}
+
+fn lift_setcc<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    let suffix = instruction
+        .mnemonic
+        .strip_prefix("set")
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let condition = condition_for_flags(&state.flags, suffix, context)?;
+    let operands = split_operands(&instruction.operands);
+    let [destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let (index, width) = parse_register(destination)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    if width != 8 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let value = condition
+        .ite(&BV::from_u64(context, 1, 1), &BV::from_u64(context, 0, 1))
+        .zero_ext(7);
+    if !write_register(&mut state.registers, index, value, 8) {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    if index == 4 {
+        state.rsp_is_known = false;
+    }
+    Ok(())
+}
+
+fn is_shift_mnemonic(mnemonic: &str) -> bool {
+    matches!(
+        mnemonic,
+        "shlq" | "shll" | "shrq" | "shrl" | "sarq" | "sarl"
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ShiftOp {
+    Left,
+    LogicalRight,
+    ArithmeticRight,
+}
+
+fn lift_shift<'ctx>(
+    instruction: &Instruction,
+    registers: &mut [BV<'ctx>],
+    context: &'ctx Context,
+) -> bool {
+    let (width, operation) = match instruction.mnemonic.as_str() {
+        "shlq" => (64, ShiftOp::Left),
+        "shll" => (32, ShiftOp::Left),
+        "shrq" => (64, ShiftOp::LogicalRight),
+        "shrl" => (32, ShiftOp::LogicalRight),
+        "sarq" => (64, ShiftOp::ArithmeticRight),
+        "sarl" => (32, ShiftOp::ArithmeticRight),
+        _ => return false,
+    };
+    let operands = split_operands(&instruction.operands);
+    let (count, destination) = match operands.as_slice() {
+        [destination] => (1, *destination),
+        [count, destination] => {
+            let Some(count) = count.strip_prefix('$').and_then(parse_integer) else {
+                return false;
+            };
+            (count, *destination)
+        }
+        _ => return false,
+    };
+    let Some((index, destination_width)) = parse_register(destination) else {
+        return false;
+    };
+    if destination_width != width || index == 4 {
+        return false;
+    }
+    let count_mask = if width == 64 { 0x3f } else { 0x1f };
+    let count = count & count_mask;
+    let value = registers[index].extract(width - 1, 0);
+    let shifted = if count == 0 {
+        value
+    } else {
+        let count = BV::from_u64(context, count, width);
+        match operation {
+            ShiftOp::Left => value.bvshl(&count),
+            ShiftOp::LogicalRight => value.bvlshr(&count),
+            ShiftOp::ArithmeticRight => value.bvashr(&count),
+        }
+    };
+    write_register(registers, index, shifted, width)
 }
 
 fn lift_cmov<'ctx>(
@@ -956,6 +1079,10 @@ fn lift_instruction<'ctx>(
     match instruction.mnemonic.as_str() {
         "movl" => lift_move(&operands, registers, context, 32),
         "movq" => lift_move(&operands, registers, context, 64),
+        "movzbl" => lift_move_extend(&operands, registers, false, 32),
+        "movzbq" => lift_move_extend(&operands, registers, false, 64),
+        "movsbl" => lift_move_extend(&operands, registers, true, 32),
+        "movsbq" => lift_move_extend(&operands, registers, true, 64),
         "leaq" => lift_lea(&operands, registers, context),
         "addl" => lift_binary(&operands, registers, context, 32, BinaryOp::Add),
         "addq" => lift_binary(&operands, registers, context, 64, BinaryOp::Add),
@@ -969,6 +1096,33 @@ fn lift_instruction<'ctx>(
         "xorq" => lift_xor(&operands, registers, 64),
         _ => false,
     }
+}
+
+fn lift_move_extend(
+    operands: &[&str],
+    registers: &mut [BV<'_>],
+    sign_extend: bool,
+    destination_width: u32,
+) -> bool {
+    let [source, destination] = operands else {
+        return false;
+    };
+    let Some(source) = register_value(source, registers, 8) else {
+        return false;
+    };
+    let Some((index, width)) = parse_register(destination) else {
+        return false;
+    };
+    if width != destination_width || index == 4 {
+        return false;
+    }
+    let extension = destination_width - 8;
+    let value = if sign_extend {
+        source.sign_ext(extension)
+    } else {
+        source.zero_ext(extension)
+    };
+    write_register(registers, index, value, destination_width)
 }
 
 #[derive(Clone, Copy)]
@@ -1138,14 +1292,16 @@ fn write_register<'ctx>(
     value: BV<'ctx>,
     width: u32,
 ) -> bool {
-    if value.get_size() != width {
+    if index >= registers.len() || value.get_size() != width {
         return false;
     }
-    registers[index] = if width == 32 {
-        value.zero_ext(32)
-    } else {
-        value
+    let updated = match width {
+        8 => registers[index].extract(63, 8).concat(&value),
+        32 => value.zero_ext(32),
+        64 => value,
+        _ => return false,
     };
+    registers[index] = updated;
     true
 }
 
@@ -1220,6 +1376,22 @@ fn split_operands(operands: &str) -> Vec<&str> {
 
 fn parse_register(register: &str) -> Option<(usize, u32)> {
     Some(match register.strip_prefix('%')? {
+        "al" => (0, 8),
+        "cl" => (1, 8),
+        "dl" => (2, 8),
+        "bl" => (3, 8),
+        "spl" => (4, 8),
+        "bpl" => (5, 8),
+        "sil" => (6, 8),
+        "dil" => (7, 8),
+        "r8b" => (8, 8),
+        "r9b" => (9, 8),
+        "r10b" => (10, 8),
+        "r11b" => (11, 8),
+        "r12b" => (12, 8),
+        "r13b" => (13, 8),
+        "r14b" => (14, 8),
+        "r15b" => (15, 8),
         "rax" => (0, 64),
         "eax" => (0, 32),
         "rcx" => (1, 64),
@@ -1706,6 +1878,325 @@ entry:
         assert_eq!(
             check_function(&inverted_absd, 0, &absd, &BTreeMap::new(), &context),
             FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn setcc_byte_registers_and_extend_moves_match_boolean_models() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let lt_model = source_model(
+            "atom lt(x: i64, y: i64) -> bool requires: true; ensures: true; body: { x < y };",
+            &context,
+        );
+        let lt_bytes = [
+            0x31, 0xc0, // xorl %eax, %eax
+            0x48, 0x39, 0xf7, // cmpq %rsi, %rdi
+            0x0f, 0x9c, 0xc0, // setl %al
+            0xc3, // retq
+        ];
+        let disassembly = disassemble(&lt_bytes, 0).unwrap();
+        assert_eq!(
+            disassembly
+                .iter()
+                .map(|instruction| instruction.mnemonic.as_str())
+                .collect::<Vec<_>>(),
+            ["xorl", "cmpq", "setl", "retq"]
+        );
+        assert_eq!(
+            check_function(&lt_bytes, 0, &lt_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+        let mut inverted = lt_bytes;
+        inverted[6] = 0x9d; // setge %al
+        assert_eq!(
+            check_function(&inverted, 0, &lt_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Different
+        );
+
+        let upper_bits = [
+            0xb8, 0x00, 0x01, 0x00, 0x00, // movl $0x100, %eax
+            0x48, 0x39, 0xf7, // cmpq %rsi, %rdi
+            0x0f, 0x9c, 0xc0, // setl %al
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&upper_bits, 0, &lt_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Different
+        );
+        let zero_extend_32 = [
+            0x48, 0x39, 0xf7, // cmpq %rsi, %rdi
+            0x0f, 0x9c, 0xc0, // setl %al
+            0x0f, 0xb6, 0xc0, // movzbl %al, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&zero_extend_32, 0, &lt_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+        let zero_extend_64 = [
+            0x48, 0x39, 0xf7, // cmpq %rsi, %rdi
+            0x0f, 0x9c, 0xc0, // setl %al
+            0x48, 0x0f, 0xb6, 0xc0, // movzbq %al, %rax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&zero_extend_64, 0, &lt_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let one_model = source_model(
+            "atom helper() -> i64 requires: true; ensures: true; body: { 1 };",
+            &context,
+        );
+        let cmpb = [
+            0xb8, 0xff, 0x00, 0x00, 0x00, // movl $255, %eax
+            0xb9, 0x01, 0x00, 0x00, 0x00, // movl $1, %ecx
+            0x38, 0xc1, // cmpb %al, %cl
+            0x0f, 0x9f, 0xc2, // setg %dl
+            0x0f, 0xb6, 0xc2, // movzbl %dl, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&cmpb, 0, &one_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+        let testb = [
+            0xb8, 0xff, 0x00, 0x00, 0x00, // movl $255, %eax
+            0x84, 0xc0, // testb %al, %al
+            0x0f, 0x98, 0xc1, // sets %cl
+            0x0f, 0xb6, 0xc1, // movzbl %cl, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&testb, 0, &one_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let positive_model = source_model(
+            "atom helper() -> i64 requires: true; ensures: true; body: { 4294967295 };",
+            &context,
+        );
+        let sign_extend_32 = [
+            0xb8, 0xff, 0x00, 0x00, 0x00, // movl $255, %eax
+            0x0f, 0xbe, 0xc0, // movsbl %al, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(
+                &sign_extend_32,
+                0,
+                &positive_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+        let negative_model = source_model(
+            "atom helper() -> i64 requires: true; ensures: true; body: { -1 };",
+            &context,
+        );
+        let sign_extend_64 = [
+            0xb8, 0xff, 0x00, 0x00, 0x00, // movl $255, %eax
+            0x48, 0x0f, 0xbe, 0xc0, // movsbq %al, %rax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(
+                &sign_extend_64,
+                0,
+                &negative_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let high_byte = [0x0f, 0xb6, 0xc4, 0xc3]; // movzbl %ah, %eax; retq
+        assert_eq!(
+            check_function(&high_byte, 0, &one_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+        let unknown_flags = [0x0f, 0x9c, 0xc0, 0xc3]; // setl %al; retq
+        assert_eq!(
+            check_function(&unknown_flags, 0, &lt_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_flags")
+        );
+        let set_spl = [
+            0x48, 0x39, 0xf7, // cmpq %rsi, %rdi
+            0x40, 0x0f, 0x9c, 0xc4, // setl %spl
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&set_spl, 0, &lt_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+    }
+
+    #[test]
+    fn immediate_and_implicit_shifts_match_and_validate_widths() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let half_model = source_model(
+            "atom half(x: i64) -> i64 requires: x >= 0 && x <= 1000; ensures: result >= 0; body: { x / 2 };",
+            &context,
+        );
+        let half_bytes = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0xc1, 0xe8, 0x3f, // shrq $0x3f, %rax
+            0x48, 0x01, 0xf8, // addq %rdi, %rax
+            0x48, 0xd1, 0xf8, // sarq %rax (implicit count 1)
+            0xc3,
+        ];
+        let half_disassembly = disassemble(&half_bytes, 0).unwrap();
+        let sar = half_disassembly
+            .iter()
+            .find(|instruction| instruction.mnemonic == "sarq")
+            .unwrap();
+        assert_eq!(sar.operands, "%rax");
+        assert_eq!(
+            check_function(&half_bytes, 0, &half_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+        let mut wrong_count = half_bytes;
+        wrong_count[6] = 0x3e;
+        assert_eq!(
+            check_function(&wrong_count, 0, &half_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Different
+        );
+
+        let identity_model = source_model(
+            "atom helper(x: i64) -> i64 requires: true; ensures: true; body: { x };",
+            &context,
+        );
+        let masked_zero = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0xc1, 0xe0, 0x40, // shlq $0x40, %rax (masked count 0)
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&masked_zero, 0, &identity_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+        let variable_count = [0x48, 0xd3, 0xe0, 0xc3]; // shlq %cl, %rax; retq
+        assert_eq!(
+            check_function(
+                &variable_count,
+                0,
+                &identity_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+        let branch_after_shift = [0x48, 0xc1, 0xe8, 0x01, 0x74, 0x01, 0xc3, 0xc3];
+        assert_eq!(
+            check_function(
+                &branch_after_shift,
+                0,
+                &identity_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::OutsideProfile("unsupported_flags")
+        );
+
+        let shifted_constant_model = source_model(
+            "atom helper() -> i64 requires: true; ensures: true; body: { 2147483647 };",
+            &context,
+        );
+        let shift_32 = [
+            0xb8, 0xff, 0xff, 0xff, 0xff, // movl $-1, %eax
+            0xc1, 0xe8, 0x01, // shrl $1, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(
+                &shift_32,
+                0,
+                &shifted_constant_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+        let masked_zero_32_model = source_model(
+            "atom helper() -> i64 requires: true; ensures: true; body: { 305419896 };",
+            &context,
+        );
+        let masked_zero_32 = [
+            0xb8, 0x78, 0x56, 0x34, 0x12, // movl $0x12345678, %eax
+            0xc1, 0xe8, 0x20, // shrl $0x20, %eax (masked count 0)
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(
+                &masked_zero_32,
+                0,
+                &masked_zero_32_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+        let shl_model = source_model(
+            "atom helper() -> i64 requires: true; ensures: true; body: { 4 };",
+            &context,
+        );
+        let shl_32 = [
+            0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0xc1, 0xe0, 0x02, // shll $2, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&shl_32, 0, &shl_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn or_flags_control_forward_branches_and_refute_inverted_branch() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom helper(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { if x == 0 && y == 0 { 1 } else { 2 } };",
+            &context,
+        );
+        let bytes = [
+            0x48, 0x09, 0xf7, // orq %rsi, %rdi
+            0x74, 0x06, // je to result 1
+            0xb8, 0x02, 0x00, 0x00, 0x00, // movl $2, %eax
+            0xc3, 0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+        let mut inverted = bytes;
+        inverted[3] = 0x75; // jne
+        assert_eq!(
+            check_function(&inverted, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::Different
+        );
+        let orl_model = source_model(
+            "atom helper() -> i64 requires: true; ensures: true; body: { 3 };",
+            &context,
+        );
+        let orl = [
+            0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0x83, 0xc8, 0x02, // orl $2, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&orl, 0, &orl_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
         );
     }
 
