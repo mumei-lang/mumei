@@ -6296,6 +6296,109 @@ on a local composite. `s[i].F[j]` direct-index stays closed exactly as
 `st.F[j]` does — a collection field is reachable only through
 extraction — and a pure array field still copies on extract.
 
+### Chan-element local containers (mumei-agent #1017)
+
+[mumei-agent#1017](https://github.com/mumei-lang/mumei-agent/pull/1017)
+admits `s[i] <- x` / `<-s[i]` on a bound `[]chan T` or `map[K]chan T`
+with a scalar payload: the element queues conflate into the container's
+share group, so an element send deposits into every holder's dep set
+like an element store and an element receive reads the group — `c <- x`
+(for `s := []chan{c}`), `s[i] <- x`, `b := s` copies, `s[i] = c` queue
+stores, and `s = []chan{c2}` reseats all stay connected. A reseat
+(`c = make(chan)`) detaches the member's queue under a surrogate token
+carrying the pre-reseat contents, since the slice keeps a copy of the
+old descriptor; a maybe-skipped reseat keeps membership so the untaken
+path's sends still reach the group. `[N]chan`, `[]chan chan`, element
+extraction (`d := s[i]`, until #1019), `close(s[i])`, `for range` and
+`select` on an element queue stay closed.
+
+### Chan-element container parameters and results (mumei-agent #1018)
+
+[mumei-agent#1018](https://github.com/mumei-lang/mumei-agent/pull/1018)
+lifts the signature gate so `[]chan T` / `map[K]chan T` params and
+results admit under the same `_chan_elem_collection` model: a `[]chan`
+param seeds its own share group like a scalar-element collection
+parameter, `s[i] <- x` deposits land in `indirect_writes` so a callee's
+send through the parameter reaches caller memory, and
+`func G() []chan int64` binds like the local `s :=` form. `[N]chan`
+and `[]chan chan` signatures stay closed.
+
+### Bound chan-element extraction (mumei-agent #1019)
+
+[mumei-agent#1019](https://github.com/mumei-lang/mumei-agent/pull/1019)
+admits `d := s[i]` / `var d chan T = s[i]` / `d = s[i]` on a bound
+`[]chan`/`map[K]chan`: the extracted name mints as a *member* of the
+container's share group (not a copied token set — a copy would diverge
+on the first `s[j] = c2` union), so `d <- x`, `<-d`, `for v := range d`
+and passing `d` as a chan argument all see the group's conflated queue
+deps, and a `s[j] <- x` send lands in `d`'s slot like every sharer's.
+Reseating behaves like a rebind: `d = t[i]` detaches before joining
+`t`'s group (pre-state resolution on parallel assigns), a conditional
+`if f { d = t[i] }` externalises the maybe-skipped rebind AND mints
+the new membership, and `d = make(chan)` parks the old queue under a
+`/chan_queue/` surrogate so `<-s[0]` keeps reading it — the surrogate's
+members inherit the detached set so `e := d; d = make; e <- x` still
+lands in the group, while `call_targets` excludes synthetic ids so
+unchanged source reuses the summary. `d := s[0][0]` on `[][]chan`
+stays closed.
+
+### close on a bound chan element (mumei-agent #1023)
+
+[mumei-agent#1023](https://github.com/mumei-lang/mumei-agent/pull/1023)
+admits `close(s[i])` on a bound chan-element container: a purely local
+group tracks no synchronization fact so the close is a no-op like
+`close(ch)`, while a group holding a param/external member records an
+imported `CallTransfer` on each such member (deduped, deterministically
+sorted) — a caller-visible effect like `s[i] <- x`. The index operand
+still evaluates for non-literal indexes and is recorded as a statement
+read on the close, matching the element send/read paths.
+
+### Chan-element arrays (mumei-agent #1021)
+
+[mumei-agent#1021](https://github.com/mumei-lang/mumei-agent/pull/1021)
+widens `_chan_elem_collection` to `array` roots so `[N]chan T` admits
+the whole element surface (`a[i] <- x` / `<-a[i]` / `d := a[i]` /
+`close(a[i])` / `for v := range a[i]` / `select`): the `b := a` copy
+still names the same queues, so `_opaque_container_bind` joins `b` to
+`a`'s group like a slice copy instead of minting an unshared backing.
+`a[0] = c` stores on an empty `var a [N]chan` join `c`'s queue and
+`c = make(chan)` reseats park the group's membership on the surrogate
+like the slice form. `[N][M]chan` nested arrays, `[]chan chan` and
+`[][]chan` extraction stay closed.
+
+### External chan-element containers (mumei-agent #1025)
+
+[mumei-agent#1025](https://github.com/mumei-lang/mumei-agent/pull/1025)
+admits the same element surface on a chan-element container living in
+external state — `var GS []chan T` / `var GM map[K]chan T` /
+`var GA [N]chan T` package-level, or an imported member `lib.GS[i]`.
+The element queues have no declared identity of their own, so
+`GS[i] <- x` / `<-GS[i]` / `close(GS[i])` / `for v := range GS[i]`
+record an imported CallTransfer on the *container's* identity (like a
+`lib.VA[i] = v` member write): sends broadcast `value ∪ index` deps
+into `indirect_writes`, reads return `indirect_writes` plus the
+index's deps, and `select` alternatives resolve through the same
+operand paths. Storing a channel into an external slot
+(`GS[i] = c`, `GS = s`) promotes the stored queue's group to the
+same caller-visible state — sends into it broadcast through
+`indirect_writes`, group reads union it, and a callee performing
+an external chan-element op promotes the caller's channel
+arguments. `[][]chan` nests, `[]chan chan`, `d := GS[i]`
+extraction and `map[string]chan` variable keys stay closed.
+
+### Append on a chan-element collection (mumei-agent #1024)
+
+[mumei-agent#1024](https://github.com/mumei-lang/mumei-agent/pull/1024)
+admits `append` on a bound chan-element collection —
+`s = append(s, c2)`, `b := append(s, c2)` and `var b = append(s,
+c2)`: the result may reuse the argument's backing so it keeps the
+group's tokens, and each appended `chan` argument joins the
+result's share group exactly like a `[]chan{c2}` literal seed —
+carrying the queue's token in the result's set alone is not
+enough, since a member only reads and writes through the group
+once its own token entry exists. `[]chan chan T` payloads stay
+closed.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
