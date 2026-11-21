@@ -1751,27 +1751,45 @@ semantics are not checked; this is not general linker-semantics or ABI
 validation. Full object-code translation validation remains the deeper Option B
 endpoint.
 
-### First per-instruction C10 Option B TV profile
+### Straight-line direct-call C10 Option B TV profile
 
 `mumei native-bundle recheck-machine-tv` first runs the complete
 `recheck-object` pipeline. It then disassembles the reproduced object's
-functions and uses Z3 to compare only leaf, straight-line functions in the
-fixed machine-instruction profile with their `pure-i64` source-atom models.
-The assumed register convention places integer arguments in `rdi`, `rsi`,
-`rdx`, `rcx`, `r8`, and `r9`, with the result in `rax`; this convention is
-declared and assumed, not verified. The command makes no ABI claim.
+functions and uses Z3 to compare straight-line functions in the fixed
+machine-instruction profile with their `pure-i64` source-atom models. Direct
+calls are matched in order to the source `CallSite`s and compared as
+uninterpreted sites: their argument expressions must match the SysV integer
+argument registers, while each call result is the corresponding source
+call-result term. Call guards must be provably true on the checked input
+domain; otherwise the function is outside this profile.
+
+The assumed convention places integer arguments in `rdi`, `rsi`, `rdx`,
+`rcx`, `r8`, and `r9`, with the result in `rax`; it is declared and assumed,
+not verified. Caller-saved registers are fresh after calls and callee-saved
+registers are preserved by assumption. The register convention and
+callee-saved preservation are not ABI claims. Direct final `jmp` tail calls
+are treated as calls followed by returns; conditional branches and other
+branching functions are outside the profile. A small abstract stack handles
+register `pushq`/`popq` and immediate `%rsp` adjustments; `%rsp`-relative
+memory accesses are unsupported.
 
 The `input_domain` is
 `signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires`.
 The comparison asserts the source model's signature-bounded parameter domains
 and division/shift definedness, but does not restrict inputs by `requires`.
 Outside-profile reasons include `calls`, `argument_count`,
-`not_a_source_atom`, `unsupported_instruction` and `unsupported_signature`.
-Non-leaf functions, unsupported signatures, functions outside the instruction
-profile, and functions without a matching source atom are reported outside the
-profile. The C `main` wrapper, CRT/startup code, dynamic loader, libc and
-runtime are not covered. This is the first bounded per-instruction Option B
-profile, not full object-code translation validation or runtime assurance.
+`not_a_source_atom`, `unsupported_instruction`, `unsupported_signature`,
+`conditional_call` and `call_order`. A direct-call callee or count mismatch is
+reported as `call_order`; a call whose guard is not provably true is reported
+as `conditional_call`. Unsupported signatures, conditional branches, other
+instructions outside the profile, and functions without a matching source
+atom are reported outside the profile. The C `main` wrapper, CRT/startup code,
+dynamic loader, libc and runtime are not covered. This remains a bounded
+per-instruction Option B profile, not full object-code translation validation
+or runtime assurance.
+The descriptor retains `machine_code_leaf_function_tv`, adds
+`machine_code_direct_call_site_tv` only when an equivalent caller is checked,
+and lists `machine_code_tv_branching_functions` as not performed.
 
 ### Pinned executable exit-status recheck
 

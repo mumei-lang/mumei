@@ -50,7 +50,7 @@ const ARTIFACT_RECHECK_SCOPE: &str =
 const OBJECT_SYMBOL_CORRESPONDENCE_SCOPE: &str =
     "artifact_reproduction_object_symbols_call_edges_and_link_placement_only/no_instruction_abi_or_runtime_semantics";
 const MACHINE_CODE_TV_SCOPE: &str =
-    "artifact_reproduction_object_link_correspondence_and_leaf_function_machine_code_tv_only/no_abi_or_runtime_semantics";
+    "artifact_reproduction_object_link_correspondence_and_straight_line_function_machine_code_tv_only/no_abi_or_runtime_semantics";
 const MACHINE_CODE_REGISTER_CONVENTION: &str =
     "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax";
 const MACHINE_CODE_TV_INPUT_DOMAIN: &str =
@@ -2555,6 +2555,7 @@ struct ObjectSymbolSurface {
     defined: BTreeSet<String>,
     undefined: BTreeSet<String>,
     calls: BTreeMap<String, BTreeSet<String>>,
+    call_targets: BTreeMap<String, BTreeMap<u64, String>>,
     call_edges_checkable: bool,
 }
 
@@ -2617,6 +2618,7 @@ fn object_symbol_surface(bytes: &[u8]) -> Result<ObjectSymbolSurface, ()> {
             let name = symbol.name().map_err(|_| ())?.to_owned();
             surface.defined.insert(name.clone());
             surface.calls.entry(name.clone()).or_default();
+            surface.call_targets.entry(name.clone()).or_default();
             let Some(section) = symbol.section_index() else {
                 surface.call_edges_checkable = false;
                 continue;
@@ -2692,6 +2694,17 @@ fn object_symbol_surface(bytes: &[u8]) -> Result<ObjectSymbolSurface, ()> {
             if let Some(callees) = surface.calls.get_mut(&function.name) {
                 callees.insert(name.to_owned());
             } else {
+                surface.call_edges_checkable = false;
+            }
+            let Some(relative_offset) = offset.checked_sub(function.start) else {
+                surface.call_edges_checkable = false;
+                continue;
+            };
+            let targets = surface
+                .call_targets
+                .entry(function.name.clone())
+                .or_default();
+            if targets.insert(relative_offset, name.to_owned()).is_some() {
                 surface.call_edges_checkable = false;
             }
         }
@@ -3174,18 +3187,25 @@ fn write_machine_tv(
     }
     let mut functions = BTreeMap::new();
     let mut equivalent_count = 0usize;
+    let mut equivalent_call_count = 0usize;
     for function_name in &object_surface.defined {
+        let has_source_calls = source_models
+            .get(function_name)
+            .is_some_and(|model| !model.call_sites.is_empty());
         let outcome = if let Some(model) = source_models.get(function_name) {
             if !machine_tv::supports_signature(model) {
                 FunctionOutcome::OutsideProfile("unsupported_signature")
-            } else if !model.call_sites.is_empty() {
-                FunctionOutcome::OutsideProfile("calls")
             } else if model.inputs.len() > 6 {
                 FunctionOutcome::OutsideProfile("argument_count")
             } else if let Some((address, bytes)) =
                 object_function_bytes(&object_bytes, function_name)
             {
-                machine_tv::check_function(&bytes, address, model, &context)
+                let call_targets = object_surface
+                    .call_targets
+                    .get(function_name)
+                    .cloned()
+                    .unwrap_or_default();
+                machine_tv::check_function(&bytes, address, model, &call_targets, &context)
             } else {
                 FunctionOutcome::OutsideProfile("unsupported_instruction")
             }
@@ -3195,6 +3215,9 @@ fn write_machine_tv(
         let value = match outcome {
             FunctionOutcome::Equivalent => {
                 equivalent_count += 1;
+                if has_source_calls {
+                    equivalent_call_count += 1;
+                }
                 serde_json::json!({"outcome": "equivalent_within_profile"})
             }
             FunctionOutcome::Different => {
@@ -3228,12 +3251,17 @@ fn write_machine_tv(
             "os_stdout_observation",
             "os_stderr_observation",
             "runtime_observation_semantics",
-            "machine_code_tv_non_leaf_functions",
+            "machine_code_tv_branching_functions",
         ];
         if equivalent_count > 0 {
             checks_performed.push("machine_code_leaf_function_tv");
         } else {
             checks_not_performed.push("machine_code_leaf_function_tv");
+        }
+        if equivalent_call_count > 0 {
+            checks_performed.push("machine_code_direct_call_site_tv");
+        } else {
+            checks_not_performed.push("machine_code_direct_call_site_tv");
         }
         let descriptor = serde_json::json!({
             "schema_version": "mumei.machine-code-tv/v1",
@@ -3256,7 +3284,7 @@ fn write_machine_tv(
             })
     } else {
         println!(
-            "Machine-code TV: {equivalent_count} of {} object functions equivalent to their source atoms within the leaf profile.\nScope: {MACHINE_CODE_TV_SCOPE}",
+            "Machine-code TV: {equivalent_count} of {} object functions equivalent to their source atoms within the straight-line profile.\nScope: {MACHINE_CODE_TV_SCOPE}",
             object_surface.defined.len(),
         );
         Ok(())
@@ -3438,6 +3466,7 @@ mod tests {
             defined: defined.iter().map(|name| (*name).to_owned()).collect(),
             undefined: undefined.iter().map(|name| (*name).to_owned()).collect(),
             calls: BTreeMap::new(),
+            call_targets: BTreeMap::new(),
             call_edges_checkable: true,
         };
 
@@ -3482,6 +3511,7 @@ mod tests {
             defined: ir.defined.clone(),
             undefined: ir.declared.clone(),
             calls: calls.clone(),
+            call_targets: BTreeMap::new(),
             call_edges_checkable: true,
         };
         assert_eq!(object_call_edges_correspond(&ir, &object), Some(true));
@@ -3606,6 +3636,17 @@ entry:
         assert!(object_surface.call_edges_checkable);
         assert_eq!(ir_surface.calls, expected);
         assert_eq!(object_surface.calls, expected);
+        assert_eq!(
+            object_surface
+                .call_targets
+                .get("visible")
+                .unwrap()
+                .values()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["external_ref".to_owned(), "other".to_owned()])
+        );
+        assert!(object_surface.call_targets.get("other").unwrap().is_empty());
         assert_eq!(
             object_call_edges_correspond(&ir_surface, &object_surface),
             Some(true)
