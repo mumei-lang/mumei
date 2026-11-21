@@ -96,6 +96,10 @@ fn invalid_deep_enum_payload_writes_fail_closed() {
             "bad_nominal_deep_payload_write",
             "expects struct 'Inner' but got struct 'OtherInner'",
         ),
+        (
+            "bad_reread_sibling_relation",
+            "Postcondition (ensures) is not satisfied",
+        ),
     ] {
         assert!(
             combined.contains(atom) && combined.contains(diagnostic),
@@ -172,6 +176,33 @@ fn deep_enum_payload_write_rebuilds_nested_aggregate_indices() {
     assert!(
         extract_indices == ["1", "0"] && insert_indices == ["0", "0", "1"],
         "deep payload write must extract/rebuild the enum slot and nested struct fields:\n{ir}"
+    );
+}
+
+#[test]
+fn deep_enum_payload_write_re_reads_from_the_rebuilt_aggregate() {
+    let ir = emit_atom_ir(
+        &fixture("test_enum_payload_deep_write.mm"),
+        "preserves_siblings",
+        "reread",
+    );
+    let lines: Vec<_> = ir.lines().collect();
+    let (insert_index, root_insert) = lines
+        .iter()
+        .enumerate()
+        .rfind(|(_, line)| line.contains("insertvalue"))
+        .expect("enum aggregate rebuild");
+    let rebuilt = root_insert
+        .split_once(" = insertvalue")
+        .expect("insertvalue result")
+        .0
+        .trim();
+    assert!(
+        lines
+            .iter()
+            .skip(insert_index + 1)
+            .any(|line| line.contains("extractvalue") && line.contains(&format!(" {rebuilt}, "))),
+        "post-write match must extract from the rebuilt enum value:\n{ir}"
     );
 }
 

@@ -164,3 +164,19 @@ body: {
     e.p.inner = OtherInner { x: 1, y: 2 };
     0
 };
+
+atom bad_reread_sibling_relation() -> i64
+requires: true;
+ensures: result == 1;
+body: {
+    let v = 0;
+    let e = Event::Move(Outer {
+        inner: Inner { x: 1, y: 2 },
+        z: 3
+    });
+    e.p.inner.x = v;
+    match e {
+        Event::Move(p) => if p.inner.y == v + 1 { 1 } else { 0 },
+        _ => 0
+    }
+};

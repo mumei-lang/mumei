@@ -91,7 +91,7 @@ body: {
     });
     e.p.inner.x = v;
     match e {
-        Event::Move(p) => if p.inner.y == 2 && p.z == 3 { 1 } else { 0 },
+        Event::Move(p) => if p.inner.x == v && p.inner.y == 2 && p.z == 3 { 1 } else { 0 },
         _ => 0
     }
 }
