@@ -9041,10 +9041,15 @@ Wave 6（P25、現在）: P31 `task_group` — `task` / `task_group:all` lowerin
 
 Core machine-TV admits one- or two-leaf struct parameters/results only when
 every leaf in the struct-bearing signature is integer, under the recorded
-composite profile. Leaves use consecutive GPRs and results use `rax`/`rdx`;
-aggregate splitting, enum signatures, and composite call arguments/results
-remain fail-closed. Equivalent aggregate functions report
-`machine_code_composite_register_aggregate_tv` and the corresponding
+composite profile. Leaves use consecutive GPRs and results use `rax`/`rdx`.
+Direct-call sites also admit one-/two-leaf all-integer struct arguments and
+results, with exact leaf obligations against consecutive GPRs and result
+binding in `rax`/`rdx`. Struct arguments must fit wholly in the remaining
+GPRs and are never passed on the stack; an aggregate that cannot fit returns
+`argument_count`. Enum signatures/call sites, f64-containing or three-or-more
+leaf structs, and tail calls with struct arguments or results remain
+fail-closed. Equivalent functions using struct signatures or direct calls
+report `machine_code_composite_register_aggregate_tv` and the corresponding
 register-convention suffix. Core #1238 also admits scalar f64 call arguments
 only when NaN-aware value matching and a per-path exact-bit proof both hold;
 computed arguments without that proof and f64 tail calls remain

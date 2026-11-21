@@ -2,7 +2,7 @@ use inkwell::targets::{InitializationConfig, Target};
 use llvm_sys::disassembler::{
     LLVMCreateDisasm, LLVMDisasmContextRef, LLVMDisasmDispose, LLVMDisasmInstruction,
 };
-use mumei_core::semantic_contract::{CallSite, PureI64Body, LOOP_BOUND};
+use mumei_core::semantic_contract::{CallSite, CallValueShape, PureI64Body, LOOP_BOUND};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{CStr, CString},
@@ -260,9 +260,11 @@ pub fn check_entry_wrapper_with_preservation(
         callee: "main".to_owned(),
         args: Vec::new(),
         arg_leaf_doubles: Vec::new(),
+        argument_shapes: Vec::new(),
         has_composite_arguments_or_result: false,
         result: value,
         result_is_double: false,
+        result_shape: CallValueShape::Scalar { leaf_count: 1 },
         guard: Bool::from_bool(context, true),
     });
     check_function_with_result_width(
@@ -285,16 +287,26 @@ fn check_function_with_result_width<'ctx>(
 ) -> (FunctionOutcome, Option<CalleeSavedPreservation>) {
     if model.inputs.len() > MAX_ARGUMENT_COUNT
         || model
-            .call_sites
-            .iter()
-            .any(|site| site.args.len() > MAX_ARGUMENT_COUNT)
-        || model
             .param_leaf_doubles
             .iter()
             .flatten()
             .filter(|is_double| **is_double)
             .count()
             > FLOAT_ARGUMENT_REGISTER_COUNT
+    {
+        return (FunctionOutcome::OutsideProfile("argument_count"), None);
+    }
+    if model
+        .call_sites
+        .iter()
+        .any(call_site_has_unsupported_composite_shape)
+    {
+        return (FunctionOutcome::OutsideProfile("call_arguments"), None);
+    }
+    if model
+        .call_sites
+        .iter()
+        .any(|site| site.args.len() > MAX_ARGUMENT_COUNT)
     {
         return (FunctionOutcome::OutsideProfile("argument_count"), None);
     }
@@ -470,14 +482,40 @@ pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
         && result_shape_supported
         && model.call_sites.iter().all(|site| {
             (site.result.get_size() == 64 || site.has_composite_arguments_or_result)
-                && site.args.iter().all(|argument| argument.get_size() == 64)
-                && site.arg_leaf_doubles.len() == site.args.len()
+                && call_site_shapes_are_consistent(site)
         })
         && !model.has_post_writes()
         && !model.has_composite_features_beyond_struct_values
         && !model.has_enum_signature
         && !model.has_non_i64_scalar_features
         && !model.bounded_memory
+}
+
+fn call_site_shapes_are_consistent(site: &CallSite<'_>) -> bool {
+    let Some(argument_leaf_count) = site
+        .argument_shapes
+        .iter()
+        .try_fold(0usize, |count, shape| count.checked_add(shape.leaf_count()))
+    else {
+        return false;
+    };
+    let Some(result_bit_width) = site.result_shape.leaf_count().checked_mul(64) else {
+        return false;
+    };
+    let has_composite_shape = site.argument_shapes.iter().any(|shape| {
+        matches!(
+            shape,
+            CallValueShape::Struct { .. } | CallValueShape::Enum { .. }
+        )
+    }) || matches!(
+        site.result_shape,
+        CallValueShape::Struct { .. } | CallValueShape::Enum { .. }
+    );
+    argument_leaf_count == site.args.len()
+        && site.args.iter().all(|argument| argument.get_size() == 64)
+        && site.arg_leaf_doubles.len() == site.args.len()
+        && result_bit_width == site.result.get_size() as usize
+        && has_composite_shape == site.has_composite_arguments_or_result
 }
 
 fn model_result_is_double(model: &PureI64Body<'_>) -> bool {
@@ -530,6 +568,12 @@ fn set_solver_budget(solver: &Solver, context: &Context) {
     solver.set_params(&params);
 }
 
+fn aggregate_leaf<'ctx>(value: &BV<'ctx>, leaf_count: usize, leaf_index: usize) -> BV<'ctx> {
+    let high = (64 * (leaf_count - leaf_index) - 1) as u32;
+    let low = (64 * (leaf_count - leaf_index - 1)) as u32;
+    value.extract(high, low)
+}
+
 fn assert_path_equivalence_query<'ctx>(
     solver: &Solver<'ctx>,
     model: &PureI64Body<'ctx>,
@@ -542,12 +586,7 @@ fn assert_path_equivalence_query<'ctx>(
     let output_matches = if let Some(leaf_count) = model.result_shape {
         let matches = (0..leaf_count)
             .map(|leaf| {
-                let high = (64 * (leaf_count - leaf) - 1) as u32;
-                let low = (64 * (leaf_count - leaf - 1)) as u32;
-                model
-                    .value
-                    .extract(high, low)
-                    ._eq(&path.return_values[leaf])
+                aggregate_leaf(&model.value, leaf_count, leaf)._eq(&path.return_values[leaf])
             })
             .collect::<Vec<_>>();
         Bool::and(context, &matches.iter().collect::<Vec<_>>())
@@ -1982,6 +2021,30 @@ fn lift_stack_argument_add<'ctx>(
     Ok(())
 }
 
+fn call_value_shape_supported(shape: CallValueShape) -> bool {
+    match shape {
+        CallValueShape::Scalar { leaf_count } => leaf_count == 1,
+        CallValueShape::Struct {
+            leaf_count,
+            has_enum: false,
+            has_f64: false,
+        } => (1..=2).contains(&leaf_count),
+        CallValueShape::Enum { .. } | CallValueShape::Struct { .. } => false,
+    }
+}
+
+fn call_site_has_unsupported_composite_shape(site: &CallSite<'_>) -> bool {
+    site.argument_shapes.iter().copied().any(|shape| {
+        matches!(
+            shape,
+            CallValueShape::Struct { .. } | CallValueShape::Enum { .. }
+        ) && !call_value_shape_supported(shape)
+    }) || (matches!(
+        site.result_shape,
+        CallValueShape::Struct { .. } | CallValueShape::Enum { .. }
+    ) && !call_value_shape_supported(site.result_shape))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lift_call<'ctx>(
     instruction: &Instruction,
@@ -2022,8 +2085,9 @@ fn lift_call<'ctx>(
             xmm_registers,
             BV::from_i64(context, 0, 64),
             false,
+            CallValueShape::Scalar { leaf_count: 1 },
             context,
-        );
+        )?;
         call_state.used_call_targets.insert(field_offset);
         return Ok(());
     }
@@ -2048,7 +2112,26 @@ fn lift_call<'ctx>(
     if target.name != crate::translation_validation::native_function_name(&call_site.callee) {
         return Err(FunctionOutcome::OutsideProfile("call_order"));
     }
-    if call_site.has_composite_arguments_or_result {
+    let has_composite_shape = call_site.argument_shapes.iter().any(|shape| {
+        matches!(
+            shape,
+            CallValueShape::Struct { .. } | CallValueShape::Enum { .. }
+        )
+    }) || matches!(
+        call_site.result_shape,
+        CallValueShape::Struct { .. } | CallValueShape::Enum { .. }
+    );
+    if call_site.has_composite_arguments_or_result != has_composite_shape
+        || call_site
+            .argument_shapes
+            .iter()
+            .copied()
+            .any(|shape| !call_value_shape_supported(shape))
+        || !call_value_shape_supported(call_site.result_shape)
+    {
+        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+    }
+    if tail_call && has_composite_shape {
         return Err(FunctionOutcome::OutsideProfile("call_arguments"));
     }
     if call_site.args.len() > MAX_ARGUMENT_COUNT {
@@ -2075,50 +2158,73 @@ fn lift_call<'ctx>(
     let mut outgoing_slots = BTreeSet::new();
     let mut integer_argument_index = 0usize;
     let mut float_argument_index = 0usize;
-    for (argument, is_double) in call_site.args.iter().zip(&call_site.arg_leaf_doubles) {
-        if *is_double {
-            let Some(register) = xmm_registers.get(float_argument_index) else {
-                return Err(FunctionOutcome::OutsideProfile("argument_count"));
-            };
-            let register = register.extract(63, 0);
-            call_state
-                .argument_obligations
-                .push(f64_values_match(context, argument, &register));
-            call_state
-                .exact_f64_argument_obligations
-                .push(argument._eq(&register));
-            float_argument_index += 1;
-        } else {
-            if let Some(register_index) = ARGUMENT_REGISTERS.get(integer_argument_index) {
-                call_state
-                    .argument_obligations
-                    .push(argument._eq(&registers[*register_index]));
-                integer_argument_index += 1;
-            } else {
-                let stack_argument_index = integer_argument_index - ARGUMENT_REGISTERS.len();
-                let word_index = i64::try_from(stack_argument_index)
-                    .map_err(|_| FunctionOutcome::OutsideProfile("call_arguments"))?;
-                let Some(stack_slot) = word_index
-                    .checked_mul(8)
-                    .and_then(|offset| rsp_offset.checked_add(offset))
-                else {
-                    return Err(FunctionOutcome::OutsideProfile("call_arguments"));
-                };
-                if stack_slot % 8 != 0 {
-                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    let mut leaf_index = 0usize;
+    for shape in &call_site.argument_shapes {
+        let leaf_count = shape.leaf_count();
+        match *shape {
+            CallValueShape::Struct { .. } => {
+                if integer_argument_index + leaf_count > ARGUMENT_REGISTERS.len() {
+                    return Err(FunctionOutcome::OutsideProfile("argument_count"));
                 }
-                let Some((_, stack_argument)) =
-                    stack.iter().find(|(candidate, _)| *candidate == stack_slot)
-                else {
-                    return Err(FunctionOutcome::OutsideProfile("call_arguments"));
-                };
-                call_state
-                    .argument_obligations
-                    .push(argument._eq(stack_argument));
-                outgoing_slots.insert(stack_slot);
-                integer_argument_index += 1;
+                for leaf in 0..leaf_count {
+                    let argument = &call_site.args[leaf_index + leaf];
+                    let register_index = ARGUMENT_REGISTERS[integer_argument_index + leaf];
+                    call_state
+                        .argument_obligations
+                        .push(argument._eq(&registers[register_index]));
+                }
+                integer_argument_index += leaf_count;
+            }
+            CallValueShape::Enum { .. } => {
+                return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+            }
+            CallValueShape::Scalar { .. } => {
+                let argument = &call_site.args[leaf_index];
+                if call_site.arg_leaf_doubles[leaf_index] {
+                    let Some(register) = xmm_registers.get(float_argument_index) else {
+                        return Err(FunctionOutcome::OutsideProfile("argument_count"));
+                    };
+                    let register = register.extract(63, 0);
+                    call_state
+                        .argument_obligations
+                        .push(f64_values_match(context, argument, &register));
+                    call_state
+                        .exact_f64_argument_obligations
+                        .push(argument._eq(&register));
+                    float_argument_index += 1;
+                } else if let Some(register_index) = ARGUMENT_REGISTERS.get(integer_argument_index)
+                {
+                    call_state
+                        .argument_obligations
+                        .push(argument._eq(&registers[*register_index]));
+                    integer_argument_index += 1;
+                } else {
+                    let stack_argument_index = integer_argument_index - ARGUMENT_REGISTERS.len();
+                    let word_index = i64::try_from(stack_argument_index)
+                        .map_err(|_| FunctionOutcome::OutsideProfile("call_arguments"))?;
+                    let Some(stack_slot) = word_index
+                        .checked_mul(8)
+                        .and_then(|offset| rsp_offset.checked_add(offset))
+                    else {
+                        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+                    };
+                    if stack_slot % 8 != 0 {
+                        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                    }
+                    let Some((_, stack_argument)) =
+                        stack.iter().find(|(candidate, _)| *candidate == stack_slot)
+                    else {
+                        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+                    };
+                    call_state
+                        .argument_obligations
+                        .push(argument._eq(stack_argument));
+                    outgoing_slots.insert(stack_slot);
+                    integer_argument_index += 1;
+                }
             }
         }
+        leaf_index += leaf_count;
     }
     if !tail_call && !outgoing_slots.is_empty() {
         stack.retain(|(stack_slot, _)| !outgoing_slots.contains(stack_slot));
@@ -2129,8 +2235,9 @@ fn lift_call<'ctx>(
         xmm_registers,
         call_site.result.clone(),
         call_site.result_is_double,
+        call_site.result_shape,
         context,
-    );
+    )?;
     call_state.used_call_targets.insert(field_offset);
     call_state.call_index += 1;
     Ok(())
@@ -2141,21 +2248,34 @@ fn apply_call_result_and_clobbers<'ctx>(
     xmm_registers: &mut [BV<'ctx>],
     result: BV<'ctx>,
     result_is_double: bool,
+    result_shape: CallValueShape,
     context: &'ctx Context,
-) {
+) -> Result<(), FunctionOutcome> {
     for xmm_register in xmm_registers.iter_mut() {
         *xmm_register = BV::fresh_const(context, "machine_call_xmm_clobber", 128);
     }
-    if result_is_double {
-        registers[0] = BV::fresh_const(context, "machine_call_integer_result_clobber", 64);
-        let upper = BV::fresh_const(context, "machine_call_xmm_result_upper", 64);
-        xmm_registers[0] = upper.concat(&result);
-    } else {
-        registers[0] = result;
-    }
-    for register_index in [1, 2, 6, 7, 8, 9, 10, 11] {
+    for register_index in [0, 1, 2, 6, 7, 8, 9, 10, 11] {
         registers[register_index] = BV::fresh_const(context, "machine_call_clobber", 64);
     }
+    match result_shape {
+        CallValueShape::Scalar { leaf_count: 1 } if result_is_double => {
+            let upper = BV::fresh_const(context, "machine_call_xmm_result_upper", 64);
+            xmm_registers[0] = upper.concat(&result);
+        }
+        CallValueShape::Scalar { leaf_count: 1 } => registers[0] = result,
+        CallValueShape::Struct {
+            leaf_count,
+            has_enum: false,
+            has_f64: false,
+        } if (1..=2).contains(&leaf_count) => {
+            registers[0] = aggregate_leaf(&result, leaf_count, 0);
+            if leaf_count == 2 {
+                registers[2] = aggregate_leaf(&result, leaf_count, 1);
+            }
+        }
+        _ => return Err(FunctionOutcome::OutsideProfile("call_arguments")),
+    }
+    Ok(())
 }
 
 fn path_solver<'ctx>(
@@ -3393,7 +3513,7 @@ entry:
     }
 
     #[test]
-    fn struct_signature_limits_and_composite_calls_fail_closed() {
+    fn struct_signature_limits_fail_closed() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
         config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
@@ -3463,47 +3583,267 @@ entry:
             check_function(&[0xc3], 0, &after_five, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("argument_count")
         );
+    }
 
-        let call_source = "struct P { x: i64, y: i64 }\n\
+    #[test]
+    fn struct_valued_direct_calls_match_arguments_and_results() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let caller_source = "struct P { x: i64, y: i64 }\n\
             atom sum(p: P) -> i64 requires: true; ensures: true; body: { p.x + p.y };\n\
             atom mk(a: i64, b: i64) -> P requires: true; ensures: true; body: { P { x: a, y: b } };\n\
-            atom caller() -> i64 requires: true; ensures: true; body: { sum(mk(1, 2)) };\n\
-            atom caller_literal() -> i64 requires: true; ensures: true; body: { sum(P { x: 1, y: 2 }) };";
-        let caller = source_model_named_with_admission(
-            call_source,
-            "caller",
-            &context,
-            RefinedAdmission::CompositeV23,
-        );
-        assert!(caller
-            .call_sites
+            atom main() -> i64 requires: true; ensures: true; body: { sum(mk(1, 2)) };";
+        let fwd_source = "struct P { x: i64, y: i64 }\n\
+            atom sum(p: P) -> i64 requires: true; ensures: true; body: { p.x + p.y };\n\
+            atom fwd(p: P) -> i64 requires: true; ensures: true; body: { sum(p) };";
+        let diff_source = "struct P { x: i64, y: i64 }\n\
+            atom mk(a: i64, b: i64) -> P requires: true; ensures: true; body: { P { x: a, y: b } };\n\
+            atom diff() -> i64 requires: true; ensures: true; body: { let p = mk(1, 2); p.x - p.y };";
+        let after_five_source = "struct P { x: i64, y: i64 }\n\
+            atom callee5(a: i64, b: i64, c: i64, d: i64, e: i64, p: P) -> i64 \
+            requires: true; ensures: true; body: { p.x + p.y };\n\
+            atom after_five(a: i64, b: i64, c: i64, d: i64, e: i64) -> i64 \
+            requires: true; ensures: true; body: { callee5(a, b, c, d, e, P { x: 1, y: 2 }) };";
+        let model = |source, name| {
+            source_model_named_with_admission(
+                source,
+                name,
+                &context,
+                RefinedAdmission::CompositeV23,
+            )
+        };
+        let caller = model(caller_source, "main");
+        let fwd = model(fwd_source, "fwd");
+        let diff = model(diff_source, "diff");
+        let after_five = model(after_five_source, "after_five");
+        assert!(caller.call_sites.iter().any(|call_site| {
+            matches!(
+                call_site.result_shape,
+                CallValueShape::Struct { leaf_count: 2, .. }
+            )
+        }));
+        assert!(caller.call_sites.iter().any(|call_site| {
+            call_site
+                .argument_shapes
+                .iter()
+                .any(|shape| matches!(shape, CallValueShape::Struct { leaf_count: 2, .. }))
+        }));
+
+        let ir = r#"target triple = "x86_64-unknown-linux-gnu"
+declare { i64, i64 } @mk(i64, i64)
+declare i64 @sum({ i64, i64 })
+define i64 @main() {
+entry:
+  %pair = call { i64, i64 } @mk(i64 1, i64 2)
+  %result = call i64 @sum({ i64, i64 } %pair)
+  ret i64 %result
+}
+define i64 @fwd({ i64, i64 } %pair) {
+entry:
+  %result = call i64 @sum({ i64, i64 } %pair)
+  ret i64 %result
+}
+define i64 @diff() {
+entry:
+  %pair = call { i64, i64 } @mk(i64 1, i64 2)
+  %x = extractvalue { i64, i64 } %pair, 0
+  %y = extractvalue { i64, i64 } %pair, 1
+  %result = sub i64 %x, %y
+  ret i64 %result
+}
+"#;
+        let (caller_address, caller_bytes, caller_targets) =
+            compiled_function_with_targets(ir, "main");
+        let caller_disassembly = disassemble(&caller_bytes, caller_address)
+            .unwrap()
             .iter()
-            .any(|call_site| call_site.has_composite_arguments_or_result));
-        let mut targets = helper_call_targets(&[1]);
-        targets.get_mut(&1).unwrap().name = "mk".to_owned();
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("struct-valued call disassembly:\n{caller_disassembly}");
         assert_eq!(
-            check_function(&[0xe8, 0, 0, 0, 0, 0xc3], 0, &caller, &targets, &context),
-            FunctionOutcome::OutsideProfile("call_arguments")
+            check_function(
+                &caller_bytes,
+                caller_address,
+                &caller,
+                &caller_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
         );
 
-        let literal_caller = source_model_named_with_admission(
-            call_source,
-            "caller_literal",
-            &context,
-            RefinedAdmission::CompositeV23,
+        let (fwd_address, fwd_bytes, fwd_targets) = compiled_function_with_targets(ir, "fwd");
+        assert_eq!(
+            check_function(&fwd_bytes, fwd_address, &fwd, &fwd_targets, &context),
+            FunctionOutcome::Equivalent
         );
-        assert!(literal_caller.call_sites.iter().any(|call_site| {
-            call_site.callee == "sum" && call_site.has_composite_arguments_or_result
-        }));
-        let mut literal_targets = helper_call_targets(&[1]);
-        literal_targets.get_mut(&1).unwrap().name = "sum".to_owned();
+
+        let (diff_address, diff_bytes, diff_targets) = compiled_function_with_targets(ir, "diff");
+        assert_eq!(
+            check_function(&diff_bytes, diff_address, &diff, &diff_targets, &context),
+            FunctionOutcome::Equivalent
+        );
+        let mk_call_arguments = [0xbf, 1, 0, 0, 0, 0xbe, 2, 0, 0, 0, 0xe8, 0, 0, 0, 0];
+        let mut reversed_result_targets = helper_call_targets(&[11]);
+        reversed_result_targets.get_mut(&11).unwrap().name = "mk".to_owned();
+        assert_eq!(
+            check_function(
+                &[
+                    mk_call_arguments.as_slice(),
+                    &[0x48, 0x29, 0xc2, 0x48, 0x89, 0xd0, 0xc3],
+                ]
+                .concat(),
+                0,
+                &diff,
+                &reversed_result_targets,
+                &context,
+            ),
+            FunctionOutcome::Different
+        );
+        let mut correct_result_targets = helper_call_targets(&[11]);
+        correct_result_targets.get_mut(&11).unwrap().name = "mk".to_owned();
+        assert_eq!(
+            check_function(
+                &[mk_call_arguments.as_slice(), &[0x48, 0x29, 0xd0, 0xc3],].concat(),
+                0,
+                &diff,
+                &correct_result_targets,
+                &context,
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let fwd_with_swapped_registers = [
+            0x48, 0x89, 0xf8, 0x48, 0x89, 0xf7, 0x48, 0x89, 0xc6, 0xe8, 0, 0, 0, 0, 0xc3,
+        ];
+        let mut swapped_argument_targets = helper_call_targets(&[10]);
+        swapped_argument_targets.get_mut(&10).unwrap().name = "sum".to_owned();
+        assert_eq!(
+            check_function(
+                &fwd_with_swapped_registers,
+                0,
+                &fwd,
+                &swapped_argument_targets,
+                &context,
+            ),
+            FunctionOutcome::Different
+        );
+
+        let mut after_five_targets = helper_call_targets(&[1]);
+        after_five_targets.get_mut(&1).unwrap().name = "callee5".to_owned();
         assert_eq!(
             check_function(
                 &[0xe8, 0, 0, 0, 0, 0xc3],
                 0,
-                &literal_caller,
-                &literal_targets,
-                &context
+                &after_five,
+                &after_five_targets,
+                &context,
+            ),
+            FunctionOutcome::OutsideProfile("argument_count")
+        );
+    }
+
+    #[test]
+    fn unsupported_composite_call_shapes_fail_closed() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = |source: &str, name: &str| {
+            source_model_named_with_admission(
+                source,
+                name,
+                &context,
+                RefinedAdmission::CompositeV23,
+            )
+        };
+        let regular_bytes = [0xe8, 0, 0, 0, 0, 0xc3];
+        let wide_source = "struct T { x: i64, y: i64, z: i64 }\n\
+            atom too_wide(p: T) -> i64 requires: true; ensures: true; body: { p.x + p.y + p.z };\n\
+            atom wide_arg() -> i64 requires: true; ensures: true; body: { too_wide(T { x: 1, y: 2, z: 3 }) };";
+        let mut targets = helper_call_targets(&[1]);
+
+        let mut wide_arg_targets = targets.clone();
+        wide_arg_targets.get_mut(&1).unwrap().name = "too_wide".to_owned();
+        assert_eq!(
+            check_function(
+                &regular_bytes,
+                0,
+                &model(wide_source, "wide_arg"),
+                &wide_arg_targets,
+                &context,
+            ),
+            FunctionOutcome::OutsideProfile("call_arguments")
+        );
+
+        let float_source = "struct F { value: f64 }\n\
+            atom float_struct(p: F) -> i64 requires: true; ensures: true; body: { 0 };\n\
+            atom float_arg(x: f64) -> i64 requires: true; ensures: true; body: { float_struct(F { value: x }) };";
+        let mut float_arg_targets = targets.clone();
+        float_arg_targets.get_mut(&1).unwrap().name = "float_struct".to_owned();
+        let float_arg_model = model(float_source, "float_arg");
+        assert!(float_arg_model.call_sites.iter().any(|call_site| {
+            call_site
+                .argument_shapes
+                .iter()
+                .any(|shape| matches!(shape, CallValueShape::Struct { has_f64: true, .. }))
+        }));
+        assert_eq!(
+            check_function(
+                &regular_bytes,
+                0,
+                &float_arg_model,
+                &float_arg_targets,
+                &context,
+            ),
+            FunctionOutcome::OutsideProfile("call_arguments")
+        );
+
+        let enum_source = "enum Shade { Red, Blue }\n\
+            atom color(p: Shade) -> i64 requires: true; ensures: true; body: { 0 };\n\
+            atom enum_arg() -> i64 requires: true; ensures: true; body: { color(Shade::Red) };";
+        let mut enum_targets = targets.clone();
+        enum_targets.get_mut(&1).unwrap().name = "color".to_owned();
+        assert_eq!(
+            check_function(
+                &regular_bytes,
+                0,
+                &model(enum_source, "enum_arg"),
+                &enum_targets,
+                &context,
+            ),
+            FunctionOutcome::OutsideProfile("call_arguments")
+        );
+
+        let result_source = "struct T { x: i64, y: i64, z: i64 }\n\
+            atom wide_result() -> T requires: true; ensures: true; body: { T { x: 1, y: 2, z: 3 } };\n\
+            atom wide_result_call() -> i64 requires: true; ensures: true; body: { let p = wide_result(); p.x + p.y + p.z };";
+        let mut wide_result_targets = targets.clone();
+        wide_result_targets.get_mut(&1).unwrap().name = "wide_result".to_owned();
+        assert_eq!(
+            check_function(
+                &regular_bytes,
+                0,
+                &model(result_source, "wide_result_call"),
+                &wide_result_targets,
+                &context,
+            ),
+            FunctionOutcome::OutsideProfile("call_arguments")
+        );
+
+        let tail_source = "struct P { x: i64, y: i64 }\n\
+            atom sum(p: P) -> i64 requires: true; ensures: true; body: { p.x + p.y };\n\
+            atom tail_struct(p: P) -> i64 requires: true; ensures: true; body: { sum(p) };";
+        targets.get_mut(&1).unwrap().name = "sum".to_owned();
+        assert_eq!(
+            check_function(
+                &[0xe9, 0, 0, 0, 0],
+                0,
+                &model(tail_source, "tail_struct"),
+                &targets,
+                &context,
             ),
             FunctionOutcome::OutsideProfile("call_arguments")
         );
@@ -3776,9 +4116,11 @@ entry:
             callee: "helper".to_owned(),
             args: Vec::new(),
             arg_leaf_doubles: Vec::new(),
+            argument_shapes: Vec::new(),
             has_composite_arguments_or_result: false,
             result: float_result,
             result_is_double: true,
+            result_shape: CallValueShape::Scalar { leaf_count: 1 },
             guard: Bool::from_bool(&context, true),
         });
         assert_eq!(
@@ -3970,9 +4312,11 @@ entry:
                 .map(|index| BV::fresh_const(&context, &format!("f64_arg_{index}"), 64))
                 .collect(),
             arg_leaf_doubles: vec![true; 9],
+            argument_shapes: vec![CallValueShape::Scalar { leaf_count: 1 }; 9],
             has_composite_arguments_or_result: false,
             result,
             result_is_double: true,
+            result_shape: CallValueShape::Scalar { leaf_count: 1 },
             guard: Bool::from_bool(&context, true),
         });
         assert_eq!(

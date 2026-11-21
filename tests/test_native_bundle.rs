@@ -4223,6 +4223,8 @@ fn recheck_machine_tv_accepts_small_integer_struct_aggregates() {
         "struct P { x: i64, y: i64 }\n\
          atom sum(p: P) -> i64 requires: true; ensures: true; body: { p.x + p.y };\n\
          atom mk(a: i64, b: i64) -> P requires: true; ensures: true; body: { P { x: a, y: b } };\n\
+         atom caller() -> i64 requires: true; ensures: true; body: { sum(mk(1, 2)) };\n\
+         atom fwd(p: P) -> i64 requires: true; ensures: true; body: { sum(p) };\n\
          atom main() -> i64 requires: true; ensures: true; body: { 0 };",
     );
     let record = module_record(&bundle);
@@ -4235,7 +4237,7 @@ fn recheck_machine_tv_accepts_small_integer_struct_aggregates() {
         machine_tv["register_convention_assumed"],
         "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax_two_eightbyte_integer_aggregates_in_consecutive_gprs_result_rax_rdx"
     );
-    for function in ["sum", "mk"] {
+    for function in ["sum", "mk", "caller", "fwd"] {
         assert_eq!(
             machine_tv["functions"][function]["outcome"],
             "equivalent_within_profile"

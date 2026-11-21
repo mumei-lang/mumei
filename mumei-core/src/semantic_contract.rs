@@ -2285,6 +2285,17 @@ impl<'ctx> CallShapes<'ctx> {
         }
     }
 
+    fn fields_contain_enum(&self, fields: &[(String, ValueKind)]) -> bool {
+        fields.iter().any(|(_, shape)| match shape {
+            ValueKind::Enum(_) => true,
+            ValueKind::Struct(child) => self
+                .structs
+                .get(child)
+                .is_some_and(|inner| self.fields_contain_enum(inner)),
+            ValueKind::Scalar(_) => false,
+        })
+    }
+
     /// The leaf kinds of a field layout in flattening order — a
     /// nested field expands to its struct's leaves — the layout a
     /// lowered aggregate splits into.
@@ -6619,6 +6630,31 @@ fn json_digest(value: &impl Serialize) -> Result<String, SemanticContractError> 
 
 /// Symbolic body for the C03 comparison fragment, independent of an emitter.
 /// No solver check, pre/postcondition proof or LLVM claim is performed here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallValueShape {
+    Scalar {
+        leaf_count: usize,
+    },
+    Struct {
+        leaf_count: usize,
+        has_enum: bool,
+        has_f64: bool,
+    },
+    Enum {
+        leaf_count: usize,
+    },
+}
+
+impl CallValueShape {
+    pub fn leaf_count(self) -> usize {
+        match self {
+            Self::Scalar { leaf_count }
+            | Self::Struct { leaf_count, .. }
+            | Self::Enum { leaf_count } => leaf_count,
+        }
+    }
+}
+
 /// One call site inside an encoded body: the callee name, the encoded
 /// argument values, the uninterpreted application producing the result,
 /// and the path guard under which the call executes — the same guard
@@ -6629,9 +6665,11 @@ pub struct CallSite<'ctx> {
     pub callee: String,
     pub args: Vec<BV<'ctx>>,
     pub arg_leaf_doubles: Vec<bool>,
+    pub argument_shapes: Vec<CallValueShape>,
     pub has_composite_arguments_or_result: bool,
     pub result: BV<'ctx>,
     pub result_is_double: bool,
+    pub result_shape: CallValueShape,
     pub guard: Bool<'ctx>,
 }
 
@@ -8320,6 +8358,27 @@ enum SourceValue<'ctx> {
         /// `CallShapes::next_array_id`.
         alloc: u64,
     },
+}
+
+fn source_value_contains_enum(value: &SourceValue<'_>) -> bool {
+    match value {
+        SourceValue::Enum { .. } => true,
+        SourceValue::Composite(fields) => fields
+            .iter()
+            .any(|(_, field)| source_value_contains_enum(field)),
+        _ => false,
+    }
+}
+
+fn source_value_contains_f64(value: &SourceValue<'_>) -> bool {
+    match value {
+        SourceValue::Float64(_) => true,
+        SourceValue::Composite(fields) => fields
+            .iter()
+            .any(|(_, field)| source_value_contains_f64(field)),
+        SourceValue::Enum { slots, .. } => slots.iter().any(source_value_contains_f64),
+        _ => false,
+    }
 }
 
 /// Instantiate a callee-side [`SourceValue`] (expressed over the
@@ -10871,10 +10930,11 @@ fn source_expr<'ctx>(
             // site and `signature_domain`/`param_env` see one encoding.
             let mut applied = Vec::with_capacity(args.len());
             let mut arg_leaf_doubles = Vec::with_capacity(args.len());
+            let mut argument_shapes = Vec::with_capacity(args.len());
             let mut has_composite_arguments = false;
             for arg in args {
                 let lower = |value: SourceValue<'ctx>| lower_scalar(value, ctx);
-                match source_expr(
+                let value = source_expr(
                     arg,
                     ctx,
                     env,
@@ -10887,24 +10947,34 @@ fn source_expr<'ctx>(
                     call_sites,
                     call_returns,
                     enums,
-                )? {
+                )?;
+                let has_enum = source_value_contains_enum(&value);
+                let has_f64 = source_value_contains_f64(&value);
+                match value {
                     // A passed-through struct parameter flattens into its
                     // leaf slots — the callee's `param_env` and
                     // `signature_domain` consume the same order.
                     SourceValue::Composite(fields) => {
                         has_composite_arguments = true;
+                        let first_leaf = applied.len();
                         for (_, field) in fields {
                             let before = applied.len();
                             lower_composite(field, ctx, &mut applied)?;
                             arg_leaf_doubles
                                 .extend(std::iter::repeat_n(false, applied.len() - before));
                         }
+                        argument_shapes.push(CallValueShape::Struct {
+                            leaf_count: applied.len() - first_leaf,
+                            has_enum,
+                            has_f64,
+                        });
                     }
                     // A passed-through enum parameter flattens into its
                     // tag slot then the shared payload slots — the same
                     // order `signature_domain` and `param_env` consume.
                     SourceValue::Enum { tag, slots, .. } => {
                         has_composite_arguments = true;
+                        let first_leaf = applied.len();
                         applied.push(tag);
                         arg_leaf_doubles.push(false);
                         for slot in slots {
@@ -10913,6 +10983,9 @@ fn source_expr<'ctx>(
                             arg_leaf_doubles
                                 .extend(std::iter::repeat_n(false, applied.len() - before));
                         }
+                        argument_shapes.push(CallValueShape::Enum {
+                            leaf_count: applied.len() - first_leaf,
+                        });
                     }
                     scalar => {
                         let is_double = matches!(&scalar, SourceValue::Float64(_));
@@ -10921,9 +10994,11 @@ fn source_expr<'ctx>(
                             applied.push(lowered.extract(63, 0));
                             applied.push(lowered.extract(127, 64));
                             arg_leaf_doubles.extend([false, false]);
+                            argument_shapes.push(CallValueShape::Scalar { leaf_count: 2 });
                         } else {
                             applied.push(lowered);
                             arg_leaf_doubles.push(is_double);
+                            argument_shapes.push(CallValueShape::Scalar { leaf_count: 1 });
                         }
                     }
                 }
@@ -10947,9 +11022,17 @@ fn source_expr<'ctx>(
                     callee: name.clone(),
                     args: applied.clone(),
                     arg_leaf_doubles: arg_leaf_doubles.clone(),
+                    argument_shapes: argument_shapes.clone(),
                     has_composite_arguments_or_result: true,
                     result: aggregate_value(&slots),
                     result_is_double: false,
+                    result_shape: CallValueShape::Struct {
+                        leaf_count,
+                        has_enum: call_returns.fields_contain_enum(fields),
+                        has_f64: call_returns
+                            .flattened_kinds(fields)
+                            .contains(&ScalarKind::F64),
+                    },
                     guard: guard.clone(),
                 });
                 return Ok(composite_from_slots(
@@ -10977,9 +11060,13 @@ fn source_expr<'ctx>(
                     callee: name.clone(),
                     args: applied.clone(),
                     arg_leaf_doubles: arg_leaf_doubles.clone(),
+                    argument_shapes: argument_shapes.clone(),
                     has_composite_arguments_or_result: true,
                     result: aggregate_value(&slots),
                     result_is_double: false,
+                    result_shape: CallValueShape::Enum {
+                        leaf_count: slots.len(),
+                    },
                     guard: guard.clone(),
                 });
                 return Ok(SourceValue::Enum {
@@ -11006,9 +11093,11 @@ fn source_expr<'ctx>(
                     callee: name.clone(),
                     args: applied.clone(),
                     arg_leaf_doubles: arg_leaf_doubles.clone(),
+                    argument_shapes: argument_shapes.clone(),
                     has_composite_arguments_or_result: has_composite_arguments,
                     result: aggregate_value(&slots),
                     result_is_double: false,
+                    result_shape: CallValueShape::Scalar { leaf_count: 2 },
                     guard: guard.clone(),
                 });
                 let agg = aggregate_value(&slots);
@@ -11027,9 +11116,11 @@ fn source_expr<'ctx>(
                 callee: name.clone(),
                 args: applied.clone(),
                 arg_leaf_doubles,
+                argument_shapes,
                 has_composite_arguments_or_result: has_composite_arguments,
                 result: value.clone(),
                 result_is_double: call_returns.returns_f64(name),
+                result_shape: CallValueShape::Scalar { leaf_count: 1 },
                 guard: guard.clone(),
             });
             // The uninterpreted result is a bitvector; a callee whose
