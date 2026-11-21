@@ -139,6 +139,13 @@ atom area(s: Shape)
         }
     }
 ```
+Direct reads from uniquely owned named payloads are modeled precisely when
+the current path proves the owning variant. This includes enum-valued fields
+such as `b.e.port` and `o.c.port`, plus scalar leaves nested in named struct
+payloads such as `e.p.inner.x`. Without a proven tag, or for positional,
+ambiguous and unknown payload names, verification keeps the existing
+conservative behavior.
+
 Deep writes may pass through enum-valued payloads and struct fields when each
 enum tag along the path is proven. Named struct payloads and their nested
 struct fields recheck refined types, `where` constraints and invariants while

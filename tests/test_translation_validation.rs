@@ -4019,3 +4019,24 @@ fn composite_v23_does_not_admit_enum_slot_deep_writes() {
         "enum-slot deep writes must remain outside composite TV admission"
     );
 }
+
+#[test]
+fn composite_v23_does_not_admit_direct_enum_payload_reads() {
+    let source = "enum Chan { Tcp(port: i64, keep: i64), Udp }\n\
+        atom main() -> i64 requires: true; ensures: true; body: {\n\
+            let e = Chan::Tcp(5, 9);\n\
+            e.port\n\
+        };";
+    let items = parse_module_checked(source).unwrap();
+    let ir = emitted_module(&items);
+    assert!(
+        tv::validate_native_module(
+            source,
+            &ir,
+            Options::default(),
+            RefinedAdmission::CompositeV23,
+        )
+        .is_err(),
+        "direct enum payload reads must not expand CompositeV23 admission"
+    );
+}
