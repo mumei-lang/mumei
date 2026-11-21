@@ -130,6 +130,24 @@ impl<'a> NominalChecker<'a> {
         }
     }
 
+    /// Enum type of a constructor or a variable already known to be an enum.
+    fn enum_type_of(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Call(name, _) => self
+                .module_env
+                .resolve_variant_owner_by_hint(name, None)
+                .ok()
+                .flatten()
+                .and_then(|def| self.enum_key(&def.name)),
+            Expr::Variable(v) => self
+                .types
+                .get(v)
+                .and_then(|t| t.as_deref())
+                .and_then(|t| self.enum_key(t)),
+            _ => None,
+        }
+    }
+
     /// Common struct type of every branch, or `None` when any branch is
     /// unknown or the branches disagree.
     fn join_struct_types<'s>(
@@ -207,64 +225,70 @@ impl<'a> NominalChecker<'a> {
         let Some(declared) = self.types.get(root).and_then(|t| t.as_deref()) else {
             return Ok(());
         };
-        if let Some(skey) = self.struct_key(declared) {
-            let Some(expected) = self
-                .field_type(&skey, field)
-                .and_then(|t| self.struct_key(t))
+        let mut segments = field.split('.');
+        let Some(head) = segments.next() else {
+            return Ok(());
+        };
+        let (mut field_decl, enum_payload) = if let Some(skey) = self.struct_key(declared) {
+            let Some(field_decl) = self.field_type(&skey, head) else {
+                return Ok(());
+            };
+            (field_decl, false)
+        } else {
+            let Some(ekey) = self.enum_key(declared) else {
+                return Ok(());
+            };
+            let Some(enum_def) = self.module_env.enums.get(&ekey) else {
+                return Ok(());
+            };
+            // Unique-owner scan, mirroring the translator: only a payload
+            // name owned by exactly one variant has a declared type.
+            let mut owners = enum_def.variants.iter().filter_map(|v| {
+                let idx = v
+                    .fields
+                    .iter()
+                    .position(|f| f.split_once(':').map(|(n, _)| n.trim()).unwrap_or(f) == head)?;
+                Some((v, idx))
+            });
+            let Some((variant, idx)) = owners.next() else {
+                return Ok(());
+            };
+            if owners.next().is_some() {
+                return Ok(());
+            }
+            let Some(field_decl) = variant
+                .fields
+                .get(idx)
+                .and_then(|f| f.split_once(':').map(|(_, t)| t.trim()))
             else {
                 return Ok(());
             };
-            if let Some(actual) = self.struct_type_of(value) {
-                if actual != expected {
-                    return Err(self.mismatch(
-                        format!(
-                            "field '{field}' of '{root}' expects struct '{expected}' but got struct '{actual}'"
-                        ),
-                        span,
-                    ));
-                }
-            }
-            return Ok(());
+            (field_decl, true)
+        };
+        for segment in segments {
+            let Some(skey) = self.struct_key(field_decl) else {
+                return Ok(());
+            };
+            let Some(next_decl) = self.field_type(&skey, segment) else {
+                return Ok(());
+            };
+            field_decl = next_decl;
         }
-        let Some(ekey) = self.enum_key(declared) else {
-            return Ok(());
-        };
-        let Some(enum_def) = self.module_env.enums.get(&ekey) else {
-            return Ok(());
-        };
-        // Unique-owner scan, mirroring the translator: only a payload name
-        // owned by exactly one variant gets a declared type to check against.
-        let mut owners = enum_def.variants.iter().filter_map(|v| {
-            let idx = v
-                .fields
-                .iter()
-                .position(|f| f.split_once(':').map(|(n, _)| n.trim()).unwrap_or(f) == field)?;
-            Some((v, idx))
-        });
-        let Some((variant, idx)) = owners.next() else {
-            return Ok(());
-        };
-        if owners.next().is_some() {
-            return Ok(());
-        }
-        let Some(field_decl) = variant
-            .fields
-            .get(idx)
-            .and_then(|f| f.split_once(':').map(|(_, t)| t.trim()))
-        else {
-            return Ok(());
-        };
         let Some(expected) = self.struct_key(field_decl) else {
             return Ok(());
         };
         if let Some(actual) = self.struct_type_of(value) {
             if actual != expected {
-                return Err(self.mismatch(
+                let message = if enum_payload {
                     format!(
                         "payload '{field}' of '{root}' expects struct '{expected}' but got struct '{actual}'"
-                    ),
-                    span,
-                ));
+                    )
+                } else {
+                    format!(
+                        "field '{field}' of '{root}' expects struct '{expected}' but got struct '{actual}'"
+                    )
+                };
+                return Err(self.mismatch(message, span));
             }
         }
         Ok(())
@@ -463,7 +487,9 @@ impl<'a> NominalChecker<'a> {
         match stmt {
             Stmt::Let { var, value, span } => {
                 self.expr(value, span)?;
-                let ty = self.struct_type_of(value);
+                let ty = self
+                    .struct_type_of(value)
+                    .or_else(|| self.enum_type_of(value));
                 self.types.insert(var.clone(), ty);
                 Ok(())
             }
@@ -937,5 +963,92 @@ body: {{ w.q = Pair {{ a: 1, b: 2 }}; 0 }};
         let errors = check(&src);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("field 'q' of 'w' expects struct 'Point' but got struct 'Pair'"));
+    }
+
+    const DEEP_ENUMS: &str = r#"
+struct Inner { x: i64, y: i64 }
+struct Other { x: i64, y: i64 }
+struct Outer { inner: Inner, z: i64 }
+struct WrapDeep { a: Outer }
+enum EvI { Hold(i: Inner), Idle }
+enum Ev { Move(p: Outer), Idle }
+"#;
+
+    #[test]
+    fn deep_struct_and_enum_field_assignments_reject_same_layout_structs() {
+        let src = format!(
+            "{DEEP_ENUMS}
+trusted atom local_enum_payload_mismatch() -> i64
+requires: true;
+ensures: true;
+body: {{ let e = EvI::Hold(Inner {{ x: 1, y: 2 }}); e.i = Other {{ x: 1, y: 2 }}; 0 }};
+
+trusted atom local_enum_deep_payload_mismatch() -> i64
+requires: true;
+ensures: true;
+body: {{ let e = Ev::Move(Outer {{ inner: Inner {{ x: 1, y: 2 }}, z: 3 }}); e.p.inner = Other {{ x: 1, y: 2 }}; 0 }};
+
+trusted atom param_enum_deep_payload_mismatch(e: Ev) -> i64
+requires: true;
+ensures: true;
+body: {{ e.p.inner = Other {{ x: 1, y: 2 }}; 0 }};
+
+trusted atom ordinary_struct_deep_field_mismatch() -> i64
+requires: true;
+ensures: true;
+body: {{ let o = WrapDeep {{ a: Outer {{ inner: Inner {{ x: 1, y: 2 }}, z: 3 }} }}; o.a.inner = Other {{ x: 1, y: 2 }}; 0 }};
+"
+        );
+        let errors = check(&src);
+        assert_eq!(errors.len(), 4, "{errors:?}");
+        for expected in [
+            "payload 'i' of 'e' expects struct 'Inner' but got struct 'Other'",
+            "payload 'p.inner' of 'e' expects struct 'Inner' but got struct 'Other'",
+            "payload 'p.inner' of 'e' expects struct 'Inner' but got struct 'Other'",
+            "field 'a.inner' of 'o' expects struct 'Inner' but got struct 'Other'",
+        ] {
+            assert!(
+                errors.iter().any(|error| error.contains(expected)),
+                "{errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn matching_deep_struct_and_enum_field_assignments_are_accepted() {
+        let src = format!(
+            "{DEEP_ENUMS}
+trusted atom local_enum_payload_match() -> i64
+requires: true;
+ensures: true;
+body: {{ let e = EvI::Hold(Inner {{ x: 1, y: 2 }}); e.i = Inner {{ x: 3, y: 4 }}; 0 }};
+
+trusted atom local_enum_deep_payload_match() -> i64
+requires: true;
+ensures: true;
+body: {{ let e = Ev::Move(Outer {{ inner: Inner {{ x: 1, y: 2 }}, z: 3 }}); e.p.inner = Inner {{ x: 3, y: 4 }}; 0 }};
+
+trusted atom param_enum_deep_payload_match(e: Ev) -> i64
+requires: true;
+ensures: true;
+body: {{ e.p.inner = Inner {{ x: 3, y: 4 }}; 0 }};
+
+trusted atom ordinary_struct_deep_field_match() -> i64
+requires: true;
+ensures: true;
+body: {{ let o = WrapDeep {{ a: Outer {{ inner: Inner {{ x: 1, y: 2 }}, z: 3 }} }}; o.a.inner = Inner {{ x: 3, y: 4 }}; 0 }};
+
+trusted atom enum_scalar_deep_field_write() -> i64
+requires: true;
+ensures: true;
+body: {{ let e = Ev::Move(Outer {{ inner: Inner {{ x: 1, y: 2 }}, z: 3 }}); e.p.inner.x = 1; 0 }};
+
+trusted atom enum_alias_keeps_nominal_type(e: Ev) -> i64
+requires: true;
+ensures: true;
+body: {{ let alias = e; alias.p.inner = Inner {{ x: 3, y: 4 }}; 0 }};
+"
+        );
+        assert!(check(&src).is_empty(), "{:?}", check(&src));
     }
 }

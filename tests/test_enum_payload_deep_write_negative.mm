@@ -5,6 +5,11 @@ struct Inner {
     y: i64
 }
 
+struct OtherInner {
+    x: i64,
+    y: i64
+}
+
 struct Outer {
     inner: Inner,
     z: i64
@@ -146,4 +151,16 @@ body: {
     let e = Event::Move(Outer { inner: Inner { x: 1, y: 2 }, z: 3 });
     e.p.inner.x = { w = w + 1; w };
     w + w
+};
+
+atom bad_nominal_deep_payload_write() -> i64
+requires: true;
+ensures: true;
+body: {
+    let e = Event::Move(Outer {
+        inner: Inner { x: 1, y: 2 },
+        z: 3
+    });
+    e.p.inner = OtherInner { x: 1, y: 2 };
+    0
 };

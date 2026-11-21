@@ -92,6 +92,10 @@ fn invalid_deep_enum_payload_writes_fail_closed() {
             "bad_enum_rhs_double_eval",
             "Postcondition (ensures) is not satisfied",
         ),
+        (
+            "bad_nominal_deep_payload_write",
+            "expects struct 'Inner' but got struct 'OtherInner'",
+        ),
     ] {
         assert!(
             combined.contains(atom) && combined.contains(diagnostic),
