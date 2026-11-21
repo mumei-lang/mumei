@@ -903,6 +903,15 @@ fn lift<'ctx>(
     let function_has_calls = instructions.iter().any(|instruction| {
         instruction.mnemonic == "callq" || is_tail_call(instruction, call_targets)
     });
+    let function_adjusts_stack = instructions.iter().any(|instruction| {
+        instruction.mnemonic.starts_with("push")
+            || instruction.mnemonic.starts_with("pop")
+            || split_operands(&instruction.operands)
+                .last()
+                .is_some_and(|destination| {
+                    matches!(destination.trim(), "%rsp" | "%esp" | "%sp" | "%spl")
+                })
+    });
     let memory_sort = Sort::bitvector(context, 64);
     let frame_memory = Array::fresh_const(
         context,
@@ -1234,6 +1243,7 @@ fn lift<'ctx>(
                         model,
                         &arguments,
                         function_has_calls,
+                        function_adjusts_stack,
                         context,
                     )?;
                 }
@@ -1262,6 +1272,7 @@ fn lift<'ctx>(
                         model,
                         &arguments,
                         function_has_calls,
+                        function_adjusts_stack,
                         context,
                     )?;
                 }
@@ -2348,15 +2359,19 @@ fn frame_memory_offset<'ctx>(
     model: &PureI64Body<'ctx>,
     arguments: &[BV<'ctx>],
     function_has_calls: bool,
+    function_adjusts_stack: bool,
     context: &'ctx Context,
 ) -> Result<BV<'ctx>, FunctionOutcome> {
+    if function_has_calls {
+        return Err(FunctionOutcome::OutsideProfile("frame_memory_call"));
+    }
+    if function_adjusts_stack {
+        return Err(FunctionOutcome::OutsideProfile("frame_memory_stack_adjust"));
+    }
     let (displacement, index) = parse_frame_memory_operand(operand)
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
     if !state.rsp_is_known || state.rsp_offset != 0 || displacement % 8 != 0 {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-    }
-    if function_has_calls {
-        return Err(FunctionOutcome::OutsideProfile("frame_memory_call"));
     }
     let displacement = BV::from_i64(context, displacement, 64);
     let offset = index.map_or_else(
@@ -2389,6 +2404,7 @@ fn lift_frame_memory_store<'ctx>(
     model: &PureI64Body<'ctx>,
     arguments: &[BV<'ctx>],
     function_has_calls: bool,
+    function_adjusts_stack: bool,
     context: &'ctx Context,
 ) -> Result<(), FunctionOutcome> {
     let operands = split_operands(&instruction.operands);
@@ -2401,6 +2417,7 @@ fn lift_frame_memory_store<'ctx>(
         model,
         arguments,
         function_has_calls,
+        function_adjusts_stack,
         context,
     )?;
     let value = if let Some(immediate) = source.strip_prefix('$') {
@@ -2422,13 +2439,22 @@ fn lift_frame_memory_load<'ctx>(
     model: &PureI64Body<'ctx>,
     arguments: &[BV<'ctx>],
     function_has_calls: bool,
+    function_adjusts_stack: bool,
     context: &'ctx Context,
 ) -> Result<(), FunctionOutcome> {
     let operands = split_operands(&instruction.operands);
     let [source, destination] = operands.as_slice() else {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     };
-    let offset = frame_memory_offset(source, state, model, arguments, function_has_calls, context)?;
+    let offset = frame_memory_offset(
+        source,
+        state,
+        model,
+        arguments,
+        function_has_calls,
+        function_adjusts_stack,
+        context,
+    )?;
     let (register, width) = parse_register(destination)
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
     let value = state
@@ -4454,6 +4480,28 @@ merge:
         assert_eq!(
             check_function(&memory_and_call, 0, &sum_model, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("frame_memory_call")
+        );
+        let store_push_pop_load = [
+            0x48, 0xc7, 0x44, 0x24, 0xf8, 5, 0, 0, 0, 0x50, 0x58, 0x48, 0x8b, 0x44, 0x24, 0xf8,
+            0xc3,
+        ];
+        let instructions = disassemble(&store_push_pop_load, 0).unwrap();
+        assert_eq!(
+            instructions
+                .iter()
+                .map(|instruction| instruction.mnemonic.as_str())
+                .collect::<Vec<_>>(),
+            ["movq", "pushq", "popq", "movq", "retq"]
+        );
+        assert_eq!(
+            check_function(
+                &store_push_pop_load,
+                0,
+                &sum_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::OutsideProfile("frame_memory_stack_adjust")
         );
         let non_qword_store = [0xc7, 0x44, 0x24, 0xf8, 1, 0, 0, 0, 0xc3];
         assert_eq!(

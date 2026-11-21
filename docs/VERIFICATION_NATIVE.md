@@ -1902,11 +1902,12 @@ Models with post-state writes, bounded strings, unsupported composite or enum
 body features, or unsupported f64 operations fail closed as
 `unsupported_signature`. Leaf-function bounded arrays may use qword
 `%rsp`-relative red-zone accesses only when each effective offset is proved
-within `-128..=-8`; the model assumes the red zone is not clobbered. Frame
-memory combined with calls, adjusted-stack accesses, non-qword accesses and
-`.rodata`/`Str` memory remain fail-closed. Scalar subranges and refined
-signatures remain supported because their input restrictions are carried by
-`param_domain`.
+within `-128..=-8`; the model assumes the red zone is not clobbered.
+Frame-memory accesses with calls (`frame_memory_call`) or in functions that
+push/pop or write `%rsp`/`%esp` (`frame_memory_stack_adjust`) remain fail-closed,
+as do non-qword accesses and `.rodata`/`Str` memory. Scalar subranges and
+refined signatures remain supported because their input restrictions are
+carried by `param_domain`.
 `u64` leaves are also admitted as full-width 64-bit bitvectors with no
 additional parameter-domain constraint. Unsigned comparisons, division,
 remainder and logical right shift retain their unsigned bitvector semantics;
