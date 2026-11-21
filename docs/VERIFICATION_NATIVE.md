@@ -1878,6 +1878,9 @@ The `input_domain` is
 `signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires`.
 The comparison asserts the source model's signature-bounded parameter domains
 and division/shift definedness, but does not restrict inputs by `requires`.
+Unknown per-path equivalence queries retry the identical obligations with
+`simplify → smt` under the same budget; constant-divisor magic-number
+sequences may remain inconclusive.
 Larger multiply-heavy functions may remain inconclusive within the solver
 budget; this is fail-closed and does not imply inequivalence.
 Outside-profile reasons include `argument_count`, `branch_target`,

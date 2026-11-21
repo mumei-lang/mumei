@@ -3077,7 +3077,10 @@ validation remains the deep endpoint.
 The per-instruction C10 Option B TV profile adds opt-in
 `native-bundle recheck-machine-tv`, which runs the complete object recheck and
 then asks Z3 whether reproduced machine code for straight-line or acyclic
-branch functions matches each source atom's pure-i64 model. Direct calls in
+branch functions matches each source atom's pure-i64 model. Unknown per-path
+equivalence queries retry the identical obligations with `simplify → smt`
+under the same budget; constant-divisor magic-number sequences may remain
+inconclusive. Direct calls in
 branching functions are matched per path to ordered source `CallSite`s;
 provably false guards are skipped and argument expressions and call-result
 terms are compared as uninterpreted sites. Unresolved guards remain outside
