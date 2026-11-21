@@ -56,6 +56,20 @@ const OBSERVATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// never stores or hashes an unbounded channel — overflow yields no pin.
 const OBSERVED_CHANNEL_MAX_BYTES: usize = 65_536;
 
+/// Declare the inputs of the one invocation. Environment and working
+/// directory are inherited from the consumer and unpinned, so observations
+/// hold only under that unpinned context.
+fn observation_invocation_envelope() -> serde_json::Value {
+    serde_json::json!({
+        "argv": [],
+        "stdin": "closed",
+        "timeout_ms": OBSERVATION_TIMEOUT.as_millis(),
+        "channel_cap_bytes": OBSERVED_CHANNEL_MAX_BYTES,
+        "environment": "inherited_unpinned",
+        "working_directory": "inherited_unpinned",
+    })
+}
+
 /// Which standard output channel an observation drains and digests.
 #[derive(Clone, Copy)]
 enum ObservedChannel {
@@ -948,12 +962,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                                 "verdict": "observed_matching",
                                 "scope": RUNTIME_OBSERVATION_RECHECK_SCOPE,
                                 "build_id": expected_build_id,
-                                "invocation": {
-                                    "argv": [],
-                                    "stdin": "closed",
-                                    "timeout_ms": OBSERVATION_TIMEOUT.as_millis(),
-                                    "channel_cap_bytes": OBSERVED_CHANNEL_MAX_BYTES,
-                                },
+                                "invocation": observation_invocation_envelope(),
                                 "observations": {
                                     "exit_status": observation.exit_status,
                                     "stdout_sha256": observation.stdout_sha256,
@@ -1340,7 +1349,9 @@ const RUNTIME_OBSERVATION_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance = NativeAcc
 /// same evaluation the paired `recheck-*` command runs, reported in the
 /// acceptance vocabulary. The descriptor binds no subject, digest or
 /// provenance so it cannot be replayed as Evidence; non-accepted outcomes
-/// write nothing.
+/// write nothing. The runtime-observation envelope contains only fixed
+/// invocation constants and unpinned inherited context, not subject,
+/// digest or provenance.
 fn write_native_acceptance(
     outcome: Outcome,
     json: bool,
@@ -1360,6 +1371,12 @@ fn write_native_acceptance(
             "checks_performed": acceptance.performed,
             "checks_not_performed": acceptance.not_performed,
         });
+        if acceptance
+            .performed
+            .contains(&"runtime_observation_semantics")
+        {
+            value["invocation"] = observation_invocation_envelope();
+        }
         // Optional binding: sha256 of the accepted record's bytes lets a
         // holder prove WHICH record this descriptor evaluated, without the
         // descriptor echoing any claim or digest it could replay as identity.
@@ -2705,6 +2722,71 @@ mod tests {
             observed_invocation(&dir.path().join("missing")),
             Err(ObservedStreamFailure::SpawnFailed)
         );
+    }
+
+    #[test]
+    fn observation_envelope_is_only_in_runtime_observation_acceptance() {
+        let runtime_acceptances = [
+            &MULTIFILE_RUNTIME_OBSERVATION_ACCEPTANCE,
+            &MULTIFILE_RUNTIME_OBSERVATION_ACCEPTANCE_ARGV_UNPINNED,
+            &RUNTIME_OBSERVATION_ACCEPTANCE,
+            &RUNTIME_OBSERVATION_ACCEPTANCE_ARGV_UNPINNED,
+        ];
+        for acceptance in runtime_acceptances {
+            let mut json_output = Vec::new();
+            write_native_acceptance(
+                Outcome::EquivalentWithinProfile,
+                true,
+                acceptance,
+                None,
+                &mut json_output,
+            )
+            .unwrap();
+            let descriptor: serde_json::Value = serde_json::from_slice(&json_output).unwrap();
+            assert_eq!(descriptor["invocation"], observation_invocation_envelope());
+            assert_eq!(descriptor["invocation"]["timeout_ms"], 30000);
+            assert_eq!(descriptor["invocation"]["channel_cap_bytes"], 65536);
+
+            let mut text_output = Vec::new();
+            write_native_acceptance(
+                Outcome::EquivalentWithinProfile,
+                false,
+                acceptance,
+                None,
+                &mut text_output,
+            )
+            .unwrap();
+            assert_eq!(text_output, acceptance.text.as_bytes());
+        }
+
+        for acceptance in [
+            &STDOUT_ACCEPTANCE,
+            &EXIT_STATUS_ACCEPTANCE,
+            &ARTIFACT_ACCEPTANCE,
+        ] {
+            let mut json_output = Vec::new();
+            write_native_acceptance(
+                Outcome::EquivalentWithinProfile,
+                true,
+                acceptance,
+                None,
+                &mut json_output,
+            )
+            .unwrap();
+            let descriptor: serde_json::Value = serde_json::from_slice(&json_output).unwrap();
+            assert!(descriptor.get("invocation").is_none());
+
+            let mut text_output = Vec::new();
+            write_native_acceptance(
+                Outcome::EquivalentWithinProfile,
+                false,
+                acceptance,
+                None,
+                &mut text_output,
+            )
+            .unwrap();
+            assert_eq!(text_output, acceptance.text.as_bytes());
+        }
     }
 
     #[test]

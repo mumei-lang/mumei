@@ -1894,9 +1894,17 @@ The scope is
 `artifact_reproduction_and_runtime_observation_semantics_on_one_invocation_only/no_runtime_abi_or_semantic_proof`.
 It is a conjunction of three OS-level observations from one run, not a
 runtime/ABI, process-semantics, optimizer-semantics or
-historical-execution claim. Existing `accept-*` descriptors remain
-unchanged; composing this descriptor with acceptance and `recovery-eval`
-is the planned Option A slice 3.
+historical-execution claim. Composition landed via `accept-observations`
+and the mumei-agent `native-observations-accept` route (mumei-agent#1039).
+
+Both JSON descriptors report the same invocation envelope:
+`argv: []`, `stdin: "closed"`, `timeout_ms: 30000`,
+`channel_cap_bytes: 65536`, and `environment` and
+`working_directory: "inherited_unpinned"`. Multiple invocations,
+non-empty argv, stdin bytes, pinned environment or working directory,
+and CPU/memory resource limits are not supported or claimed; only the
+30-second timeout and 64 KiB per-channel cap are enforced, and none of
+those properties is covered by `runtime_observation_semantics`.
 
 ### Pinned executable runtime-observation acceptance
 
@@ -1930,8 +1938,12 @@ This is the only acceptance descriptor that performs
 `runtime_observation_semantics`: each per-channel `accept-*` command runs
 its channel observation separately, so those descriptors cannot claim
 that all channels matched in the same invocation. The descriptor is not
-reusable Evidence or a certificate. The Agent-side performer registration
-in `RUNTIME_CHECK_VOCABULARY` (mumei-agent#1034) is a follow-up.
+reusable Evidence or a certificate. The Agent
+`native-observations-accept` route (mumei-agent#1039) now performs
+`runtime_observation_semantics` from this descriptor. The Agent decides
+acceptance from Core's exit code and its own declared-input recheck; it
+stores the JSON but does not validate the `invocation` envelope, which
+is what Core reports about its own run, not a condition the Agent checks.
 These descriptors name the exit-status observation only as
 `os_exit_status_observation` (formerly bare `os_exit_status` in the
 not-performed lists of the non-exit-status descriptors).
