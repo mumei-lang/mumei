@@ -3073,6 +3073,15 @@ instruction semantics are not checked; this is not general linker-semantics or
 ABI validation. Local/private definitions, indirect calls and unsupported or
 unresolvable relocations are inconclusive. Full object-code translation
 validation remains the deep endpoint.
+
+The first per-instruction C10 Option B TV profile adds opt-in
+`native-bundle recheck-machine-tv`, which runs the complete object recheck and
+then asks Z3 whether reproduced machine code for leaf straight-line functions
+matches each source atom's pure-i64 model. It assumes (but does not verify) the
+declared x86-64 integer-register convention and makes no ABI claim. Non-leaf
+functions, the C `main` wrapper, CRT/startup code, loader, libc and runtime are
+not covered; full object-code TV remains the deeper endpoint.
+
 Sibling descriptors now name the exit-status observation only as
 `os_exit_status_observation` (formerly bare `os_exit_status` in
 non-exit-status `checks_not_performed` lists).

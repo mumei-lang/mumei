@@ -32,6 +32,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei native-bundle check` | 1 | Check snapshot identities against an externally supplied build ID; does not execute or prove the artifact |
 | `mumei native-bundle recheck-artifact` | 1 | Recheck that the toolchain reproduces the pinned object and executable; does not execute or check runtime/ABI semantics |
 | `mumei native-bundle recheck-object` | 2 | Recheck object symbols, direct call edges and linked function placement/call targets; no instruction semantics, ABI or runtime claim |
+| `mumei native-bundle recheck-machine-tv` | 2 | Compare leaf straight-line machine code with pure-i64 source models under an assumed register convention; no ABI or runtime claim |
 | `mumei native-bundle recheck-exit-status` | 1 | Execute the reproduced executable and compare its OS exit status with the record pin; no runtime/ABI semantics |
 | `mumei native-bundle accept-exit-status` | 2 | Accept the pinned artifact after the exit-status recheck; emits an anonymous acceptance descriptor, not reusable Evidence |
 | `mumei native-bundle recheck-stdout` | 1 | Execute the reproduced executable and compare its captured stdout digest with the record pin; no runtime/ABI semantics |
@@ -561,6 +562,30 @@ Usage: mumei native-bundle recheck-object [OPTIONS] --expected-build-id <EXPECTE
 |---|---|---|---|
 | `--expected-build-id <EXPECTED_BUILD_ID>` | — | — | SHA-256 of native-bundle.json obtained through a separately trusted channel |
 | `--json` | false | — | Emit a mumei.object-symbol-correspondence/v1 descriptor on success, not reusable Evidence or a certificate |
+
+## `mumei native-bundle recheck-machine-tv`
+
+Compare leaf straight-line machine code with pure-i64 source models under an assumed register convention; no ABI or runtime claim
+
+Usage:
+
+```text
+Usage: mumei native-bundle recheck-machine-tv [OPTIONS] --expected-build-id <EXPECTED_BUILD_ID> <BUNDLE> <SOURCE>
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `BUNDLE` | Yes | — |
+| `SOURCE` | Yes | — |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--expected-build-id <EXPECTED_BUILD_ID>` | — | — | SHA-256 of native-bundle.json obtained through a separately trusted channel |
+| `--json` | false | — | Emit a mumei.machine-code-tv/v1 descriptor on success, not reusable Evidence or a certificate |
 
 ## `mumei native-bundle recheck-exit-status`
 

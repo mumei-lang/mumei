@@ -1,6 +1,7 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use mumei_core::native_bundle::{self, BundleFile, RECORD_FILE};
+use object::{Object, ObjectSection, ObjectSymbol, SymbolKind};
 use std::{
     collections::BTreeMap,
     fs,
@@ -94,6 +95,53 @@ fn recheck_object(source: &Path, bundle: &Path, id: &str, json: bool) -> Output 
         bundle,
         id,
     )
+}
+
+fn recheck_machine_tv(source: &Path, bundle: &Path, id: &str, json: bool) -> Output {
+    consume(
+        if json {
+            "recheck-machine-tv --json"
+        } else {
+            "recheck-machine-tv"
+        },
+        source,
+        bundle,
+        id,
+    )
+}
+
+fn object_function_disassembly(bundle: &Path, function_name: &str) -> Vec<String> {
+    let bytes = fs::read(bundle.join(BundleFile::Object.file_name())).unwrap();
+    let file = object::File::parse(bytes.as_slice()).unwrap();
+    let symbol = file
+        .symbols()
+        .find(|symbol| {
+            symbol.name().ok() == Some(function_name)
+                && symbol.is_global()
+                && symbol.is_definition()
+                && symbol.kind() == SymbolKind::Text
+        })
+        .unwrap();
+    let section = file
+        .section_by_index(symbol.section_index().unwrap())
+        .unwrap();
+    mumei_emit_llvm::machine_tv::disassemble(
+        section
+            .data_range(symbol.address(), symbol.size())
+            .unwrap()
+            .unwrap(),
+        symbol.address(),
+    )
+    .unwrap()
+    .into_iter()
+    .map(|instruction| {
+        if instruction.operands.is_empty() {
+            instruction.mnemonic
+        } else {
+            format!("{} {}", instruction.mnemonic, instruction.operands)
+        }
+    })
+    .collect()
 }
 
 fn repin(bundle: &Path, source: Option<&str>) -> String {
@@ -256,6 +304,102 @@ fn recheck_object_rejects_wrong_expected_build_id_like_artifact_recheck() {
     let artifact = consume("recheck-artifact", &source, &bundle, &wrong_id);
     assert!(!output.status.success());
     assert_eq!(output.status.code(), artifact.status.code());
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    assert_eq!(
+        object_function_disassembly(&bundle, "__mumei_user_main"),
+        vec!["movl $7, %eax".to_owned(), "retq".to_owned()]
+    );
+
+    let text = recheck_machine_tv(&source, &bundle, &id, false);
+    assert_success(&text);
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains(
+        "Machine-code TV: 1 of 2 object functions equivalent to their source atoms within the leaf profile."
+    ));
+    assert!(text.contains(
+        "Scope: artifact_reproduction_object_link_correspondence_and_leaf_function_machine_code_tv_only/no_abi_or_runtime_semantics"
+    ));
+
+    let output = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(descriptor["schema_version"], "mumei.machine-code-tv/v1");
+    assert_eq!(
+        descriptor["scope"],
+        "artifact_reproduction_object_link_correspondence_and_leaf_function_machine_code_tv_only/no_abi_or_runtime_semantics"
+    );
+    assert_eq!(
+        descriptor["register_convention_assumed"],
+        "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax"
+    );
+    assert_eq!(
+        descriptor["functions"],
+        serde_json::json!({
+            "__mumei_user_main": {"outcome": "equivalent_within_profile"},
+            "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
+        })
+    );
+    assert_eq!(
+        descriptor["checks_performed"],
+        serde_json::json!([
+            "toolchain_object_executable_reproduction",
+            "object_symbol_correspondence",
+            "object_call_edge_correspondence",
+            "object_link_correspondence",
+            "machine_code_leaf_function_tv",
+        ])
+    );
+    assert_eq!(
+        descriptor["checks_not_performed"],
+        serde_json::json!([
+            "optimizer_semantics",
+            "raw_link_argument_vector_reproduction",
+            "abi_runtime_semantics",
+            "os_exit_status_observation",
+            "os_stdout_observation",
+            "os_stderr_observation",
+            "runtime_observation_semantics",
+            "machine_code_tv_non_leaf_functions",
+        ])
+    );
+}
+
+#[test]
+fn recheck_machine_tv_reports_module_leaf_and_non_leaf_outcomes() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), MODULE);
+    assert_eq!(
+        object_function_disassembly(&bundle, "helper"),
+        vec!["leaq 1(%rdi), %rax".to_owned(), "retq".to_owned()]
+    );
+    let output = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        descriptor["functions"],
+        serde_json::json!({
+            "__mumei_user_main": {"outcome": "outside_profile", "reason": "calls"},
+            "helper": {"outcome": "equivalent_within_profile"},
+            "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
+        })
+    );
+}
+
+#[test]
+fn recheck_machine_tv_rejects_wrong_expected_build_id_like_recheck_object() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, _) = build(root.path());
+    let wrong_id = "0".repeat(64);
+    let output = recheck_machine_tv(&source, &bundle, &wrong_id, true);
+    let object = recheck_object(&source, &bundle, &wrong_id, true);
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), object.status.code());
     assert!(output.stdout.is_empty());
 }
 

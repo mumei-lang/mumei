@@ -3,7 +3,10 @@ use mumei_core::semantic_contract::RefinedAdmission;
 use mumei_core::{
     hir, native_bundle::*, parser, proof_cert, resolver, semantic_contract, verification,
 };
-use mumei_emit_llvm::translation_validation::{self as tv, Options, Outcome};
+use mumei_emit_llvm::{
+    machine_tv::{self, FunctionOutcome},
+    translation_validation::{self as tv, Options, Outcome},
+};
 use object::{
     Architecture, BinaryFormat, Object, ObjectSection, ObjectSymbol, RelocationFlags,
     RelocationTarget, SectionKind, SymbolKind,
@@ -46,6 +49,10 @@ const ARTIFACT_RECHECK_SCOPE: &str =
     "source_postcondition_llvm_snapshot_and_toolchain_identity_only/no_execution_or_runtime_semantics";
 const OBJECT_SYMBOL_CORRESPONDENCE_SCOPE: &str =
     "artifact_reproduction_object_symbols_call_edges_and_link_placement_only/no_instruction_abi_or_runtime_semantics";
+const MACHINE_CODE_TV_SCOPE: &str =
+    "artifact_reproduction_object_link_correspondence_and_leaf_function_machine_code_tv_only/no_abi_or_runtime_semantics";
+const MACHINE_CODE_REGISTER_CONVENTION: &str =
+    "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax";
 const EXIT_STATUS_RECHECK_SCOPE: &str =
     "artifact_reproduction_and_os_exit_status_observation_only/no_runtime_abi_or_semantic_proof";
 const STDOUT_RECHECK_SCOPE: &str =
@@ -403,6 +410,7 @@ struct LoadedBundle {
     object_build: ObjectBuild,
     link_build: LinkBuild,
     files: BTreeMap<BundleFile, Vec<u8>>,
+    source_text: Option<String>,
 }
 
 pub(crate) fn run(command: NativeBundleCommand) {
@@ -552,139 +560,39 @@ pub(crate) fn run(command: NativeBundleCommand) {
             source,
             expected_build_id,
             json,
-        } => match recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id) {
+        } => match recheck_object_pipeline(
+            Path::new(&bundle),
+            Path::new(&source),
+            &expected_build_id,
+        ) {
             Err(error) => Err(error),
-            Ok(ArtifactRecheckResult {
-                result: ArtifactRecheck::Different,
-                ..
-            }) => Err(BundleError(
-                "pinned artifact differs from the toolchain's output for the pinned inputs",
-            )),
-            Ok(ArtifactRecheckResult {
-                result: ArtifactRecheck::Inconclusive,
-                ..
-            }) => {
-                eprintln!(
-                    "Native source/LLVM recheck inconclusive; no object symbol correspondence established."
-                );
+            Ok(ObjectRecheckPipeline::Different(message)) => Err(BundleError(message)),
+            Ok(ObjectRecheckPipeline::Inconclusive(message)) => {
+                eprintln!("{message}");
                 std::process::exit(3);
             }
-            Ok(ArtifactRecheckResult {
-                result: ArtifactRecheck::Rechecked,
-                stage: Some(stage),
-                ..
-            }) => {
-                let ir = fs::read(stage.path().join(BundleFile::LlvmIr.file_name()));
-                let object = fs::read(stage.path().join(BundleFile::Object.file_name()));
-                let (Ok(ir), Ok(object)) = (ir, object) else {
-                    eprintln!("Native object symbol surface inconclusive; staged inputs could not be read.");
-                    drop(stage);
-                    std::process::exit(3);
-                };
-                let (Ok(ir_surface), Ok(object_surface)) =
-                    (tv::ir_function_surface(&ir), object_symbol_surface(&object))
-                else {
-                    eprintln!("Native object symbol surface inconclusive; LLVM IR or object parsing failed.");
-                    drop(stage);
-                    std::process::exit(3);
-                };
-                if !object_symbols_correspond(&ir_surface, &object_surface) {
-                    Err(BundleError(
-                        "native object symbol surface differs from LLVM IR",
-                    ))
-                } else {
-                    match object_call_edges_correspond(&ir_surface, &object_surface) {
-                        None => {
-                            eprintln!(
-                                "Native object call-edge correspondence inconclusive; direct call edges are not checkable."
-                            );
-                            drop(stage);
-                            std::process::exit(3);
-                        }
-                        Some(false) => {
-                            Err(BundleError("native object call edges differ from LLVM IR"))
-                        }
-                        Some(true) => {
-                            let executable =
-                                fs::read(stage.path().join(BundleFile::Executable.file_name()));
-                            let Ok(executable) = executable else {
-                                eprintln!(
-                                    "Native object link correspondence inconclusive; staged executable could not be read."
-                                );
-                                drop(stage);
-                                std::process::exit(3);
-                            };
-                            let (link_corresponds, resolved_call_sites) =
-                                match object_link_corresponds(&object, &executable) {
-                                    Ok(Some(result)) => result,
-                                    Ok(None) | Err(()) => {
-                                        eprintln!(
-                                            "Native object link correspondence inconclusive; linked function bytes or call targets are not checkable."
-                                        );
-                                        drop(stage);
-                                        std::process::exit(3);
-                                    }
-                                };
-                            if !link_corresponds {
-                                Err(BundleError(
-                                    "linked executable function bytes or call targets differ from the object",
-                                ))
-                            } else if json {
-                            let descriptor = serde_json::json!({
-                                "schema_version": "mumei.object-symbol-correspondence/v1",
-                                "scope": OBJECT_SYMBOL_CORRESPONDENCE_SCOPE,
-                                "build_id": expected_build_id,
-                                "defined_functions": ir_surface.defined,
-                                "external_references": object_surface.undefined,
-                                "checks_performed": [
-                                    "toolchain_object_executable_reproduction",
-                                    "object_symbol_correspondence",
-                                    "object_call_edge_correspondence",
-                                    "object_link_correspondence",
-                                ],
-                                "checks_not_performed": [
-                                    "optimizer_semantics",
-                                    "raw_link_argument_vector_reproduction",
-                                    "abi_runtime_semantics",
-                                    "os_exit_status_observation",
-                                    "os_stdout_observation",
-                                    "os_stderr_observation",
-                                    "runtime_observation_semantics",
-                                ],
-                                "call_edges": ir_surface.calls,
-                                "resolved_call_sites": resolved_call_sites,
-                            });
-                            serde_json::to_vec_pretty(&descriptor)
-                                .map_err(|_| BundleError("cannot encode object symbol descriptor"))
-                                .and_then(|mut bytes| {
-                                    bytes.push(b'\n');
-                                    std::io::stdout()
-                                        .lock()
-                                        .write_all(&bytes)
-                                        .map_err(|_| {
-                                            BundleError("cannot write object symbol descriptor")
-                                        })
-                                })
-                            } else {
-                            let call_count: usize =
-                                ir_surface.calls.values().map(BTreeSet::len).sum();
-                            println!(
-                                "Native object symbol surface, direct call edges and linked placement correspond to the pinned LLVM IR and executable: {} defined functions, {call_count} call edges, {resolved_call_sites} resolved call sites.\nScope: {OBJECT_SYMBOL_CORRESPONDENCE_SCOPE}",
-                                ir_surface.defined.len(),
-                            );
-                            Ok(())
-                            }
-                        }
-                    }
-                }
+            Ok(ObjectRecheckPipeline::Rechecked(data)) => {
+                write_object_recheck(*data, &expected_build_id, json)
             }
-            Ok(ArtifactRecheckResult {
-                result: ArtifactRecheck::Rechecked,
-                stage: None,
-                ..
-            }) => {
-                eprintln!("Native object symbol surface inconclusive; reproduced artifacts are unavailable.");
+        },
+        NativeBundleCommand::RecheckMachineTv {
+            bundle,
+            source,
+            expected_build_id,
+            json,
+        } => match recheck_object_pipeline(
+            Path::new(&bundle),
+            Path::new(&source),
+            &expected_build_id,
+        ) {
+            Err(error) => Err(error),
+            Ok(ObjectRecheckPipeline::Different(message)) => Err(BundleError(message)),
+            Ok(ObjectRecheckPipeline::Inconclusive(message)) => {
+                eprintln!("{message}");
                 std::process::exit(3);
+            }
+            Ok(ObjectRecheckPipeline::Rechecked(data)) => {
+                write_machine_tv(*data, &expected_build_id, json)
             }
         },
         NativeBundleCommand::RecheckExitStatus { bundle, source, expected_build_id } => {
@@ -1232,6 +1140,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                     expected_stderr_sha256,
                     pin_envelope,
                     stage,
+                    ..
                 }) => match check_runtime_observations(
                     expected_exit_status,
                     expected_stdout_sha256,
@@ -2395,10 +2304,11 @@ fn recheck_llvm_loaded(
     let files = components(bundle)?;
     if record_family(&bytes)? == RecordFamily::Multifile {
         let record = load_pinned_multifile_record(&bytes, expected_id)?;
-        let loaded = LoadedBundle {
+        let mut loaded = LoadedBundle {
             object_build: record.object_build.clone(),
             link_build: record.link_build.clone(),
             files,
+            source_text: None,
         };
         let (members, root) = multifile_inputs(bundle, source)?;
         match recheck_multifile_source(&bytes, expected_id, &root, &members, &loaded.files)? {
@@ -2415,6 +2325,7 @@ fn recheck_llvm_loaded(
         )
         .map_err(|_| BundleError("import closure merge failed"))?
         .0;
+        loaded.source_text = Some(merged.clone());
         let llvm_ir = std::str::from_utf8(&loaded.files[&BundleFile::LlvmIr])
             .map_err(|_| BundleError("native LLVM snapshot is not UTF-8"))?;
         let report = tv::validate_native_module(
@@ -2456,6 +2367,7 @@ fn recheck_llvm_loaded(
             object_build: record.object_build.clone(),
             link_build: record.link_build.clone(),
             files,
+            source_text: Some(source.clone()),
         };
         match recheck_module_source(&bytes, expected_id, &source, &loaded.files)? {
             SourceRecheck::Refuted => return Err(BundleError("source postcondition refuted")),
@@ -2503,6 +2415,7 @@ fn recheck_llvm_loaded(
         object_build: record.object_build.clone(),
         link_build: record.link_build.clone(),
         files,
+        source_text: Some(source.clone()),
     };
     match recheck_source(&bytes, expected_id, &source, &loaded.files)? {
         SourceRecheck::Refuted => return Err(BundleError("source postcondition refuted")),
@@ -2632,6 +2545,7 @@ struct ArtifactRecheckResult {
     expected_stdout_sha256: Option<String>,
     expected_stderr_sha256: Option<String>,
     stage: Option<tempfile::TempDir>,
+    source_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -2640,6 +2554,21 @@ struct ObjectSymbolSurface {
     undefined: BTreeSet<String>,
     calls: BTreeMap<String, BTreeSet<String>>,
     call_edges_checkable: bool,
+}
+
+struct ObjectRecheckData {
+    stage: tempfile::TempDir,
+    ir_surface: tv::IrFunctionSurface,
+    object_surface: ObjectSymbolSurface,
+    object_bytes: Vec<u8>,
+    resolved_call_sites: usize,
+    source_text: Option<String>,
+}
+
+enum ObjectRecheckPipeline {
+    Rechecked(Box<ObjectRecheckData>),
+    Different(&'static str),
+    Inconclusive(&'static str),
 }
 
 struct ObjectFunctionRange {
@@ -3023,6 +2952,312 @@ fn object_link_corresponds(
     Ok(Some((true, resolved_call_sites)))
 }
 
+fn recheck_object_pipeline(
+    bundle: &Path,
+    source: &Path,
+    expected_id: &str,
+) -> Result<ObjectRecheckPipeline, BundleError> {
+    let recheck = recheck_artifact(bundle, source, expected_id)?;
+    let ArtifactRecheckResult {
+        result,
+        stage,
+        source_text,
+        ..
+    } = recheck;
+    match result {
+        ArtifactRecheck::Different => {
+            return Ok(ObjectRecheckPipeline::Different(
+                "pinned artifact differs from the toolchain's output for the pinned inputs",
+            ));
+        }
+        ArtifactRecheck::Inconclusive => {
+            return Ok(ObjectRecheckPipeline::Inconclusive(
+                "Native source/LLVM recheck inconclusive; no object symbol correspondence established.",
+            ));
+        }
+        ArtifactRecheck::Rechecked => (),
+    }
+    let Some(stage) = stage else {
+        return Ok(ObjectRecheckPipeline::Inconclusive(
+            "Native object symbol surface inconclusive; reproduced artifacts are unavailable.",
+        ));
+    };
+    let ir = fs::read(stage.path().join(BundleFile::LlvmIr.file_name()));
+    let object_bytes = fs::read(stage.path().join(BundleFile::Object.file_name()));
+    let (Ok(ir), Ok(object_bytes)) = (ir, object_bytes) else {
+        return Ok(ObjectRecheckPipeline::Inconclusive(
+            "Native object symbol surface inconclusive; staged inputs could not be read.",
+        ));
+    };
+    let (Ok(ir_surface), Ok(object_surface)) = (
+        tv::ir_function_surface(&ir),
+        object_symbol_surface(&object_bytes),
+    ) else {
+        return Ok(ObjectRecheckPipeline::Inconclusive(
+            "Native object symbol surface inconclusive; LLVM IR or object parsing failed.",
+        ));
+    };
+    if !object_symbols_correspond(&ir_surface, &object_surface) {
+        return Ok(ObjectRecheckPipeline::Different(
+            "native object symbol surface differs from LLVM IR",
+        ));
+    }
+    match object_call_edges_correspond(&ir_surface, &object_surface) {
+        None => {
+            return Ok(ObjectRecheckPipeline::Inconclusive(
+                "Native object call-edge correspondence inconclusive; direct call edges are not checkable.",
+            ));
+        }
+        Some(false) => {
+            return Ok(ObjectRecheckPipeline::Different(
+                "native object call edges differ from LLVM IR",
+            ));
+        }
+        Some(true) => (),
+    }
+    let executable = match fs::read(stage.path().join(BundleFile::Executable.file_name())) {
+        Ok(executable) => executable,
+        Err(_) => {
+            return Ok(ObjectRecheckPipeline::Inconclusive(
+                    "Native object link correspondence inconclusive; staged executable could not be read.",
+                ));
+        }
+    };
+    let (link_corresponds, resolved_call_sites) = match object_link_corresponds(
+        &object_bytes,
+        &executable,
+    ) {
+        Ok(Some(result)) => result,
+        Ok(None) | Err(()) => {
+            return Ok(ObjectRecheckPipeline::Inconclusive(
+                    "Native object link correspondence inconclusive; linked function bytes or call targets are not checkable.",
+                ));
+        }
+    };
+    if !link_corresponds {
+        return Ok(ObjectRecheckPipeline::Different(
+            "linked executable function bytes or call targets differ from the object",
+        ));
+    }
+    Ok(ObjectRecheckPipeline::Rechecked(Box::new(
+        ObjectRecheckData {
+            stage,
+            ir_surface,
+            object_surface,
+            object_bytes,
+            resolved_call_sites,
+            source_text,
+        },
+    )))
+}
+
+fn object_function_bytes(bytes: &[u8], function_name: &str) -> Option<(u64, Vec<u8>)> {
+    let file = object::File::parse(bytes).ok()?;
+    let symbol = file.symbols().find(|symbol| {
+        symbol.name().ok() == Some(function_name)
+            && symbol.is_global()
+            && symbol.is_definition()
+            && symbol.kind() == SymbolKind::Text
+    })?;
+    let section = file.section_by_index(symbol.section_index()?).ok()?;
+    let function_bytes = section.data_range(symbol.address(), symbol.size()).ok()??;
+    if u64::try_from(function_bytes.len()).ok()? != symbol.size() {
+        return None;
+    }
+    Some((symbol.address(), function_bytes.to_vec()))
+}
+
+fn write_object_recheck(
+    data: ObjectRecheckData,
+    expected_build_id: &str,
+    json: bool,
+) -> Result<(), BundleError> {
+    let ObjectRecheckData {
+        stage,
+        ir_surface,
+        object_surface,
+        resolved_call_sites,
+        ..
+    } = data;
+    let _stage = stage;
+    if json {
+        let descriptor = serde_json::json!({
+            "schema_version": "mumei.object-symbol-correspondence/v1",
+            "scope": OBJECT_SYMBOL_CORRESPONDENCE_SCOPE,
+            "build_id": expected_build_id,
+            "defined_functions": ir_surface.defined,
+            "external_references": object_surface.undefined,
+            "checks_performed": [
+                "toolchain_object_executable_reproduction",
+                "object_symbol_correspondence",
+                "object_call_edge_correspondence",
+                "object_link_correspondence",
+            ],
+            "checks_not_performed": [
+                "optimizer_semantics",
+                "raw_link_argument_vector_reproduction",
+                "abi_runtime_semantics",
+                "os_exit_status_observation",
+                "os_stdout_observation",
+                "os_stderr_observation",
+                "runtime_observation_semantics",
+            ],
+            "call_edges": ir_surface.calls,
+            "resolved_call_sites": resolved_call_sites,
+        });
+        serde_json::to_vec_pretty(&descriptor)
+            .map_err(|_| BundleError("cannot encode object symbol descriptor"))
+            .and_then(|mut bytes| {
+                bytes.push(b'\n');
+                std::io::stdout()
+                    .lock()
+                    .write_all(&bytes)
+                    .map_err(|_| BundleError("cannot write object symbol descriptor"))
+            })
+    } else {
+        let call_count: usize = ir_surface.calls.values().map(BTreeSet::len).sum();
+        println!(
+            "Native object symbol surface, direct call edges and linked placement correspond to the pinned LLVM IR and executable: {} defined functions, {call_count} call edges, {resolved_call_sites} resolved call sites.\nScope: {OBJECT_SYMBOL_CORRESPONDENCE_SCOPE}",
+            ir_surface.defined.len(),
+        );
+        Ok(())
+    }
+}
+
+fn write_machine_tv(
+    data: ObjectRecheckData,
+    expected_build_id: &str,
+    json: bool,
+) -> Result<(), BundleError> {
+    let ObjectRecheckData {
+        stage,
+        ir_surface: _,
+        object_surface,
+        object_bytes,
+        source_text,
+        ..
+    } = data;
+    let Some(source_text) = source_text else {
+        eprintln!("Machine-code TV inconclusive; the checked source snapshot is unavailable.");
+        drop(stage);
+        std::process::exit(3);
+    };
+    let mut config = z3::Config::new();
+    config.set_timeout_msec(u64::from(machine_tv::TIMEOUT_MS));
+    config.set_param_value("rlimit", &machine_tv::RESOURCE_LIMIT.to_string());
+    let context = z3::Context::new(&config);
+    let models = match semantic_contract::encode_pure_i64_module(
+        &source_text,
+        &context,
+        true,
+        RefinedAdmission::Reject,
+    ) {
+        Ok(models) => models,
+        Err(_) => {
+            eprintln!(
+                "Machine-code TV inconclusive; source is outside the pure-i64 model profile."
+            );
+            drop(stage);
+            std::process::exit(3);
+        }
+    };
+    let mut source_models = BTreeMap::new();
+    for model in models {
+        let symbol_name = tv::native_function_name(&model.function_name).to_owned();
+        if source_models.insert(symbol_name, model).is_some() {
+            eprintln!("Machine-code TV inconclusive; source atom names do not map uniquely to object functions.");
+            drop(stage);
+            std::process::exit(3);
+        }
+    }
+    let mut functions = BTreeMap::new();
+    let mut equivalent_count = 0usize;
+    for function_name in &object_surface.defined {
+        let outcome = if let Some(model) = source_models.get(function_name) {
+            if !model.call_sites.is_empty() {
+                FunctionOutcome::OutsideProfile("calls")
+            } else if model.inputs.len() > 6 {
+                FunctionOutcome::OutsideProfile("argument_count")
+            } else if let Some((address, bytes)) =
+                object_function_bytes(&object_bytes, function_name)
+            {
+                machine_tv::check_function(&bytes, address, model, &context)
+            } else {
+                FunctionOutcome::OutsideProfile("unsupported_instruction")
+            }
+        } else {
+            FunctionOutcome::OutsideProfile("not_a_source_atom")
+        };
+        let value = match outcome {
+            FunctionOutcome::Equivalent => {
+                equivalent_count += 1;
+                serde_json::json!({"outcome": "equivalent_within_profile"})
+            }
+            FunctionOutcome::Different => {
+                eprintln!("machine code of {function_name} differs from its source atom");
+                drop(stage);
+                std::process::exit(1);
+            }
+            FunctionOutcome::Unknown => {
+                eprintln!("Machine-code TV inconclusive; Z3 returned unknown.");
+                drop(stage);
+                std::process::exit(3);
+            }
+            FunctionOutcome::OutsideProfile(reason) => {
+                serde_json::json!({"outcome": "outside_profile", "reason": reason})
+            }
+        };
+        functions.insert(function_name.clone(), value);
+    }
+    if json {
+        let mut checks_performed = vec![
+            "toolchain_object_executable_reproduction",
+            "object_symbol_correspondence",
+            "object_call_edge_correspondence",
+            "object_link_correspondence",
+        ];
+        let mut checks_not_performed = vec![
+            "optimizer_semantics",
+            "raw_link_argument_vector_reproduction",
+            "abi_runtime_semantics",
+            "os_exit_status_observation",
+            "os_stdout_observation",
+            "os_stderr_observation",
+            "runtime_observation_semantics",
+            "machine_code_tv_non_leaf_functions",
+        ];
+        if equivalent_count > 0 {
+            checks_performed.push("machine_code_leaf_function_tv");
+        } else {
+            checks_not_performed.push("machine_code_leaf_function_tv");
+        }
+        let descriptor = serde_json::json!({
+            "schema_version": "mumei.machine-code-tv/v1",
+            "scope": MACHINE_CODE_TV_SCOPE,
+            "build_id": expected_build_id,
+            "register_convention_assumed": MACHINE_CODE_REGISTER_CONVENTION,
+            "functions": functions,
+            "checks_performed": checks_performed,
+            "checks_not_performed": checks_not_performed,
+        });
+        serde_json::to_vec_pretty(&descriptor)
+            .map_err(|_| BundleError("cannot encode machine-code TV descriptor"))
+            .and_then(|mut bytes| {
+                bytes.push(b'\n');
+                std::io::stdout()
+                    .lock()
+                    .write_all(&bytes)
+                    .map_err(|_| BundleError("cannot write machine-code TV descriptor"))
+            })
+    } else {
+        println!(
+            "Machine-code TV: {equivalent_count} of {} object functions equivalent to their source atoms within the leaf profile.\nScope: {MACHINE_CODE_TV_SCOPE}",
+            object_surface.defined.len(),
+        );
+        Ok(())
+    }
+}
+
 fn observation_pins_comparable(link_build: &LinkBuild) -> bool {
     match &link_build.observation_envelope {
         None => true,
@@ -3041,6 +3276,7 @@ impl ArtifactRecheckResult {
             expected_stdout_sha256: None,
             expected_stderr_sha256: None,
             stage: None,
+            source_text: None,
         }
     }
 
@@ -3054,6 +3290,7 @@ impl ArtifactRecheckResult {
             expected_stdout_sha256: None,
             expected_stderr_sha256: None,
             stage: None,
+            source_text: None,
         }
     }
 }
@@ -3079,6 +3316,7 @@ fn recheck_artifact(
         object_build,
         link_build,
         files,
+        source_text,
     } = loaded;
     let parent = bundle
         .parent()
@@ -3143,6 +3381,7 @@ fn recheck_artifact(
             .then(|| link_build.expected_stderr_sha256.clone())
             .flatten(),
         stage: Some(stage),
+        source_text,
     })
 }
 
