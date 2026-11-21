@@ -2046,10 +2046,16 @@ F64 leaves in struct call arguments use the scalar f64 call obligations:
 Query A compares NaN-aware values, and Query B must prove exact argument bits
 under the same path assumptions. If that exact proof is satisfiable or
 unknown, the function fails closed as `call_arguments`, not `different`.
-Enums, structs with five or more leaves, i128/u128 struct leaves, post-writes,
-bounded memory, and tail calls with struct arguments or results remain
-outside the profile. When an equivalent function uses a struct aggregate,
-the descriptor performs `machine_code_composite_register_aggregate_tv`.
+Struct field writes, nested field writes and branch- or match-merged struct
+values are admitted when their source values flatten to the modeled register
+leaves. These are local value updates, not memory modeling; LLVM stack-memory
+lowering remains outside the profile. Enum signatures, enum values, enum
+scalar operations and enum payload writes remain fail-closed. An enum `match`
+path that does not set an enum-use flag remains closed by the separate
+enum-signature gate. Structs with five or more leaves, i128/u128 struct
+leaves, bounded memory, and tail calls with struct arguments or results also
+remain outside the profile. When an equivalent function uses a struct
+aggregate, the descriptor performs `machine_code_composite_register_aggregate_tv`.
 Aggregates wider than two leaves use the convention suffix
 `_llvm_first_class_aggregates_split_into_registers_result_rax_rdx_rcx_xmm0_xmm1`
 on the active integer or f64 `register_convention_assumed` string and add

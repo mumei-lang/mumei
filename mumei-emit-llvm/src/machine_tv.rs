@@ -492,8 +492,7 @@ pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
                     && site.result_shape == (CallValueShape::Scalar { leaf_count: 2 })))
                 && call_site_shapes_are_consistent(site)
         })
-        && !model.has_post_writes()
-        && !model.has_composite_features_beyond_struct_values
+        && !model.has_enum_composite_features
         && !model.has_enum_signature
         && !wide_composite_values(model)
         && !model.bounded_memory
@@ -3868,6 +3867,167 @@ entry:
     }
 
     #[test]
+    fn struct_writes_and_merged_values_match_real_llvm_codegen() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "struct P { x: i64, y: i64 }\n\
+            struct I { a: i64, b: i64 }\n\
+            struct O { i: I, c: i64 }\n\
+            atom setx(p: P, v: i64) -> P requires: true; ensures: true; body: { p.x = v; p };\n\
+            atom bump(o: O, w: i64) -> O requires: true; ensures: true; body: { o.i.a = w; o };\n\
+            atom merged(c: i64, a: i64, b: i64, d: i64, e: i64) -> P requires: true; ensures: true; body: { if c > 0 { P { x: a, y: b } } else { P { x: d, y: e } } };";
+        let model = |name| {
+            source_model_named_with_admission(
+                source,
+                name,
+                &context,
+                RefinedAdmission::CompositeV23,
+            )
+        };
+        let setx_model = model("setx");
+        let bump_model = model("bump");
+        let merged_model = model("merged");
+        assert!(setx_model.has_composite_features_beyond_struct_values);
+        assert!(bump_model.has_composite_features_beyond_struct_values);
+        assert!(merged_model.has_composite_features_beyond_struct_values);
+        assert!(!setx_model.has_enum_composite_features);
+        assert!(!bump_model.has_enum_composite_features);
+        assert!(!merged_model.has_enum_composite_features);
+
+        let setx_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i64 } @setx({ i64, i64 } %p, i64 %v) {
+entry:
+  %p.x = insertvalue { i64, i64 } %p, i64 %v, 0
+  ret { i64, i64 } %p.x
+}
+"#;
+        let (setx_address, setx_bytes, setx_targets) =
+            compiled_function_with_targets(setx_ir, "setx");
+        assert_eq!(
+            check_function(
+                &setx_bytes,
+                setx_address,
+                &setx_model,
+                &setx_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let wrong_field_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i64 } @setx({ i64, i64 } %p, i64 %v) {
+entry:
+  %p.y = insertvalue { i64, i64 } %p, i64 %v, 1
+  ret { i64, i64 } %p.y
+}
+"#;
+        let (wrong_address, wrong_bytes, wrong_targets) =
+            compiled_function_with_targets(wrong_field_ir, "setx");
+        assert_eq!(
+            check_function(
+                &wrong_bytes,
+                wrong_address,
+                &setx_model,
+                &wrong_targets,
+                &context
+            ),
+            FunctionOutcome::Different
+        );
+
+        let bump_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { { i64, i64 }, i64 } @bump({ { i64, i64 }, i64 } %o, i64 %w) {
+entry:
+  %inner = extractvalue { { i64, i64 }, i64 } %o, 0
+  %inner.a = insertvalue { i64, i64 } %inner, i64 %w, 0
+  %result = insertvalue { { i64, i64 }, i64 } %o, { i64, i64 } %inner.a, 0
+  ret { { i64, i64 }, i64 } %result
+}
+"#;
+        let (bump_address, bump_bytes, bump_targets) =
+            compiled_function_with_targets(bump_ir, "bump");
+        assert_eq!(
+            check_function(
+                &bump_bytes,
+                bump_address,
+                &bump_model,
+                &bump_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let merged_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i64 } @merged(i64 %c, i64 %a, i64 %b, i64 %d, i64 %e) {
+entry:
+  %condition = icmp sgt i64 %c, 0
+  br i1 %condition, label %then, label %else
+then:
+  %then.x = insertvalue { i64, i64 } poison, i64 %a, 0
+  %then.result = insertvalue { i64, i64 } %then.x, i64 %b, 1
+  br label %join
+else:
+  %else.x = insertvalue { i64, i64 } poison, i64 %d, 0
+  %else.result = insertvalue { i64, i64 } %else.x, i64 %e, 1
+  br label %join
+join:
+  %result = phi { i64, i64 } [ %then.result, %then ], [ %else.result, %else ]
+  ret { i64, i64 } %result
+}
+"#;
+        let (merged_address, merged_bytes, merged_targets) =
+            compiled_function_with_targets(merged_ir, "merged");
+        assert_eq!(
+            check_function(
+                &merged_bytes,
+                merged_address,
+                &merged_model,
+                &merged_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn enum_values_and_enum_matches_remain_outside_machine_tv() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let enum_source = "enum E { Off, Val(x: i64) }\n\
+            atom make(x: i64) -> i64 requires: true; ensures: true; body: { let e = E::Val(x); match e { E::Val(y) => y, _ => 0 } };";
+        let model = source_model_named_with_admission(
+            enum_source,
+            "make",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(model.has_enum_composite_features);
+        let bytes = [0x48, 0x89, 0xf8, 0xc3];
+        assert_eq!(
+            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_signature")
+        );
+
+        let match_source = "enum E { Off, Val(x: i64) }\n\
+            atom pick(e: E) -> i64 requires: true; ensures: true; body: { match e { E::Val(y) => y, _ => 0 } };";
+        let match_model = source_model_named_with_admission(
+            match_source,
+            "pick",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(match_model.has_enum_signature);
+        assert!(!match_model.has_enum_composite_features);
+        assert_eq!(
+            check_function(&bytes, 0, &match_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_signature")
+        );
+    }
+
+    #[test]
     fn mixed_class_struct_signatures_match_real_llvm_codegen() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
@@ -4937,7 +5097,7 @@ entry:
     }
 
     #[test]
-    fn unsupported_memory_and_composite_features_fail_closed() {
+    fn unsupported_memory_and_enum_features_fail_closed() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
         config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
@@ -4955,6 +5115,7 @@ entry:
         let mut composite_model = source_model(source, &context);
         composite_model.has_composite_or_enum_features = true;
         composite_model.has_composite_features_beyond_struct_values = true;
+        composite_model.has_enum_composite_features = true;
         assert_eq!(
             check_function(&bytes, 0, &composite_model, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("unsupported_signature")

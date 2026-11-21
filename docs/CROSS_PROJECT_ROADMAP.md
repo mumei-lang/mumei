@@ -9063,10 +9063,16 @@ C-ABI aggregate classification; SysV memory-class passing is not validated.
 
 F64 struct-call arguments use NaN-aware Query A matching plus a per-path
 exact-bit Query B obligation, whose failure is `call_arguments`, never
-`different`. F64 tail calls, enum signatures/call sites, structs with five
-or more leaves, i128/u128 struct leaves, post-writes, and bounded memory remain
-fail-closed. Equivalent functions using struct signatures or direct calls
-report `machine_code_composite_register_aggregate_tv`. Aggregates wider than
+`different`. Struct field writes, nested field writes and branch- or
+match-merged struct values are admitted when their source values flatten to
+the modeled register leaves. These are local value updates, not memory
+modeling; LLVM stack-memory lowering remains outside the profile. Enum
+signatures, enum values, enum scalar operations and enum payload writes stay
+fail-closed; enum `match` paths without an enum-use flag remain closed by the
+separate enum-signature gate. F64 tail calls, structs with five or more
+leaves, i128/u128 struct leaves and bounded memory remain fail-closed.
+Equivalent functions using struct signatures or direct calls report
+`machine_code_composite_register_aggregate_tv`. Aggregates wider than
 two leaves use
 `_llvm_first_class_aggregates_split_into_registers_result_rax_rdx_rcx_xmm0_xmm1`
 in the active integer or f64 convention string and list
