@@ -133,12 +133,19 @@ impl<'a> NominalChecker<'a> {
     /// Enum type of a constructor or a variable already known to be an enum.
     fn enum_type_of(&self, expr: &Expr) -> Option<String> {
         match expr {
-            Expr::Call(name, _) => self
-                .module_env
-                .resolve_variant_owner_by_hint(name, None)
-                .ok()
-                .flatten()
-                .and_then(|def| self.enum_key(&def.name)),
+            Expr::Call(name, _) => {
+                if let Some(atom) = self.lookup_atom(name) {
+                    atom.return_type
+                        .as_deref()
+                        .and_then(|type_name| self.enum_key(type_name))
+                } else {
+                    self.module_env
+                        .resolve_variant_owner_by_hint(name, None)
+                        .ok()
+                        .flatten()
+                        .and_then(|def| self.enum_key(&def.name))
+                }
+            }
             Expr::Variable(v) => self
                 .types
                 .get(v)
@@ -1012,6 +1019,31 @@ body: {{ let o = WrapDeep {{ a: Outer {{ inner: Inner {{ x: 1, y: 2 }}, z: 3 }} 
                 "{errors:?}"
             );
         }
+    }
+
+    #[test]
+    fn atom_call_type_takes_precedence_over_same_named_variant() {
+        let src = r#"
+struct VariantPayload { x: i64, y: i64 }
+struct AtomPayload { x: i64, y: i64 }
+enum VariantOwner { Produce(p: VariantPayload), Idle }
+enum AtomReturn { Built(p: AtomPayload), Empty }
+
+trusted atom Produce() -> AtomReturn
+requires: true;
+ensures: true;
+body: { AtomReturn::Built(AtomPayload { x: 1, y: 2 }) };
+
+trusted atom main() -> i64
+requires: true;
+ensures: true;
+body: {
+    let value = Produce();
+    value.p = AtomPayload { x: 3, y: 4 };
+    0
+};
+"#;
+        assert!(check(src).is_empty(), "{:?}", check(src));
     }
 
     #[test]
