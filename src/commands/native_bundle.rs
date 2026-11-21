@@ -50,7 +50,7 @@ const ARTIFACT_RECHECK_SCOPE: &str =
 const OBJECT_SYMBOL_CORRESPONDENCE_SCOPE: &str =
     "artifact_reproduction_object_symbols_call_edges_and_link_placement_only/no_instruction_abi_or_runtime_semantics";
 const MACHINE_CODE_TV_SCOPE: &str =
-    "artifact_reproduction_object_link_correspondence_and_leaf_function_machine_code_tv_only/no_abi_or_runtime_semantics";
+    "artifact_reproduction_object_link_correspondence_and_straight_line_function_machine_code_tv_only/no_abi_or_runtime_semantics";
 const MACHINE_CODE_REGISTER_CONVENTION: &str =
     "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax";
 const MACHINE_CODE_TV_INPUT_DOMAIN: &str =
@@ -2555,6 +2555,7 @@ struct ObjectSymbolSurface {
     defined: BTreeSet<String>,
     undefined: BTreeSet<String>,
     calls: BTreeMap<String, BTreeSet<String>>,
+    call_targets: BTreeMap<String, BTreeMap<u64, machine_tv::CallTarget>>,
     call_edges_checkable: bool,
 }
 
@@ -2617,6 +2618,7 @@ fn object_symbol_surface(bytes: &[u8]) -> Result<ObjectSymbolSurface, ()> {
             let name = symbol.name().map_err(|_| ())?.to_owned();
             surface.defined.insert(name.clone());
             surface.calls.entry(name.clone()).or_default();
+            surface.call_targets.entry(name.clone()).or_default();
             let Some(section) = symbol.section_index() else {
                 surface.call_edges_checkable = false;
                 continue;
@@ -2692,6 +2694,43 @@ fn object_symbol_surface(bytes: &[u8]) -> Result<ObjectSymbolSurface, ()> {
             if let Some(callees) = surface.calls.get_mut(&function.name) {
                 callees.insert(name.to_owned());
             } else {
+                surface.call_edges_checkable = false;
+            }
+            let Some(relative_offset) = offset.checked_sub(function.start) else {
+                surface.call_edges_checkable = false;
+                continue;
+            };
+            let targets = surface
+                .call_targets
+                .entry(function.name.clone())
+                .or_default();
+            let relocation_kind = match relocation.flags() {
+                RelocationFlags::Elf { r_type }
+                    if r_type == object::elf::R_X86_64_PLT32
+                        && relocation.kind() == object::RelocationKind::PltRelative =>
+                {
+                    machine_tv::CallRelocationKind::ElfX86_64Plt32
+                }
+                RelocationFlags::Elf { r_type }
+                    if r_type == object::elf::R_X86_64_PC32
+                        && relocation.kind() == object::RelocationKind::Relative =>
+                {
+                    machine_tv::CallRelocationKind::ElfX86_64Pc32
+                }
+                _ => machine_tv::CallRelocationKind::Other,
+            };
+            if targets
+                .insert(
+                    relative_offset,
+                    machine_tv::CallTarget {
+                        name: name.to_owned(),
+                        relocation_kind,
+                        relocation_size: relocation.size(),
+                        addend: relocation.addend(),
+                    },
+                )
+                .is_some()
+            {
                 surface.call_edges_checkable = false;
             }
         }
@@ -3126,6 +3165,25 @@ fn write_object_recheck(
     }
 }
 
+fn machine_tv_coverage_checks(
+    equivalent_leaf_count: usize,
+    equivalent_call_count: usize,
+) -> (Vec<&'static str>, Vec<&'static str>) {
+    let mut checks_performed = Vec::new();
+    let mut checks_not_performed = Vec::new();
+    if equivalent_leaf_count > 0 {
+        checks_performed.push("machine_code_leaf_function_tv");
+    } else {
+        checks_not_performed.push("machine_code_leaf_function_tv");
+    }
+    if equivalent_call_count > 0 {
+        checks_performed.push("machine_code_direct_call_site_tv");
+    } else {
+        checks_not_performed.push("machine_code_direct_call_site_tv");
+    }
+    (checks_performed, checks_not_performed)
+}
+
 fn write_machine_tv(
     data: ObjectRecheckData,
     expected_build_id: &str,
@@ -3174,18 +3232,26 @@ fn write_machine_tv(
     }
     let mut functions = BTreeMap::new();
     let mut equivalent_count = 0usize;
+    let mut equivalent_leaf_count = 0usize;
+    let mut equivalent_call_count = 0usize;
     for function_name in &object_surface.defined {
+        let has_source_calls = source_models
+            .get(function_name)
+            .is_some_and(|model| !model.call_sites.is_empty());
         let outcome = if let Some(model) = source_models.get(function_name) {
             if !machine_tv::supports_signature(model) {
                 FunctionOutcome::OutsideProfile("unsupported_signature")
-            } else if !model.call_sites.is_empty() {
-                FunctionOutcome::OutsideProfile("calls")
             } else if model.inputs.len() > 6 {
                 FunctionOutcome::OutsideProfile("argument_count")
             } else if let Some((address, bytes)) =
                 object_function_bytes(&object_bytes, function_name)
             {
-                machine_tv::check_function(&bytes, address, model, &context)
+                let call_targets = object_surface
+                    .call_targets
+                    .get(function_name)
+                    .cloned()
+                    .unwrap_or_default();
+                machine_tv::check_function(&bytes, address, model, &call_targets, &context)
             } else {
                 FunctionOutcome::OutsideProfile("unsupported_instruction")
             }
@@ -3195,6 +3261,11 @@ fn write_machine_tv(
         let value = match outcome {
             FunctionOutcome::Equivalent => {
                 equivalent_count += 1;
+                if has_source_calls {
+                    equivalent_call_count += 1;
+                } else {
+                    equivalent_leaf_count += 1;
+                }
                 serde_json::json!({"outcome": "equivalent_within_profile"})
             }
             FunctionOutcome::Different => {
@@ -3228,13 +3299,12 @@ fn write_machine_tv(
             "os_stdout_observation",
             "os_stderr_observation",
             "runtime_observation_semantics",
-            "machine_code_tv_non_leaf_functions",
+            "machine_code_tv_branching_functions",
         ];
-        if equivalent_count > 0 {
-            checks_performed.push("machine_code_leaf_function_tv");
-        } else {
-            checks_not_performed.push("machine_code_leaf_function_tv");
-        }
+        let (machine_tv_checks, machine_tv_checks_not_performed) =
+            machine_tv_coverage_checks(equivalent_leaf_count, equivalent_call_count);
+        checks_performed.extend(machine_tv_checks);
+        checks_not_performed.extend(machine_tv_checks_not_performed);
         let descriptor = serde_json::json!({
             "schema_version": "mumei.machine-code-tv/v1",
             "scope": MACHINE_CODE_TV_SCOPE,
@@ -3256,7 +3326,7 @@ fn write_machine_tv(
             })
     } else {
         println!(
-            "Machine-code TV: {equivalent_count} of {} object functions equivalent to their source atoms within the leaf profile.\nScope: {MACHINE_CODE_TV_SCOPE}",
+            "Machine-code TV: {equivalent_count} of {} object functions equivalent to their source atoms within the straight-line profile.\nScope: {MACHINE_CODE_TV_SCOPE}",
             object_surface.defined.len(),
         );
         Ok(())
@@ -3424,6 +3494,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn machine_tv_descriptor_omits_leaf_check_for_caller_only_equivalence() {
+        let (checks_performed, checks_not_performed) = machine_tv_coverage_checks(0, 1);
+        assert_eq!(checks_performed, vec!["machine_code_direct_call_site_tv"]);
+        assert_eq!(checks_not_performed, vec!["machine_code_leaf_function_tv"]);
+    }
+
+    #[test]
     fn object_symbols_correspond_only_when_definitions_match_and_references_are_declared() {
         let ir = tv::IrFunctionSurface {
             defined: BTreeSet::from(["main".to_owned(), "helper".to_owned()]),
@@ -3438,6 +3515,7 @@ mod tests {
             defined: defined.iter().map(|name| (*name).to_owned()).collect(),
             undefined: undefined.iter().map(|name| (*name).to_owned()).collect(),
             calls: BTreeMap::new(),
+            call_targets: BTreeMap::new(),
             call_edges_checkable: true,
         };
 
@@ -3482,6 +3560,7 @@ mod tests {
             defined: ir.defined.clone(),
             undefined: ir.declared.clone(),
             calls: calls.clone(),
+            call_targets: BTreeMap::new(),
             call_edges_checkable: true,
         };
         assert_eq!(object_call_edges_correspond(&ir, &object), Some(true));
@@ -3607,8 +3686,128 @@ entry:
         assert_eq!(ir_surface.calls, expected);
         assert_eq!(object_surface.calls, expected);
         assert_eq!(
+            object_surface
+                .call_targets
+                .get("visible")
+                .unwrap()
+                .values()
+                .map(|target| target.name.clone())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["external_ref".to_owned(), "other".to_owned()])
+        );
+        assert!(object_surface.call_targets.get("other").unwrap().is_empty());
+        assert_eq!(
             object_call_edges_correspond(&ir_surface, &object_surface),
             Some(true)
+        );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn machine_tv_rejects_patched_rela_addend_from_object_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        let ir_path = dir.path().join("calls.ll");
+        let object_path = dir.path().join("calls.o");
+        let ir = br#"
+define i64 @callee(i64 %x) {
+entry:
+  ret i64 %x
+}
+
+define i64 @caller(i64 %x) {
+entry:
+  %result = call i64 @callee(i64 %x)
+  ret i64 %result
+}
+"#;
+        fs::write(&ir_path, ir).unwrap();
+        mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ir_path, &object_path)
+            .unwrap();
+        let mut object_bytes = fs::read(&object_path).unwrap();
+        let addend_file_offset = {
+            let file = object::File::parse(object_bytes.as_slice()).unwrap();
+            assert_eq!(file.format(), BinaryFormat::Elf);
+            assert_eq!(file.architecture(), Architecture::X86_64);
+            let text_section = file.section_by_name(".text").unwrap();
+            let rela_text_section = file.section_by_name(".rela.text").unwrap();
+            let (rela_file_offset, rela_size) = rela_text_section.file_range().unwrap();
+            let caller = file
+                .symbols()
+                .find(|symbol| {
+                    symbol.name().ok() == Some("caller")
+                        && symbol.is_global()
+                        && symbol.is_definition()
+                        && symbol.kind() == SymbolKind::Text
+                })
+                .unwrap();
+            let caller_start = caller.address();
+            let caller_end = caller_start.checked_add(caller.size()).unwrap();
+            let relocation_entry_index = text_section
+                .relocations()
+                .enumerate()
+                .find_map(|(entry_index, (offset, relocation))| {
+                    if !(caller_start <= offset && offset < caller_end)
+                        || relocation.size() != 32
+                        || relocation.has_implicit_addend()
+                        || relocation.addend() != -4
+                        || !matches!(
+                            relocation.flags(),
+                            RelocationFlags::Elf { r_type }
+                                if r_type == object::elf::R_X86_64_PLT32
+                                    || r_type == object::elf::R_X86_64_PC32
+                        )
+                    {
+                        return None;
+                    }
+                    let RelocationTarget::Symbol(symbol_index) = relocation.target() else {
+                        return None;
+                    };
+                    let target = file.symbol_by_index(symbol_index).ok()?;
+                    (target.name().ok() == Some("callee")).then_some(entry_index)
+                })
+                .unwrap();
+            let addend_offset = rela_file_offset
+                .checked_add(
+                    u64::try_from(relocation_entry_index)
+                        .unwrap()
+                        .checked_mul(24)
+                        .unwrap(),
+                )
+                .unwrap()
+                .checked_add(16)
+                .unwrap();
+            assert!(addend_offset
+                .checked_add(8)
+                .is_some_and(|end| end <= rela_file_offset + rela_size));
+            usize::try_from(addend_offset).unwrap()
+        };
+        object_bytes[addend_file_offset..addend_file_offset + 8]
+            .copy_from_slice(&(-3i64).to_le_bytes());
+
+        let surface = object_symbol_surface(&object_bytes).unwrap();
+        let call_targets = surface.call_targets.get("caller").unwrap();
+        assert_eq!(call_targets.len(), 1);
+        assert_eq!(call_targets.values().next().unwrap().addend, -3);
+        let (address, function_bytes) = object_function_bytes(&object_bytes, "caller").unwrap();
+        let mut config = z3::Config::new();
+        config.set_timeout_msec(u64::from(machine_tv::TIMEOUT_MS));
+        config.set_param_value("rlimit", &machine_tv::RESOURCE_LIMIT.to_string());
+        let context = z3::Context::new(&config);
+        let source = "atom callee(x: i64) -> i64 requires: true; ensures: true; body: { x };\n\
+            atom caller(x: i64) -> i64 requires: true; ensures: true; body: { callee(x) };";
+        let model = semantic_contract::encode_pure_i64_module(
+            source,
+            &context,
+            true,
+            RefinedAdmission::Reject,
+        )
+        .unwrap()
+        .into_iter()
+        .find(|model| model.function_name == "caller")
+        .unwrap();
+        assert_eq!(
+            machine_tv::check_function(&function_bytes, address, &model, call_targets, &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
         );
     }
 

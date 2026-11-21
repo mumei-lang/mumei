@@ -706,7 +706,7 @@ pub(crate) enum NativeBundleCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Compare leaf straight-line machine code with pure-i64 source models under an assumed register convention; no ABI or runtime claim
+    /// Compare straight-line machine code, including direct calls, with pure-i64 source models under assumed register conventions; no ABI or runtime claim
     RecheckMachineTv {
         bundle: String,
         source: String,
