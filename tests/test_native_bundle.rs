@@ -166,6 +166,19 @@ fn recheck_machine_tv(source: &Path, bundle: &Path, id: &str, json: bool) -> Out
     )
 }
 
+fn accept_object(source: &Path, bundle: &Path, id: &str, json: bool) -> Output {
+    consume(
+        if json {
+            "accept-object --json"
+        } else {
+            "accept-object"
+        },
+        source,
+        bundle,
+        id,
+    )
+}
+
 fn object_function_disassembly(bundle: &Path, function_name: &str) -> Vec<String> {
     let bytes = fs::read(bundle.join(BundleFile::Object.file_name())).unwrap();
     let file = object::File::parse(bytes.as_slice()).unwrap();
@@ -5021,6 +5034,118 @@ fn accept_artifact_accepts_module_bundles() {
         "mumei.native-evidence-acceptance/v1"
     );
     assert_eq!(descriptor["accepted"], true);
+}
+
+#[test]
+fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), MODULE);
+    let output = accept_object(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        descriptor["schema_version"],
+        "mumei.native-evidence-acceptance/v1"
+    );
+    assert_eq!(descriptor["acceptance"], "evaluated");
+    assert_eq!(descriptor["accepted"], true);
+    assert_eq!(
+        descriptor["scope"],
+        "native_bundle_object_machine_code_translation_correspondence"
+    );
+    assert_eq!(descriptor["build_id"], id);
+    assert_eq!(
+        descriptor["llvm_sha256"],
+        native_bundle::sha256(&fs::read(bundle.join(BundleFile::LlvmIr.file_name())).unwrap())
+    );
+    assert_eq!(
+        descriptor["object_sha256"],
+        native_bundle::sha256(&fs::read(bundle.join(BundleFile::Object.file_name())).unwrap())
+    );
+    assert_eq!(
+        descriptor["register_convention_assumed"],
+        "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax"
+    );
+    assert_eq!(
+        descriptor["functions"],
+        serde_json::json!({
+            "__mumei_user_main": {"outcome": "equivalent_within_profile"},
+            "helper": {"outcome": "equivalent_within_profile"},
+            "main": {"outcome": "outside_profile", "reason": "not_a_source_atom"},
+        })
+    );
+    let performed = descriptor["checks_performed"].as_array().unwrap();
+    assert!(performed
+        .iter()
+        .any(|check| check == "object_source_machine_code_correspondence"));
+    assert!(performed
+        .iter()
+        .any(|check| check == "object_link_correspondence"));
+    assert!(!performed
+        .iter()
+        .any(|check| check == "pinned_member_merge_rederivation"));
+    let descriptor_text = String::from_utf8_lossy(&output.stdout);
+    assert!(!descriptor_text.contains("object_translation_correspondence"));
+
+    let text = accept_object(&source, &bundle, &id, false);
+    assert_success(&text);
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains("Native object accepted within the machine-code TV profile:"));
+    assert!(text.contains("2 source-atom functions equivalent"));
+    assert_eq!(text.lines().count(), 2);
+
+    let wrong_id = "0".repeat(64);
+    assert_ne!(wrong_id, id);
+    let rejected = accept_object(&source, &bundle, &wrong_id, true);
+    assert_eq!(rejected.status.code(), Some(1));
+    assert!(rejected.stdout.is_empty());
+}
+
+#[test]
+fn accept_object_accepts_loop_bundle_without_object_link() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), WHILE_PROBE);
+    let output = accept_object(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        descriptor["scope"],
+        "native_bundle_object_machine_code_translation_correspondence_without_object_link"
+    );
+    assert_eq!(
+        descriptor["input_domain"],
+        "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires_and_loops_exiting_within_bound_4"
+    );
+    let performed = descriptor["checks_performed"].as_array().unwrap();
+    assert!(performed
+        .iter()
+        .any(|check| check == "object_source_machine_code_correspondence"));
+    assert!(!performed
+        .iter()
+        .any(|check| check == "object_link_correspondence"));
+    let not_performed = descriptor["checks_not_performed"].as_array().unwrap();
+    assert!(not_performed
+        .iter()
+        .any(|check| check == "object_link_correspondence"));
+    assert!(not_performed
+        .iter()
+        .any(|check| check == "machine_code_tv_loop_executions_beyond_bound"));
+    assert!(not_performed
+        .iter()
+        .any(|check| check == "runtime_cancellation_semantics"));
+}
+
+#[test]
+fn accept_object_inconclusive_constant_division_emits_no_descriptor() {
+    let root = tempfile::tempdir().unwrap();
+    let source_text =
+        "atom quotient_seven(x: i64) -> i64 requires: true; ensures: true; body: { x / 7 };\n\
+atom main() -> i64 requires: true; ensures: true; body: { quotient_seven(3) };";
+    let (source, bundle, id) = build_source(root.path(), source_text);
+    let output = accept_object(&source, &bundle, &id, true);
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("object not accepted"));
 }
 
 const MF_HELPERS: &str =

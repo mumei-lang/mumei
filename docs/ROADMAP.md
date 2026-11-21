@@ -3138,6 +3138,17 @@ equivalent function has both a conditional branch and a call; those functions
 remain counted as direct-call functions rather than forward- or acyclic-branch
 functions.
 
+The next C10 Option B producer adds `native-bundle accept-object`. It performs
+the same bounded machine-TV evaluation and emits an anonymous acceptance
+descriptor only when at least one source-atom function is present, every such
+function is equivalent and every other defined function has the exact
+`not_a_source_atom` outcome (the C `main` wrapper). Its Core-owned
+`object_source_machine_code_correspondence` check is mapped by the future
+mumei-agent `native-object-accept` route to the agent-owned
+`object_translation_correspondence` check; the Core descriptor does not emit
+the agent name. Inconclusive outcomes emit no descriptor, and ABI/runtime,
+wrapper, authenticity and historical-execution claims remain outside scope.
+
 Sibling descriptors now name the exit-status observation only as
 `os_exit_status_observation` (formerly bare `os_exit_status` in
 non-exit-status `checks_not_performed` lists).
