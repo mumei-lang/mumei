@@ -6479,11 +6479,35 @@ like `append`. Every receive form (`d := <-cc`, `d = <-cc`, comma-ok,
 no CallTransfer, so a fully local program stays
 `none_in_supported_fragment`, while external members (`GC`, `GS[i]`)
 keep the group caller-visible. Conditional receive-reassigns keep the
-old alias joined, and parallel assigns resolve from the pre-state. A
-local queue escaping (call/`go` argument, `return`, store, closure
-capture, `&cc`, reseat onto `G()`/a param), `chan chan chan T`,
-`[]chan chan T`, and a received channel used as an operation target
-(`(<-cc) <- x`, `<-(<-cc)`) stay closed.
+old alias joined, and parallel assigns resolve from the pre-state.
+Other local-queue escapes (`return`, store, closure capture, `&cc`,
+reseat onto `G()`/a param), `[]chan chan T`, `chan chan chan T` or
+deeper nesting, and non-scalar inner elements stay closed.
+
+### Direct local chan-chan call arguments (mumei-agent #1040)
+
+[mumei-agent#1040](https://github.com/mumei-lang/mumei-agent/pull/1040)
+admits a local scalar-element `chan chan T` queue passed to a direct local,
+non-method, non-variadic call with a matching parameter. The whole share
+group becomes caller-visible at the call, including `go`; for `defer`,
+promotion occurs at registration. Later joins inherit externality. The
+outer-queue parameter ordinal also flows to values received through channels
+taken from it, including named-result assignments, range/select bindings and
+comma-ok receives. Imported, interface, closure, method, variadic,
+mismatched-type and converted arguments stay closed.
+
+### Received channels as operation targets (mumei-agent #1043)
+
+[mumei-agent#1043](https://github.com/mumei-lang/mumei-agent/pull/1043)
+admits a channel received from an eligible queue as an operation operand:
+`(<-Q) <- v`, `<-(<-Q)`, `close(<-Q)`, `len`/`cap` of `<-Q`,
+`for v := range <-Q`, and send/receive select cases. Each is analyzed like
+`tmp := <-Q` evaluated at the same point, carrying the same share-group,
+externality and origin facts. `Q` may be a local queue, a queue made
+caller-visible by an external member or #1040 promotion, a `chan chan T`
+parameter, or a multi-result binding whose temporary-receive form is already
+admitted. Direct call-result queue operands and aliases of a chan-chan
+parameter remain closed.
 
 ## No-`.mm` front door and V1 order
 
