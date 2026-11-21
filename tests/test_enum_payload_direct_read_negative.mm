@@ -3,6 +3,11 @@ enum Chan {
     Udp
 }
 
+enum Outer {
+    Wrap(c: Chan, marker: i64),
+    Nil
+}
+
 enum Positional {
     Tcp(i64, i64),
     Udp
