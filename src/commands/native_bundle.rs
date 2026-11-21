@@ -3702,6 +3702,7 @@ entry:
         );
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
     fn machine_tv_rejects_patched_rela_addend_from_object_surface() {
         let dir = tempfile::tempdir().unwrap();
