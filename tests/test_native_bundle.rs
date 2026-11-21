@@ -641,6 +641,126 @@ fn stderr_is_pinned_and_reproduced() {
 }
 
 #[test]
+fn runtime_observations_are_rechecked_on_one_invocation() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+    let recheck_observations = |source: &Path, bundle: &Path, id: &str, json: bool| {
+        let mut args = vec![
+            "native-bundle",
+            "recheck-observations",
+            bundle.to_str().unwrap(),
+            source.to_str().unwrap(),
+            "--expected-build-id",
+            id,
+        ];
+        if json {
+            args.push("--json");
+        }
+        cli(&args)
+    };
+
+    let text = recheck_observations(&source, &bundle, &id, false);
+    assert_success(&text);
+    assert_eq!(
+        String::from_utf8_lossy(&text.stdout),
+        "Pinned toolchain outputs reproduce the pinned object and executable; one invocation of the reproduced executable matches every pinned runtime observation (exit status, stdout and stderr).\nScope: artifact_reproduction_and_runtime_observation_semantics_on_one_invocation_only/no_runtime_abi_or_semantic_proof\n"
+    );
+
+    let json = recheck_observations(&source, &bundle, &id, true);
+    assert_success(&json);
+    assert!(json.stdout.ends_with(b"\n"));
+    let descriptor: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(descriptor.as_object().unwrap().len(), 8);
+    assert_eq!(descriptor["schema_version"], "mumei.runtime-observation/v1");
+    assert_eq!(descriptor["verdict"], "observed_matching");
+    assert_eq!(
+        descriptor["scope"],
+        "artifact_reproduction_and_runtime_observation_semantics_on_one_invocation_only/no_runtime_abi_or_semantic_proof"
+    );
+    assert_eq!(descriptor["build_id"], id);
+    assert_eq!(
+        descriptor["invocation"],
+        serde_json::json!({
+            "argv": [],
+            "stdin": "closed",
+            "timeout_ms": 30_000,
+            "channel_cap_bytes": 65_536,
+        })
+    );
+    assert_eq!(
+        descriptor["observations"],
+        serde_json::json!({
+            "exit_status": record["link_build"]["expected_exit_status"],
+            "stdout_sha256": record["link_build"]["expected_stdout_sha256"],
+            "stderr_sha256": record["link_build"]["expected_stderr_sha256"],
+        })
+    );
+    assert_eq!(
+        descriptor["checks_performed"],
+        serde_json::json!([
+            "os_exit_status_observation",
+            "os_stdout_observation",
+            "os_stderr_observation",
+            "runtime_observation_semantics",
+        ])
+    );
+    assert_eq!(
+        descriptor["checks_not_performed"],
+        serde_json::json!([
+            "producer_authenticity",
+            "historical_execution",
+            "optimizer_semantics",
+            "abi_runtime_semantics",
+            "grade_promotion",
+            "lean_kernel_checks",
+        ])
+    );
+
+    for pin in [
+        "expected_exit_status",
+        "expected_stdout_sha256",
+        "expected_stderr_sha256",
+    ] {
+        let mut pinless_record = record.clone();
+        pinless_record["link_build"]
+            .as_object_mut()
+            .unwrap()
+            .remove(pin);
+        let bytes = serde_json::to_vec(&pinless_record).unwrap();
+        fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+        let id = native_bundle::sha256(&bytes);
+        for json in [false, true] {
+            let output = recheck_observations(&source, &bundle, &id, json);
+            assert_eq!(output.status.code(), Some(3), "{pin}, json={json}");
+            assert!(output.stdout.is_empty(), "{pin}, json={json}");
+        }
+    }
+
+    for pin in [
+        "expected_exit_status",
+        "expected_stdout_sha256",
+        "expected_stderr_sha256",
+    ] {
+        let mut wrong_record = record.clone();
+        if pin == "expected_exit_status" {
+            let expected = record["link_build"][pin].as_u64().unwrap();
+            wrong_record["link_build"][pin] =
+                serde_json::json!(if expected == 255 { 1 } else { expected + 1 });
+        } else {
+            wrong_record["link_build"][pin] = serde_json::json!("0".repeat(64));
+        }
+        let bytes = serde_json::to_vec(&wrong_record).unwrap();
+        fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+        let id = native_bundle::sha256(&bytes);
+        let output = recheck_observations(&source, &bundle, &id, true);
+        assert_eq!(output.status.code(), Some(1), "{pin}");
+        assert!(output.stdout.is_empty(), "{pin}");
+    }
+}
+
+#[test]
 fn stderr_acceptance_emits_the_observation_descriptor() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build(root.path());

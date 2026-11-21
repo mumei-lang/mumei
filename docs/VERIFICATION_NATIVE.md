@@ -1856,6 +1856,48 @@ acceptance descriptor with `os_stderr_observation` in
 in `checks_not_performed`. Every unevaluable case exits 3 with no
 descriptor; a mismatched digest exits 1.
 
+### Pinned executable runtime-observation recheck
+
+`mumei native-bundle recheck-observations` completes all three pinned
+runtime observations in one invocation of the byte-identical executable
+reproduced by `recheck-artifact`:
+
+```sh
+mumei native-bundle recheck-observations module-bundle module.mm \
+  --expected-build-id <trusted-64-character-lowercase-sha256>
+mumei native-bundle recheck-observations module-bundle module.mm \
+  --expected-build-id <trusted-64-character-lowercase-sha256> --json
+```
+
+The observer closes stdin, supplies no arguments, and captures stdout and
+stderr concurrently, with the same 30-second timeout and 64 KiB cap per
+channel as the individual observation commands. It compares the resulting
+OS exit status, stdout SHA-256 and stderr SHA-256 against all three
+`link_build` pins. This is one invocation; the producer currently obtains
+those pins with three separate build-time runs (`observed_exit_status`,
+`observed_stdout` and `observed_stderr`). The combined recheck therefore
+tests whether all three observations agree on the same fresh execution,
+without changing how any pin is produced.
+
+If any pin is absent, the reproduced executable is unavailable, or a
+spawn, timeout, signal, reader or capture-cap failure prevents a complete
+observation, the command exits 3 as inconclusive and emits no descriptor.
+A complete observation that differs from any pin exits 1 and prints no
+stdout. A match exits 0. Text mode reports the three matching channels;
+`--json` emits `mumei.runtime-observation/v1` with verdict
+`observed_matching`, the trusted build ID, the fixed invocation envelope,
+all three observed values, the four checks performed and the six declared
+checks not performed. This descriptor is not reusable Evidence or a
+certificate.
+
+The scope is
+`artifact_reproduction_and_runtime_observation_semantics_on_one_invocation_only/no_runtime_abi_or_semantic_proof`.
+It is a conjunction of three OS-level observations from one run, not a
+runtime/ABI, process-semantics, optimizer-semantics or
+historical-execution claim. Existing `accept-*` descriptors remain
+unchanged; composing this descriptor with acceptance and `recovery-eval`
+is the planned Option A slice 3.
+
 ### First native consumer Evidence producer
 
 `mumei native-bundle recheck-llvm <bundle> <source> --expected-build-id <trusted-id> --json`

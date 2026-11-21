@@ -3894,6 +3894,19 @@ the `native_stderr_recheck`/`native_stderr_accept` MCP tools.
 mumei-demo's `native_stderr_recheck` and `native_stderr_accept`
 scenarios exercise both routes end to end.
 
+### Wave 5 pinned executable runtime-observation recheck (C10 consumer)
+
+Core's `mumei native-bundle recheck-observations` runs the reproduced
+executable once and compares its exit status, stdout digest and stderr
+digest against all three build-time pins in that single invocation.
+Missing pins or incomplete observation exit 3 as inconclusive; any
+mismatch exits 1; a match emits `mumei.runtime-observation/v1` with
+`runtime_observation_semantics` in `checks_performed`. The scope is
+bounded to the one OS-level invocation and claims no runtime/ABI,
+process-semantics or historical-execution proof. Existing accept
+descriptors stay unchanged; composition with acceptance and
+`recovery-eval` is Option A slice 3.
+
 ### Wave 5 declared producer-identity gate (C02 consumer)
 
 Core's `mumei evidence check|check-list|check-consistency`

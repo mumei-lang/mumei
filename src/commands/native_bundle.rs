@@ -45,6 +45,8 @@ const STDOUT_RECHECK_SCOPE: &str =
     "artifact_reproduction_and_os_stdout_observation_only/no_runtime_abi_or_semantic_proof";
 const STDERR_RECHECK_SCOPE: &str =
     "artifact_reproduction_and_os_stderr_observation_only/no_runtime_abi_or_semantic_proof";
+const RUNTIME_OBSERVATION_RECHECK_SCOPE: &str =
+    "artifact_reproduction_and_runtime_observation_semantics_on_one_invocation_only/no_runtime_abi_or_semantic_proof";
 /// The build/recheck single-run cap for observing an executable: a
 /// bounded pure-i64 `main` is expected to return promptly, but the
 /// observation must never hang a command.
@@ -114,7 +116,6 @@ fn observed_stream_inner(
     executable: &Path,
     channel: ObservedChannel,
 ) -> Result<String, ObservedStreamFailure> {
-    use std::io::Read;
     let mut command = std::process::Command::new(executable);
     command.stdin(Stdio::null());
     match channel {
@@ -130,7 +131,7 @@ fn observed_stream_inner(
         .map_err(|_| ObservedStreamFailure::SpawnFailed)?;
     // ChildStdout/ChildStderr are distinct types; erase to the shared
     // Read interface for the draining reader thread.
-    let mut piped: Box<dyn std::io::Read + Send> = match channel {
+    let piped: Box<dyn std::io::Read + Send> = match channel {
         ObservedChannel::Stdout => Box::new(
             child
                 .stdout
@@ -144,34 +145,7 @@ fn observed_stream_inner(
                 .ok_or(ObservedStreamFailure::PipeTaken)?,
         ),
     };
-    let reader = std::thread::spawn(move || {
-        let mut captured = Vec::new();
-        let mut chunk = [0u8; 8192];
-        let mut overflow = false;
-        loop {
-            match piped.read(&mut chunk) {
-                Ok(0) => break,
-                Err(_) => {
-                    // A read error mid-stream means the captured bytes
-                    // are truncated — fail closed, never pin a partial
-                    // digest.
-                    overflow = true;
-                    break;
-                }
-                Ok(n) => {
-                    let room = OBSERVED_CHANNEL_MAX_BYTES.saturating_sub(captured.len());
-                    if n > room {
-                        // Any byte past the cap makes the channel
-                        // unobservable — the pin must cover the whole
-                        // stream, never a truncation.
-                        overflow = true;
-                    }
-                    captured.extend_from_slice(&chunk[..n.min(room)]);
-                }
-            }
-        }
-        (captured, overflow)
-    });
+    let reader = capped_reader(piped);
     let deadline = Instant::now() + OBSERVATION_TIMEOUT;
     let finished = loop {
         match child.try_wait() {
@@ -201,6 +175,97 @@ fn observed_stream_inner(
         return Err(ObservedStreamFailure::OutputOverCap);
     }
     Ok(sha256(&captured))
+}
+
+fn capped_reader<R>(mut piped: R) -> std::thread::JoinHandle<(Vec<u8>, bool)>
+where
+    R: std::io::Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut captured = Vec::new();
+        let mut chunk = [0u8; 8192];
+        let mut overflow = false;
+        loop {
+            match piped.read(&mut chunk) {
+                Ok(0) => break,
+                Err(_) => {
+                    overflow = true;
+                    break;
+                }
+                Ok(n) => {
+                    let room = OBSERVED_CHANNEL_MAX_BYTES.saturating_sub(captured.len());
+                    if n > room {
+                        overflow = true;
+                    }
+                    captured.extend_from_slice(&chunk[..n.min(room)]);
+                }
+            }
+        }
+        (captured, overflow)
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InvocationObservation {
+    exit_status: u32,
+    stdout_sha256: String,
+    stderr_sha256: String,
+}
+
+fn observed_invocation(executable: &Path) -> Result<InvocationObservation, ObservedStreamFailure> {
+    let mut child = std::process::Command::new(executable)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| ObservedStreamFailure::SpawnFailed)?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(ObservedStreamFailure::PipeTaken);
+    };
+    let Some(stderr) = child.stderr.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(ObservedStreamFailure::PipeTaken);
+    };
+    let stdout_reader = capped_reader(stdout);
+    let stderr_reader = capped_reader(stderr);
+
+    let deadline = Instant::now() + OBSERVATION_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(ObservedStreamFailure::TimedOutOrKilled);
+            }
+        }
+    };
+    let Some(exit_status) = status.code() else {
+        let _ = stdout_reader.join();
+        let _ = stderr_reader.join();
+        return Err(ObservedStreamFailure::TimedOutOrKilled);
+    };
+
+    let stdout_result = stdout_reader.join();
+    let stderr_result = stderr_reader.join();
+    let (stdout, stdout_overflow) =
+        stdout_result.map_err(|_| ObservedStreamFailure::ReaderFailed)?;
+    let (stderr, stderr_overflow) =
+        stderr_result.map_err(|_| ObservedStreamFailure::ReaderFailed)?;
+    if stdout_overflow || stderr_overflow {
+        return Err(ObservedStreamFailure::OutputOverCap);
+    }
+    Ok(InvocationObservation {
+        exit_status: exit_status as u32,
+        stdout_sha256: sha256(&stdout),
+        stderr_sha256: sha256(&stderr),
+    })
 }
 
 /// The stdout channel observation — see `observed_stream`.
@@ -783,6 +848,132 @@ pub(crate) fn run(command: NativeBundleCommand) {
                         (ArtifactRecheck::Inconclusive, ..) => {
                             eprintln!("Native source/LLVM recheck inconclusive; artifact not accepted.");
                             std::process::exit(3);
+                        }
+                    }
+                }
+            }
+        }
+        NativeBundleCommand::RecheckObservations {
+            bundle,
+            source,
+            expected_build_id,
+            json,
+        } => {
+            match recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id) {
+                Err(error) => Err(error),
+                Ok(ArtifactRecheckResult {
+                    result: ArtifactRecheck::Different,
+                    ..
+                }) => Err(BundleError(
+                    "pinned artifact differs from the toolchain's output for the pinned inputs",
+                )),
+                Ok(ArtifactRecheckResult {
+                    result: ArtifactRecheck::Inconclusive,
+                    ..
+                }) => {
+                    eprintln!("Native source/LLVM recheck inconclusive; no artifact result established.");
+                    std::process::exit(3);
+                }
+                Ok(ArtifactRecheckResult {
+                    result: ArtifactRecheck::Rechecked,
+                    expected_exit_status,
+                    expected_stdout_sha256,
+                    expected_stderr_sha256,
+                    stage,
+                    ..
+                }) => {
+                    let (
+                        Some(expected_exit_status),
+                        Some(expected_stdout_sha256),
+                        Some(expected_stderr_sha256),
+                    ) = (
+                        expected_exit_status,
+                        expected_stdout_sha256,
+                        expected_stderr_sha256,
+                    )
+                    else {
+                        eprintln!(
+                            "Record does not pin every runtime observation (exit status, stdout and stderr); inconclusive."
+                        );
+                        drop(stage);
+                        std::process::exit(3);
+                    };
+                    let Some(stage) = stage else {
+                        eprintln!("Reproduced executable is unavailable for execution; inconclusive.");
+                        std::process::exit(3);
+                    };
+                    match observed_invocation(
+                        &stage.path().join(BundleFile::Executable.file_name()),
+                    ) {
+                        Err(_) => {
+                            eprintln!(
+                                "Executable runtime observation inconclusive; spawn failed, timed out, terminated by signal or exceeded the capture cap."
+                            );
+                            drop(stage);
+                            std::process::exit(3);
+                        }
+                        Ok(observation)
+                            if observation.exit_status != expected_exit_status
+                                || observation.stdout_sha256 != expected_stdout_sha256
+                                || observation.stderr_sha256 != expected_stderr_sha256 =>
+                        {
+                            Err(BundleError(
+                                "reproduced executable's runtime observations differ from the record pins",
+                            ))
+                        }
+                        Ok(observation) => {
+                            if json {
+                                use std::io::Write;
+                                let descriptor = serde_json::json!({
+                                    "schema_version": "mumei.runtime-observation/v1",
+                                    "verdict": "observed_matching",
+                                    "scope": RUNTIME_OBSERVATION_RECHECK_SCOPE,
+                                    "build_id": expected_build_id,
+                                    "invocation": {
+                                        "argv": [],
+                                        "stdin": "closed",
+                                        "timeout_ms": OBSERVATION_TIMEOUT.as_millis(),
+                                        "channel_cap_bytes": OBSERVED_CHANNEL_MAX_BYTES,
+                                    },
+                                    "observations": {
+                                        "exit_status": observation.exit_status,
+                                        "stdout_sha256": observation.stdout_sha256,
+                                        "stderr_sha256": observation.stderr_sha256,
+                                    },
+                                    "checks_performed": [
+                                        "os_exit_status_observation",
+                                        "os_stdout_observation",
+                                        "os_stderr_observation",
+                                        "runtime_observation_semantics",
+                                    ],
+                                    "checks_not_performed": [
+                                        "producer_authenticity",
+                                        "historical_execution",
+                                        "optimizer_semantics",
+                                        "abi_runtime_semantics",
+                                        "grade_promotion",
+                                        "lean_kernel_checks",
+                                    ],
+                                });
+                                serde_json::to_vec_pretty(&descriptor)
+                                    .map_err(|_| {
+                                        BundleError("runtime observation descriptor encoding failed")
+                                    })
+                                    .and_then(|mut bytes| {
+                                        bytes.push(b'\n');
+                                        std::io::stdout()
+                                            .lock()
+                                            .write_all(&bytes)
+                                            .map_err(|_| {
+                                                BundleError(
+                                                    "cannot write runtime observation descriptor",
+                                                )
+                                            })
+                                    })
+                            } else {
+                                println!("Pinned toolchain outputs reproduce the pinned object and executable; one invocation of the reproduced executable matches every pinned runtime observation (exit status, stdout and stderr).\nScope: {RUNTIME_OBSERVATION_RECHECK_SCOPE}");
+                                Ok(())
+                            }
                         }
                     }
                 }
@@ -2211,6 +2402,14 @@ fn publish(_: &Path, _: &Path) -> Result<(), BundleError> {
 mod tests {
     use super::*;
 
+    fn executable_script(path: &Path, body: &str) {
+        std::fs::write(path, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
     #[test]
     fn refuted_or_inconclusive_queries_never_write_json_or_text() {
         for json in [false, true] {
@@ -2289,6 +2488,80 @@ mod tests {
         }
         // A missing executable is unobservable, not a pin.
         assert_eq!(observed_stderr(&dir.path().join("missing")), None);
+    }
+
+    #[test]
+    fn invocation_observation_captures_both_channels_and_exit_status_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let printer = dir.path().join("printer.sh");
+        executable_script(
+            &printer,
+            "#!/bin/sh\nprintf 'out'\nprintf 'err' >&2\nexit 7\n",
+        );
+
+        let observation = observed_invocation(&printer).unwrap();
+        assert_eq!(observation.exit_status, 7);
+        assert_eq!(observation.stdout_sha256, sha256(b"out"));
+        assert_eq!(observation.stderr_sha256, sha256(b"err"));
+    }
+
+    #[test]
+    fn invocation_observation_caps_each_channel_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let printer = dir.path().join("printer.sh");
+        for (stdout_bytes, stderr_bytes, over_cap) in [
+            (
+                OBSERVED_CHANNEL_MAX_BYTES,
+                OBSERVED_CHANNEL_MAX_BYTES,
+                false,
+            ),
+            (
+                OBSERVED_CHANNEL_MAX_BYTES + 1,
+                OBSERVED_CHANNEL_MAX_BYTES,
+                true,
+            ),
+            (
+                OBSERVED_CHANNEL_MAX_BYTES,
+                OBSERVED_CHANNEL_MAX_BYTES + 1,
+                true,
+            ),
+        ] {
+            executable_script(
+                &printer,
+                &format!(
+                    "#!/bin/sh\nhead -c {stdout_bytes} /dev/zero\nhead -c {stderr_bytes} /dev/zero >&2\n"
+                ),
+            );
+            let result = observed_invocation(&printer);
+            if over_cap {
+                assert_eq!(result, Err(ObservedStreamFailure::OutputOverCap));
+            } else {
+                let observation = result.unwrap();
+                let zeroes = vec![0; OBSERVED_CHANNEL_MAX_BYTES];
+                assert_eq!(observation.stdout_sha256, sha256(&zeroes));
+                assert_eq!(observation.stderr_sha256, sha256(&zeroes));
+            }
+        }
+    }
+
+    #[test]
+    fn invocation_observation_maps_signal_to_inconclusive() {
+        let dir = tempfile::tempdir().unwrap();
+        let killer = dir.path().join("killer.sh");
+        executable_script(&killer, "#!/bin/sh\nkill -9 $$\n");
+        assert_eq!(
+            observed_invocation(&killer),
+            Err(ObservedStreamFailure::TimedOutOrKilled)
+        );
+    }
+
+    #[test]
+    fn invocation_observation_reports_spawn_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            observed_invocation(&dir.path().join("missing")),
+            Err(ObservedStreamFailure::SpawnFailed)
+        );
     }
 
     #[test]

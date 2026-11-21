@@ -37,6 +37,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei native-bundle accept-stdout` | 2 | Accept the pinned artifact after the stdout recheck; emits an anonymous acceptance descriptor, not reusable Evidence |
 | `mumei native-bundle recheck-stderr` | 1 | Execute the reproduced executable and compare its captured stderr digest with the record pin; no runtime/ABI semantics |
 | `mumei native-bundle accept-stderr` | 2 | Accept the pinned artifact after the stderr recheck; emits an anonymous acceptance descriptor, not reusable Evidence |
+| `mumei native-bundle recheck-observations` | 2 | Execute the reproduced executable once and compare its exit status, stdout and stderr with every record pin; no runtime/ABI semantics |
 | `mumei build` | 5 | Verify + compile to LLVM IR (default) |
 | `mumei verify` | 38 | Z3 formal verification only (no codegen) |
 | `mumei config` | 2 | Show effective settings and where each value comes from. The CLI `--profile` is per-invocation; `mumei config` only reports the manifest source. |
@@ -675,6 +676,30 @@ Usage: mumei native-bundle accept-stderr [OPTIONS] --expected-build-id <EXPECTED
 |---|---|---|---|
 | `--expected-build-id <EXPECTED_BUILD_ID>` | — | — | SHA-256 of native-bundle.json obtained through a separately trusted channel |
 | `--json` | false | — | Emit a static acceptance descriptor, not reusable Evidence or a certificate |
+
+## `mumei native-bundle recheck-observations`
+
+Execute the reproduced executable once and compare its exit status, stdout and stderr with every record pin; no runtime/ABI semantics
+
+Usage:
+
+```text
+Usage: mumei native-bundle recheck-observations [OPTIONS] --expected-build-id <EXPECTED_BUILD_ID> <BUNDLE> <SOURCE>
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `BUNDLE` | Yes | — |
+| `SOURCE` | Yes | — |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--expected-build-id <EXPECTED_BUILD_ID>` | — | — | SHA-256 of native-bundle.json obtained through a separately trusted channel |
+| `--json` | false | — | Emit a mumei.runtime-observation/v1 descriptor on a matching observation, not reusable Evidence or a certificate |
 
 ## `mumei build`
 

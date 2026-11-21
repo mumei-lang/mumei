@@ -737,6 +737,17 @@ pub(crate) enum NativeBundleCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Execute the reproduced executable once and compare its exit status, stdout and stderr with every record pin; no runtime/ABI semantics
+    RecheckObservations {
+        bundle: String,
+        source: String,
+        /// SHA-256 of native-bundle.json obtained through a separately trusted channel
+        #[arg(long)]
+        expected_build_id: String,
+        /// Emit a mumei.runtime-observation/v1 descriptor on a matching observation, not reusable Evidence or a certificate
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
