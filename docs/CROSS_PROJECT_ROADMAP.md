@@ -6625,8 +6625,32 @@ return point. Storing a local queue in a package or imported `chan chan T`
 variable promotes its group and broadcasts its dependencies to later
 external reads, including channels that join the group after the store.
 Stores into struct fields, slices, maps or composite literals, closure
-capture, address-taking, `[]chan chan T`, deeper nesting and non-scalar
-inner elements remain closed.
+capture, address-taking, deeper nesting and non-scalar inner elements
+remain closed; containers of queues were admitted by #1052 below.
+
+### Containers of chan-chan queues (mumei-agent #1052)
+
+[mumei-agent#1052](https://github.com/mumei-lang/mumei-agent/pull/1052)
+admits one-level containers of scalar-element queues — local
+`[]chan chan T`, `[N]chan chan T` and `map[K]chan chan T` — by modeling the
+whole container as one conflated local queue (the #1036 share-group model,
+with the container binding as the queue identity), so results may
+over-approximate but never under-approximate the per-element form.
+Literals, `make`, `var a [N]...`, `append` and indexed stores join their
+elements; an external element (chan-chan parameter, package/imported
+queue, call result or external alias) promotes the group as a #1047 reseat
+does. An indexed element `s[i]`/`a[i]`/`m[k]` is admitted in every queue
+operand position (send, receive incl. comma-ok and select,
+`<-(<-s[i])`, `(<-s[i]) <- x`, `close`/`len`/`cap`, `range`, `q := s[i]`),
+and `for _, q := range s` / `for _, q = range s` bind or reseat `q` into
+the group; range assignment is conditional, keeps the target's prior
+externality, and a package-variable target records a #1049 package store.
+`p []chan chan T` parameters and package/imported `GS []chan chan T`
+containers behave per element as external queues with index dependencies
+unioned, as for `GS[i]` (#1028). Returning, storing, passing, capturing or
+taking the address of the container itself, struct fields, `[N]chan T`
+array parameters, `[][]chan chan T`, `[]chan chan chan T` and deeper, and
+non-scalar inner elements remain closed.
 
 ## No-`.mm` front door and V1 order
 
