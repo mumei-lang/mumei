@@ -504,13 +504,175 @@ fn is_struct_projection_slot_name(
     name: &str,
 ) -> bool {
     let mut memo = std::collections::HashMap::new();
+    is_struct_projection_slot_name_with_memo(module_env, binding, sdef, name, &mut memo)
+}
+
+fn is_struct_projection_slot_name_with_memo(
+    module_env: &ModuleEnv,
+    binding: &str,
+    sdef: &crate::parser::ast::StructDef,
+    name: &str,
+    memo: &mut std::collections::HashMap<(String, String), bool>,
+) -> bool {
     [
         format!("{binding}_"),
         format!("{}{}_", STRUCT_FIELD_PREFIX, binding),
     ]
     .iter()
     .filter_map(|prefix| name.strip_prefix(prefix))
-    .any(|path| struct_field_path_exists(module_env, sdef, path, &mut memo))
+    .any(|path| struct_field_path_exists(module_env, sdef, path, memo))
+}
+
+const MAX_PARAM_PROJECTION_DEPTH: usize = 16;
+const MAX_PARAM_PROJECTION_SLOT_NAMES: usize = 4096;
+
+fn struct_projection_paths(
+    module_env: &ModuleEnv,
+    sdef: &crate::parser::ast::StructDef,
+    depth: usize,
+    type_path: &mut Vec<String>,
+    memo: &mut std::collections::HashMap<(String, usize, Vec<String>), Vec<String>>,
+) -> Option<Vec<String>> {
+    let mut path_types = type_path.clone();
+    path_types.sort_unstable();
+    path_types.dedup();
+    let key = (sdef.name.clone(), depth, path_types);
+    if let Some(paths) = memo.get(&key) {
+        return Some(paths.clone());
+    }
+
+    let mut paths = std::collections::BTreeSet::new();
+    for field in &sdef.fields {
+        paths.insert(field.name.clone());
+        if paths.len() * 2 > MAX_PARAM_PROJECTION_SLOT_NAMES {
+            return None;
+        }
+
+        let resolved = module_env.resolve_base_type(&field.type_name);
+        if depth >= MAX_PARAM_PROJECTION_DEPTH
+            || resolved.trim().starts_with('[')
+            || resolved.trim().ends_with("[]")
+        {
+            continue;
+        }
+        let Some(nested_type) = canonical_struct_type_in_module(module_env, &resolved) else {
+            continue;
+        };
+        if type_path.contains(&nested_type) {
+            continue;
+        }
+        let Some(nested) = module_env.get_struct(&nested_type) else {
+            continue;
+        };
+
+        type_path.push(nested_type);
+        let nested_paths = struct_projection_paths(module_env, nested, depth + 1, type_path, memo)?;
+        type_path.pop();
+
+        for nested_path in nested_paths {
+            paths.insert(format!("{}_{}", field.name, nested_path));
+            if paths.len() * 2 > MAX_PARAM_PROJECTION_SLOT_NAMES {
+                return None;
+            }
+        }
+    }
+
+    let paths = paths.into_iter().collect::<Vec<_>>();
+    memo.insert(key, paths.clone());
+    Some(paths)
+}
+
+fn struct_projection_slot_names(
+    module_env: &ModuleEnv,
+    binding: &str,
+    sdef: &crate::parser::ast::StructDef,
+) -> Option<Vec<String>> {
+    let mut memo = std::collections::HashMap::new();
+    let paths =
+        struct_projection_paths(module_env, sdef, 0, &mut vec![sdef.name.clone()], &mut memo)?;
+    let mut names = Vec::with_capacity(paths.len() * 2);
+    for path in paths {
+        names.push(format!("{binding}_{path}"));
+        names.push(struct_field_key(binding, &path));
+        if names.len() > MAX_PARAM_PROJECTION_SLOT_NAMES {
+            return None;
+        }
+    }
+    Some(names)
+}
+
+pub(crate) fn reject_parameter_projection_slot_collisions(
+    module_env: &ModuleEnv,
+    atom: &crate::parser::Atom,
+) -> MumeiResult<()> {
+    let struct_types = atom
+        .params
+        .iter()
+        .map(|param| {
+            param
+                .type_name
+                .as_deref()
+                .and_then(|type_name| canonical_struct_type_in_module(module_env, type_name))
+        })
+        .collect::<Vec<_>>();
+
+    for (p_index, p) in atom.params.iter().enumerate() {
+        let Some(p_type) = struct_types[p_index].as_deref() else {
+            continue;
+        };
+        let Some(p_struct) = module_env.get_struct(p_type) else {
+            continue;
+        };
+        let mut path_memo = std::collections::HashMap::new();
+
+        for (q_index, q) in atom.params.iter().enumerate() {
+            if p_index == q_index {
+                continue;
+            }
+            let collision_error = || {
+                MumeiError::type_error_at(
+                    format!(
+                        "parameter '{}' collides with a field projection slot of struct parameter '{}'; rename the parameter",
+                        q.name, p.name
+                    ),
+                    atom.span.clone(),
+                )
+            };
+
+            if is_struct_projection_slot_name_with_memo(
+                module_env,
+                &p.name,
+                p_struct,
+                &q.name,
+                &mut path_memo,
+            ) {
+                return Err(collision_error());
+            }
+
+            let Some(q_type) = struct_types[q_index].as_deref() else {
+                continue;
+            };
+            let Some(q_struct) = module_env.get_struct(q_type) else {
+                continue;
+            };
+            let Some(q_slot_names) = struct_projection_slot_names(module_env, &q.name, q_struct)
+            else {
+                return Err(collision_error());
+            };
+            if q_slot_names.iter().any(|slot_name| {
+                is_struct_projection_slot_name_with_memo(
+                    module_env,
+                    &p.name,
+                    p_struct,
+                    slot_name,
+                    &mut path_memo,
+                )
+            }) {
+                return Err(collision_error());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn reject_struct_projection_slot_collisions(
