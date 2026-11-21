@@ -570,6 +570,7 @@ fn struct_binding_slot_keys<'a>(
         sdef: &crate::parser::ast::StructDef,
         env: &Env<'a>,
         depth: usize,
+        type_path: &mut Vec<String>,
         keys: &mut std::collections::HashSet<String>,
     ) {
         const MAX_NESTED_DEPTH: usize = 16;
@@ -582,21 +583,41 @@ fn struct_binding_slot_keys<'a>(
                 }
             }
             let resolved = vc.module_env.resolve_base_type(&field.type_name);
-            if depth < MAX_NESTED_DEPTH
-                && !resolved.trim().starts_with('[')
-                && !resolved.trim().ends_with("[]")
+            if depth >= MAX_NESTED_DEPTH
+                || resolved.trim().starts_with('[')
+                || resolved.trim().ends_with("[]")
             {
-                if let Some(nested_type) = canonical_struct_type(vc, &resolved) {
-                    if let Some(nested) = vc.module_env.get_struct(&nested_type) {
-                        collect(vc, &direct_key, nested, env, depth + 1, keys);
-                    }
-                }
+                continue;
+            }
+            let Some(nested_type) = canonical_struct_type(vc, &resolved) else {
+                continue;
+            };
+            let direct_prefix = format!("{direct_key}_");
+            let struct_prefix = format!("{STRUCT_FIELD_PREFIX}{direct_key}_");
+            let has_nested_slots = env
+                .keys()
+                .any(|key| key.starts_with(&direct_prefix) || key.starts_with(&struct_prefix));
+            if !has_nested_slots || type_path.contains(&nested_type) {
+                continue;
+            }
+            if let Some(nested) = vc.module_env.get_struct(&nested_type) {
+                type_path.push(nested_type);
+                collect(vc, &direct_key, nested, env, depth + 1, type_path, keys);
+                type_path.pop();
             }
         }
     }
 
     let mut keys = std::collections::HashSet::new();
-    collect(vc, binding, sdef, env, 0, &mut keys);
+    collect(
+        vc,
+        binding,
+        sdef,
+        env,
+        0,
+        &mut vec![sdef.name.clone()],
+        &mut keys,
+    );
     keys
 }
 
