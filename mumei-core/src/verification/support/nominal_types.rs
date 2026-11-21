@@ -98,6 +98,25 @@ impl<'a> NominalChecker<'a> {
             .map(|f| f.type_name.as_str())
     }
 
+    /// Declared type of a uniquely-owned named enum payload.
+    fn enum_payload_type(&self, key: &str, field: &str) -> Option<&'a str> {
+        let enum_def = self.module_env.enums.get(key)?;
+        let mut payload_type = None;
+        for variant in &enum_def.variants {
+            let Some(index) = variant.fields.iter().position(|decl| {
+                decl.split_once(':')
+                    .is_some_and(|(name, _)| name.trim() == field)
+            }) else {
+                continue;
+            };
+            if payload_type.is_some() {
+                return None;
+            }
+            payload_type = variant.field_types.get(index).map(|ty| ty.name.as_str());
+        }
+        payload_type
+    }
+
     /// Struct type of `expr` when it is syntactically evident.
     fn struct_type_of(&self, expr: &Expr) -> Option<String> {
         match expr {
@@ -232,8 +251,8 @@ impl<'a> NominalChecker<'a> {
         let Some(declared) = self.types.get(root).and_then(|t| t.as_deref()) else {
             return Ok(());
         };
-        let mut segments = field.split('.');
-        let Some(head) = segments.next() else {
+        let segments: Vec<&str> = field.split('.').collect();
+        let Some(head) = segments.first().copied() else {
             return Ok(());
         };
         let (mut field_decl, enum_payload) = if let Some(skey) = self.struct_key(declared) {
@@ -245,38 +264,22 @@ impl<'a> NominalChecker<'a> {
             let Some(ekey) = self.enum_key(declared) else {
                 return Ok(());
             };
-            let Some(enum_def) = self.module_env.enums.get(&ekey) else {
-                return Ok(());
-            };
             // Unique-owner scan, mirroring the translator: only a payload
             // name owned by exactly one variant has a declared type.
-            let mut owners = enum_def.variants.iter().filter_map(|v| {
-                let idx = v
-                    .fields
-                    .iter()
-                    .position(|f| f.split_once(':').map(|(n, _)| n.trim()).unwrap_or(f) == head)?;
-                Some((v, idx))
-            });
-            let Some((variant, idx)) = owners.next() else {
-                return Ok(());
-            };
-            if owners.next().is_some() {
-                return Ok(());
-            }
-            let Some(field_decl) = variant
-                .fields
-                .get(idx)
-                .and_then(|f| f.split_once(':').map(|(_, t)| t.trim()))
-            else {
+            let Some(field_decl) = self.enum_payload_type(&ekey, head) else {
                 return Ok(());
             };
             (field_decl, true)
         };
-        for segment in segments {
-            let Some(skey) = self.struct_key(field_decl) else {
-                return Ok(());
+        for segment in &segments[1..] {
+            let next_decl = if let Some(skey) = self.struct_key(field_decl) {
+                self.field_type(&skey, segment)
+            } else if let Some(ekey) = self.enum_key(field_decl) {
+                self.enum_payload_type(&ekey, segment)
+            } else {
+                None
             };
-            let Some(next_decl) = self.field_type(&skey, segment) else {
+            let Some(next_decl) = next_decl else {
                 return Ok(());
             };
             field_decl = next_decl;
@@ -1099,5 +1102,61 @@ body: {{ let alias = e; alias.p.inner = Inner {{ x: 3, y: 4 }}; 0 }};
 "
         );
         assert!(check(&src).is_empty(), "{:?}", check(&src));
+    }
+
+    #[test]
+    fn enum_intermediate_payload_struct_writes_are_nominally_checked() {
+        let src = r#"
+struct Inner { x: i64, y: i64 }
+struct Other { x: i64, y: i64 }
+enum Chan { Tcp(p: Inner), Udp }
+struct B { e: Chan, k: i64 }
+
+trusted atom local_enum_slot_mismatch() -> i64
+requires: true;
+ensures: true;
+body: {
+    let b = B { e: Chan::Tcp(Inner { x: 1, y: 2 }), k: 3 };
+    b.e.p = Other { x: 4, y: 5 };
+    0
+};
+
+trusted atom param_enum_slot_mismatch(b: B) -> i64
+requires: true;
+ensures: true;
+body: { b.e.p = Other { x: 4, y: 5 }; 0 };
+
+trusted atom local_enum_slot_match() -> i64
+requires: true;
+ensures: true;
+body: {
+    let b = B { e: Chan::Tcp(Inner { x: 1, y: 2 }), k: 3 };
+    b.e.p = Inner { x: 4, y: 5 };
+    0
+};
+
+trusted atom param_enum_slot_match(b: B) -> i64
+requires: true;
+ensures: true;
+body: { b.e.p = Inner { x: 4, y: 5 }; 0 };
+"#;
+        let errors = check(src);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        for atom in ["local_enum_slot_mismatch", "param_enum_slot_mismatch"] {
+            let atom_context = format!("in atom '{atom}'");
+            let matches = errors
+                .iter()
+                .filter(|error| {
+                    error.contains(&atom_context)
+                        && error.contains(
+                            "field 'e.p' of 'b' expects struct 'Inner' but got struct 'Other'",
+                        )
+                })
+                .count();
+            assert_eq!(
+                matches, 1,
+                "expected one nominal mismatch for {atom}: {errors:?}"
+            );
+        }
     }
 }

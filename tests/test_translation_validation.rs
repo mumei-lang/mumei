@@ -3996,3 +3996,26 @@ fn composite_v23_does_not_admit_deep_enum_payload_writes() {
         "deep enum payload writes must remain outside composite TV admission"
     );
 }
+
+#[test]
+fn composite_v23_does_not_admit_enum_slot_deep_writes() {
+    let source = "enum Chan { Tcp(port: i64), Udp }\n\
+        struct B { e: Chan, k: i64 }\n\
+        atom main() -> i64 requires: true; ensures: true; body: {\n\
+            let b = B { e: Chan::Tcp(1), k: 3 };\n\
+            b.e.port = 7;\n\
+            0\n\
+        };";
+    let items = parse_module_checked(source).unwrap();
+    let ir = emitted_module(&items);
+    assert!(
+        tv::validate_native_module(
+            source,
+            &ir,
+            Options::default(),
+            RefinedAdmission::CompositeV23,
+        )
+        .is_err(),
+        "enum-slot deep writes must remain outside composite TV admission"
+    );
+}

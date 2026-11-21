@@ -139,18 +139,21 @@ atom area(s: Shape)
         }
     }
 ```
-For a named payload whose declared type is a struct, a narrowed enum value may
-be updated at a declared leaf path. The write requires the enum to hold the
-variant that owns the payload, and rechecks the struct field's refined type,
-`where` constraint and invariants while preserving sibling fields:
+Deep writes may pass through enum-valued payloads and struct fields when each
+enum tag along the path is proven. Named struct payloads and their nested
+struct fields recheck refined types, `where` constraints and invariants while
+preserving sibling fields:
 
 ```mumei
 e.p.inner.x = value
+o.c.port = value
+b.e.port = value
 ```
 
-Positional payloads, scalar payloads and ambiguous payload names do not support
-deep field writes. These writes are not admitted by composite translation
-validation.
+The enum payload or field slot must have exactly its declared LLVM type;
+union-widened slots are rejected. Positional payloads, scalar paths, arrays,
+recursive enum slots and ambiguous payload names remain unsupported. These
+writes are not admitted by composite translation validation.
 
 ---
 ## Atom Syntax

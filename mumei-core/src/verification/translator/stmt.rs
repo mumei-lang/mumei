@@ -684,17 +684,58 @@ fn struct_field_assign<'a>(
         // contract, invariant and fresh-handle logic at every depth —
         // recursion peels one segment per level.
         let mut parent_ty = type_name.as_str();
-        for segment in &segments[..segments.len() - 1] {
-            let Some(sdef) = vc.module_env.get_struct(parent_ty) else {
+        for (index, segment) in segments[..segments.len() - 1].iter().enumerate() {
+            let resolved_parent_ty = vc.module_env.resolve_base_type(parent_ty);
+            let Some(sdef) = vc.module_env.get_struct(&resolved_parent_ty) else {
                 return Ok(None);
             };
             let Some(f) = sdef.fields.iter().find(|f| f.name == *segment) else {
                 return Ok(None);
             };
             parent_ty = f.type_name.as_str();
+            let resolved_field_ty = vc.module_env.resolve_base_type(parent_ty);
+            if index + 1 < segments.len() {
+                if let Some(edef) = vc.module_env.get_enum(&resolved_field_ty) {
+                    if !datatype::is_finite_adt(edef, vc.module_env) {
+                        return Ok(None);
+                    }
+                    let prefix = segments[..=index].join(".");
+                    let rest = segments[index + 1..].join(".");
+                    let prefix_expr = segments[..=index]
+                        .iter()
+                        .fold(Expr::Variable(base.to_string()), |acc, segment| {
+                            Expr::FieldAccess(Box::new(acc), (*segment).to_string())
+                        });
+                    let slot = expr_to_z3(vc, &prefix_expr, env, solver_opt)?;
+                    let temp = enum_slot_temp_name(vc, env);
+                    env.insert(temp.clone(), slot);
+                    vc.local_enum_types
+                        .borrow_mut()
+                        .insert(temp.clone(), edef.name.clone());
+                    let result = (|| {
+                        let enum_path = format!("{temp}.{rest}");
+                        let Some(written) =
+                            enum_field_assign(vc, &enum_path, value, env, solver_opt)?
+                        else {
+                            return Ok(None);
+                        };
+                        let field_path = format!("{base}.{prefix}");
+                        let temp_expr = Expr::Variable(temp.clone());
+                        let Some(_) =
+                            struct_field_assign(vc, &field_path, &temp_expr, env, solver_opt)?
+                        else {
+                            return Ok(None);
+                        };
+                        Ok(Some(written))
+                    })();
+                    remove_enum_slot_temp(vc, env, &temp);
+                    return result;
+                }
+            }
         }
         let leaf = segments[segments.len() - 1];
-        let Some(parent_sdef) = vc.module_env.get_struct(parent_ty) else {
+        let resolved_parent_ty = vc.module_env.resolve_base_type(parent_ty);
+        let Some(parent_sdef) = vc.module_env.get_struct(&resolved_parent_ty) else {
             return Ok(None);
         };
         if !parent_sdef.fields.iter().any(|f| f.name == leaf) {
@@ -949,6 +990,44 @@ fn enum_field_assign<'a>(
     if segments.len() > 1 {
         let field_type = &edef.variants[vidx].field_types[fidx].name;
         let resolved_type = vc.module_env.resolve_base_type(field_type);
+        if let Some(inner_enum) = vc.module_env.get_enum(&resolved_type) {
+            if !datatype::is_finite_adt(inner_enum, vc.module_env) {
+                return Ok(None);
+            }
+            let Some((leaf_off, leaf_width)) =
+                datatype::payload_leaf_range(edef, vc.module_env, vidx, fidx)
+            else {
+                return Ok(None);
+            };
+            if leaf_width != 1 {
+                return Ok(None);
+            }
+            let Some(slot) = datatype::variant_selector_apply(&sort, vidx, leaf_off, &target)
+            else {
+                return Ok(None);
+            };
+            let temp = enum_slot_temp_name(vc, env);
+            env.insert(temp.clone(), slot);
+            vc.local_enum_types
+                .borrow_mut()
+                .insert(temp.clone(), inner_enum.name.clone());
+            let result = (|| {
+                let inner_path = format!("{temp}.{}", segments[1..].join("."));
+                let Some(written) = enum_field_assign(vc, &inner_path, value, env, solver_opt)?
+                else {
+                    return Ok(None);
+                };
+                let payload_path = format!("{base}.{payload_field}");
+                let temp_expr = Expr::Variable(temp.clone());
+                let Some(_) = enum_field_assign(vc, &payload_path, &temp_expr, env, solver_opt)?
+                else {
+                    return Ok(None);
+                };
+                Ok(Some(written))
+            })();
+            remove_enum_slot_temp(vc, env, &temp);
+            return result;
+        }
         let Some(sdef) = vc.module_env.structs.get(&resolved_type) else {
             return Ok(None);
         };
@@ -1102,6 +1181,42 @@ fn enum_payload_temp_name(vc: &VCtx<'_>, env: &Env<'_>) -> String {
             return name;
         }
     }
+}
+
+fn enum_slot_temp_name(vc: &VCtx<'_>, env: &Env<'_>) -> String {
+    static TEMP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    loop {
+        let id = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = format!("__enum_slot_{id}");
+        let field_prefix = format!("{name}_");
+        let struct_prefix = format!("__struct_{name}_");
+        let occupied = env.keys().any(|key| {
+            key == &name || key.starts_with(&field_prefix) || key.starts_with(&struct_prefix)
+        }) || vc.local_struct_types.borrow().contains_key(&name)
+            || vc.local_enum_types.borrow().contains_key(&name);
+        if !occupied {
+            return name;
+        }
+    }
+}
+
+fn remove_enum_slot_temp(vc: &VCtx<'_>, env: &mut Env<'_>, temp: &str) {
+    let field_prefix = format!("{temp}_");
+    let struct_prefix = format!("__struct_{temp}_");
+    let keys: Vec<String> = env
+        .keys()
+        .filter(|key| {
+            key.as_str() == temp
+                || key.starts_with(&field_prefix)
+                || key.starts_with(&struct_prefix)
+        })
+        .cloned()
+        .collect();
+    for key in keys {
+        env.remove(&key);
+    }
+    vc.local_enum_types.borrow_mut().remove(temp);
+    vc.local_struct_types.borrow_mut().remove(temp);
 }
 
 fn collect_struct_handle_names(
