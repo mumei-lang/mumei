@@ -1388,7 +1388,7 @@ fn lift_stack_store<'ctx>(
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
     let entry_offset = rsp_memory_entry_offset(destination, state.rsp_offset)?;
-    if entry_offset >= 0 || entry_offset % 8 != 0 {
+    if entry_offset >= 0 || entry_offset < state.rsp_offset || entry_offset % 8 != 0 {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
     let value = operand_value(source, &state.registers, context, 64)
@@ -4025,6 +4025,16 @@ entry:
                 &[0x48, 0x89, 0x44, 0x24, 0x08, 0xc3], // movq %rax, 8(%rsp); retq
                 0,
                 &seven_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+        assert_eq!(
+            check_function(
+                &[0x48, 0x89, 0x7c, 0x24, 0xf8, 0xc3], // movq %rdi, -8(%rsp); retq
+                0,
+                &seventh_only_model,
                 &BTreeMap::new(),
                 &context
             ),
