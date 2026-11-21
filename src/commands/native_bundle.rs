@@ -2555,7 +2555,7 @@ struct ObjectSymbolSurface {
     defined: BTreeSet<String>,
     undefined: BTreeSet<String>,
     calls: BTreeMap<String, BTreeSet<String>>,
-    call_targets: BTreeMap<String, BTreeMap<u64, String>>,
+    call_targets: BTreeMap<String, BTreeMap<u64, machine_tv::CallTarget>>,
     call_edges_checkable: bool,
 }
 
@@ -2704,7 +2704,33 @@ fn object_symbol_surface(bytes: &[u8]) -> Result<ObjectSymbolSurface, ()> {
                 .call_targets
                 .entry(function.name.clone())
                 .or_default();
-            if targets.insert(relative_offset, name.to_owned()).is_some() {
+            let relocation_kind = match relocation.flags() {
+                RelocationFlags::Elf { r_type }
+                    if r_type == object::elf::R_X86_64_PLT32
+                        && relocation.kind() == object::RelocationKind::PltRelative =>
+                {
+                    machine_tv::CallRelocationKind::ElfX86_64Plt32
+                }
+                RelocationFlags::Elf { r_type }
+                    if r_type == object::elf::R_X86_64_PC32
+                        && relocation.kind() == object::RelocationKind::Relative =>
+                {
+                    machine_tv::CallRelocationKind::ElfX86_64Pc32
+                }
+                _ => machine_tv::CallRelocationKind::Other,
+            };
+            if targets
+                .insert(
+                    relative_offset,
+                    machine_tv::CallTarget {
+                        name: name.to_owned(),
+                        relocation_kind,
+                        relocation_size: relocation.size(),
+                        addend: relocation.addend(),
+                    },
+                )
+                .is_some()
+            {
                 surface.call_edges_checkable = false;
             }
         }
@@ -3665,7 +3691,7 @@ entry:
                 .get("visible")
                 .unwrap()
                 .values()
-                .cloned()
+                .map(|target| target.name.clone())
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from(["external_ref".to_owned(), "other".to_owned()])
         );

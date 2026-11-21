@@ -51,6 +51,32 @@ pub enum FunctionOutcome {
     OutsideProfile(&'static str),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallTarget {
+    pub name: String,
+    pub relocation_kind: CallRelocationKind,
+    pub relocation_size: u8,
+    pub addend: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallRelocationKind {
+    ElfX86_64Plt32,
+    ElfX86_64Pc32,
+    Other,
+}
+
+impl CallTarget {
+    fn is_entry_target_relocation(&self) -> bool {
+        self.relocation_size == 32
+            && self.addend == -4
+            && matches!(
+                self.relocation_kind,
+                CallRelocationKind::ElfX86_64Plt32 | CallRelocationKind::ElfX86_64Pc32
+            )
+    }
+}
+
 struct Disassembler(LLVMDisasmContextRef);
 
 impl Drop for Disassembler {
@@ -114,7 +140,7 @@ pub fn check_function<'ctx>(
     bytes: &[u8],
     address: u64,
     model: &PureI64Body<'ctx>,
-    call_targets: &BTreeMap<u64, String>,
+    call_targets: &BTreeMap<u64, CallTarget>,
     context: &'ctx Context,
 ) -> FunctionOutcome {
     if !supports_signature(model) {
@@ -195,7 +221,7 @@ struct CallState<'ctx> {
 fn lift<'ctx>(
     instructions: &[Instruction],
     model: &PureI64Body<'ctx>,
-    call_targets: &BTreeMap<u64, String>,
+    call_targets: &BTreeMap<u64, CallTarget>,
     context: &'ctx Context,
 ) -> Result<LiftedFunction<'ctx>, FunctionOutcome> {
     let mut registers = (0..16)
@@ -329,7 +355,7 @@ fn lift<'ctx>(
 fn lift_call<'ctx>(
     instruction: &Instruction,
     model: &PureI64Body<'ctx>,
-    call_targets: &BTreeMap<u64, String>,
+    call_targets: &BTreeMap<u64, CallTarget>,
     call_state: &mut CallState<'ctx>,
     registers: &mut [BV<'ctx>],
     context: &'ctx Context,
@@ -345,10 +371,13 @@ fn lift_call<'ctx>(
     let target = call_targets
         .get(&field_offset)
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    if !target.is_entry_target_relocation() {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
     let Some(call_site) = model.call_sites.get(call_state.call_index) else {
         return Err(FunctionOutcome::OutsideProfile("call_order"));
     };
-    if target != crate::translation_validation::native_function_name(&call_site.callee) {
+    if target.name != crate::translation_validation::native_function_name(&call_site.callee) {
         return Err(FunctionOutcome::OutsideProfile("call_order"));
     }
     if call_site.args.len() > ARGUMENT_REGISTERS.len() {
@@ -784,7 +813,7 @@ entry:
     fn compiled_function_with_targets(
         ir: &str,
         function_name: &str,
-    ) -> (u64, Vec<u8>, BTreeMap<u64, String>) {
+    ) -> (u64, Vec<u8>, BTreeMap<u64, CallTarget>) {
         let directory = tempfile::tempdir().unwrap();
         let ir_path = directory.path().join("helper.ll");
         let object_path = directory.path().join("helper.o");
@@ -817,7 +846,30 @@ entry:
                     .name()
                     .unwrap()
                     .to_owned();
-                call_targets.insert(offset - address, target);
+                let relocation_kind = match relocation.flags() {
+                    object::RelocationFlags::Elf { r_type }
+                        if r_type == object::elf::R_X86_64_PLT32
+                            && relocation.kind() == object::RelocationKind::PltRelative =>
+                    {
+                        CallRelocationKind::ElfX86_64Plt32
+                    }
+                    object::RelocationFlags::Elf { r_type }
+                        if r_type == object::elf::R_X86_64_PC32
+                            && relocation.kind() == object::RelocationKind::Relative =>
+                    {
+                        CallRelocationKind::ElfX86_64Pc32
+                    }
+                    _ => CallRelocationKind::Other,
+                };
+                call_targets.insert(
+                    offset - address,
+                    CallTarget {
+                        name: target,
+                        relocation_kind,
+                        relocation_size: relocation.size(),
+                        addend: relocation.addend(),
+                    },
+                );
             }
         }
         (address, function_bytes, call_targets)
@@ -875,12 +927,21 @@ entry:
         let (address, bytes, call_targets) = compiled_function_with_targets(ir, "caller");
         assert_eq!(call_targets.len(), 1);
         assert_eq!(
-            call_targets.values().next().map(String::as_str),
+            call_targets
+                .values()
+                .next()
+                .map(|target| target.name.as_str()),
             Some("callee")
         );
         assert_eq!(
             check_function(&bytes, address, &model, &call_targets, &context),
             FunctionOutcome::Equivalent
+        );
+        let mut unsupported_addend = call_targets.clone();
+        unsupported_addend.values_mut().next().unwrap().addend = -3;
+        assert_eq!(
+            check_function(&bytes, address, &model, &unsupported_addend, &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
         );
 
         let add_source = "atom callee(x: i64) -> i64 requires: true; ensures: true; body: { x };\n\
