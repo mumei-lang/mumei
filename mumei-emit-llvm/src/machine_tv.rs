@@ -136,22 +136,51 @@ pub fn disassemble(bytes: &[u8], address: u64) -> Result<Vec<Instruction>, Disas
     Ok(instructions)
 }
 
-pub fn has_forward_branch(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchShape {
+    None,
+    Forward,
+    AcyclicBackward,
+}
+
+pub fn branch_shape(
     bytes: &[u8],
     address: u64,
     call_targets: &BTreeMap<u64, CallTarget>,
-) -> bool {
+) -> BranchShape {
     let Ok(instructions) = disassemble(bytes, address) else {
-        return false;
+        return BranchShape::None;
     };
-    instructions.iter().any(|instruction| {
-        is_conditional_branch(&instruction.mnemonic)
-            || (is_unconditional_jump(&instruction.mnemonic)
-                && !instruction
-                    .offset
-                    .checked_add(1)
-                    .is_some_and(|offset| call_targets.contains_key(&offset)))
-    })
+    if instructions.is_empty() {
+        return BranchShape::None;
+    }
+    let function_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let Ok(branch_targets) = resolve_branch_targets(&instructions, function_size, call_targets)
+    else {
+        return BranchShape::None;
+    };
+    let successors = control_flow_successors(&instructions, &branch_targets, call_targets);
+    let reachable = reachable_instructions(&successors);
+    if reachable_control_flow_has_cycle(&successors, &reachable) {
+        return BranchShape::None;
+    }
+    let mut has_branch = false;
+    let mut has_backward_edge = false;
+    for (index, is_reachable) in reachable.iter().enumerate() {
+        if *is_reachable {
+            if let Some(target) = branch_targets.get(&index) {
+                has_branch = true;
+                has_backward_edge |= *target < index;
+            }
+        }
+    }
+    if !has_branch {
+        BranchShape::None
+    } else if has_backward_edge {
+        BranchShape::AcyclicBackward
+    } else {
+        BranchShape::Forward
+    }
 }
 
 pub fn check_function<'ctx>(
@@ -304,6 +333,11 @@ fn lift<'ctx>(
         return Err(FunctionOutcome::OutsideProfile("branching_call"));
     }
     let branch_targets = resolve_branch_targets(instructions, function_size, call_targets)?;
+    let successors = control_flow_successors(instructions, &branch_targets, call_targets);
+    let reachable = reachable_instructions(&successors);
+    if reachable_control_flow_has_cycle(&successors, &reachable) {
+        return Err(FunctionOutcome::OutsideProfile("cyclic_control_flow"));
+    }
     let registers = (0..16)
         .map(|_| BV::fresh_const(context, "machine_initial_register", 64))
         .collect::<Vec<_>>();
@@ -547,6 +581,79 @@ fn is_tail_call(instruction: &Instruction, call_targets: &BTreeMap<u64, CallTarg
             .is_some_and(|offset| call_targets.contains_key(&offset))
 }
 
+fn control_flow_successors(
+    instructions: &[Instruction],
+    branch_targets: &BTreeMap<usize, usize>,
+    call_targets: &BTreeMap<u64, CallTarget>,
+) -> Vec<Vec<usize>> {
+    let mut successors = vec![Vec::new(); instructions.len()];
+    for (index, instruction) in instructions.iter().enumerate() {
+        if is_conditional_branch(&instruction.mnemonic) {
+            if let Some(target) = branch_targets.get(&index) {
+                successors[index].push(*target);
+            }
+            if index + 1 < instructions.len() {
+                successors[index].push(index + 1);
+            }
+        } else if is_unconditional_jump(&instruction.mnemonic) {
+            if !is_tail_call(instruction, call_targets) {
+                if let Some(target) = branch_targets.get(&index) {
+                    successors[index].push(*target);
+                }
+            }
+        } else if instruction.mnemonic != "retq" && index + 1 < instructions.len() {
+            successors[index].push(index + 1);
+        }
+    }
+    successors
+}
+
+fn reachable_instructions(successors: &[Vec<usize>]) -> Vec<bool> {
+    let mut reachable = vec![false; successors.len()];
+    if successors.is_empty() {
+        return reachable;
+    }
+    let mut pending = vec![0];
+    while let Some(index) = pending.pop() {
+        if reachable[index] {
+            continue;
+        }
+        reachable[index] = true;
+        pending.extend(successors[index].iter().copied());
+    }
+    reachable
+}
+
+fn reachable_control_flow_has_cycle(successors: &[Vec<usize>], reachable: &[bool]) -> bool {
+    if successors.is_empty() || !reachable[0] {
+        return false;
+    }
+    let mut states = vec![0u8; successors.len()];
+    states[0] = 1;
+    let mut pending = vec![(0usize, 0usize)];
+    while let Some(&(index, edge_index)) = pending.last() {
+        if edge_index == successors[index].len() {
+            states[index] = 2;
+            pending.pop();
+            continue;
+        }
+        pending.last_mut().unwrap().1 += 1;
+        let target = successors[index][edge_index];
+        if !reachable[target] {
+            continue;
+        }
+        match states[target] {
+            1 => return true,
+            0 => {
+                states[target] = 1;
+                pending.push((target, 0));
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 fn resolve_branch_targets(
     instructions: &[Instruction],
     function_size: u64,
@@ -585,9 +692,6 @@ fn resolve_branch_targets(
         }
         let target_offset = u64::try_from(target_offset)
             .map_err(|_| FunctionOutcome::OutsideProfile("branch_target"))?;
-        if target_offset <= instruction.offset {
-            return Err(FunctionOutcome::OutsideProfile("backward_branch"));
-        }
         let Some(target_index) = instruction_indices.get(&target_offset) else {
             return Err(FunctionOutcome::OutsideProfile("branch_target"));
         };
@@ -2216,8 +2320,8 @@ entry:
             FunctionOutcome::Equivalent
         );
         assert_eq!(
-            check_function(&[0xeb, 0xfe], 0, &model, &BTreeMap::new(), &context),
-            FunctionOutcome::OutsideProfile("backward_branch")
+            check_function(&[0x90, 0xeb, 0xfd], 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("cyclic_control_flow")
         );
         let jump_into_instruction = [0xeb, 0x01, 0x48, 0x89, 0xf8, 0xc3];
         assert_eq!(
@@ -2229,6 +2333,48 @@ entry:
                 &context
             ),
             FunctionOutcome::OutsideProfile("branch_target")
+        );
+    }
+
+    #[test]
+    fn probe_acyclic_backward_branch_bytes_match_band() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom band(x: i64, y: i64) -> i64 requires: x >= 0 && x <= 100 && y >= 0 && y <= 100; ensures: true; body: { if x > 5 && y > 5 { x + y } else { 0 } };",
+            &context,
+        );
+        let bytes = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0x83, 0xff, 0x06, // cmpq $6, %rdi
+            0x7c, 0x0f, // jl to xorl %ecx, %ecx
+            0x48, 0x83, 0xfe, 0x06, // cmpq $6, %rsi
+            0x0f, 0x9d, 0xc1, // setge %cl
+            0x84, 0xc9, // testb %cl, %cl
+            0x74, 0x0a, // je to xorl %eax, %eax
+            0x48, 0x01, 0xf0, // addq %rsi, %rax
+            0xc3, // retq
+            0x31, 0xc9, // xorl %ecx, %ecx
+            0x84, 0xc9, // testb %cl, %cl
+            0x75, 0xf6, // jne backward to addq
+            0x31, 0xc0, // xorl %eax, %eax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            branch_shape(&bytes, 0, &BTreeMap::new()),
+            BranchShape::AcyclicBackward
+        );
+        assert_eq!(
+            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+        let mut inverted = bytes;
+        inverted[28] = 0x74; // je to addq, keeping the backward edge
+        assert_eq!(
+            check_function(&inverted, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::Different
         );
     }
 

@@ -50,7 +50,7 @@ const ARTIFACT_RECHECK_SCOPE: &str =
 const OBJECT_SYMBOL_CORRESPONDENCE_SCOPE: &str =
     "artifact_reproduction_object_symbols_call_edges_and_link_placement_only/no_instruction_abi_or_runtime_semantics";
 const MACHINE_CODE_TV_SCOPE: &str =
-    "artifact_reproduction_object_link_correspondence_and_forward_branch_function_machine_code_tv_only/no_abi_or_runtime_semantics";
+    "artifact_reproduction_object_link_correspondence_and_acyclic_branch_function_machine_code_tv_only/no_abi_or_runtime_semantics";
 const MACHINE_CODE_REGISTER_CONVENTION: &str =
     "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax";
 const MACHINE_CODE_TV_INPUT_DOMAIN: &str =
@@ -3168,7 +3168,8 @@ fn write_object_recheck(
 fn machine_tv_coverage_checks(
     equivalent_leaf_count: usize,
     equivalent_call_count: usize,
-    equivalent_branch_count: usize,
+    equivalent_forward_branch_count: usize,
+    equivalent_acyclic_branch_count: usize,
 ) -> (Vec<&'static str>, Vec<&'static str>) {
     let mut checks_performed = Vec::new();
     let mut checks_not_performed = Vec::new();
@@ -3182,10 +3183,15 @@ fn machine_tv_coverage_checks(
     } else {
         checks_not_performed.push("machine_code_direct_call_site_tv");
     }
-    if equivalent_branch_count > 0 {
+    if equivalent_forward_branch_count > 0 {
         checks_performed.push("machine_code_forward_branch_function_tv");
     } else {
         checks_not_performed.push("machine_code_forward_branch_function_tv");
+    }
+    if equivalent_acyclic_branch_count > 0 {
+        checks_performed.push("machine_code_acyclic_branch_function_tv");
+    } else {
+        checks_not_performed.push("machine_code_acyclic_branch_function_tv");
     }
     (checks_performed, checks_not_performed)
 }
@@ -3240,12 +3246,13 @@ fn write_machine_tv(
     let mut equivalent_count = 0usize;
     let mut equivalent_leaf_count = 0usize;
     let mut equivalent_call_count = 0usize;
-    let mut equivalent_branch_count = 0usize;
+    let mut equivalent_forward_branch_count = 0usize;
+    let mut equivalent_acyclic_branch_count = 0usize;
     for function_name in &object_surface.defined {
         let has_source_calls = source_models
             .get(function_name)
             .is_some_and(|model| !model.call_sites.is_empty());
-        let mut has_forward_branch = false;
+        let mut branch_shape = machine_tv::BranchShape::None;
         let outcome = if let Some(model) = source_models.get(function_name) {
             if !machine_tv::supports_signature(model) {
                 FunctionOutcome::OutsideProfile("unsupported_signature")
@@ -3259,7 +3266,7 @@ fn write_machine_tv(
                     .get(function_name)
                     .cloned()
                     .unwrap_or_default();
-                has_forward_branch = machine_tv::has_forward_branch(&bytes, address, &call_targets);
+                branch_shape = machine_tv::branch_shape(&bytes, address, &call_targets);
                 machine_tv::check_function(&bytes, address, model, &call_targets, &context)
             } else {
                 FunctionOutcome::OutsideProfile("unsupported_instruction")
@@ -3272,10 +3279,16 @@ fn write_machine_tv(
                 equivalent_count += 1;
                 if has_source_calls {
                     equivalent_call_count += 1;
-                } else if has_forward_branch {
-                    equivalent_branch_count += 1;
                 } else {
-                    equivalent_leaf_count += 1;
+                    match branch_shape {
+                        machine_tv::BranchShape::None => equivalent_leaf_count += 1,
+                        machine_tv::BranchShape::Forward => {
+                            equivalent_forward_branch_count += 1;
+                        }
+                        machine_tv::BranchShape::AcyclicBackward => {
+                            equivalent_acyclic_branch_count += 1;
+                        }
+                    }
                 }
                 serde_json::json!({"outcome": "equivalent_within_profile"})
             }
@@ -3310,12 +3323,13 @@ fn write_machine_tv(
             "os_stdout_observation",
             "os_stderr_observation",
             "runtime_observation_semantics",
-            "machine_code_tv_backward_branch_functions",
+            "machine_code_tv_cyclic_control_flow_functions",
         ];
         let (machine_tv_checks, machine_tv_checks_not_performed) = machine_tv_coverage_checks(
             equivalent_leaf_count,
             equivalent_call_count,
-            equivalent_branch_count,
+            equivalent_forward_branch_count,
+            equivalent_acyclic_branch_count,
         );
         checks_performed.extend(machine_tv_checks);
         checks_not_performed.extend(machine_tv_checks_not_performed);
@@ -3340,7 +3354,7 @@ fn write_machine_tv(
             })
     } else {
         println!(
-            "Machine-code TV: {equivalent_count} of {} object functions equivalent to their source atoms within the forward-branch profile.\nScope: {MACHINE_CODE_TV_SCOPE}",
+            "Machine-code TV: {equivalent_count} of {} object functions equivalent to their source atoms within the acyclic-branch profile.\nScope: {MACHINE_CODE_TV_SCOPE}",
             object_surface.defined.len(),
         );
         Ok(())
@@ -3509,20 +3523,21 @@ mod tests {
 
     #[test]
     fn machine_tv_descriptor_omits_leaf_check_for_caller_only_equivalence() {
-        let (checks_performed, checks_not_performed) = machine_tv_coverage_checks(0, 1, 0);
+        let (checks_performed, checks_not_performed) = machine_tv_coverage_checks(0, 1, 0, 0);
         assert_eq!(checks_performed, vec!["machine_code_direct_call_site_tv"]);
         assert_eq!(
             checks_not_performed,
             vec![
                 "machine_code_leaf_function_tv",
-                "machine_code_forward_branch_function_tv"
+                "machine_code_forward_branch_function_tv",
+                "machine_code_acyclic_branch_function_tv"
             ]
         );
     }
 
     #[test]
     fn machine_tv_descriptor_counts_branch_functions_separately_from_leaves() {
-        let (checks_performed, checks_not_performed) = machine_tv_coverage_checks(0, 0, 1);
+        let (checks_performed, checks_not_performed) = machine_tv_coverage_checks(0, 0, 1, 0);
         assert_eq!(
             checks_performed,
             vec!["machine_code_forward_branch_function_tv"]
@@ -3531,7 +3546,25 @@ mod tests {
             checks_not_performed,
             vec![
                 "machine_code_leaf_function_tv",
-                "machine_code_direct_call_site_tv"
+                "machine_code_direct_call_site_tv",
+                "machine_code_acyclic_branch_function_tv"
+            ]
+        );
+    }
+
+    #[test]
+    fn machine_tv_descriptor_counts_acyclic_backward_branches_separately() {
+        let (checks_performed, checks_not_performed) = machine_tv_coverage_checks(0, 0, 0, 1);
+        assert_eq!(
+            checks_performed,
+            vec!["machine_code_acyclic_branch_function_tv"]
+        );
+        assert_eq!(
+            checks_not_performed,
+            vec![
+                "machine_code_leaf_function_tv",
+                "machine_code_direct_call_site_tv",
+                "machine_code_forward_branch_function_tv"
             ]
         );
     }

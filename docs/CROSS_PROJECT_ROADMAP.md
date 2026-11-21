@@ -4016,23 +4016,30 @@ nothing), so an older Core without the link check never yields
 `object_link_correspondence`. It is not a recovery performer, and
 `object_translation_correspondence` stays not performed.
 
-### Wave 5 acyclic forward-branch direct-call TV profile (C10 Option B)
+### Wave 5 acyclic-branch direct-call TV profile (C10 Option B)
 
 Core's opt-in `mumei native-bundle recheck-machine-tv` runs the full linked
 object-correspondence pipeline, then checks reproduced machine code against
-pure-i64 source models with Z3 for straight-line and acyclic forward-branch
+pure-i64 source models with Z3 for straight-line and acyclic-branch
 functions in a fixed instruction whitelist. Conditional and unconditional
-local branches must target decoded instruction starts strictly forward, and
-symbolic execution is bounded at 64 completed paths. Direct calls are matched
-to source `CallSite`s in order and compared as uninterpreted sites, including
-call arguments and result terms; functions mixing calls and conditional
-branches are outside the profile. The x86-64 integer-register convention and
-callee-saved preservation are assumed, not verified, and make no ABI claim.
+local branches must target decoded instruction starts inside the function.
+Backward edges are supported if the reachable CFG remains acyclic; reachable
+cycles are outside the profile. Symbolic execution is bounded at 64 completed
+paths. Direct calls are matched to source `CallSite`s in order and compared
+as uninterpreted sites, including call arguments and result terms; functions
+mixing calls and conditional branches are outside the profile. The x86-64
+integer-register convention and callee-saved preservation are assumed, not
+verified, and make no ABI claim.
 The instruction profile includes `setcc`, byte-register views and extensions,
 masked immediate or implicit-one shifts, and `or` logical flags.
-Backward branches/loops, the C `main` wrapper, CRT/startup code, the loader,
-libc and runtime are not covered. This is a bounded per-instruction profile;
-full object-code TV remains the deep endpoint.
+The `machine_code_forward_branch_function_tv` descriptor keeps its
+forward-only meaning; `machine_code_acyclic_branch_function_tv` covers
+equivalent functions with backward but acyclic edges. The not-performed
+vocabulary changed from `machine_code_tv_backward_branch_functions` to
+`machine_code_tv_cyclic_control_flow_functions`; agent consumers should
+update it. The C `main` wrapper, CRT/startup code, loader, libc and runtime
+are not covered. This is a bounded per-instruction profile; full object-code
+TV remains the deep endpoint.
 
 Agent consumes it as the bounded `native-machine-tv-recheck` route / MCP tool
 (mumei-agent #1053). It validates the `mumei.machine-code-tv/v1` schema and
