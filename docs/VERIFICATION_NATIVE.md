@@ -2013,9 +2013,15 @@ Flattened integer leaves consume `rdi`–`r9` in order.
 A two-leaf aggregate that cannot fit wholly in the remaining argument
 registers is outside as `argument_count`; aggregates are never split between
 registers and the stack, and stack arguments remain scalar-only. Result leaf 0
-is compared exactly with `rax`, and leaf 1 with `rdx`. Calls with composite
-arguments or results remain outside as `call_arguments`. When an equivalent
-function has a struct parameter or result, the descriptor performs
+is compared exactly with `rax`, and leaf 1 with `rdx`. Direct-call sites also
+admit scalar arguments and one-/two-leaf all-integer struct arguments. Struct
+leaves consume consecutive GPRs and must fit wholly in the remaining `rdi`–`r9`
+registers; they are never passed on the stack. One-/two-leaf integer struct
+results bind leaf 0 to `rax` and leaf 1 to `rdx` after caller-saved clobbers.
+Enums, f64-containing structs, structs with three or more leaves, and tail
+calls with struct arguments or results remain outside as `call_arguments`.
+When an equivalent function has a struct parameter, result, or direct-call
+argument/result, the descriptor performs
 `machine_code_composite_register_aggregate_tv` and appends
 `_two_eightbyte_integer_aggregates_in_consecutive_gprs_result_rax_rdx` to its
 active integer or f64 `register_convention_assumed` string. This is bounded

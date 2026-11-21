@@ -3192,11 +3192,15 @@ outside the profile. Agent consumers must adopt these names.
 The same bounded profile admits small struct parameters and results only when
 each aggregate has one or two flattened 64-bit integer leaves and every leaf
 in the struct-bearing signature is integer. Leaves are passed in consecutive
-integer argument registers and results use `rax`/`rdx`. A pair that cannot fit
-wholly in the remaining argument registers, larger or non-integer aggregates,
-enum signatures, and composite call arguments/results fail closed. Equivalent
-aggregate functions perform `machine_code_composite_register_aggregate_tv`;
-their descriptor appends
+integer argument registers and results use `rax`/`rdx`. Direct-call sites also
+admit one-/two-leaf all-integer struct arguments and results, with exact leaf
+obligations against consecutive GPRs and result binding in `rax`/`rdx`.
+Struct arguments must fit wholly in the remaining GPRs and are never passed
+on the stack; an aggregate that cannot fit returns `argument_count`. Enums,
+f64-containing or three-or-more-leaf structs, and tail calls with struct
+arguments or results remain `call_arguments`. Equivalent functions using
+structs in signatures or direct calls perform
+`machine_code_composite_register_aggregate_tv`; their descriptor appends
 `_two_eightbyte_integer_aggregates_in_consecutive_gprs_result_rax_rdx` to the
 active register-convention label. This remains a bounded assumed-convention
 claim, not general ABI validation.

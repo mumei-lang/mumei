@@ -89,6 +89,30 @@ fn machine_tv_register_convention_assumed(
     }
 }
 
+fn machine_tv_call_shapes_have_composite_aggregate(
+    argument_shapes: &[semantic_contract::CallValueShape],
+    result_shape: semantic_contract::CallValueShape,
+) -> bool {
+    argument_shapes
+        .iter()
+        .any(|shape| matches!(shape, semantic_contract::CallValueShape::Struct { .. }))
+        || matches!(
+            result_shape,
+            semantic_contract::CallValueShape::Struct { .. }
+        )
+}
+
+fn machine_tv_model_uses_composite_aggregate(model: &semantic_contract::PureI64Body<'_>) -> bool {
+    model.param_shapes.iter().any(Option::is_some)
+        || model.result_shape.is_some()
+        || model.call_sites.iter().any(|call_site| {
+            machine_tv_call_shapes_have_composite_aggregate(
+                &call_site.argument_shapes,
+                call_site.result_shape,
+            )
+        })
+}
+
 const OBSERVATION_ENVIRONMENT: &str = "empty";
 const OBSERVATION_WORKING_DIRECTORY: &str = "executable_directory";
 /// The build/recheck single-run cap for observing an executable: a
@@ -3608,10 +3632,9 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
                 .any(|is_double| *is_double)
                 || model.result_leaf_doubles.iter().any(|is_double| *is_double)
         });
-        let has_composite_aggregate_signature =
-            source_models.get(function_name).is_some_and(|model| {
-                model.param_shapes.iter().any(Option::is_some) || model.result_shape.is_some()
-            });
+        let has_composite_aggregate = source_models
+            .get(function_name)
+            .is_some_and(machine_tv_model_uses_composite_aggregate);
         let has_source_loop = source_models
             .get(function_name)
             .is_some_and(|model| model.loop_bound_exits.is_some());
@@ -3711,7 +3734,7 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
                     if has_f64_scalar_leaves {
                         equivalent_f64_scalar_count += 1;
                     }
-                    if has_composite_aggregate_signature {
+                    if has_composite_aggregate {
                         equivalent_composite_aggregate_count += 1;
                     }
                     if has_source_loop {
@@ -4755,6 +4778,45 @@ mod tests {
         let (performed, not_performed) = machine_tv_f64_scalar_checks(0);
         assert!(performed.is_empty());
         assert!(not_performed.is_empty());
+    }
+
+    #[test]
+    fn machine_tv_descriptor_counts_call_site_only_struct_aggregates() {
+        let config = z3::Config::new();
+        let context = z3::Context::new(&config);
+        let mut model = semantic_contract::PureI64Body::synthetic_scalar(
+            "caller",
+            z3::ast::BV::from_u64(&context, 0, 64),
+        );
+        model.call_sites.push(semantic_contract::CallSite {
+            callee: "sum".to_owned(),
+            args: vec![
+                z3::ast::BV::from_u64(&context, 1, 64),
+                z3::ast::BV::from_u64(&context, 2, 64),
+            ],
+            arg_leaf_doubles: vec![false, false],
+            argument_shapes: vec![semantic_contract::CallValueShape::Struct {
+                leaf_count: 2,
+                has_enum: false,
+                has_f64: false,
+            }],
+            has_composite_arguments_or_result: true,
+            result: z3::ast::BV::from_u64(&context, 0, 64),
+            result_is_double: false,
+            result_shape: semantic_contract::CallValueShape::Scalar { leaf_count: 1 },
+            guard: z3::ast::Bool::from_bool(&context, true),
+        });
+        assert!(model.param_shapes.is_empty());
+        assert_eq!(model.result_shape, None);
+        assert!(machine_tv_model_uses_composite_aggregate(&model));
+        assert_eq!(
+            machine_tv_register_convention_assumed(0, 1),
+            "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax_two_eightbyte_integer_aggregates_in_consecutive_gprs_result_rax_rdx"
+        );
+        assert_eq!(
+            machine_tv_composite_aggregate_checks(1).0,
+            vec!["machine_code_composite_register_aggregate_tv"]
+        );
     }
 
     #[test]
