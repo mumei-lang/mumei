@@ -3076,14 +3076,17 @@ validation remains the deep endpoint.
 
 The per-instruction C10 Option B TV profile adds opt-in
 `native-bundle recheck-machine-tv`, which runs the complete object recheck and
-then asks Z3 whether reproduced machine code for straight-line functions
-matches each source atom's pure-i64 model. Direct calls are matched in order
-to source `CallSite`s and compared as uninterpreted sites, including argument
-expressions and call-result terms. The x86-64 integer-register convention and
-callee-saved preservation are assumed, not verified; this makes no ABI claim.
-Conditional branches and other branching functions, the C `main` wrapper,
-CRT/startup code, loader, libc and runtime are not covered. Full object-code TV
-remains the deeper endpoint.
+then asks Z3 whether reproduced machine code for straight-line or acyclic
+forward-branch functions matches each source atom's pure-i64 model. Direct
+calls are matched in order to source `CallSite`s and compared as
+uninterpreted sites, including argument expressions and call-result terms;
+functions mixing calls and conditional branches are outside the profile.
+Forward branches must land on decoded instruction starts and symbolic path
+exploration is bounded at 64 completed paths. The x86-64 integer-register
+convention and callee-saved preservation are assumed, not verified; this makes
+no ABI claim. Backward branches/loops, the C `main` wrapper, CRT/startup code,
+loader, libc and runtime are not covered. Full object-code TV remains the
+deeper endpoint.
 
 Sibling descriptors now name the exit-status observation only as
 `os_exit_status_observation` (formerly bare `os_exit_status` in

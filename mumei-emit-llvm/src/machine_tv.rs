@@ -136,6 +136,24 @@ pub fn disassemble(bytes: &[u8], address: u64) -> Result<Vec<Instruction>, Disas
     Ok(instructions)
 }
 
+pub fn has_forward_branch(
+    bytes: &[u8],
+    address: u64,
+    call_targets: &BTreeMap<u64, CallTarget>,
+) -> bool {
+    let Ok(instructions) = disassemble(bytes, address) else {
+        return false;
+    };
+    instructions.iter().any(|instruction| {
+        is_conditional_branch(&instruction.mnemonic)
+            || (is_unconditional_jump(&instruction.mnemonic)
+                && !instruction
+                    .offset
+                    .checked_add(1)
+                    .is_some_and(|offset| call_targets.contains_key(&offset)))
+    })
+}
+
 pub fn check_function<'ctx>(
     bytes: &[u8],
     address: u64,
@@ -156,31 +174,48 @@ pub fn check_function<'ctx>(
         Ok(instructions) if !instructions.is_empty() => instructions,
         _ => return FunctionOutcome::OutsideProfile("unsupported_instruction"),
     };
-    let lifted = match lift(&instructions, model, call_targets, context) {
+    let lifted = match lift(
+        &instructions,
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        model,
+        call_targets,
+        context,
+    ) {
         Ok(lifted) => lifted,
         Err(outcome) => return outcome,
     };
-    let solver = Solver::new(context);
-    set_solver_budget(&solver, context);
-    for (input, register) in model.inputs.iter().zip(&lifted.arguments) {
-        solver.assert(&input._eq(register));
+    let mut unknown_path = false;
+    for path in &lifted.paths {
+        let solver = Solver::new(context);
+        set_solver_budget(&solver, context);
+        for (input, register) in model.inputs.iter().zip(&lifted.arguments) {
+            solver.assert(&input._eq(register));
+        }
+        for assumption in model
+            .param_domain
+            .iter()
+            .chain(&model.definedness)
+            .chain(&model.call_result_bounds)
+        {
+            solver.assert(assumption);
+        }
+        for condition in &path.path_conditions {
+            solver.assert(condition);
+        }
+        let output_matches = model.value._eq(&path.return_value);
+        let mut equivalent_terms: Vec<&Bool> = path.call_argument_obligations.iter().collect();
+        equivalent_terms.push(&output_matches);
+        solver.assert(&Bool::and(context, &equivalent_terms).not());
+        match solver.check() {
+            SatResult::Unsat => {}
+            SatResult::Sat => return FunctionOutcome::Different,
+            SatResult::Unknown => unknown_path = true,
+        }
     }
-    for assumption in model
-        .param_domain
-        .iter()
-        .chain(&model.definedness)
-        .chain(&model.call_result_bounds)
-    {
-        solver.assert(assumption);
-    }
-    let output_matches = model.value._eq(&lifted.return_value);
-    let mut equivalent_terms: Vec<&Bool> = lifted.call_argument_obligations.iter().collect();
-    equivalent_terms.push(&output_matches);
-    solver.assert(&Bool::and(context, &equivalent_terms).not());
-    match solver.check() {
-        SatResult::Unsat => FunctionOutcome::Equivalent,
-        SatResult::Sat => FunctionOutcome::Different,
-        SatResult::Unknown => FunctionOutcome::Unknown,
+    if unknown_path {
+        FunctionOutcome::Unknown
+    } else {
+        FunctionOutcome::Equivalent
     }
 }
 
@@ -207,149 +242,621 @@ fn set_solver_budget(solver: &Solver, context: &Context) {
 const ARGUMENT_REGISTERS: [usize; 6] = [7, 6, 2, 1, 8, 9];
 
 struct LiftedFunction<'ctx> {
-    return_value: BV<'ctx>,
     arguments: Vec<BV<'ctx>>,
+    paths: Vec<LiftedPath<'ctx>>,
+}
+
+struct LiftedPath<'ctx> {
+    return_value: BV<'ctx>,
+    path_conditions: Vec<Bool<'ctx>>,
     call_argument_obligations: Vec<Bool<'ctx>>,
 }
 
+#[derive(Clone)]
 struct CallState<'ctx> {
     call_index: usize,
     used_call_targets: BTreeSet<u64>,
     argument_obligations: Vec<Bool<'ctx>>,
 }
 
+#[derive(Clone)]
+enum FlagState<'ctx> {
+    Unknown,
+    Compare {
+        left: BV<'ctx>,
+        right: BV<'ctx>,
+        width: u32,
+    },
+    Result {
+        value: BV<'ctx>,
+        width: u32,
+    },
+}
+
+#[derive(Clone)]
+struct MachineState<'ctx> {
+    instruction_index: usize,
+    registers: Vec<BV<'ctx>>,
+    stack: Vec<(i64, BV<'ctx>)>,
+    rsp_offset: i64,
+    flags: FlagState<'ctx>,
+    call_state: CallState<'ctx>,
+    path_conditions: Vec<Bool<'ctx>>,
+}
+
+const MAX_COMPLETED_PATHS: usize = 64;
+
 fn lift<'ctx>(
     instructions: &[Instruction],
+    function_size: u64,
     model: &PureI64Body<'ctx>,
     call_targets: &BTreeMap<u64, CallTarget>,
     context: &'ctx Context,
 ) -> Result<LiftedFunction<'ctx>, FunctionOutcome> {
-    let mut registers = (0..16)
+    let has_conditional_branch = instructions
+        .iter()
+        .any(|instruction| is_conditional_branch(&instruction.mnemonic));
+    let has_call = instructions.iter().any(|instruction| {
+        instruction.mnemonic == "callq" || is_tail_call(instruction, call_targets)
+    });
+    if has_conditional_branch && has_call {
+        return Err(FunctionOutcome::OutsideProfile("branching_call"));
+    }
+    let branch_targets = resolve_branch_targets(instructions, function_size, call_targets)?;
+    let registers = (0..16)
         .map(|_| BV::fresh_const(context, "machine_initial_register", 64))
         .collect::<Vec<_>>();
     let arguments = ARGUMENT_REGISTERS
         .iter()
         .map(|index| registers[*index].extract(63, 0))
         .collect();
-    let mut stack = Vec::<(i64, BV<'ctx>)>::new();
-    let mut rsp_offset = 0i64;
-    let mut call_state = CallState {
-        call_index: 0,
-        used_call_targets: BTreeSet::new(),
-        argument_obligations: Vec::new(),
-    };
-    let mut returned = false;
-    for (index, instruction) in instructions.iter().enumerate() {
-        if returned {
-            return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-        }
-        if instruction.mnemonic == "retq" {
-            if index + 1 != instructions.len()
-                || !instruction.operands.is_empty()
-                || rsp_offset != 0
-                || !stack.is_empty()
-            {
+    let mut pending = vec![MachineState {
+        instruction_index: 0,
+        registers,
+        stack: Vec::new(),
+        rsp_offset: 0,
+        flags: FlagState::Unknown,
+        call_state: CallState {
+            call_index: 0,
+            used_call_targets: BTreeSet::new(),
+            argument_obligations: Vec::new(),
+        },
+        path_conditions: Vec::new(),
+    }];
+    let mut paths = Vec::new();
+    while let Some(mut state) = pending.pop() {
+        loop {
+            let index = state.instruction_index;
+            let Some(instruction) = instructions.get(index) else {
                 return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+            };
+            if is_conditional_branch(&instruction.mnemonic) {
+                let suffix = instruction
+                    .mnemonic
+                    .strip_prefix('j')
+                    .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+                let condition = condition_for_flags(&state.flags, suffix, context)?;
+                let target = *branch_targets
+                    .get(&index)
+                    .ok_or(FunctionOutcome::OutsideProfile("branch_target"))?;
+                let mut fallthrough = state.clone();
+                fallthrough.path_conditions.push(condition.not());
+                fallthrough.instruction_index = index + 1;
+                pending.push(fallthrough);
+                state.path_conditions.push(condition);
+                state.instruction_index = target;
+                continue;
             }
-            returned = true;
-        } else if instruction.mnemonic.starts_with("nop") {
-            continue;
-        } else if matches!(instruction.mnemonic.as_str(), "callq") {
-            lift_call(
-                instruction,
-                model,
-                call_targets,
-                &mut call_state,
-                &mut registers,
-                context,
-            )?;
-        } else if matches!(instruction.mnemonic.as_str(), "jmp" | "jmpq") {
-            if index + 1 != instructions.len() || rsp_offset != 0 || !stack.is_empty() {
-                return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+            if is_unconditional_jump(&instruction.mnemonic) {
+                if is_tail_call(instruction, call_targets) {
+                    if index + 1 != instructions.len()
+                        || state.rsp_offset != 0
+                        || !state.stack.is_empty()
+                    {
+                        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                    }
+                    lift_call(
+                        instruction,
+                        model,
+                        call_targets,
+                        &mut state.call_state,
+                        &mut state.registers,
+                        context,
+                    )?;
+                    state.flags = FlagState::Unknown;
+                    paths.push(finish_path(state, model, call_targets)?);
+                    if paths.len() > MAX_COMPLETED_PATHS {
+                        return Err(FunctionOutcome::OutsideProfile("path_bound"));
+                    }
+                    break;
+                }
+                state.instruction_index = *branch_targets
+                    .get(&index)
+                    .ok_or(FunctionOutcome::OutsideProfile("branch_target"))?;
+                continue;
             }
-            lift_call(
-                instruction,
-                model,
-                call_targets,
-                &mut call_state,
-                &mut registers,
-                context,
-            )?;
-            returned = true;
-        } else if instruction.mnemonic == "pushq" {
-            let operands = split_operands(&instruction.operands);
-            let [source] = operands.as_slice() else {
-                return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-            };
-            let Some(value) = register_value(source, &registers, 64) else {
-                return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-            };
-            if !adjust_rsp(&mut registers, &mut stack, &mut rsp_offset, -8, context) {
-                return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+            if instruction.mnemonic == "retq" {
+                if !instruction.operands.is_empty()
+                    || state.rsp_offset != 0
+                    || !state.stack.is_empty()
+                {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                }
+                paths.push(finish_path(state, model, call_targets)?);
+                if paths.len() > MAX_COMPLETED_PATHS {
+                    return Err(FunctionOutcome::OutsideProfile("path_bound"));
+                }
+                break;
             }
-            stack.push((rsp_offset, value));
-        } else if instruction.mnemonic == "popq" {
-            let operands = split_operands(&instruction.operands);
-            let [destination] = operands.as_slice() else {
-                return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-            };
-            let Some((register_index, width)) = parse_register(destination) else {
-                return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-            };
-            let Some((stack_slot, _)) = stack.last() else {
-                return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-            };
-            if width != 64 || register_index == 4 || *stack_slot != rsp_offset {
-                return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+            if instruction.mnemonic.starts_with("nop") {
+                state.instruction_index += 1;
+                continue;
             }
-            let (_, value) = stack.pop().expect("stack was checked as non-empty");
-            if !adjust_rsp(&mut registers, &mut stack, &mut rsp_offset, 8, context)
-                || !write_register(&mut registers, register_index, value, 64)
-            {
-                return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-            }
-        } else if matches!(instruction.mnemonic.as_str(), "addq" | "subq")
-            && split_operands(&instruction.operands)
-                .get(1)
-                .is_some_and(|destination| *destination == "%rsp")
-        {
-            let operands = split_operands(&instruction.operands);
-            let [immediate, _] = operands.as_slice() else {
-                return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-            };
-            let Some(amount) = immediate.strip_prefix('$').and_then(parse_integer) else {
-                return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-            };
-            let amount = amount as i64;
-            let delta = if instruction.mnemonic == "addq" {
-                amount
-            } else {
-                let Some(delta) = amount.checked_neg() else {
+            if instruction.mnemonic == "callq" {
+                lift_call(
+                    instruction,
+                    model,
+                    call_targets,
+                    &mut state.call_state,
+                    &mut state.registers,
+                    context,
+                )?;
+                state.flags = FlagState::Unknown;
+            } else if instruction.mnemonic == "pushq" {
+                let operands = split_operands(&instruction.operands);
+                let [source] = operands.as_slice() else {
                     return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
                 };
-                delta
-            };
-            if !adjust_rsp(&mut registers, &mut stack, &mut rsp_offset, delta, context) {
-                return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                let Some(value) = register_value(source, &state.registers, 64) else {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                };
+                if !adjust_rsp(
+                    &mut state.registers,
+                    &mut state.stack,
+                    &mut state.rsp_offset,
+                    -8,
+                    context,
+                ) {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                }
+                state.stack.push((state.rsp_offset, value));
+            } else if instruction.mnemonic == "popq" {
+                let operands = split_operands(&instruction.operands);
+                let [destination] = operands.as_slice() else {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                };
+                let Some((register_index, width)) = parse_register(destination) else {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                };
+                let Some((stack_slot, _)) = state.stack.last() else {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                };
+                if width != 64 || register_index == 4 || *stack_slot != state.rsp_offset {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                }
+                let (_, value) = state.stack.pop().expect("stack was checked as non-empty");
+                if !adjust_rsp(
+                    &mut state.registers,
+                    &mut state.stack,
+                    &mut state.rsp_offset,
+                    8,
+                    context,
+                ) || !write_register(&mut state.registers, register_index, value, 64)
+                {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                }
+            } else if matches!(instruction.mnemonic.as_str(), "addq" | "subq")
+                && split_operands(&instruction.operands)
+                    .get(1)
+                    .is_some_and(|destination| *destination == "%rsp")
+            {
+                lift_rsp_adjustment(instruction, &mut state, context)?;
+            } else if matches!(instruction.mnemonic.as_str(), "cmpl" | "cmpq") {
+                let width = instruction_width(&instruction.mnemonic)?;
+                state.flags =
+                    compare_flags(&instruction.operands, &state.registers, context, width)?;
+            } else if matches!(instruction.mnemonic.as_str(), "testl" | "testq") {
+                let width = instruction_width(&instruction.mnemonic)?;
+                state.flags = test_flags(&instruction.operands, &state.registers, context, width)?;
+            } else if matches!(instruction.mnemonic.as_str(), "subl" | "subq") {
+                let width = instruction_width(&instruction.mnemonic)?;
+                let (left, right) =
+                    binary_operands(&instruction.operands, &state.registers, context, width)?;
+                if !lift_binary(
+                    &split_operands(&instruction.operands),
+                    &mut state.registers,
+                    context,
+                    width,
+                    BinaryOp::Sub,
+                ) {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                }
+                state.flags = FlagState::Compare { left, right, width };
+            } else if matches!(instruction.mnemonic.as_str(), "xorl" | "xorq") {
+                let width = instruction_width(&instruction.mnemonic)?;
+                state.flags = lift_bitwise_flags(
+                    &instruction.operands,
+                    &mut state.registers,
+                    context,
+                    width,
+                    false,
+                )?;
+            } else if matches!(instruction.mnemonic.as_str(), "andl" | "andq") {
+                let width = instruction_width(&instruction.mnemonic)?;
+                state.flags = lift_bitwise_flags(
+                    &instruction.operands,
+                    &mut state.registers,
+                    context,
+                    width,
+                    true,
+                )?;
+            } else if instruction.mnemonic.starts_with("cmov") {
+                lift_cmov(instruction, &mut state, context)?;
+            } else {
+                let leaves_flags_unchanged =
+                    matches!(instruction.mnemonic.as_str(), "movl" | "movq" | "leaq");
+                if !lift_instruction(instruction, &mut state.registers, context) {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                }
+                if !leaves_flags_unchanged {
+                    state.flags = FlagState::Unknown;
+                }
             }
-        } else if !lift_instruction(instruction, &mut registers, context) {
-            return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+            state.instruction_index += 1;
         }
     }
-    if !returned {
+    if paths.is_empty() {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    if call_state.call_index != model.call_sites.len() {
+    Ok(LiftedFunction { arguments, paths })
+}
+
+fn is_unconditional_jump(mnemonic: &str) -> bool {
+    matches!(mnemonic, "jmp" | "jmpq")
+}
+
+fn is_conditional_branch(mnemonic: &str) -> bool {
+    mnemonic.starts_with('j') && !is_unconditional_jump(mnemonic)
+}
+
+fn is_tail_call(instruction: &Instruction, call_targets: &BTreeMap<u64, CallTarget>) -> bool {
+    is_unconditional_jump(&instruction.mnemonic)
+        && instruction
+            .offset
+            .checked_add(1)
+            .is_some_and(|offset| call_targets.contains_key(&offset))
+}
+
+fn resolve_branch_targets(
+    instructions: &[Instruction],
+    function_size: u64,
+    call_targets: &BTreeMap<u64, CallTarget>,
+) -> Result<BTreeMap<usize, usize>, FunctionOutcome> {
+    let instruction_indices = instructions
+        .iter()
+        .enumerate()
+        .map(|(index, instruction)| (instruction.offset, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut targets = BTreeMap::new();
+    for (index, instruction) in instructions.iter().enumerate() {
+        let conditional = is_conditional_branch(&instruction.mnemonic);
+        if !conditional && !is_unconditional_jump(&instruction.mnemonic) {
+            continue;
+        }
+        if is_tail_call(instruction, call_targets) {
+            continue;
+        }
+        if conditional
+            && !instruction
+                .mnemonic
+                .strip_prefix('j')
+                .is_some_and(is_supported_condition)
+        {
+            return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+        }
+        let displacement = branch_target_displacement(instruction)
+            .ok_or(FunctionOutcome::OutsideProfile("branch_target"))?;
+        let next_offset = instructions
+            .get(index + 1)
+            .map_or(function_size, |next| next.offset);
+        let target_offset = i128::from(next_offset) + i128::from(displacement);
+        if target_offset < 0 || target_offset >= i128::from(function_size) {
+            return Err(FunctionOutcome::OutsideProfile("branch_target"));
+        }
+        let target_offset = u64::try_from(target_offset)
+            .map_err(|_| FunctionOutcome::OutsideProfile("branch_target"))?;
+        if target_offset <= instruction.offset {
+            return Err(FunctionOutcome::OutsideProfile("backward_branch"));
+        }
+        let Some(target_index) = instruction_indices.get(&target_offset) else {
+            return Err(FunctionOutcome::OutsideProfile("branch_target"));
+        };
+        targets.insert(index, *target_index);
+    }
+    Ok(targets)
+}
+
+fn branch_target_displacement(instruction: &Instruction) -> Option<i64> {
+    let operands = split_operands(&instruction.operands);
+    let [operand] = operands.as_slice() else {
+        return None;
+    };
+    let operand = operand.split_whitespace().next()?;
+    let displacement = parse_integer(operand)?;
+    if operand.starts_with('-') {
+        Some(displacement as i64)
+    } else {
+        i64::try_from(displacement).ok()
+    }
+}
+
+fn is_supported_condition(suffix: &str) -> bool {
+    matches!(
+        suffix,
+        "e" | "z"
+            | "ne"
+            | "nz"
+            | "l"
+            | "nge"
+            | "le"
+            | "ng"
+            | "g"
+            | "nle"
+            | "ge"
+            | "nl"
+            | "b"
+            | "c"
+            | "nae"
+            | "be"
+            | "na"
+            | "a"
+            | "nbe"
+            | "ae"
+            | "nb"
+            | "nc"
+            | "s"
+            | "ns"
+    )
+}
+
+fn condition_for_flags<'ctx>(
+    flags: &FlagState<'ctx>,
+    suffix: &str,
+    context: &'ctx Context,
+) -> Result<Bool<'ctx>, FunctionOutcome> {
+    if !is_supported_condition(suffix) {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let (zero, sign, signed_less, unsigned_less) = match flags {
+        FlagState::Unknown => {
+            return Err(FunctionOutcome::OutsideProfile("unsupported_flags"));
+        }
+        FlagState::Compare { left, right, width } => {
+            let difference = left.bvsub(right);
+            (
+                left._eq(right),
+                most_significant_bit(&difference, *width, context),
+                left.bvslt(right),
+                left.bvult(right),
+            )
+        }
+        FlagState::Result { value, width } => {
+            let zero = value._eq(&BV::from_u64(context, 0, *width));
+            let sign = most_significant_bit(value, *width, context);
+            (zero, sign.clone(), sign, Bool::from_bool(context, false))
+        }
+    };
+    let not_zero = zero.not();
+    let not_signed_less = signed_less.not();
+    let not_unsigned_less = unsigned_less.not();
+    Ok(match suffix {
+        "e" | "z" => zero,
+        "ne" | "nz" => not_zero,
+        "l" | "nge" => signed_less,
+        "le" | "ng" => Bool::or(context, &[&signed_less, &zero]),
+        "g" | "nle" => Bool::and(context, &[&not_signed_less, &not_zero]),
+        "ge" | "nl" => not_signed_less,
+        "b" | "c" | "nae" => unsigned_less,
+        "be" | "na" => Bool::or(context, &[&unsigned_less, &zero]),
+        "a" | "nbe" => Bool::and(context, &[&not_unsigned_less, &not_zero]),
+        "ae" | "nb" | "nc" => not_unsigned_less,
+        "s" => sign,
+        "ns" => sign.not(),
+        _ => return Err(FunctionOutcome::OutsideProfile("unsupported_instruction")),
+    })
+}
+
+fn most_significant_bit<'ctx>(value: &BV<'ctx>, width: u32, context: &'ctx Context) -> Bool<'ctx> {
+    value
+        .extract(width - 1, width - 1)
+        ._eq(&BV::from_u64(context, 1, 1))
+}
+
+fn finish_path<'ctx>(
+    state: MachineState<'ctx>,
+    model: &PureI64Body<'ctx>,
+    call_targets: &BTreeMap<u64, CallTarget>,
+) -> Result<LiftedPath<'ctx>, FunctionOutcome> {
+    if state.call_state.call_index != model.call_sites.len() {
         return Err(FunctionOutcome::OutsideProfile("call_order"));
     }
-    if call_state.used_call_targets.len() != call_targets.len() {
+    if state.call_state.used_call_targets.len() != call_targets.len() {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    Ok(LiftedFunction {
-        return_value: registers[0].extract(63, 0),
-        arguments,
-        call_argument_obligations: call_state.argument_obligations,
+    Ok(LiftedPath {
+        return_value: state.registers[0].extract(63, 0),
+        path_conditions: state.path_conditions,
+        call_argument_obligations: state.call_state.argument_obligations,
     })
+}
+
+fn instruction_width(mnemonic: &str) -> Result<u32, FunctionOutcome> {
+    if mnemonic.ends_with('l') {
+        Ok(32)
+    } else if mnemonic.ends_with('q') {
+        Ok(64)
+    } else {
+        Err(FunctionOutcome::OutsideProfile("unsupported_instruction"))
+    }
+}
+
+fn binary_operands<'ctx>(
+    operands: &str,
+    registers: &[BV<'ctx>],
+    context: &'ctx Context,
+    width: u32,
+) -> Result<(BV<'ctx>, BV<'ctx>), FunctionOutcome> {
+    let operands = split_operands(operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let left = register_value(destination, registers, width)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let right = operand_value(source, registers, context, width)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    Ok((left, right))
+}
+
+fn compare_flags<'ctx>(
+    operands: &str,
+    registers: &[BV<'ctx>],
+    context: &'ctx Context,
+    width: u32,
+) -> Result<FlagState<'ctx>, FunctionOutcome> {
+    let (left, right) = binary_operands(operands, registers, context, width)?;
+    Ok(FlagState::Compare { left, right, width })
+}
+
+fn test_flags<'ctx>(
+    operands: &str,
+    registers: &[BV<'ctx>],
+    context: &'ctx Context,
+    width: u32,
+) -> Result<FlagState<'ctx>, FunctionOutcome> {
+    let (left, right) = binary_operands(operands, registers, context, width)?;
+    Ok(FlagState::Result {
+        value: left.bvand(&right),
+        width,
+    })
+}
+
+fn lift_bitwise_flags<'ctx>(
+    operands: &str,
+    registers: &mut [BV<'ctx>],
+    context: &'ctx Context,
+    width: u32,
+    and: bool,
+) -> Result<FlagState<'ctx>, FunctionOutcome> {
+    let operands = split_operands(operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let (index, destination_width) = parse_register(destination)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    if destination_width != width || index == 4 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let left = register_value(destination, registers, width)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let right = if and {
+        operand_value(source, registers, context, width)
+    } else {
+        register_value(source, registers, width)
+    }
+    .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let value = if and {
+        left.bvand(&right)
+    } else {
+        left.bvxor(&right)
+    };
+    if !write_register(registers, index, value.clone(), width) {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    Ok(FlagState::Result { value, width })
+}
+
+fn lift_cmov<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    let (suffix, width) = instruction
+        .mnemonic
+        .strip_prefix("cmov")
+        .and_then(|rest| {
+            rest.strip_suffix('l')
+                .map(|suffix| (suffix, 32))
+                .or_else(|| rest.strip_suffix('q').map(|suffix| (suffix, 64)))
+        })
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let condition = condition_for_flags(&state.flags, suffix, context)?;
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let source = register_value(source, &state.registers, width)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let (index, destination_width) = parse_register(destination)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    if destination_width != width || index == 4 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let previous = state.registers[index].extract(width - 1, 0);
+    if !write_register(
+        &mut state.registers,
+        index,
+        condition.ite(&source, &previous),
+        width,
+    ) {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    Ok(())
+}
+
+fn lift_rsp_adjustment<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [immediate, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    if *destination != "%rsp" {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let amount = immediate
+        .strip_prefix('$')
+        .and_then(parse_integer)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let amount_signed = amount as i64;
+    let delta = if instruction.mnemonic == "addq" {
+        amount_signed
+    } else {
+        amount_signed
+            .checked_neg()
+            .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?
+    };
+    let previous_rsp = state.registers[4].clone();
+    if !adjust_rsp(
+        &mut state.registers,
+        &mut state.stack,
+        &mut state.rsp_offset,
+        delta,
+        context,
+    ) {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    state.flags = if instruction.mnemonic == "subq" {
+        FlagState::Compare {
+            left: previous_rsp,
+            right: BV::from_u64(context, amount, 64),
+            width: 64,
+        }
+    } else {
+        FlagState::Unknown
+    };
+    Ok(())
 }
 
 fn lift_call<'ctx>(
@@ -1141,6 +1648,201 @@ entry:
         assert_eq!(
             check_function(&[0x55, 0xc3], 0, &model, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+    }
+
+    #[test]
+    fn probe_forward_branch_bytes_match_absd_clamp_and_pick() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "atom absd(x: i64, y: i64) -> i64 requires: x >= 0 && x <= 1000 && y >= 0 && y <= 1000; ensures: result >= 0; body: { if x > y { x - y } else { y - x } };\n\
+            atom clamp(x: i64) -> i64 requires: true; ensures: result <= 10; body: { if x > 10 { 10 } else { x } };\n\
+            atom pick(b: bool, x: i64) -> i64 requires: true; ensures: true; body: { if b { x } else { 0 } };\n\
+            atom main() -> i64 requires: true; ensures: result >= 0; body: { absd(7, 3) };";
+        let absd = source_model_named(source, "absd", &context);
+        let clamp = source_model_named(source, "clamp", &context);
+        let pick = source_model_named(source, "pick", &context);
+        let absd_bytes = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0x29, 0xf0, // subq %rsi, %rax
+            0x7e, 0x01, // jle to the else arm
+            0xc3, // retq
+            0x48, 0x29, 0xfe, // subq %rdi, %rsi
+            0x48, 0x89, 0xf0, // movq %rsi, %rax
+            0xc3, // retq
+        ];
+        let clamp_bytes = [
+            0xb8, 0x0a, 0x00, 0x00, 0x00, // movl $10, %eax
+            0x48, 0x83, 0xff, 0x0a, // cmpq $10, %rdi
+            0x7e, 0x01, // jle to the else arm
+            0xc3, // retq
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0xc3, // retq
+        ];
+        let pick_bytes = [
+            0x48, 0x89, 0xf0, // movq %rsi, %rax
+            0x48, 0x85, 0xff, // testq %rdi, %rdi
+            0x74, 0x01, // je to the false arm
+            0xc3, // retq
+            0x31, 0xc0, // xorl %eax, %eax
+            0xc3, // retq
+        ];
+        let disassembled = disassemble(&absd_bytes, 0x1000).unwrap();
+        assert_eq!(disassembled[2].operands, "1");
+        for (bytes, model) in [
+            (absd_bytes.as_slice(), &absd),
+            (clamp_bytes.as_slice(), &clamp),
+            (pick_bytes.as_slice(), &pick),
+        ] {
+            assert_eq!(
+                check_function(bytes, 0, model, &BTreeMap::new(), &context),
+                FunctionOutcome::Equivalent
+            );
+        }
+        let mut inverted_absd = absd_bytes;
+        inverted_absd[6] = 0x7f; // jle -> jg
+        assert_eq!(
+            check_function(&inverted_absd, 0, &absd, &BTreeMap::new(), &context),
+            FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn forward_and_backward_jumps_are_classified() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom helper() -> i64 requires: true; ensures: true; body: { 7 };",
+            &context,
+        );
+        let forward = [0xeb, 0x01, 0xc3, 0xb8, 0x07, 0x00, 0x00, 0x00, 0xc3];
+        assert_eq!(
+            check_function(&forward, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+        assert_eq!(
+            check_function(&[0xeb, 0xfe], 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("backward_branch")
+        );
+        let jump_into_instruction = [0xeb, 0x01, 0x48, 0x89, 0xf8, 0xc3];
+        assert_eq!(
+            check_function(
+                &jump_into_instruction,
+                0,
+                &model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::OutsideProfile("branch_target")
+        );
+    }
+
+    #[test]
+    fn conditional_branch_after_unknown_flags_is_outside_profile() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom helper(x: i64) -> i64 requires: true; ensures: true; body: { x + 1 };",
+            &context,
+        );
+        let bytes = [0x48, 0x83, 0xc7, 0x01, 0x74, 0x01, 0xc3, 0xc3];
+        assert_eq!(
+            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_flags")
+        );
+    }
+
+    #[test]
+    fn register_cmov_and_32_bit_compare_follow_instruction_width() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let max_model = source_model(
+            "atom max(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { if x < y { y } else { x } };",
+            &context,
+        );
+        let max_bytes = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0x39, 0xf7, // cmpq %rsi, %rdi
+            0x48, 0x0f, 0x4c, 0xc6, // cmovlq %rsi, %rax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&max_bytes, 0, &max_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let signed_model = source_model(
+            "atom helper(x: i64) -> i64 requires: true; ensures: true; body: { if x < 0 { 1 } else { 0 } };",
+            &context,
+        );
+        let narrow_compare = [
+            0xb8, 0x00, 0x00, 0x00, 0x00, // movl $0, %eax
+            0x83, 0xff, 0x00, // cmpl $0, %edi
+            0x7d, 0x05, // jge to retq
+            0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(
+                &narrow_compare,
+                0,
+                &signed_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn symbolic_forward_paths_are_bounded() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom helper() -> i64 requires: true; ensures: true; body: { 0 };",
+            &context,
+        );
+        let mut bytes = Vec::new();
+        for _ in 0..7 {
+            bytes.extend([0x48, 0x85, 0xff, 0x74, 0x01, 0x90]);
+        }
+        bytes.extend([0xb8, 0x00, 0x00, 0x00, 0x00, 0xc3]);
+        assert_eq!(
+            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("path_bound")
+        );
+    }
+
+    #[test]
+    fn conditional_branch_with_a_call_is_outside_profile() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom callee(x: i64) -> i64 requires: true; ensures: true; body: { x };\n\
+             atom helper(x: i64) -> i64 requires: true; ensures: true; body: { callee(x) };",
+            &context,
+        );
+        let bytes = [
+            0x48, 0x85, 0xff, // testq %rdi, %rdi
+            0x74, 0x05, // je to retq
+            0xe8, 0x00, 0x00, 0x00, 0x00, // callq
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("branching_call")
         );
     }
 }

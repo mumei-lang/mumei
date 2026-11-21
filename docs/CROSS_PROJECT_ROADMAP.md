@@ -4008,19 +4008,21 @@ validation. Local/private function definitions, indirect calls, and unsupported
 or unresolvable relocations are inconclusive. Full object-code translation
 validation remains the deep endpoint.
 
-### Wave 5 straight-line direct-call TV profile (C10 Option B)
+### Wave 5 acyclic forward-branch direct-call TV profile (C10 Option B)
 
 Core's opt-in `mumei native-bundle recheck-machine-tv` runs the full linked
 object-correspondence pipeline, then checks reproduced machine code against
-pure-i64 source models with Z3 for straight-line functions in a fixed
-instruction whitelist. Direct calls are matched to source `CallSite`s in
-order and compared as uninterpreted sites, including call arguments and result
-terms; conditional calls are outside the profile. The x86-64 integer-register
-convention and callee-saved preservation are assumed, not verified, and make
-no ABI claim. Conditional branches and other branching functions, the C
-`main` wrapper, CRT/startup code, the loader, libc and runtime are not covered.
-This is a bounded per-instruction profile; full object-code TV remains the
-deep endpoint.
+pure-i64 source models with Z3 for straight-line and acyclic forward-branch
+functions in a fixed instruction whitelist. Conditional and unconditional
+local branches must target decoded instruction starts strictly forward, and
+symbolic execution is bounded at 64 completed paths. Direct calls are matched
+to source `CallSite`s in order and compared as uninterpreted sites, including
+call arguments and result terms; functions mixing calls and conditional
+branches are outside the profile. The x86-64 integer-register convention and
+callee-saved preservation are assumed, not verified, and make no ABI claim.
+Backward branches/loops, the C `main` wrapper, CRT/startup code, the loader,
+libc and runtime are not covered. This is a bounded per-instruction profile;
+full object-code TV remains the deep endpoint.
 
 ### Wave 5 declared producer-identity gate (C02 consumer)
 

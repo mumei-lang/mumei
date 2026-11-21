@@ -1751,45 +1751,71 @@ semantics are not checked; this is not general linker-semantics or ABI
 validation. Full object-code translation validation remains the deeper Option B
 endpoint.
 
-### Straight-line direct-call C10 Option B TV profile
+### Acyclic forward-branch direct-call C10 Option B TV profile
 
 `mumei native-bundle recheck-machine-tv` first runs the complete
 `recheck-object` pipeline. It then disassembles the reproduced object's
-functions and uses Z3 to compare straight-line functions in the fixed
-machine-instruction profile with their `pure-i64` source-atom models. Direct
-calls are matched in order to the source `CallSite`s and compared as
-uninterpreted sites: their argument expressions must match the SysV integer
-argument registers, while each call result is the corresponding source
-call-result term. Call guards must be provably true on the checked input
-domain; otherwise the function is outside this profile.
+functions by linear sweep and uses Z3 to compare straight-line and acyclic
+forward-branch functions in the fixed machine-instruction profile with their
+`pure-i64` source-atom models. Direct calls are matched in order to the source
+`CallSite`s and compared as uninterpreted sites: their argument expressions
+must match the SysV integer argument registers, while each call result is the
+corresponding source call-result term. Call guards must be provably true on
+the checked input domain; otherwise the function is outside this profile.
 
 The assumed convention places integer arguments in `rdi`, `rsi`, `rdx`,
 `rcx`, `r8`, and `r9`, with the result in `rax`; it is declared and assumed,
 not verified. Caller-saved registers are fresh after calls and callee-saved
 registers are preserved by assumption. The register convention and
 callee-saved preservation are not ABI claims. Direct final `jmp` tail calls
-are treated as calls followed by returns; conditional branches and other
-branching functions are outside the profile. A small abstract stack handles
-register `pushq`/`popq` and immediate `%rsp` adjustments; `%rsp`-relative
-memory accesses are unsupported.
+are treated as calls followed by returns. A function containing both a
+conditional branch and a call is outside the profile. A small abstract stack
+handles register `pushq`/`popq` and immediate `%rsp` adjustments;
+`%rsp`-relative memory accesses are unsupported.
+
+Conditional branches and local unconditional jumps must target the start of a
+decoded instruction strictly after the branch. Multiple `retq` instructions
+are supported, and every explored path must return with the stack balanced;
+falling off the function is outside the profile. Backward or equal branch
+targets are reported as `backward_branch`; targets outside the function or
+not at an instruction boundary are `branch_target`.
+
+`cmpl`/`cmpq` and `testl`/`testq` set flags without changing registers.
+`subl`/`subq` and `xorl`/`xorq` also set flags; `andl`/`andq` use the modeled
+logical-result flags. Compare/subtract flags retain operand width and model
+signed and unsigned comparisons, equality, and the result sign bit. Test,
+and, and xor flags model zero/sign with carry and overflow clear. The
+supported condition codes are `e`/`z`, `ne`/`nz`, `l`/`nge`, `le`/`ng`,
+`g`/`nle`, `ge`/`nl`, `b`/`c`/`nae`, `be`/`na`, `a`/`nbe`,
+`ae`/`nb`/`nc`, `s`, and `ns`. `cmov<cc>l` and `cmov<cc>q` with register
+operands are modeled as conditional expressions; `set<cc>` is unsupported.
+`mov`, `lea`, `push`, `pop`, and `nop` preserve flags. Initial flags and flags
+after other arithmetic or calls are unknown, so a condition that reads them
+is outside the profile. Symbolic execution is bounded at 64 completed paths;
+exceeding that bound is `path_bound`.
 
 The `input_domain` is
 `signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires`.
 The comparison asserts the source model's signature-bounded parameter domains
 and division/shift definedness, but does not restrict inputs by `requires`.
-Outside-profile reasons include `calls`, `argument_count`,
-`not_a_source_atom`, `unsupported_instruction`, `unsupported_signature`,
-`conditional_call` and `call_order`. A direct-call callee or count mismatch is
-reported as `call_order`; a call whose guard is not provably true is reported
-as `conditional_call`. Unsupported signatures, conditional branches, other
-instructions outside the profile, and functions without a matching source
-atom are reported outside the profile. The C `main` wrapper, CRT/startup code,
-dynamic loader, libc and runtime are not covered. This remains a bounded
-per-instruction Option B profile, not full object-code translation validation
-or runtime assurance.
-The descriptor retains `machine_code_leaf_function_tv`, adds
+Outside-profile reasons include `argument_count`, `backward_branch`,
+`branch_target`, `branching_call`, `call_order`, `conditional_call`,
+`not_a_source_atom`, `path_bound`, `unsupported_flags`,
+`unsupported_instruction`, and `unsupported_signature`. A direct-call callee
+or count mismatch is reported as `call_order`; a call whose guard is not
+provably true is reported as `conditional_call`. Unsupported signatures,
+branches outside the forward-only profile, other instructions outside the
+profile, and functions without a matching source atom are outside the
+profile. The C `main` wrapper, CRT/startup code, dynamic loader, libc and
+runtime are not covered. This remains a bounded per-instruction Option B
+profile, not full object-code translation validation or runtime assurance.
+The descriptor performs `machine_code_leaf_function_tv` only when an
+equivalent call-free, branch-free function is checked,
 `machine_code_direct_call_site_tv` only when an equivalent caller is checked,
-and lists `machine_code_tv_branching_functions` as not performed.
+and `machine_code_forward_branch_function_tv` only when an equivalent
+forward-branch function is checked. It lists
+`machine_code_tv_backward_branch_functions` as not performed; loops remain
+outside the profile.
 
 ### Pinned executable exit-status recheck
 
