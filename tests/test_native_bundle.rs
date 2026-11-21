@@ -4150,6 +4150,10 @@ fn recheck_machine_tv_accept_object_f64_module_bundle() {
     let machine_tv = recheck_machine_tv(&source, &bundle, &id, true);
     assert_success(&machine_tv);
     let machine_tv: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
+    assert_eq!(
+        machine_tv["register_convention_assumed"],
+        "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_result_rax_or_xmm0"
+    );
     for function in ["fadd", "feq", "mixed"] {
         assert_eq!(
             machine_tv["functions"][function]["outcome"],
@@ -4179,6 +4183,10 @@ fn recheck_machine_tv_accept_object_f64_module_bundle() {
     assert_success(&accepted);
     let accepted: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
     assert_eq!(accepted["accepted"], true);
+    assert_eq!(
+        accepted["register_convention_assumed"],
+        "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_result_rax_or_xmm0"
+    );
     assert!(accepted["checks_performed"]
         .as_array()
         .unwrap()

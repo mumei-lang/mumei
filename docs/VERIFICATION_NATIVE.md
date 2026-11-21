@@ -1989,7 +1989,10 @@ Scalar f64 function parameters use the XMM entry registers, but direct call
 sites with an f64 argument fail closed as `call_arguments`: source NaN payload
 bits are unspecified, while a callee may observe them when producing an integer
 result. f64 call results remain supported and are bound from the low 64 bits of
-`xmm0`.
+`xmm0`. When an equivalent function has a scalar f64 leaf,
+`register_convention_assumed` names the XMM argument/result registers with
+`sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_result_rax_or_xmm0`;
+otherwise the descriptor retains the integer-only convention string.
 
 ### Object-stage machine-code acceptance (C10 Option B)
 

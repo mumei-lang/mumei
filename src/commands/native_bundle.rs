@@ -55,6 +55,8 @@ const MACHINE_CODE_TV_WITHOUT_OBJECT_LINK_SCOPE: &str =
     "artifact_reproduction_object_symbol_and_call_edge_correspondence_and_machine_code_tv_only/no_object_link_correspondence_abi_or_runtime_semantics";
 const MACHINE_CODE_REGISTER_CONVENTION: &str =
     "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax";
+const MACHINE_CODE_F64_REGISTER_CONVENTION: &str =
+    "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_result_rax_or_xmm0";
 const MACHINE_CODE_TV_INPUT_DOMAIN: &str =
     "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires";
 const MACHINE_CODE_TV_REFINED_INPUT_DOMAIN: &str =
@@ -67,6 +69,15 @@ const STDERR_RECHECK_SCOPE: &str =
     "artifact_reproduction_and_os_stderr_observation_only/no_runtime_abi_or_semantic_proof";
 const RUNTIME_OBSERVATION_RECHECK_SCOPE: &str =
     "artifact_reproduction_and_runtime_observation_semantics_on_one_invocation_only/no_runtime_abi_or_semantic_proof";
+
+fn machine_tv_register_convention_assumed(equivalent_f64_scalar_count: usize) -> &'static str {
+    if equivalent_f64_scalar_count > 0 {
+        MACHINE_CODE_F64_REGISTER_CONVENTION
+    } else {
+        MACHINE_CODE_REGISTER_CONVENTION
+    }
+}
+
 const OBSERVATION_ENVIRONMENT: &str = "empty";
 const OBSERVATION_WORKING_DIRECTORY: &str = "executable_directory";
 /// The build/recheck single-run cap for observing an executable: a
@@ -3845,7 +3856,9 @@ fn write_machine_tv(
             "schema_version": "mumei.machine-code-tv/v1",
             "scope": evaluation.scope,
             "build_id": expected_build_id,
-            "register_convention_assumed": MACHINE_CODE_REGISTER_CONVENTION,
+            "register_convention_assumed": machine_tv_register_convention_assumed(
+                evaluation.counts.equivalent_f64_scalar_count,
+            ),
             "input_domain": evaluation.input_domain,
             "functions": evaluation.functions,
             "checks_performed": checks_performed,
@@ -3998,7 +4011,9 @@ fn write_object_machine_tv_acceptance(
             "build_id": expected_build_id,
             "llvm_sha256": format!("{:x}", Sha256::digest(&data.llvm_bytes)),
             "object_sha256": format!("{:x}", Sha256::digest(&data.object_bytes)),
-            "register_convention_assumed": MACHINE_CODE_REGISTER_CONVENTION,
+            "register_convention_assumed": machine_tv_register_convention_assumed(
+                evaluation.counts.equivalent_f64_scalar_count,
+            ),
             "input_domain": &evaluation.input_domain,
             "functions": &evaluation.functions,
         });
@@ -4657,6 +4672,14 @@ mod tests {
 
     #[test]
     fn machine_tv_descriptor_tracks_f64_scalar_coverage_and_assumptions() {
+        assert_eq!(
+            machine_tv_register_convention_assumed(1),
+            "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_result_rax_or_xmm0"
+        );
+        assert_eq!(
+            machine_tv_register_convention_assumed(0),
+            "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax"
+        );
         let (performed, not_performed) = machine_tv_f64_scalar_checks(1);
         assert_eq!(performed, vec!["machine_code_f64_scalar_function_tv"]);
         assert_eq!(
