@@ -554,8 +554,16 @@ fn stdout_acceptance_emits_the_observation_descriptor() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|check| check == "os_exit_status"),
+            .any(|check| check == "os_exit_status_observation"),
         "a stdout run does not compare the exit status"
+    );
+    assert!(
+        !descriptor["checks_not_performed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check == "os_exit_status"),
+        "the descriptor does not use the legacy check name"
     );
     assert!(
         !descriptor["checks_performed"]
@@ -894,7 +902,7 @@ fn stderr_acceptance_emits_the_observation_descriptor() {
             .any(|check| check == "os_stderr_observation"),
         "stderr acceptance must claim the OS observation"
     );
-    for unclaimed in ["os_exit_status", "os_stdout_observation"] {
+    for unclaimed in ["os_exit_status_observation", "os_stdout_observation"] {
         assert!(
             descriptor["checks_not_performed"]
                 .as_array()
@@ -904,6 +912,14 @@ fn stderr_acceptance_emits_the_observation_descriptor() {
             "a stderr run does not claim {unclaimed}"
         );
     }
+    assert!(
+        !descriptor["checks_not_performed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check == "os_exit_status"),
+        "the descriptor does not use the legacy check name"
+    );
     assert!(
         !descriptor["checks_performed"]
             .as_array()
@@ -4123,6 +4139,11 @@ fn accept_artifact_emits_descriptor_only_when_artifacts_reproduce() {
                 .iter()
                 .any(|entry| entry == "toolchain_object_executable_reproduction"));
             assert!(descriptor["checks_not_performed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry == "os_exit_status_observation"));
+            assert!(!descriptor["checks_not_performed"]
                 .as_array()
                 .unwrap()
                 .iter()

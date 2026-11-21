@@ -3809,7 +3809,7 @@ anonymous `mumei.native-evidence-acceptance/v1` descriptor with
 under one environment is an observation, not a history:
 `historical_execution`, `abi_runtime_semantics`, optimizer and
 process semantics stay in `checks_not_performed`, and
-`accept-artifact` keeps `os_exit_status` excluded — it performs no
+`accept-artifact` keeps `os_exit_status_observation` excluded — it performs no
 execution, so each descriptor names exactly what it ran. Exit
 mapping mirrors the recheck (match → 0, mismatch → 1,
 inconclusive → 3); the descriptor is anonymous and cannot be
@@ -3843,7 +3843,7 @@ observation of one channel with no exit-status, stderr, runtime, ABI
 or historical-execution claim. The paired `native-bundle
 accept-stdout` emits the anonymous acceptance descriptor on a matching
 observation with `os_stdout_observation` in `checks_performed` and
-`os_exit_status`, `os_stderr_observation`, `historical_execution`,
+`os_exit_status_observation`, `os_stderr_observation`, `historical_execution`,
 optimizer/ABI/runtime, grade and Lean honestly named in
 `checks_not_performed`; the sibling descriptors name the new check in
 their own `checks_not_performed` so each document lists exactly what
@@ -3878,7 +3878,7 @@ observation of one channel with no exit-status, stdout, runtime, ABI
 or historical-execution claim. The paired `native-bundle
 accept-stderr` emits the anonymous acceptance descriptor on a matching
 observation with `os_stderr_observation` in `checks_performed` and
-`os_exit_status`, `os_stdout_observation`, `historical_execution`,
+`os_exit_status_observation`, `os_stdout_observation`, `historical_execution`,
 optimizer/ABI/runtime, grade and Lean honestly named in
 `checks_not_performed`; the sibling descriptors name the new check in
 their own `checks_not_performed` so each document lists exactly what
@@ -3916,6 +3916,9 @@ match exit status, stdout and stderr together. Its checks include
 `accept-*` command can claim because those observations are made in
 separate runs. The Agent-side `RUNTIME_CHECK_VOCABULARY` performer
 registration (mumei-agent#1034) follows this Core descriptor.
+Sibling descriptors now name the exit-status observation only as
+`os_exit_status_observation` (formerly bare `os_exit_status` in
+non-exit-status `checks_not_performed` lists).
 
 ### Wave 5 declared producer-identity gate (C02 consumer)
 
