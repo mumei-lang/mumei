@@ -82,7 +82,7 @@ impl fmt::Display for Error {
 
 pub(crate) fn parse(bytes: &[u8]) -> Result<JsonValue, Error> {
     let raw: Box<RawValue> = serde_json::from_slice(bytes).map_err(|_| Error::InvalidShape)?;
-    parse_raw_value(raw.get(), 0)
+    parse_raw_value(raw.get(), 1)
 }
 
 pub(crate) fn reject_unrepresentable_integers(value: &JsonValue) -> Result<(), Error> {
@@ -339,5 +339,22 @@ mod tests {
     #[test]
     fn strict_json_rejects_unpaired_surrogate_escapes() {
         assert!(parse(br#"{"opaque":"\ud800"}"#).is_err());
+    }
+
+    #[test]
+    fn strict_json_matches_serde_json_default_nesting_limit() {
+        for depth in 125..=131 {
+            let array = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+            let object = format!("{}0{}", r#"{"a":"#.repeat(depth), "}".repeat(depth));
+            for (kind, input) in [("array", &array), ("object", &object)] {
+                let strict_json_accepts = parse(input.as_bytes()).is_ok();
+                let serde_json_accepts =
+                    serde_json::from_slice::<serde_json::Value>(input.as_bytes()).is_ok();
+                assert_eq!(
+                    strict_json_accepts, serde_json_accepts,
+                    "{kind} nesting depth {depth}"
+                );
+            }
+        }
     }
 }
