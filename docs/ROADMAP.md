@@ -3183,34 +3183,44 @@ exceptions, disabled FTZ/DAZ, and NaN payload bits remain unverified.
 The descriptor performs `machine_code_f64_scalar_function_tv` for equivalent
 functions with any f64 leaf, including one inside a struct or call shape, and
 lists `machine_code_tv_mxcsr_control_state` and
-`machine_code_tv_nan_payload_bits` as not performed. One-/two-leaf f64
-aggregates use the mixed INTEGER/SSE rules described below. Register-only
+`machine_code_tv_nan_payload_bits` as not performed. F64 struct aggregates
+use the mixed INTEGER/SSE rules described below. Register-only
 `ucomisd`/`comisd` model unordered/equal/less flags exactly
 (`ZF = unordered || fp.eq`, `CF = unordered || fp.lt`, `PF = unordered`;
 `OF/SF/AF = 0`); their branch, `setcc`, and `cmovcc` conditions are supported.
 Memory operands and parity conditions after integer flag producers remain
 outside the profile. Agent consumers must adopt these names.
 
-The same bounded profile admits one-/two-leaf struct parameters, results, and
-direct-call values whose leaves are INTEGER (`i64`) and/or SSE (`f64`)
-eightbytes. INTEGER leaves use the next GPR from `rdi`–`r9`; SSE leaves use
-the next XMM register from `xmm0`–`xmm7`, independently. Aggregates are
-preflighted per class and must fit wholly in the remaining registers; they are
-never split or passed on the stack. Results preserve source leaf order:
-INTEGER leaves use `rax` then `rdx`, SSE leaves use the low 64 bits of `xmm0`
-then `xmm1`. Function-result f64 leaves compare NaN-aware, while integer
-leaves compare exactly.
+The same bounded profile admits one- through four-leaf struct parameters and
+direct-call values whose leaves are INTEGER (`i64`) and/or SSE (`f64`).
+INTEGER leaves use the next GPR from `rdi`–`r9`; SSE leaves use the next XMM
+register from `xmm0`–`xmm7`, independently. Aggregates are preflighted per
+class and must fit wholly in the remaining registers; they are never split
+or passed on the stack.
+
+Aggregate results have at most four leaves overall, at most three INTEGER
+leaves, and at most two SSE leaves. Real `llc-17 -O2` output returned three
+INTEGER leaves in `rax`, `rdx`, `rcx` and `{i64,f64,i64,f64}` in
+`rax`, `xmm0`, `rdx`, `xmm1`. It did not return a fourth INTEGER leaf in
+`r8`: a four-`i64` aggregate uses a hidden sret pointer and memory stores.
+For three f64 leaves, the third leaf uses an x87 stack register, outside this
+model. Such result shapes fail closed. Supported results preserve source
+leaf order; f64 leaves compare NaN-aware and integer leaves compare exactly.
+This is an assumed LLVM first-class aggregate lowering convention, not SysV
+C-ABI aggregate classification; SysV memory-class passing is not validated.
 
 F64 struct-call arguments use NaN-aware Query A matching plus a per-path
 exact-bit Query B obligation, whose failure is `call_arguments`, never
-`different`. F64 tail calls, enum signatures/call sites, structs with three
+`different`. F64 tail calls, enum signatures/call sites, structs with five
 or more leaves, u64/i128 leaves, post-writes, and bounded memory remain
 fail-closed. Equivalent functions using struct signatures or direct calls
-perform `machine_code_composite_register_aggregate_tv`; integer-only
-aggregates use the GPR-only convention suffix, and any equivalent aggregate
-containing f64 uses
-`_two_eightbyte_aggregates_classified_integer_gprs_sse_xmm_result_rax_rdx_xmm0_xmm1`.
-This remains a bounded assumed-convention claim, not general ABI validation.
+perform `machine_code_composite_register_aggregate_tv`. Aggregates wider
+than two leaves use
+`_llvm_first_class_aggregates_split_into_registers_result_rax_rdx_rcx_xmm0_xmm1`
+in the active integer or f64 convention string and list
+`machine_code_tv_sysv_memory_class_aggregate_abi` as not performed. The
+convention names LLVM aggregate lowering and does not claim general ABI
+validation.
 
 Sibling descriptors now name the exit-status observation only as
 `os_exit_status_observation` (formerly bare `os_exit_status` in

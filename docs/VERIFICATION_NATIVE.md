@@ -2007,33 +2007,43 @@ equivalent function has an f64 leaf, including inside a struct or a call shape,
 `sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_result_rax_or_xmm0`;
 otherwise the descriptor retains the integer-only convention string.
 
-One-/two-leaf struct parameters, results, and direct-call values may contain
-integer and/or f64 leaves. Each leaf is a separate SysV eightbyte: integer
-leaves consume the next GPR from `rdi`–`r9`, and f64 leaves consume the next
-XMM register from `xmm0`–`xmm7`. A struct must fit wholly in the remaining
-registers of both classes before any of its leaves are assigned; otherwise it
-is outside as `argument_count`. Structs are never split between registers and
-the stack, and stack arguments remain scalar-only. Results are assigned in
-leaf order, using `rax` then `rdx` for integer leaves and the low 64 bits of
-`xmm0` then `xmm1` for f64 leaves. Function-result f64 leaves use NaN-aware
-matching; integer leaves are compared exactly. Struct call results bind the
-same leaves into those registers after caller-saved clobbers.
+One- through four-leaf struct parameters and direct-call values may contain
+integer and/or f64 leaves. Each leaf uses its own assumed register class:
+integer leaves consume the next GPR from `rdi`–`r9`, and f64 leaves consume
+the next XMM register from `xmm0`–`xmm7`. A struct must fit wholly in the
+remaining registers of both classes before any of its leaves are assigned;
+otherwise it is outside as `argument_count`. Structs are never split between
+registers and the stack, and stack arguments remain scalar-only.
+
+Aggregate results are admitted only with at most four leaves overall, at
+most three INTEGER leaves, and at most two SSE leaves. The `llc-17 -O2`
+probe observed three INTEGER leaves returned in `rax`, `rdx`, `rcx`, and a
+mixed `{i64,f64,i64,f64}` result returned in `rax`, `xmm0`, `rdx`, `xmm1`.
+The expected fourth INTEGER result register `r8` was not observed: a
+four-`i64` aggregate return is lowered through a hidden sret pointer and
+memory stores. A three-f64 result uses `xmm0`, `xmm1`, and an x87 stack
+register for its third leaf, which this model does not support. Those shapes
+fail closed (`unsupported_signature` for function results,
+`call_arguments` for call results). This is LLVM first-class aggregate
+lowering, not SysV C-ABI aggregate classification; SysV memory-class passing
+is not validated. Function-result f64 leaves use NaN-aware matching, integer
+leaves compare exactly, and supported struct call results bind the leaves
+into the corresponding registers after caller-saved clobbers.
 
 F64 leaves in struct call arguments use the scalar f64 call obligations:
 Query A compares NaN-aware values, and Query B must prove exact argument bits
 under the same path assumptions. If that exact proof is satisfiable or
 unknown, the function fails closed as `call_arguments`, not `different`.
-Enums, structs with three or more leaves, u64/i128 leaves, post-writes,
-bounded memory, and tail calls with struct arguments or results remain outside
-the profile. When an equivalent function has a struct parameter, result, or
-direct-call argument/result, the descriptor performs
-`machine_code_composite_register_aggregate_tv`. Integer-only aggregates append
-`_two_eightbyte_integer_aggregates_in_consecutive_gprs_result_rax_rdx`; an
-aggregate with an f64 leaf instead appends
-`_two_eightbyte_aggregates_classified_integer_gprs_sse_xmm_result_rax_rdx_xmm0_xmm1`
-to the active integer or f64 `register_convention_assumed` string. This is
-bounded profile evidence under an assumed SysV convention, not general ABI
-validation.
+Enums, structs with five or more leaves, u64/i128 leaves, post-writes,
+bounded memory, and tail calls with struct arguments or results remain
+outside the profile. When an equivalent function uses a struct aggregate,
+the descriptor performs `machine_code_composite_register_aggregate_tv`.
+Aggregates wider than two leaves use the convention suffix
+`_llvm_first_class_aggregates_split_into_registers_result_rax_rdx_rcx_xmm0_xmm1`
+on the active integer or f64 `register_convention_assumed` string and add
+`machine_code_tv_sysv_memory_class_aggregate_abi` to checks not performed.
+This is bounded evidence for the observed LLVM lowering, not SysV C-ABI
+classification or general ABI validation.
 
 ### Object-stage machine-code acceptance (C10 Option B)
 
