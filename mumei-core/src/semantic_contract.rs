@@ -6629,6 +6629,7 @@ pub struct CallSite<'ctx> {
     pub callee: String,
     pub args: Vec<BV<'ctx>>,
     pub arg_leaf_doubles: Vec<bool>,
+    pub has_composite_arguments_or_result: bool,
     pub result: BV<'ctx>,
     pub result_is_double: bool,
     pub guard: Bool<'ctx>,
@@ -6698,6 +6699,9 @@ pub struct PureI64Body<'ctx> {
     /// a scalar result, one per flattened slot for an aggregate result.
     /// Empty when the atom declares no return type.
     pub result_leaf_doubles: Vec<bool>,
+    /// True when a parameter or result contains an enum rather than only
+    /// scalar leaves or nested structs.
+    pub has_enum_signature: bool,
     /// When the body contains a `while`, the conjunction of each loop's
     /// bounded-exit condition: `true` only on inputs where every loop's
     /// guard fails within `LOOP_BOUND` unrolled iterations. Equivalence
@@ -6719,6 +6723,9 @@ pub struct PureI64Body<'ctx> {
     pub bounded_memory: bool,
     /// True when the admitted module uses composite or enum body features.
     pub has_composite_or_enum_features: bool,
+    /// True when the module uses enum, write, merge or other composite
+    /// features beyond plain struct values.
+    pub has_composite_features_beyond_struct_values: bool,
     /// True when the admitted module uses f64 leaves or arithmetic.
     pub has_f64_features: bool,
     /// True when the admitted module uses u64, i128 or u128 leaves.
@@ -6749,10 +6756,12 @@ impl<'ctx> PureI64Body<'ctx> {
             result_shape: None,
             param_leaf_doubles: Vec::new(),
             result_leaf_doubles: Vec::new(),
+            has_enum_signature: false,
             loop_bound_exits: None,
             post_writes: HashMap::new(),
             bounded_memory: false,
             has_composite_or_enum_features: false,
+            has_composite_features_beyond_struct_values: false,
             has_f64_features: false,
             has_non_i64_scalar_features: false,
         }
@@ -6766,6 +6775,7 @@ type AdmittedPureI64Module = (
     RefinedEnv,
     StructEnv,
     EnumEnv,
+    bool,
     bool,
     bool,
     bool,
@@ -6788,6 +6798,7 @@ pub fn encode_pure_i64_body<'ctx>(
         enums,
         bounded_memory,
         has_composite_or_enum_features,
+        has_composite_features_beyond_struct_values,
         has_f64_features,
         has_non_i64_scalar_features,
     ) = bounded_pure_i64_module(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
@@ -6806,6 +6817,7 @@ pub fn encode_pure_i64_body<'ctx>(
         &call_returns,
         bounded_memory,
         has_composite_or_enum_features,
+        has_composite_features_beyond_struct_values,
         has_f64_features,
         has_non_i64_scalar_features,
     )
@@ -6829,6 +6841,7 @@ pub fn encode_pure_i64_module<'ctx>(
         enums,
         bounded_memory,
         has_composite_or_enum_features,
+        has_composite_features_beyond_struct_values,
         has_f64_features,
         has_non_i64_scalar_features,
     ) = bounded_pure_i64_module(source, allow_wrapping_arithmetic, admission)?;
@@ -6846,6 +6859,7 @@ pub fn encode_pure_i64_module<'ctx>(
                 &call_returns,
                 bounded_memory,
                 has_composite_or_enum_features,
+                has_composite_features_beyond_struct_values,
                 has_f64_features,
                 has_non_i64_scalar_features,
             )),
@@ -6915,6 +6929,12 @@ fn bounded_pure_i64_module(
         || enum_scalar_ops_used
         || nested_writes_used
         || enum_writes_used;
+    let has_composite_features_beyond_struct_values = field_writes_used
+        || enum_values_used
+        || merged_composites_used
+        || enum_scalar_ops_used
+        || nested_writes_used
+        || enum_writes_used;
     let has_f64_features = f64_leaves || f64_arithmetic_used;
     let has_non_i64_scalar_features = u64_leaves || wide_leaves;
     // The bounded profile keeps its single-atom arity gate here the same
@@ -6934,6 +6954,7 @@ fn bounded_pure_i64_module(
         // stack-memory model as an admitted array literal.
         arrays || strs,
         has_composite_or_enum_features,
+        has_composite_features_beyond_struct_values,
         has_f64_features,
         has_non_i64_scalar_features,
     ))
@@ -6950,6 +6971,7 @@ fn encode_atom_body<'ctx>(
     call_returns: &CallShapes<'ctx>,
     bounded_memory: bool,
     has_composite_or_enum_features: bool,
+    has_composite_features_beyond_struct_values: bool,
     has_f64_features: bool,
     has_non_i64_scalar_features: bool,
 ) -> BodyResult<PureI64Body<'ctx>> {
@@ -6975,6 +6997,23 @@ fn encode_atom_body<'ctx>(
         .params
         .iter()
         .any(|p| struct_fields(p, structs).is_some() || enum_variants(p, enums).is_some());
+    let enum_slot = |slot: &SignatureSlot<'_>| {
+        matches!(
+            slot,
+            SignatureSlot::EnumTag { .. }
+                | SignatureSlot::EnumField { .. }
+                | SignatureSlot::EnumWideField { .. }
+        )
+    };
+    let has_enum_signature = slots.iter().any(enum_slot)
+        || atom.return_type.as_deref().is_some_and(|name| {
+            enums.contains_key(name)
+                || structs.get(name).is_some_and(|fields| {
+                    flattened_struct_fields(structs, enums, fields)
+                        .iter()
+                        .any(|(_, slot)| enum_slot(slot))
+                })
+        });
     let assignable: BTreeSet<String> = atom
         .params
         .iter()
@@ -7258,9 +7297,11 @@ fn encode_atom_body<'ctx>(
                     })
             })
             .unwrap_or_default(),
+        has_enum_signature,
         loop_bound_exits,
         bounded_memory,
         has_composite_or_enum_features,
+        has_composite_features_beyond_struct_values,
         has_f64_features,
         has_non_i64_scalar_features,
         post_writes: top_writes
@@ -7795,6 +7836,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
         enums,
         bounded_memory,
         has_composite_or_enum_features,
+        has_composite_features_beyond_struct_values,
         has_f64_features,
         has_non_i64_scalar_features,
     ) = bounded_pure_i64_module(source, true, admission)?;
@@ -7827,6 +7869,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
                 &call_returns,
                 bounded_memory,
                 has_composite_or_enum_features,
+                has_composite_features_beyond_struct_values,
                 has_f64_features,
                 has_non_i64_scalar_features,
             )
@@ -10828,6 +10871,7 @@ fn source_expr<'ctx>(
             // site and `signature_domain`/`param_env` see one encoding.
             let mut applied = Vec::with_capacity(args.len());
             let mut arg_leaf_doubles = Vec::with_capacity(args.len());
+            let mut has_composite_arguments = false;
             for arg in args {
                 let lower = |value: SourceValue<'ctx>| lower_scalar(value, ctx);
                 match source_expr(
@@ -10848,6 +10892,7 @@ fn source_expr<'ctx>(
                     // leaf slots — the callee's `param_env` and
                     // `signature_domain` consume the same order.
                     SourceValue::Composite(fields) => {
+                        has_composite_arguments = true;
                         for (_, field) in fields {
                             let before = applied.len();
                             lower_composite(field, ctx, &mut applied)?;
@@ -10859,6 +10904,7 @@ fn source_expr<'ctx>(
                     // tag slot then the shared payload slots — the same
                     // order `signature_domain` and `param_env` consume.
                     SourceValue::Enum { tag, slots, .. } => {
+                        has_composite_arguments = true;
                         applied.push(tag);
                         arg_leaf_doubles.push(false);
                         for slot in slots {
@@ -10901,6 +10947,7 @@ fn source_expr<'ctx>(
                     callee: name.clone(),
                     args: applied.clone(),
                     arg_leaf_doubles: arg_leaf_doubles.clone(),
+                    has_composite_arguments_or_result: true,
                     result: aggregate_value(&slots),
                     result_is_double: false,
                     guard: guard.clone(),
@@ -10930,6 +10977,7 @@ fn source_expr<'ctx>(
                     callee: name.clone(),
                     args: applied.clone(),
                     arg_leaf_doubles: arg_leaf_doubles.clone(),
+                    has_composite_arguments_or_result: true,
                     result: aggregate_value(&slots),
                     result_is_double: false,
                     guard: guard.clone(),
@@ -10958,6 +11006,7 @@ fn source_expr<'ctx>(
                     callee: name.clone(),
                     args: applied.clone(),
                     arg_leaf_doubles: arg_leaf_doubles.clone(),
+                    has_composite_arguments_or_result: has_composite_arguments,
                     result: aggregate_value(&slots),
                     result_is_double: false,
                     guard: guard.clone(),
@@ -10978,6 +11027,7 @@ fn source_expr<'ctx>(
                 callee: name.clone(),
                 args: applied.clone(),
                 arg_leaf_doubles,
+                has_composite_arguments_or_result: has_composite_arguments,
                 result: value.clone(),
                 result_is_double: call_returns.returns_f64(name),
                 guard: guard.clone(),

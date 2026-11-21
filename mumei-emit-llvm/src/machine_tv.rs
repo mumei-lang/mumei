@@ -260,6 +260,7 @@ pub fn check_entry_wrapper_with_preservation(
         callee: "main".to_owned(),
         args: Vec::new(),
         arg_leaf_doubles: Vec::new(),
+        has_composite_arguments_or_result: false,
         result: value,
         result_is_double: false,
         guard: Bool::from_bool(context, true),
@@ -418,38 +419,65 @@ pub fn function_has_reachable_cycle(
 }
 
 pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
-    let scalar_parameter_kinds = model.param_leaf_doubles.len() == model.param_shapes.len()
+    let parameter_leaf_count = model
+        .param_shapes
+        .iter()
+        .zip(&model.param_leaf_doubles)
+        .fold(0usize, |count, (shape, leaves)| {
+            count.saturating_add(shape.unwrap_or(leaves.len()))
+        });
+    let parameter_shapes_supported = model.param_shapes.len() == model.param_leaf_doubles.len()
         && model
+            .param_shapes
+            .iter()
+            .zip(&model.param_leaf_doubles)
+            .all(|(shape, leaves)| match shape {
+                None => leaves.len() == 1,
+                Some(count) => {
+                    (1..=2).contains(count)
+                        && leaves.len() == *count
+                        && leaves.iter().all(|is_double| !*is_double)
+                }
+            });
+    let has_struct_signature =
+        model.param_shapes.iter().any(Option::is_some) || model.result_shape.is_some();
+    let all_struct_signature_leaves_are_integer = !has_struct_signature
+        || (model
             .param_leaf_doubles
             .iter()
-            .all(|leaves| leaves.len() == 1);
-    let scalar_result_kind = model.result_leaf_doubles.len() <= 1;
-    model.inputs.len() == model.param_shapes.len()
+            .flatten()
+            .all(|is_double| !*is_double)
+            && model
+                .result_leaf_doubles
+                .iter()
+                .all(|is_double| !*is_double));
+    let result_shape_supported = match model.result_shape {
+        None => model.result_leaf_doubles.len() <= 1 && model.value.get_size() == 64,
+        Some(count) => {
+            (1..=2).contains(&count)
+                && model.result_leaf_doubles.len() == count
+                && model
+                    .result_leaf_doubles
+                    .iter()
+                    .all(|is_double| !*is_double)
+                && model.value.get_size() == (64 * count) as u32
+        }
+    };
+    model.inputs.len() == parameter_leaf_count
         && model.inputs.iter().all(|input| input.get_size() == 64)
-        && model.value.get_size() == 64
-        && model.param_shapes.iter().all(Option::is_none)
-        && scalar_parameter_kinds
-        && scalar_result_kind
+        && parameter_shapes_supported
+        && all_struct_signature_leaves_are_integer
+        && result_shape_supported
         && model.call_sites.iter().all(|site| {
-            site.result.get_size() == 64
+            (site.result.get_size() == 64 || site.has_composite_arguments_or_result)
                 && site.args.iter().all(|argument| argument.get_size() == 64)
                 && site.arg_leaf_doubles.len() == site.args.len()
         })
         && !model.has_post_writes()
-        && !model.has_composite_or_enum_features
+        && !model.has_composite_features_beyond_struct_values
+        && !model.has_enum_signature
         && !model.has_non_i64_scalar_features
-        && !model.composite_signature
-        && model.result_shape.is_none()
         && !model.bounded_memory
-}
-
-fn model_parameter_is_double(model: &PureI64Body<'_>, index: usize) -> bool {
-    model
-        .param_leaf_doubles
-        .get(index)
-        .and_then(|leaves| leaves.first())
-        .copied()
-        .unwrap_or(false)
 }
 
 fn model_result_is_double(model: &PureI64Body<'_>) -> bool {
@@ -511,13 +539,25 @@ fn assert_path_equivalence_query<'ctx>(
     context: &'ctx Context,
 ) {
     assert_path_assumptions(solver, model, arguments, path);
-    let output_matches = match result_width {
-        ResultWidth::I64 => model.value._eq(&path.return_value),
-        ResultWidth::I32 => model
-            .value
-            .extract(31, 0)
-            ._eq(&path.return_value.extract(31, 0)),
-        ResultWidth::F64 => f64_values_match(context, &model.value, &path.return_value),
+    let output_matches = if let Some(leaf_count) = model.result_shape {
+        let matches = (0..leaf_count)
+            .map(|leaf| {
+                let high = (64 * (leaf_count - leaf) - 1) as u32;
+                let low = (64 * (leaf_count - leaf - 1)) as u32;
+                model
+                    .value
+                    .extract(high, low)
+                    ._eq(&path.return_values[leaf])
+            })
+            .collect::<Vec<_>>();
+        Bool::and(context, &matches.iter().collect::<Vec<_>>())
+    } else {
+        let return_value = &path.return_values[0];
+        match result_width {
+            ResultWidth::I64 => model.value._eq(return_value),
+            ResultWidth::I32 => model.value.extract(31, 0)._eq(&return_value.extract(31, 0)),
+            ResultWidth::F64 => f64_values_match(context, &model.value, return_value),
+        }
     };
     let mut equivalent_terms: Vec<&Bool> = path.call_argument_obligations.iter().collect();
     equivalent_terms.push(&output_matches);
@@ -614,7 +654,7 @@ struct LiftedFunction<'ctx> {
 }
 
 struct LiftedPath<'ctx> {
-    return_value: BV<'ctx>,
+    return_values: Vec<BV<'ctx>>,
     callee_saved_registers: Vec<BV<'ctx>>,
     final_rsp_offset: i64,
     path_conditions: Vec<Bool<'ctx>>,
@@ -693,17 +733,29 @@ fn lift<'ctx>(
     let mut integer_argument_index = 0usize;
     let mut float_argument_index = 0usize;
     let mut arguments = Vec::with_capacity(model.inputs.len());
-    for input_index in 0..model.inputs.len() {
-        if model_parameter_is_double(model, input_index) {
-            arguments.push(xmm_registers[float_argument_index].extract(63, 0));
-            float_argument_index += 1;
-        } else {
-            integer_argument_indices.push(input_index);
-            arguments.push(ARGUMENT_REGISTERS.get(integer_argument_index).map_or_else(
-                || BV::fresh_const(context, "machine_initial_stack_argument", 64),
-                |register_index| registers[*register_index].extract(63, 0),
-            ));
-            integer_argument_index += 1;
+    let mut input_index = 0usize;
+    for (parameter_shape, leaves) in model.param_shapes.iter().zip(&model.param_leaf_doubles) {
+        if parameter_shape.is_some()
+            && integer_argument_index.saturating_add(leaves.len()) > ARGUMENT_REGISTERS.len()
+        {
+            return Err(FunctionOutcome::OutsideProfile("argument_count"));
+        }
+        for is_double in leaves {
+            if *is_double {
+                let Some(register) = xmm_registers.get(float_argument_index) else {
+                    return Err(FunctionOutcome::OutsideProfile("argument_count"));
+                };
+                arguments.push(register.extract(63, 0));
+                float_argument_index += 1;
+            } else {
+                integer_argument_indices.push(input_index);
+                arguments.push(ARGUMENT_REGISTERS.get(integer_argument_index).map_or_else(
+                    || BV::fresh_const(context, "machine_initial_stack_argument", 64),
+                    |register_index| registers[*register_index].extract(63, 0),
+                ));
+                integer_argument_index += 1;
+            }
+            input_index += 1;
         }
     }
     let mut pending = vec![MachineState {
@@ -1434,17 +1486,27 @@ fn finish_path<'ctx>(
             return Err(FunctionOutcome::OutsideProfile("call_order"));
         }
     }
-    let return_value = if model_result_is_double(model) {
-        state.xmm_registers[0].extract(63, 0)
+    let return_values = if let Some(leaf_count) = model.result_shape {
+        vec![
+            state.registers[0].extract(63, 0),
+            state.registers[2].extract(63, 0),
+        ]
+        .into_iter()
+        .take(leaf_count)
+        .collect()
     } else {
-        state.registers[0].extract(63, 0)
+        vec![if model_result_is_double(model) {
+            state.xmm_registers[0].extract(63, 0)
+        } else {
+            state.registers[0].extract(63, 0)
+        }]
     };
     let callee_saved_registers = CALLEE_SAVED_REGISTERS
         .iter()
         .map(|register_index| state.registers[*register_index].extract(63, 0))
         .collect();
     Ok(LiftedPath {
-        return_value,
+        return_values,
         callee_saved_registers,
         final_rsp_offset: state.rsp_offset,
         path_conditions: state.path_conditions,
@@ -1985,6 +2047,9 @@ fn lift_call<'ctx>(
     };
     if target.name != crate::translation_validation::native_function_name(&call_site.callee) {
         return Err(FunctionOutcome::OutsideProfile("call_order"));
+    }
+    if call_site.has_composite_arguments_or_result {
+        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
     }
     if call_site.args.len() > MAX_ARGUMENT_COUNT {
         return Err(FunctionOutcome::OutsideProfile("argument_count"));
@@ -3245,6 +3310,206 @@ entry:
     }
 
     #[test]
+    fn integer_struct_pairs_match_real_llvm_codegen_and_preserve_leaf_order() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "struct P { x: i64, y: i64 }\n\
+            atom sum(p: P) -> i64 requires: true; ensures: true; body: { p.x + p.y };\n\
+            atom mk(a: i64, b: i64) -> P requires: true; ensures: true; body: { P { x: a, y: b } };\n\
+            atom mk_swapped(a: i64, b: i64) -> P requires: true; ensures: true; body: { P { x: b, y: a } };";
+        let sum_model = source_model_named_with_admission(
+            source,
+            "sum",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let mk_model = source_model_named_with_admission(
+            source,
+            "mk",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let swapped_model = source_model_named_with_admission(
+            source,
+            "mk_swapped",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(sum_model.has_composite_or_enum_features);
+        assert!(!sum_model.has_composite_features_beyond_struct_values);
+        assert_eq!(sum_model.param_shapes, vec![Some(2)]);
+        assert_eq!(mk_model.result_shape, Some(2));
+        assert!(supports_signature(&sum_model));
+        assert!(supports_signature(&mk_model));
+
+        let sum_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @sum({ i64, i64 } %pair) {
+entry:
+  %x = extractvalue { i64, i64 } %pair, 0
+  %y = extractvalue { i64, i64 } %pair, 1
+  %result = add i64 %x, %y
+  ret i64 %result
+}
+"#;
+        let (sum_address, sum_bytes, sum_targets) = compiled_function_with_targets(sum_ir, "sum");
+        let sum_disassembly = disassemble(&sum_bytes, sum_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("sum struct disassembly:\n{sum_disassembly}");
+        assert_eq!(
+            check_function(&sum_bytes, sum_address, &sum_model, &sum_targets, &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let mk_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i64 } @mk(i64 %a, i64 %b) {
+entry:
+  %first = insertvalue { i64, i64 } undef, i64 %a, 0
+  %result = insertvalue { i64, i64 } %first, i64 %b, 1
+  ret { i64, i64 } %result
+}
+"#;
+        let (mk_address, mk_bytes, mk_targets) = compiled_function_with_targets(mk_ir, "mk");
+        let mk_disassembly = disassemble(&mk_bytes, mk_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("mk struct disassembly:\n{mk_disassembly}");
+        assert_eq!(
+            check_function(&mk_bytes, mk_address, &mk_model, &mk_targets, &context),
+            FunctionOutcome::Equivalent
+        );
+        assert_eq!(
+            check_function(&mk_bytes, mk_address, &swapped_model, &mk_targets, &context),
+            FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn struct_signature_limits_and_composite_calls_fail_closed() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let one_leaf_source = "struct One { x: i64 }\n\
+            atom identity(value: One) -> One requires: true; ensures: true; body: { value };";
+        let one_leaf = source_model_named_with_admission(
+            one_leaf_source,
+            "identity",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert_eq!(one_leaf.param_shapes, vec![Some(1)]);
+        assert_eq!(one_leaf.result_shape, Some(1));
+        assert!(supports_signature(&one_leaf));
+
+        let three_leaf_source = "struct T { x: i64, y: i64, z: i64 }\n\
+            atom three(p: T) -> i64 requires: true; ensures: true; body: { p.x + p.y + p.z };";
+        let three_leaf = source_model_named_with_admission(
+            three_leaf_source,
+            "three",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert_eq!(
+            check_function(&[0xc3], 0, &three_leaf, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_signature")
+        );
+
+        let f64_struct_source = "struct F { value: f64 }\n\
+            atom project(value: F) -> f64 requires: true; ensures: true; body: { value.value };";
+        let f64_struct = source_model_named_with_admission(
+            f64_struct_source,
+            "project",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert_eq!(
+            check_function(&[0xc3], 0, &f64_struct, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_signature")
+        );
+
+        let enum_source = "enum Shade { Red, Blue }\n\
+            atom color(value: Shade) -> i64 requires: true; ensures: true; body: { 0 };";
+        let enum_model = source_model_named_with_admission(
+            enum_source,
+            "color",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(enum_model.has_enum_signature);
+        assert_eq!(
+            check_function(&[0xc3], 0, &enum_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_signature")
+        );
+
+        let after_five_source = "struct P { x: i64, y: i64 }\n\
+            atom after_five(a: i64, b: i64, c: i64, d: i64, e: i64, p: P) -> i64 \
+            requires: true; ensures: true; body: { p.x + p.y };";
+        let after_five = source_model_named_with_admission(
+            after_five_source,
+            "after_five",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert_eq!(
+            check_function(&[0xc3], 0, &after_five, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("argument_count")
+        );
+
+        let call_source = "struct P { x: i64, y: i64 }\n\
+            atom sum(p: P) -> i64 requires: true; ensures: true; body: { p.x + p.y };\n\
+            atom mk(a: i64, b: i64) -> P requires: true; ensures: true; body: { P { x: a, y: b } };\n\
+            atom caller() -> i64 requires: true; ensures: true; body: { sum(mk(1, 2)) };\n\
+            atom caller_literal() -> i64 requires: true; ensures: true; body: { sum(P { x: 1, y: 2 }) };";
+        let caller = source_model_named_with_admission(
+            call_source,
+            "caller",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(caller
+            .call_sites
+            .iter()
+            .any(|call_site| call_site.has_composite_arguments_or_result));
+        let mut targets = helper_call_targets(&[1]);
+        targets.get_mut(&1).unwrap().name = "mk".to_owned();
+        assert_eq!(
+            check_function(&[0xe8, 0, 0, 0, 0, 0xc3], 0, &caller, &targets, &context),
+            FunctionOutcome::OutsideProfile("call_arguments")
+        );
+
+        let literal_caller = source_model_named_with_admission(
+            call_source,
+            "caller_literal",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(literal_caller.call_sites.iter().any(|call_site| {
+            call_site.callee == "sum" && call_site.has_composite_arguments_or_result
+        }));
+        let mut literal_targets = helper_call_targets(&[1]);
+        literal_targets.get_mut(&1).unwrap().name = "sum".to_owned();
+        assert_eq!(
+            check_function(
+                &[0xe8, 0, 0, 0, 0, 0xc3],
+                0,
+                &literal_caller,
+                &literal_targets,
+                &context
+            ),
+            FunctionOutcome::OutsideProfile("call_arguments")
+        );
+    }
+
+    #[test]
     fn compiled_leaf_helper_matches_its_pure_i64_model() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
@@ -3315,6 +3580,7 @@ entry:
 
         let mut composite_model = source_model(source, &context);
         composite_model.has_composite_or_enum_features = true;
+        composite_model.has_composite_features_beyond_struct_values = true;
         assert_eq!(
             check_function(&bytes, 0, &composite_model, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("unsupported_signature")
@@ -3510,6 +3776,7 @@ entry:
             callee: "helper".to_owned(),
             args: Vec::new(),
             arg_leaf_doubles: Vec::new(),
+            has_composite_arguments_or_result: false,
             result: float_result,
             result_is_double: true,
             guard: Bool::from_bool(&context, true),
@@ -3703,6 +3970,7 @@ entry:
                 .map(|index| BV::fresh_const(&context, &format!("f64_arg_{index}"), 64))
                 .collect(),
             arg_leaf_doubles: vec![true; 9],
+            has_composite_arguments_or_result: false,
             result,
             result_is_double: true,
             guard: Bool::from_bool(&context, true),
@@ -4205,7 +4473,7 @@ entry:
             "atom helper() -> i64 requires: true; ensures: true; body: { 7 };",
             &context,
         );
-        model.composite_signature = true;
+        model.has_enum_signature = true;
         assert_eq!(
             check_function(&[0x90, 0xeb, 0xfd], 0, &model, &BTreeMap::new(), &context,),
             FunctionOutcome::OutsideProfile("cyclic_control_flow")
@@ -5941,8 +6209,7 @@ entry:
                 product.extract(63, 0)
             };
             assert_eq!(
-                lifted.paths[0]
-                    .return_value
+                lifted.paths[0].return_values[0]
                     ._eq(&expected)
                     .simplify()
                     .as_bool(),

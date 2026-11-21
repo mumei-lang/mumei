@@ -3164,11 +3164,12 @@ models under the profile pinned by the record, matching the LLVM recheck;
 single-file rechecks keep `RefinedAdmission::Reject`. Refined scalar parameter
 predicates are carried in the input domain, whose refined-signature label
 matches LLVM's exact module label and retains the loop-bound suffix. Unsupported
-memory, composite/enum, non-i64 scalar and non-scalar f64 features remain
-outside the machine-TV profile.
+memory, enums and composite operations beyond plain struct values, non-i64
+scalar features, and non-scalar f64 features remain outside the machine-TV
+profile.
 Agent consumers must adopt both check names and the function field.
 
-The next C10 Option B machine-TV slice proves register-only scalar f64
+The C10 Option B machine-TV profile proves register-only scalar f64
 functions with a bounded SSE2 profile, NaN-aware result comparison, `xmm0`–`xmm7`
 entry registers for f64 parameters and the low 64 bits of `xmm0` for f64
 results. Direct calls classify f64 arguments into `xmm0`–`xmm7` and integers
@@ -3187,6 +3188,18 @@ not performed. Composite f64 remains outside the profile. Register-only
 `OF/SF/AF = 0`); their branch, `setcc`, and `cmovcc` conditions are supported.
 Memory operands and parity conditions after integer flag producers remain
 outside the profile. Agent consumers must adopt these names.
+
+The same bounded profile admits small struct parameters and results only when
+each aggregate has one or two flattened 64-bit integer leaves and every leaf
+in the struct-bearing signature is integer. Leaves are passed in consecutive
+integer argument registers and results use `rax`/`rdx`. A pair that cannot fit
+wholly in the remaining argument registers, larger or non-integer aggregates,
+enum signatures, and composite call arguments/results fail closed. Equivalent
+aggregate functions perform `machine_code_composite_register_aggregate_tv`;
+their descriptor appends
+`_two_eightbyte_integer_aggregates_in_consecutive_gprs_result_rax_rdx` to the
+active register-convention label. This remains a bounded assumed-convention
+claim, not general ABI validation.
 
 Sibling descriptors now name the exit-status observation only as
 `os_exit_status_observation` (formerly bare `os_exit_status` in
