@@ -321,6 +321,20 @@ fn enum_slot_direct_read_extracts_the_payload_not_the_tag() {
 }
 
 #[test]
+fn generic_nested_struct_fields_keep_unsigned_ops() {
+    let ir = emit_atom_ir(
+        &fixture("test_enum_slot_deep_write.mm"),
+        "generic_holder_unsigned_ops",
+        "generic-u64",
+    );
+    assert!(
+        ir.contains("icmp ugt"),
+        "expected unsigned comparison:\n{ir}"
+    );
+    assert!(ir.contains("udiv"), "expected unsigned division:\n{ir}");
+}
+
+#[test]
 fn enum_slot_deep_write_rejects_a_union_widened_slot() {
     let dir = std::env::temp_dir().join(format!(
         "mumei_enum_slot_deep_widened_{}",

@@ -34,7 +34,7 @@ fn emit_deep_aggregate_field_write<'ctx>(
     array_ptrs: &mut HashMap<String, ArrayPtr<'ctx>>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<Option<BasicValueEnum<'ctx>>> {
-    let resolved_root_type = resolve_named_type(module_env, root_type);
+    let resolved_root_type = module_env.resolve_base_type(root_type);
     let root_is_struct = module_env.get_struct(&resolved_root_type).is_some();
     if !root_is_struct && module_env.get_enum(&resolved_root_type).is_none() {
         return Ok(None);
@@ -52,7 +52,7 @@ fn emit_deep_aggregate_field_write<'ctx>(
             return Ok(None);
         };
         parent_types.push(parent_type);
-        parent_type = resolve_named_type(module_env, &declared_type);
+        parent_type = module_env.resolve_base_type(&declared_type);
         index_path.push(index);
         declared_types.push(declared_type);
         enum_payload_slots.push(enum_payload_slot);
@@ -131,7 +131,7 @@ fn emit_deep_aggregate_field_write<'ctx>(
     let written = compile_hir_expr(
         context, builder, module, function, value, variables, var_types, array_ptrs, module_env,
     )?;
-    let leaf_type = resolve_named_type(module_env, &declared_types[leaf_level]);
+    let leaf_type = module_env.resolve_base_type(&declared_types[leaf_level]);
     let written = if leaf_type == "i128" || leaf_type == "u128" {
         wide_int_cast(builder, written, expected_type, leaf_type == "i128")?
     } else {
@@ -174,7 +174,7 @@ pub(crate) fn deep_aggregate_field_slot(
     field: &str,
     var: &str,
 ) -> MumeiResult<Option<(u32, String, bool)>> {
-    let parent_type = resolve_named_type(module_env, parent_type);
+    let parent_type = module_env.resolve_base_type(parent_type);
     if let Some(sdef) = module_env.get_struct(&parent_type) {
         let Some((index, declared_type)) = sdef
             .fields
@@ -226,8 +226,8 @@ pub(crate) fn deep_slot_type_error(
     enum_payload_slot: bool,
 ) -> MumeiError {
     if enum_payload_slot {
-        let parent_type = resolve_named_type(module_env, parent_type);
-        let declared_type = resolve_named_type(module_env, declared_type);
+        let parent_type = module_env.resolve_base_type(parent_type);
+        let declared_type = module_env.resolve_base_type(declared_type);
         let slot = index.saturating_sub(1);
         let declared_kind = if module_env.get_struct(&declared_type).is_some() {
             "struct"
@@ -777,7 +777,7 @@ pub(crate) fn compile_hir_stmt<'a>(
                                                 "enum payload '{payload_field}' has no declared type"
                                             ))
                                         })?;
-                                    let payload_type = resolve_named_type(module_env, field_type);
+                                    let payload_type = module_env.resolve_base_type(field_type);
                                     let payload_sdef = module_env
                                         .get_struct(&payload_type)
                                         .ok_or_else(|| {
@@ -818,7 +818,7 @@ pub(crate) fn compile_hir_stmt<'a>(
                                     let mut index_path = Vec::with_capacity(segments.len() - 1);
                                     for segment in &segments[1..] {
                                         let resolved_type =
-                                            resolve_named_type(module_env, level_type);
+                                            module_env.resolve_base_type(level_type);
                                         let sdef =
                                             module_env.get_struct(&resolved_type).ok_or_else(|| {
                                                 MumeiError::codegen(format!(
@@ -844,7 +844,7 @@ pub(crate) fn compile_hir_stmt<'a>(
                                     )?;
                                     let expected_ty =
                                         resolve_param_type(context, Some(level_type), module_env);
-                                    let leaf_type = resolve_named_type(module_env, level_type);
+                                    let leaf_type = module_env.resolve_base_type(level_type);
                                     let val = if leaf_type == "i128" || leaf_type == "u128" {
                                         wide_int_cast(
                                             builder,

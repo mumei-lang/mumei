@@ -1482,7 +1482,7 @@ pub(crate) fn infer_struct_type_name(
                 }
             }
             let inner_ty = infer_struct_type_name(inner, var_types, module_env)?;
-            let parent_ty = resolve_named_type(module_env, &inner_ty);
+            let parent_ty = module_env.resolve_base_type(&inner_ty);
             let declared_type = if let Some(sdef) = module_env.get_struct(&parent_ty) {
                 sdef.fields
                     .iter()
@@ -1499,7 +1499,7 @@ pub(crate) fn infer_struct_type_name(
             } else {
                 return None;
             };
-            let base = resolve_named_type(module_env, &declared_type);
+            let base = module_env.resolve_base_type(&declared_type);
             if module_env.get_struct(&base).is_some() || module_env.get_enum(&base).is_some() {
                 Some(base)
             } else {
@@ -3621,7 +3621,7 @@ pub(crate) fn compile_hir_expr<'a>(
                     )));
                 }
                 let receiver_type = infer_struct_type_name(inner_expr, var_types, module_env)
-                    .map(|name| resolve_named_type(module_env, &name));
+                    .map(|name| module_env.resolve_base_type(&name));
                 if let Some(enum_type) = receiver_type
                     .as_deref()
                     .filter(|name| module_env.get_enum(name).is_some())
@@ -3729,7 +3729,7 @@ pub(crate) fn compile_hir_expr<'a>(
                     array_ptrs, module_env,
                 )?;
                 let receiver_type = infer_struct_type_name(inner_expr, var_types, module_env)
-                    .map(|name| resolve_named_type(module_env, &name));
+                    .map(|name| module_env.resolve_base_type(&name));
                 if let Some(enum_type) = receiver_type
                     .as_deref()
                     .filter(|name| module_env.get_enum(name).is_some())

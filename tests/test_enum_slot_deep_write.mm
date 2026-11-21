@@ -14,6 +14,14 @@ struct B {
     invariant: self.k >= 0
 }
 
+struct Cell<T> {
+    value: T
+}
+
+struct Holder {
+    cell: Cell<u64>
+}
+
 enum Chan {
     Tcp(port: i64, keep: i64),
     Udp
@@ -156,3 +164,11 @@ requires: match b.e {
 };
 ensures: true;
 body: b.e.port = v;
+
+atom generic_holder_unsigned_ops(h: Holder) -> u64
+requires: true;
+ensures: true;
+body: {
+    h.cell.value > 0;
+    h.cell.value / 2
+}
