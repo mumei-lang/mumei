@@ -3990,15 +3990,18 @@ Sibling descriptors now name the exit-status observation only as
 `os_exit_status_observation` (formerly bare `os_exit_status` in
 non-exit-status `checks_not_performed` lists).
 
-### Wave 5 object symbol-surface correspondence (C10 Option B, first slice)
+### Wave 5 object symbol-surface and direct call-edge correspondence (C10 Option B, second slice)
 
 Core's `mumei native-bundle recheck-object` runs artifact reproduction and
 checks that the reproduced object's non-local defined text symbols match the
 pinned LLVM IR's externally visible function definitions, with object
-undefined symbols contained in the IR declarations. This is the first bounded
-Option B step: symbol-surface correspondence only, with no instruction
-selection, register allocation, relocation, linker, ABI or runtime claim. Full
-object-code translation validation remains the deep endpoint.
+undefined symbols contained in the IR declarations. It now also compares each
+externally visible function's direct IR callees with call-relocation targets
+inside its object byte range. Local/private function definitions, indirect
+calls, or ambiguous object relocations are inconclusive. This second bounded
+Option B step makes no instruction-selection, register-allocation,
+relocation-arithmetic, linker, ABI or runtime claim. Full object-code
+translation validation remains the deep endpoint.
 
 ### Wave 5 declared producer-identity gate (C02 consumer)
 

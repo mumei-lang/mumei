@@ -31,7 +31,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei native-bundle build` | 1 | Freshly verify and build a pure-i64 main on Linux/x86_64 with fixed settings |
 | `mumei native-bundle check` | 1 | Check snapshot identities against an externally supplied build ID; does not execute or prove the artifact |
 | `mumei native-bundle recheck-artifact` | 1 | Recheck that the toolchain reproduces the pinned object and executable; does not execute or check runtime/ABI semantics |
-| `mumei native-bundle recheck-object` | 2 | Recheck the reproduced object's function-symbol surface against the pinned LLVM IR; no instruction-level, ABI, relocation or runtime semantics |
+| `mumei native-bundle recheck-object` | 2 | Recheck the reproduced object's function-symbol surface and direct call edges against the pinned LLVM IR; no instruction-selection, register-allocation, relocation-arithmetic, linker, ABI or runtime semantics |
 | `mumei native-bundle recheck-exit-status` | 1 | Execute the reproduced executable and compare its OS exit status with the record pin; no runtime/ABI semantics |
 | `mumei native-bundle accept-exit-status` | 2 | Accept the pinned artifact after the exit-status recheck; emits an anonymous acceptance descriptor, not reusable Evidence |
 | `mumei native-bundle recheck-stdout` | 1 | Execute the reproduced executable and compare its captured stdout digest with the record pin; no runtime/ABI semantics |
@@ -540,7 +540,7 @@ Usage: mumei native-bundle recheck-artifact --expected-build-id <EXPECTED_BUILD_
 
 ## `mumei native-bundle recheck-object`
 
-Recheck the reproduced object's function-symbol surface against the pinned LLVM IR; no instruction-level, ABI, relocation or runtime semantics
+Recheck the reproduced object's function-symbol surface and direct call edges against the pinned LLVM IR; no instruction-selection, register-allocation, relocation-arithmetic, linker, ABI or runtime semantics
 
 Usage:
 

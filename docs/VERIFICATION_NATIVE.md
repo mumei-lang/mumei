@@ -1282,11 +1282,11 @@ Checking the wrapper shape makes **low-32-bit truncation explicit**, not an
 i64-to-OS-exit-code equivalence or an ABI/runtime guarantee. A user body differing
 only above bit 31 is still rejected even if the wrapper's low 32 bits coincide.
 Repinned object/executable bytes may still pass `recheck-llvm` when source and
-LLVM checks hold; the separate `recheck-object` checks only the public function
-symbol surface against the IR. There is **no instruction-selection, register
-allocation, relocation, linker, system-library, OS, runtime or final-executable
-semantic proof**, nor producer authenticity or attestation that the object was
-emitted from these IR bytes.
+LLVM checks hold; the separate `recheck-object` checks the public function
+symbol surface and direct call edges against the IR. There is **no
+instruction-selection, register allocation, relocation-arithmetic, linker,
+system-library, OS, runtime or final-executable semantic proof**, nor producer
+authenticity or attestation that the object was emitted from these IR bytes.
 The consumer binary, Core source model, Z3 and LLVM parser/verifier/interpreter
 remain trusted components. Packaging is not a hermetic deployment.
 
@@ -1723,20 +1723,23 @@ equivalent bytes (a different LLVM version, for example) fails closed rather
 than being normalized into agreement. The OS exit-status check is the
 separate opt-in stage below.
 
-### Pinned object symbol-surface correspondence
+### Pinned object symbol-surface and direct call-edge correspondence
 
 `mumei native-bundle recheck-object` runs the full artifact recheck and then
-compares the reproduced `program.o` symbol surface with the pinned `program.ll`.
-The externally visible IR function definitions must equal the object's
-non-local defined text symbols, and each non-empty undefined object symbol must
-be declared in the IR. A mismatch exits 1; a failed parse is inconclusive and
-exits 3. The JSON descriptor names artifact reproduction and
-`object_symbol_correspondence`.
+compares the reproduced `program.o` symbol surface and call edges with the
+pinned `program.ll`. The externally visible IR function definitions must equal
+the object's non-local defined text symbols, and each non-empty undefined
+object symbol must be declared in the IR. For each externally visible function,
+the direct callees in the IR must equal the call-relocation targets inside that
+function's object byte range.
 
-This is the first bounded C10 Option B step: symbol-surface correspondence only.
-It makes no instruction-selection, register-allocation, relocation, linker,
-ABI or runtime claim. Full object-code translation validation remains the
-deeper Option B endpoint.
+Local/private function definitions, indirect calls, or object call relocations
+that cannot be assigned unambiguously to a visible function make call-edge
+comparison inconclusive (exit 3). A symbol or call-edge mismatch exits 1.
+This is the second bounded C10 Option B step: direct call-edge correspondence
+only. It makes no instruction-selection, register-allocation,
+relocation-arithmetic, linker, ABI or runtime claim. Full object-code
+translation validation remains the deeper Option B endpoint.
 
 ### Pinned executable exit-status recheck
 
