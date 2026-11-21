@@ -3,6 +3,7 @@
 pub mod binary;
 pub mod codegen;
 pub mod jit;
+pub mod machine_tv;
 pub mod translation_validation;
 
 /// Re-export inkwell's Context so downstream crates (e.g. the CLI binary)

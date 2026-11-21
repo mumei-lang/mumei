@@ -828,11 +828,19 @@ pub fn validate_native_module(
 /// emitted names, so their map is empty.
 fn native_call_renames(native: bool) -> BTreeMap<String, String> {
     if native {
-        [("__mumei_user_main".to_owned(), "main".to_owned())]
+        [(native_function_name("main").to_owned(), "main".to_owned())]
             .into_iter()
             .collect()
     } else {
         BTreeMap::new()
+    }
+}
+
+pub fn native_function_name(atom_name: &str) -> &str {
+    if atom_name == "main" {
+        "__mumei_user_main"
+    } else {
+        atom_name
     }
 }
 

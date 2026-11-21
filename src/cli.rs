@@ -706,6 +706,17 @@ pub(crate) enum NativeBundleCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Compare leaf straight-line machine code with pure-i64 source models under an assumed register convention; no ABI or runtime claim
+    RecheckMachineTv {
+        bundle: String,
+        source: String,
+        /// SHA-256 of native-bundle.json obtained through a separately trusted channel
+        #[arg(long)]
+        expected_build_id: String,
+        /// Emit a mumei.machine-code-tv/v1 descriptor on success, not reusable Evidence or a certificate
+        #[arg(long)]
+        json: bool,
+    },
     /// Execute the reproduced executable and compare its OS exit status with the record pin; no runtime/ABI semantics
     RecheckExitStatus {
         bundle: String,

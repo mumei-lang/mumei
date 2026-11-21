@@ -1751,6 +1751,28 @@ semantics are not checked; this is not general linker-semantics or ABI
 validation. Full object-code translation validation remains the deeper Option B
 endpoint.
 
+### First per-instruction C10 Option B TV profile
+
+`mumei native-bundle recheck-machine-tv` first runs the complete
+`recheck-object` pipeline. It then disassembles the reproduced object's
+functions and uses Z3 to compare only leaf, straight-line functions in the
+fixed machine-instruction profile with their `pure-i64` source-atom models.
+The assumed register convention places integer arguments in `rdi`, `rsi`,
+`rdx`, `rcx`, `r8`, and `r9`, with the result in `rax`; this convention is
+declared and assumed, not verified. The command makes no ABI claim.
+
+The `input_domain` is
+`signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires`.
+The comparison asserts the source model's signature-bounded parameter domains
+and division/shift definedness, but does not restrict inputs by `requires`.
+Outside-profile reasons include `calls`, `argument_count`,
+`not_a_source_atom`, `unsupported_instruction` and `unsupported_signature`.
+Non-leaf functions, unsupported signatures, functions outside the instruction
+profile, and functions without a matching source atom are reported outside the
+profile. The C `main` wrapper, CRT/startup code, dynamic loader, libc and
+runtime are not covered. This is the first bounded per-instruction Option B
+profile, not full object-code translation validation or runtime assurance.
+
 ### Pinned executable exit-status recheck
 
 `mumei native-bundle recheck-exit-status` is the execution slice of the
