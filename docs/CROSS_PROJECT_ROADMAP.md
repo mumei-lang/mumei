@@ -5361,7 +5361,9 @@ fixed point.
 queue model one level deep: the outer queue is the tracked
 resource and channels sent through it promote to external
 queues (`chanChanElemOK` gates scalar-element inner channels).
-Deeper nesting and `make(chan chan T)` locals stay closed.
+At this stage, deeper nesting and local `make(chan chan T)` queues
+stayed closed; #1036 and #1057 below later extend local queues and
+scalar-leaf nesting.
 
 ### Go deep-analysis: chan chan follow-on forms (mumei-agent #960)
 
@@ -6629,9 +6631,11 @@ no CallTransfer, so a fully local program stays
 `none_in_supported_fragment`, while external members (`GC`, `GS[i]`)
 keep the group caller-visible. Conditional receive-reassigns keep the
 old alias joined, and parallel assigns resolve from the pre-state.
-Other local-queue escapes (`return`, store, closure capture, `&cc`,
-reseat onto `G()`/a param), `[]chan chan T`, `chan chan chan T` or
-deeper nesting, and non-scalar inner elements stay closed.
+Later slices below add call promotion, external sources, matching
+returns and package-variable stores, containers, and deeper
+scalar-leaf queues. Container-value escapes, closure capture,
+address-taking, struct-field stores, and non-scalar leaves remain
+closed.
 
 ### Direct local chan-chan call arguments (mumei-agent #1040)
 
@@ -6684,9 +6688,9 @@ readable contents of its share group, and the group becomes external at the
 return point. Storing a local queue in a package or imported `chan chan T`
 variable promotes its group and broadcasts its dependencies to later
 external reads, including channels that join the group after the store.
-Stores into struct fields, slices, maps or composite literals, closure
-capture, address-taking, deeper nesting and non-scalar inner elements
-remain closed; containers of queues were admitted by #1052 below.
+Stores into struct fields, closure capture, address-taking and
+non-scalar inner elements remain closed; containers of queues were
+admitted by #1052 below, and deeper scalar-leaf queues by #1057.
 
 ### Containers of chan-chan queues (mumei-agent #1052)
 
@@ -6709,8 +6713,31 @@ externality, and a package-variable target records a #1049 package store.
 containers behave per element as external queues with index dependencies
 unioned, as for `GS[i]` (#1028). Returning, storing, passing, capturing or
 taking the address of the container itself, struct fields, `[N]chan T`
-array parameters, `[][]chan chan T`, `[]chan chan chan T` and deeper, and
-non-scalar inner elements remain closed.
+array parameters, `[][]chan chan T`, and non-scalar inner elements
+remain closed.
+
+### Deeper scalar-leaf chan-chan queues (mumei-agent #1057)
+
+[mumei-agent#1057](https://github.com/mumei-lang/mumei-agent/pull/1057)
+extends recursive channel queues to `chan chan chan T` and deeper when
+the leaf is an integer or boolean. A local queue at any depth is one
+conflated share group containing every channel reachable at every level;
+channels sent into or received out of it join that group. External nested
+queues retain imported-transfer semantics, including selector
+dependencies and parameter origins.
+
+Supported operations include nested receives (`<-(<-(<-q))`), sends to
+received-channel targets, `close`/`len`/`cap`/`range`, select and comma-ok
+receives (including `var q2, ok = <-p`), aliases, direct call/`go`/`defer`
+promotion, matching returns and package-variable queue stores, and #1052
+containers of nested queues, including `[]chan chan chan T`,
+`[N]chan chan chan T` and `map[K]chan chan chan T`. Selector and index
+dependencies remain attached when operations go through container
+members.
+
+Non-scalar or struct leaves, returning/storing/passing the container
+itself, closure capture, address-taking, struct fields, and nested
+containers such as `[][]chan chan T` remain closed.
 
 ## No-`.mm` front door and V1 order
 
