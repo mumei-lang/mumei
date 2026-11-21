@@ -6194,6 +6194,17 @@ host declares no memory bound. Core does not enforce it. No grade is promoted.
 C11 stays partial; Evidence acceptance of adapter claims, C12's demand
 gate and grade promotion are unchanged.
 
+### C11 Core evidence-check acceptance check (mumei)
+
+`mumei evidence check-attempt-acceptance <input> | --stdin [--json]`
+validates the closed representation and consistency of a scheduled
+`mumei.evidence-check-acceptance/v1` record. `accepted` is the producer's
+binding of a declared check to its current candidate, never Core Evidence
+acceptance. `candidate_match` is not rechecked because Core has no
+attempt-sequence snapshot. Core does not rerun the declared check.
+
+C11 stays partial; C12's demand gate and grade promotion are unchanged.
+
 ### Claim Book promotable gate (mumei #1172)
 
 [mumei#1172](https://github.com/mumei-lang/mumei/pull/1172) turns the

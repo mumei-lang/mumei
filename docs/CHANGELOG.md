@@ -1,3 +1,11 @@
+### Unreleased: Core evidence-check acceptance representation check
+
+- Added `mumei evidence check-attempt-acceptance <input> | --stdin [--json]`
+  to validate the closed representation and producer consistency of
+  `mumei.evidence-check-acceptance/v1`. The recorded `accepted` field is not
+  Core Evidence acceptance; candidate matching is not rechecked and no Core
+  check or grade promotion is performed.
+
 ### Unreleased: Core adapter-manifest representation check
 
 - Added `mumei evidence check-adapter <input> | --stdin [--json]` to validate

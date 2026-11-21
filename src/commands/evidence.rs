@@ -2,6 +2,7 @@ use crate::cli::EvidenceCommand;
 use mumei_core::adapter_manifest;
 use mumei_core::attempt_schedule;
 use mumei_core::evidence_acceptance::{self, Verdict};
+use mumei_core::evidence_check_acceptance;
 use mumei_core::producer_signature::{self, PRODUCER_SIGNATURE_SCHEMA};
 use mumei_core::source_evidence::{self, AcceptOutcome, Options, Outcome, RecheckOutcome};
 use mumei_core::verification_evidence::{self, MAX_INPUT_BYTES, SCHEMA_VERSION};
@@ -123,6 +124,11 @@ pub(crate) fn run(command: EvidenceCommand) {
         EvidenceCommand::CheckAdapter { input, stdin, json } => (
             check_adapter(input.as_deref().map(Path::new), stdin, json, &mut output).map(|()| 0),
             "Adapter-manifest representation check failed",
+        ),
+        EvidenceCommand::CheckAttemptAcceptance { input, stdin, json } => (
+            check_attempt_acceptance(input.as_deref().map(Path::new), stdin, json, &mut output)
+                .map(|()| 0),
+            "Evidence-check acceptance representation check failed",
         ),
         EvidenceCommand::CheckList {
             input,
@@ -1134,6 +1140,63 @@ fn check_adapter(
     output
         .write_all(&diagnostic)
         .map_err(|_| "cannot write representation diagnostic")
+}
+
+fn check_attempt_acceptance(
+    input: Option<&Path>,
+    stdin: bool,
+    json: bool,
+    output: &mut impl Write,
+) -> Result<(), &'static str> {
+    let bytes = match (input, stdin) {
+        (Some(path), false) => {
+            super::input::read_regular(path, evidence_check_acceptance::MAX_INPUT_BYTES as u64)?
+        }
+        (None, true) => {
+            super::input::read_stdin(evidence_check_acceptance::MAX_INPUT_BYTES as u64)?
+        }
+        _ => return Err("choose exactly one evidence-check acceptance input"),
+    };
+    let acceptance = evidence_check_acceptance::decode_acceptance(&bytes)
+        .map_err(|_| "invalid evidence-check acceptance representation")?;
+    let diagnostic = if json {
+        let body = serde_json::json!({
+            "schema_version": "mumei.evidence-check-acceptance-check/v1",
+            "acceptance_schema_version": "mumei.evidence-check-acceptance/v1",
+            "representation": "valid",
+            "acceptance": "not_evaluated",
+            "declared_outcome": acceptance.outcome,
+            "requirement_fingerprint": if acceptance.requirement_fingerprint.is_some() {
+                "declared"
+            } else {
+                "absent"
+            },
+            "declared_field_meaning": {
+                "outcome": "declared_core_check_outcome",
+                "candidate_match": "producer_computed_not_rechecked",
+                "accepted": "producer_representation_binding_not_core_acceptance",
+            },
+            "checks_performed": ["representation_gate", "acceptance_consistency"],
+            "checks_not_performed": [
+                "candidate_match_recheck",
+                "core_check_rerun",
+                "evidence_acceptance",
+                "claim_truth",
+                "producer_authenticity",
+                "freshness",
+                "grade_promotion",
+            ],
+        });
+        let mut bytes = serde_json::to_vec_pretty(&body)
+            .map_err(|_| "cannot encode evidence-check acceptance diagnostic")?;
+        bytes.push(b'\n');
+        bytes
+    } else {
+        b"Evidence-check acceptance v1 representation valid; acceptance not evaluated.\n".to_vec()
+    };
+    output
+        .write_all(&diagnostic)
+        .map_err(|_| "cannot write evidence-check acceptance diagnostic")
 }
 
 fn check_list(
