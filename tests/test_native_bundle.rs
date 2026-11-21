@@ -42,6 +42,9 @@ atom main() -> i64 requires: true; ensures: true; body: { chain_four(0) };";
 const LEA_SUM: &str =
     "atom lea_sum(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { x + y };\n\
 atom main() -> i64 requires: true; ensures: true; body: { lea_sum(1, 2) };";
+const WHILE_PROBE: &str =
+    "atom loop_count(n: i64) -> i64 requires: n >= 0 && n <= 10; ensures: true; body: { let i = 0; while i < n invariant: i >= 0 && i <= n decreases: n - i { i = i + 1; }; i };\n\
+atom main() -> i64 requires: true; ensures: true; body: { loop_count(3) };";
 
 fn cli(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_mumei"))
@@ -4718,11 +4721,54 @@ fn repin_module(bundle: &Path) -> String {
 fn artifact_recheck_reproduces_pinned_object_and_executable() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build(root.path());
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+    assert!(record["link_build"].get("runtime_source_sha256").is_none());
     let output = recheck_artifact(&source, &bundle, &id);
     assert_success(&output);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("toolchain_identity_only"));
     assert!(stdout.contains("no_execution_or_runtime_semantics"));
+}
+
+#[test]
+fn loop_bundle_links_and_pins_runtime_but_keeps_runtime_out_of_claims() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), WHILE_PROBE);
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+    let runtime_hash = native_bundle::sha256(include_str!("../runtime/mumei_runtime.c").as_bytes());
+    assert_eq!(record["link_build"]["runtime_source_sha256"], runtime_hash);
+    assert!(!BundleFile::ALL
+        .iter()
+        .any(|file| file.file_name() == "mumei_runtime.c"));
+    assert_success(&recheck_artifact(&source, &bundle, &id));
+
+    let object = recheck_object(&source, &bundle, &id, true);
+    assert_eq!(object.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&object.stderr).contains("link correspondence inconclusive"));
+
+    let machine_tv = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&machine_tv);
+    let descriptor: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
+    assert_eq!(
+        descriptor["functions"]["loop_count"],
+        serde_json::json!({"outcome": "outside_profile", "reason": "cyclic_control_flow"})
+    );
+    assert!(descriptor["checks_not_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check == "object_link_correspondence"));
+
+    let mut tampered = record;
+    tampered["link_build"]["runtime_source_sha256"] = serde_json::Value::String("0".repeat(64));
+    let bytes = serde_json::to_vec(&tampered).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    let tampered_id = native_bundle::sha256(&bytes);
+    let mismatch = recheck_artifact(&source, &bundle, &tampered_id);
+    assert_eq!(mismatch.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&mismatch.stderr).contains("runtime source differs"));
 }
 
 #[test]

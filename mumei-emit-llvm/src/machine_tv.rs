@@ -207,6 +207,12 @@ pub fn check_function<'ctx>(
     context: &'ctx Context,
 ) -> FunctionOutcome {
     if !supports_signature(model) {
+        if let Ok(instructions) = disassemble(bytes, address) {
+            let function_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if function_has_reachable_cycle(&instructions, function_size, call_targets) {
+                return FunctionOutcome::OutsideProfile("cyclic_control_flow");
+            }
+        }
         return FunctionOutcome::OutsideProfile("unsupported_signature");
     }
     if model.inputs.len() > 6 {
@@ -262,6 +268,20 @@ pub fn check_function<'ctx>(
     } else {
         FunctionOutcome::Equivalent
     }
+}
+
+fn function_has_reachable_cycle(
+    instructions: &[Instruction],
+    function_size: u64,
+    call_targets: &BTreeMap<u64, CallTarget>,
+) -> bool {
+    let Ok(branch_targets) = resolve_branch_targets(instructions, function_size, call_targets)
+    else {
+        return false;
+    };
+    let successors = control_flow_successors(instructions, &branch_targets, call_targets);
+    let reachable = reachable_instructions(&successors);
+    reachable_control_flow_has_cycle(&successors, &reachable)
 }
 
 pub fn supports_signature(model: &PureI64Body<'_>) -> bool {

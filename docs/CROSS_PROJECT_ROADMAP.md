@@ -4056,6 +4056,14 @@ acyclic-branch functions. The C `main` wrapper, CRT/startup code, loader, libc a
 are not covered. This is a bounded per-instruction profile; full object-code
 TV remains the deep endpoint.
 
+The bundle linker conditionally includes the embedded C runtime when an
+undefined object symbol matches one of its exports and pins the source with
+the optional `runtime_source_sha256` record field. This is artifact
+reproduction only; runtime semantics remain outside the claims. An external
+runtime target can keep `recheck-object` inconclusive, while machine-TV
+reports object-link correspondence as not performed and retains its
+fail-closed function outcomes.
+
 Agent consumes it as the bounded `native-machine-tv-recheck` route / MCP tool
 (mumei-agent #1053). It validates the `mumei.machine-code-tv/v1` schema and
 expected build ID and discharges only the listed object checks, including the

@@ -580,6 +580,7 @@ mod tests {
                 linker: "gnu-ld".into(),
                 linker_version: "1".into(),
                 arguments_sha256: "args".into(),
+                runtime_source_sha256: None,
                 canonical_arguments_sha256: None,
                 expected_exit_status: None,
                 expected_stdout_sha256: None,

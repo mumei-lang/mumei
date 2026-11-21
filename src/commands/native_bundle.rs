@@ -1,4 +1,4 @@
-use crate::{cli::NativeBundleCommand, linker};
+use crate::{cli::NativeBundleCommand, codegen::MUMEI_RUNTIME_C, linker};
 use mumei_core::semantic_contract::RefinedAdmission;
 use mumei_core::{
     hir, native_bundle::*, parser, proof_cert, resolver, semantic_contract, verification,
@@ -51,6 +51,8 @@ const OBJECT_SYMBOL_CORRESPONDENCE_SCOPE: &str =
     "artifact_reproduction_object_symbols_call_edges_and_link_placement_only/no_instruction_abi_or_runtime_semantics";
 const MACHINE_CODE_TV_SCOPE: &str =
     "artifact_reproduction_object_link_correspondence_and_acyclic_branch_and_conditional_call_function_machine_code_tv_only/no_abi_or_runtime_semantics";
+const MACHINE_CODE_TV_WITHOUT_OBJECT_LINK_SCOPE: &str =
+    "artifact_reproduction_object_symbol_and_call_edge_correspondence_and_machine_code_tv_only/no_object_link_correspondence_abi_or_runtime_semantics";
 const MACHINE_CODE_REGISTER_CONVENTION: &str =
     "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax";
 const MACHINE_CODE_TV_INPUT_DOMAIN: &str =
@@ -73,6 +75,29 @@ const OBSERVATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// output fits well inside it, and an output cap means the observation
 /// never stores or hashes an unbounded channel — overflow yields no pin.
 const OBSERVED_CHANNEL_MAX_BYTES: usize = 65_536;
+const EMBEDDED_RUNTIME_EXPORTS: &[&str] = &[
+    "__mumei_chan_init",
+    "__mumei_chan_recv",
+    "__mumei_chan_send",
+    "__mumei_chan_send_owned",
+    "__mumei_effect_stub",
+    "__mumei_get_resource_mutex",
+    "__mumei_payload_box_alloc_failed",
+    "__mumei_task_cancel",
+    "__mumei_task_group_any_flag",
+    "__mumei_task_group_any_wait",
+    "__mumei_task_group_cancel",
+    "__mumei_task_group_complete",
+    "__mumei_task_group_enter",
+    "__mumei_task_group_leave",
+    "__mumei_task_group_reset",
+    "__mumei_task_group_set_completed",
+    "__mumei_task_group_should_cancel",
+    "__mumei_task_group_should_cancel_current",
+    "mumei_task_group_any_is_done",
+    "mumei_task_group_any_signal",
+    "mumei_task_group_any_wait",
+];
 
 /// Declare the inputs of the one invocation: an empty environment and the
 /// executable's directory as the working directory.
@@ -566,6 +591,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
             Path::new(&bundle),
             Path::new(&source),
             &expected_build_id,
+            false,
         ) {
             Err(error) => Err(error),
             Ok(ObjectRecheckPipeline::Different(message)) => Err(BundleError(message)),
@@ -586,6 +612,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
             Path::new(&bundle),
             Path::new(&source),
             &expected_build_id,
+            true,
         ) {
             Err(error) => Err(error),
             Ok(ObjectRecheckPipeline::Different(message)) => Err(BundleError(message)),
@@ -1635,6 +1662,29 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), BundleError> {
     fs::write(path, bytes).map_err(|_| BundleError("cannot stage component"))
 }
 
+fn link_recorded_bundle_object(
+    object: &Path,
+    stage: &Path,
+    executable: &Path,
+) -> Result<LinkBuild, BundleError> {
+    let object_bytes = read_regular(object, MAX_COMPONENT_BYTES)?;
+    let surface = object_symbol_surface(&object_bytes)
+        .map_err(|_| BundleError("native object symbol parsing failed"))?;
+    let needs_runtime = surface
+        .undefined
+        .iter()
+        .any(|symbol| EMBEDDED_RUNTIME_EXPORTS.contains(&symbol.as_str()));
+    if needs_runtime {
+        let runtime = stage.join("mumei_runtime.c");
+        write(&runtime, MUMEI_RUNTIME_C.as_bytes())?;
+        linker::link_recorded_with_runtime(&[object.to_path_buf()], &runtime, executable)
+            .map_err(|_| BundleError("native link or toolchain observation failed"))
+    } else {
+        linker::link_recorded(&[object.to_path_buf()], executable)
+            .map_err(|_| BundleError("native link or toolchain observation failed"))
+    }
+}
+
 fn build(input: &Path, output: &Path) -> Result<(String, &'static str), BundleError> {
     if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         return Err(BundleError("unsupported host for first native profile"));
@@ -1718,11 +1768,11 @@ fn build_single(source: &str, input: &Path, output: &Path) -> Result<String, Bun
         .map_err(|_| BundleError("native IR emission failed"))?;
     let object_build = mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ir, &object)
         .map_err(|_| BundleError("native object emission failed"))?;
-    let mut link_build = linker::link_recorded(
-        &[object],
+    let mut link_build = link_recorded_bundle_object(
+        &object,
+        stage.path(),
         &stage.path().join(BundleFile::Executable.file_name()),
-    )
-    .map_err(|_| BundleError("native link or toolchain observation failed"))?;
+    )?;
     link_build.expected_exit_status =
         observed_exit_status(&stage.path().join(BundleFile::Executable.file_name()));
     link_build.expected_stdout_sha256 =
@@ -1852,9 +1902,11 @@ fn emit_module(
         .map_err(|_| BundleError("native IR emission failed"))?;
     let object_build = mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ir, &object)
         .map_err(|_| BundleError("native object emission failed"))?;
-    let mut link_build =
-        linker::link_recorded(&[object], &stage.join(BundleFile::Executable.file_name()))
-            .map_err(|_| BundleError("native link or toolchain observation failed"))?;
+    let mut link_build = link_recorded_bundle_object(
+        &object,
+        stage,
+        &stage.join(BundleFile::Executable.file_name()),
+    )?;
     link_build.expected_exit_status =
         observed_exit_status(&stage.join(BundleFile::Executable.file_name()));
     link_build.expected_stdout_sha256 =
@@ -2563,6 +2615,7 @@ struct ObjectRecheckData {
     stage: tempfile::TempDir,
     ir_surface: tv::IrFunctionSurface,
     object_surface: ObjectSymbolSurface,
+    object_link_correspondence: bool,
     object_bytes: Vec<u8>,
     resolved_call_sites: usize,
     source_text: Option<String>,
@@ -2997,6 +3050,7 @@ fn recheck_object_pipeline(
     bundle: &Path,
     source: &Path,
     expected_id: &str,
+    allow_uncheckable_object_link: bool,
 ) -> Result<ObjectRecheckPipeline, BundleError> {
     let recheck = recheck_artifact(bundle, source, expected_id)?;
     let ArtifactRecheckResult {
@@ -3064,17 +3118,16 @@ fn recheck_object_pipeline(
                 ));
         }
     };
-    let (link_corresponds, resolved_call_sites) = match object_link_corresponds(
-        &object_bytes,
-        &executable,
-    ) {
-        Ok(Some(result)) => result,
-        Ok(None) | Err(()) => {
-            return Ok(ObjectRecheckPipeline::Inconclusive(
+    let (object_link_correspondence, link_corresponds, resolved_call_sites) =
+        match object_link_corresponds(&object_bytes, &executable) {
+            Ok(Some((corresponds, resolved))) => (true, corresponds, resolved),
+            Ok(None) | Err(()) if allow_uncheckable_object_link => (false, true, 0),
+            Ok(None) | Err(()) => {
+                return Ok(ObjectRecheckPipeline::Inconclusive(
                     "Native object link correspondence inconclusive; linked function bytes or call targets are not checkable.",
                 ));
-        }
-    };
+            }
+        };
     if !link_corresponds {
         return Ok(ObjectRecheckPipeline::Different(
             "linked executable function bytes or call targets differ from the object",
@@ -3085,6 +3138,7 @@ fn recheck_object_pipeline(
             stage,
             ir_surface,
             object_surface,
+            object_link_correspondence,
             object_bytes,
             resolved_call_sites,
             source_text,
@@ -3211,6 +3265,7 @@ fn write_machine_tv(
         stage,
         ir_surface: _,
         object_surface,
+        object_link_correspondence,
         object_bytes,
         source_text,
         ..
@@ -3262,9 +3317,7 @@ fn write_machine_tv(
         let mut branch_shape = machine_tv::BranchShape::None;
         let mut has_conditional_call = false;
         let outcome = if let Some(model) = source_models.get(function_name) {
-            if !machine_tv::supports_signature(model) {
-                FunctionOutcome::OutsideProfile("unsupported_signature")
-            } else if model.inputs.len() > 6 {
+            if model.inputs.len() > 6 {
                 FunctionOutcome::OutsideProfile("argument_count")
             } else if let Some((address, bytes)) =
                 object_function_bytes(&object_bytes, function_name)
@@ -3326,7 +3379,6 @@ fn write_machine_tv(
             "toolchain_object_executable_reproduction",
             "object_symbol_correspondence",
             "object_call_edge_correspondence",
-            "object_link_correspondence",
         ];
         let mut checks_not_performed = vec![
             "optimizer_semantics",
@@ -3338,6 +3390,16 @@ fn write_machine_tv(
             "runtime_observation_semantics",
             "machine_code_tv_cyclic_control_flow_functions",
         ];
+        if object_link_correspondence {
+            checks_performed.push("object_link_correspondence");
+        } else {
+            checks_not_performed.push("object_link_correspondence");
+        }
+        let scope = if object_link_correspondence {
+            MACHINE_CODE_TV_SCOPE
+        } else {
+            MACHINE_CODE_TV_WITHOUT_OBJECT_LINK_SCOPE
+        };
         let (machine_tv_checks, machine_tv_checks_not_performed) = machine_tv_coverage_checks(
             equivalent_leaf_count,
             equivalent_call_count,
@@ -3349,7 +3411,7 @@ fn write_machine_tv(
         checks_not_performed.extend(machine_tv_checks_not_performed);
         let descriptor = serde_json::json!({
             "schema_version": "mumei.machine-code-tv/v1",
-            "scope": MACHINE_CODE_TV_SCOPE,
+            "scope": scope,
             "build_id": expected_build_id,
             "register_convention_assumed": MACHINE_CODE_REGISTER_CONVENTION,
             "input_domain": MACHINE_CODE_TV_INPUT_DOMAIN,
@@ -3367,8 +3429,13 @@ fn write_machine_tv(
                     .map_err(|_| BundleError("cannot write machine-code TV descriptor"))
             })
     } else {
+        let scope = if object_link_correspondence {
+            MACHINE_CODE_TV_SCOPE
+        } else {
+            MACHINE_CODE_TV_WITHOUT_OBJECT_LINK_SCOPE
+        };
         println!(
-            "Machine-code TV: {equivalent_count} of {} object functions equivalent to their source atoms within the acyclic-branch and conditional-call profile.\nScope: {MACHINE_CODE_TV_SCOPE}",
+            "Machine-code TV: {equivalent_count} of {} object functions equivalent to their source atoms within the acyclic-branch and conditional-call profile.\nScope: {scope}",
             object_surface.defined.len(),
         );
         Ok(())
@@ -3435,6 +3502,14 @@ fn recheck_artifact(
         files,
         source_text,
     } = loaded;
+    let link_runtime = match link_build.runtime_source_sha256.as_deref() {
+        Some(pinned) if pinned == sha256(MUMEI_RUNTIME_C.as_bytes()) => true,
+        Some(_) => {
+            eprintln!("Recorded runtime source differs from the current embedded runtime; artifact recheck is inconclusive.");
+            return Ok(ArtifactRecheckResult::inconclusive(family));
+        }
+        None => false,
+    };
     let parent = bundle
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -3443,6 +3518,13 @@ fn recheck_artifact(
         .prefix(".mumei-artifact-")
         .tempdir_in(parent)
         .map_err(|_| BundleError("cannot stage artifact recheck"))?;
+    let runtime_path = if link_runtime {
+        let path = stage.path().join("mumei_runtime.c");
+        write(&path, MUMEI_RUNTIME_C.as_bytes())?;
+        Some(path)
+    } else {
+        None
+    };
     let ir_path = stage.path().join(BundleFile::LlvmIr.file_name());
     write(&ir_path, &files[&BundleFile::LlvmIr])?;
     let object_path = stage.path().join(BundleFile::Object.file_name());
@@ -3455,13 +3537,21 @@ fn recheck_artifact(
         return Ok(ArtifactRecheckResult::different(family));
     }
     let executable_path = stage.path().join(BundleFile::Executable.file_name());
-    let fresh_link = linker::link_recorded(&[object_path], &executable_path)
-        .map_err(|_| BundleError("native link or toolchain observation failed"))?;
+    let fresh_link = match runtime_path.as_deref() {
+        Some(runtime) => linker::link_recorded_with_runtime(
+            std::slice::from_ref(&object_path),
+            runtime,
+            &executable_path,
+        ),
+        None => linker::link_recorded(&[object_path], &executable_path),
+    }
+    .map_err(|_| BundleError("native link or toolchain observation failed"))?;
     if fresh_link.driver != link_build.driver
         || fresh_link.driver_version != link_build.driver_version
         || fresh_link.driver_target != link_build.driver_target
         || fresh_link.linker != link_build.linker
         || fresh_link.linker_version != link_build.linker_version
+        || fresh_link.runtime_source_sha256 != link_build.runtime_source_sha256
         || read_regular(&executable_path, MAX_COMPONENT_BYTES)? != files[&BundleFile::Executable]
     {
         return Ok(ArtifactRecheckResult::different(family));
@@ -4284,6 +4374,7 @@ entry:
             linker: "gnu-ld".into(),
             linker_version: "1".into(),
             arguments_sha256: "args".into(),
+            runtime_source_sha256: None,
             canonical_arguments_sha256: None,
             expected_exit_status: None,
             expected_stdout_sha256: None,

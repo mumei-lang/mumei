@@ -3103,6 +3103,13 @@ convention and callee-saved preservation are assumed, not verified. The C
 code, loader, libc and runtime are not covered. Full object-code TV remains
 the deeper endpoint.
 
+Native-bundle linking conditionally adds the embedded runtime only for
+undefined object symbols it exports and pins its source in the optional
+`runtime_source_sha256` field. Runtime semantics remain outside all claims.
+When an external runtime call makes object-link correspondence uncheckable,
+`recheck-object` stays inconclusive; machine-TV reports the link check as not
+performed rather than implying it was established.
+
 `machine_code_forward_branch_function_tv` retains its forward-only meaning;
 `machine_code_acyclic_branch_function_tv` covers equivalent functions with
 backward but acyclic edges. The not-performed vocabulary changed from

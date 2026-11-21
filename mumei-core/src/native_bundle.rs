@@ -503,6 +503,10 @@ pub struct LinkBuild {
     pub linker: String,
     pub linker_version: String,
     pub arguments_sha256: String,
+    /// SHA-256 of the embedded runtime C source when it was linked.
+    /// Optional so records that did not link the runtime remain unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_source_sha256: Option<String>,
     /// sha256 of the argv with every path-dependent argument replaced by
     /// a stable placeholder (`{output}`, `{input:i}`, `{toolchain}`) —
     /// reproducible by a recheck on fresh staging paths, unlike the raw
