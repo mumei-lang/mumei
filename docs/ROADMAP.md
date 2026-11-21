@@ -3158,6 +3158,14 @@ function is proved preserved. Direct and poll callees remain assumed to
 preserve these registers, so in-module composition requires each source callee
 to be independently proved; the external-callee assumption is listed as
 `machine_code_callee_saved_preservation_assumed_for_external_callees`.
+
+The next C10 Option B slice re-derives module and multifile machine-TV source
+models under the profile pinned by the record, matching the LLVM recheck;
+single-file rechecks keep `RefinedAdmission::Reject`. Refined scalar parameter
+predicates are carried in the input domain, whose refined-signature label
+matches LLVM's exact module label and retains the loop-bound suffix. Unsupported
+memory, composite/enum, non-i64 scalar and f64 model features remain outside
+the machine-TV profile.
 Agent consumers must adopt both check names and the function field.
 
 Sibling descriptors now name the exit-status observation only as

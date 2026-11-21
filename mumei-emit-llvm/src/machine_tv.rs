@@ -279,6 +279,14 @@ fn check_function_with_result_width<'ctx>(
     context: &'ctx Context,
     result_width: ResultWidth,
 ) -> (FunctionOutcome, Option<CalleeSavedPreservation>) {
+    if model.inputs.len() > MAX_ARGUMENT_COUNT
+        || model
+            .call_sites
+            .iter()
+            .any(|site| site.args.len() > MAX_ARGUMENT_COUNT)
+    {
+        return (FunctionOutcome::OutsideProfile("argument_count"), None);
+    }
     if !supports_signature(model) {
         if let Ok(instructions) = disassemble(bytes, address) {
             let function_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
@@ -290,16 +298,6 @@ fn check_function_with_result_width<'ctx>(
             FunctionOutcome::OutsideProfile("unsupported_signature"),
             None,
         );
-    }
-    if model.inputs.len() > MAX_ARGUMENT_COUNT {
-        return (FunctionOutcome::OutsideProfile("argument_count"), None);
-    }
-    if model
-        .call_sites
-        .iter()
-        .any(|site| site.args.len() > MAX_ARGUMENT_COUNT)
-    {
-        return (FunctionOutcome::OutsideProfile("argument_count"), None);
     }
     let instructions = match disassemble(bytes, address) {
         Ok(instructions) if !instructions.is_empty() => instructions,
@@ -386,7 +384,19 @@ pub fn function_has_reachable_cycle(
 }
 
 pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
-    !model.composite_signature
+    model.inputs.len() == model.param_shapes.len()
+        && model.inputs.iter().all(|input| input.get_size() == 64)
+        && model.value.get_size() == 64
+        && model.param_shapes.iter().all(Option::is_none)
+        && model.call_sites.iter().all(|site| {
+            site.result.get_size() == 64
+                && site.args.iter().all(|argument| argument.get_size() == 64)
+        })
+        && !model.has_post_writes()
+        && !model.has_composite_or_enum_features
+        && !model.has_f64_features
+        && !model.has_non_i64_scalar_features
+        && !model.composite_signature
         && model.result_shape.is_none()
         && !model
             .param_leaf_doubles
@@ -2675,7 +2685,15 @@ mod tests {
     use z3::Config;
 
     fn source_model<'ctx>(source: &str, context: &'ctx Context) -> PureI64Body<'ctx> {
-        encode_pure_i64_module(source, context, true, RefinedAdmission::Reject)
+        source_model_with_admission(source, context, RefinedAdmission::Reject)
+    }
+
+    fn source_model_with_admission<'ctx>(
+        source: &str,
+        context: &'ctx Context,
+        admission: RefinedAdmission,
+    ) -> PureI64Body<'ctx> {
+        encode_pure_i64_module(source, context, true, admission)
             .unwrap()
             .into_iter()
             .next()
@@ -2818,6 +2836,80 @@ entry:
         assert_eq!(
             check_function(&bytes, address, &model, &BTreeMap::new(), &context),
             FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn refined_parameter_domain_is_used_for_machine_tv_equivalence() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "type Pos = i64 where v > 0;\n\
+            atom inc(x: Pos) -> i64 requires: true; ensures: true; body: { x + 1 };";
+        let model = source_model_with_admission(source, &context, RefinedAdmission::V1);
+        assert!(model.refined_signature);
+        assert_eq!(model.param_domain.len(), 1);
+
+        let mut unbounded_model =
+            source_model_with_admission(source, &context, RefinedAdmission::V1);
+        unbounded_model.param_domain.clear();
+        let bytes = [
+            0x48, 0x85, 0xff, // testq %rdi, %rdi
+            0x7e, 0x05, // jle to the zero-return path
+            0x48, 0x8d, 0x47, 0x01, // leaq 1(%rdi), %rax
+            0xc3, // retq
+            0x31, 0xc0, // xorl %eax, %eax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function_with_preservation(&bytes, 0, &model, &BTreeMap::new(), &context),
+            (
+                FunctionOutcome::Equivalent,
+                Some(CalleeSavedPreservation::Preserved)
+            )
+        );
+        assert_eq!(
+            check_function(&bytes, 0, &unbounded_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn unsupported_memory_composite_and_f64_body_features_fail_closed() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "atom identity(x: i64) -> i64 requires: true; ensures: true; body: { x };";
+        let bytes = [0x48, 0x89, 0xf8, 0xc3];
+
+        let mut memory_model = source_model(source, &context);
+        memory_model.bounded_memory = true;
+        assert_eq!(
+            check_function(&bytes, 0, &memory_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_signature")
+        );
+
+        let mut composite_model = source_model(source, &context);
+        composite_model.has_composite_or_enum_features = true;
+        assert_eq!(
+            check_function(&bytes, 0, &composite_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_signature")
+        );
+
+        let mut floating_model = source_model(source, &context);
+        floating_model.has_f64_features = true;
+        assert_eq!(
+            check_function(&bytes, 0, &floating_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_signature")
+        );
+
+        let mut non_i64_model = source_model(source, &context);
+        non_i64_model.has_non_i64_scalar_features = true;
+        assert_eq!(
+            check_function(&bytes, 0, &non_i64_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_signature")
         );
     }
 

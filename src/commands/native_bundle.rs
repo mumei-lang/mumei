@@ -57,6 +57,8 @@ const MACHINE_CODE_REGISTER_CONVENTION: &str =
     "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax";
 const MACHINE_CODE_TV_INPUT_DOMAIN: &str =
     "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires";
+const MACHINE_CODE_TV_REFINED_INPUT_DOMAIN: &str =
+    "module_members_signed_i64_inputs_with_refined_scalar_signature_predicate_domains_not_process_exit_status";
 const EXIT_STATUS_RECHECK_SCOPE: &str =
     "artifact_reproduction_and_os_exit_status_observation_only/no_runtime_abi_or_semantic_proof";
 const STDOUT_RECHECK_SCOPE: &str =
@@ -438,6 +440,7 @@ struct LoadedBundle {
     link_build: LinkBuild,
     files: BTreeMap<BundleFile, Vec<u8>>,
     source_text: Option<String>,
+    record_profile: Option<String>,
 }
 
 pub(crate) fn run(command: NativeBundleCommand) {
@@ -2414,6 +2417,7 @@ fn recheck_llvm_loaded(
             link_build: record.link_build.clone(),
             files,
             source_text: None,
+            record_profile: Some(record.profile.clone()),
         };
         let (members, root) = multifile_inputs(bundle, source)?;
         match recheck_multifile_source(&bytes, expected_id, &root, &members, &loaded.files)? {
@@ -2473,6 +2477,7 @@ fn recheck_llvm_loaded(
             link_build: record.link_build.clone(),
             files,
             source_text: Some(source.clone()),
+            record_profile: Some(record.profile.clone()),
         };
         match recheck_module_source(&bytes, expected_id, &source, &loaded.files)? {
             SourceRecheck::Refuted => return Err(BundleError("source postcondition refuted")),
@@ -2521,6 +2526,7 @@ fn recheck_llvm_loaded(
         link_build: record.link_build.clone(),
         files,
         source_text: Some(source.clone()),
+        record_profile: None,
     };
     match recheck_source(&bytes, expected_id, &source, &loaded.files)? {
         SourceRecheck::Refuted => return Err(BundleError("source postcondition refuted")),
@@ -2645,6 +2651,7 @@ struct ArtifactRecheckResult {
     result: ArtifactRecheck,
     family: RecordFamily,
     canonical_argv_compared: bool,
+    record_profile: Option<String>,
     pin_envelope: &'static str,
     expected_exit_status: Option<u32>,
     expected_stdout_sha256: Option<String>,
@@ -2666,6 +2673,7 @@ struct ObjectRecheckData {
     stage: tempfile::TempDir,
     family: RecordFamily,
     canonical_argv_compared: bool,
+    admission: RefinedAdmission,
     ir_surface: tv::IrFunctionSurface,
     object_surface: ObjectSymbolSurface,
     object_link_correspondence: bool,
@@ -3111,6 +3119,7 @@ fn recheck_object_pipeline(
         result,
         family,
         canonical_argv_compared,
+        record_profile,
         stage,
         source_text,
         ..
@@ -3128,6 +3137,7 @@ fn recheck_object_pipeline(
         }
         ArtifactRecheck::Rechecked => (),
     }
+    let admission = machine_tv_admission_for_record(family, record_profile.as_deref())?;
     let Some(stage) = stage else {
         return Ok(ObjectRecheckPipeline::Inconclusive(
             "Native object symbol surface inconclusive; reproduced artifacts are unavailable.",
@@ -3194,6 +3204,7 @@ fn recheck_object_pipeline(
             stage,
             family,
             canonical_argv_compared,
+            admission,
             ir_surface,
             object_surface,
             object_link_correspondence,
@@ -3203,6 +3214,25 @@ fn recheck_object_pipeline(
             source_text,
         },
     )))
+}
+
+fn machine_tv_admission_for_record(
+    family: RecordFamily,
+    record_profile: Option<&str>,
+) -> Result<RefinedAdmission, BundleError> {
+    match family {
+        RecordFamily::Single => {
+            // The single-file LLVM recheck uses `validate_native_main`,
+            // which has no refined-admission argument.
+            Ok(RefinedAdmission::Reject)
+        }
+        RecordFamily::Module => module_refined_admission(
+            record_profile.ok_or(BundleError("native module record profile is unavailable"))?,
+        ),
+        RecordFamily::Multifile => multifile_refined_admission(record_profile.ok_or(
+            BundleError("native multifile record profile is unavailable"),
+        )?),
+    }
 }
 
 fn object_function_bytes(bytes: &[u8], function_name: &str) -> Option<(u64, Vec<u8>)> {
@@ -3318,14 +3348,19 @@ fn machine_tv_entry_wrapper_checks(
     }
 }
 
-fn machine_tv_input_domain(source_loops: bool) -> String {
+fn machine_tv_input_domain(source_loops: bool, refined_signatures: bool) -> String {
+    let domain = if refined_signatures {
+        MACHINE_CODE_TV_REFINED_INPUT_DOMAIN
+    } else {
+        MACHINE_CODE_TV_INPUT_DOMAIN
+    };
     if source_loops {
         format!(
-            "{MACHINE_CODE_TV_INPUT_DOMAIN}_and_loops_exiting_within_bound_{}",
+            "{domain}_and_loops_exiting_within_bound_{}",
             semantic_contract::LOOP_BOUND
         )
     } else {
-        MACHINE_CODE_TV_INPUT_DOMAIN.to_owned()
+        domain.to_owned()
     }
 }
 
@@ -3393,6 +3428,7 @@ struct MachineTvCounts {
     equivalent_conditional_call_count: usize,
     equivalent_bounded_loop_count: usize,
     equivalent_source_loop_count: usize,
+    equivalent_refined_signature_count: usize,
     object_function_count: usize,
 }
 
@@ -3470,7 +3506,7 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
         source_text,
         &context,
         true,
-        RefinedAdmission::Reject,
+        data.admission,
     ) {
         Ok(models) => models,
         Err(_) => {
@@ -3503,9 +3539,13 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
     let mut equivalent_conditional_call_count = 0usize;
     let mut equivalent_bounded_loop_count = 0usize;
     let mut equivalent_source_loop_count = 0usize;
+    let mut equivalent_refined_signature_count = 0usize;
     let mut has_cyclic_or_loop_bound_outcome = false;
     for function_name in &data.object_surface.defined {
         let is_entry_wrapper = function_name == "main";
+        let has_refined_signature = source_models
+            .get(function_name)
+            .is_some_and(|model| model.refined_signature);
         let has_source_loop = source_models
             .get(function_name)
             .is_some_and(|model| model.loop_bound_exits.is_some());
@@ -3599,6 +3639,9 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
                     machine_tv::CalleeSavedPreservation::Unknown => "unknown",
                 };
                 if !is_entry_wrapper {
+                    if has_refined_signature {
+                        equivalent_refined_signature_count += 1;
+                    }
                     if has_source_loop {
                         equivalent_source_loop_count += 1;
                     }
@@ -3659,6 +3702,7 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
         equivalent_conditional_call_count,
         equivalent_bounded_loop_count,
         equivalent_source_loop_count,
+        equivalent_refined_signature_count,
         object_function_count: data.object_surface.defined.len(),
     };
     let mut coverage = machine_tv_coverage_checks(
@@ -3688,7 +3732,10 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
     } else {
         MACHINE_CODE_TV_WITHOUT_OBJECT_LINK_SCOPE
     };
-    let input_domain = machine_tv_input_domain(counts.equivalent_source_loop_count > 0);
+    let input_domain = machine_tv_input_domain(
+        counts.equivalent_source_loop_count > 0,
+        counts.equivalent_refined_signature_count > 0,
+    );
     Ok(MachineTvEvaluation {
         functions,
         outcomes,
@@ -3966,6 +4013,7 @@ impl ArtifactRecheckResult {
             result: ArtifactRecheck::Different,
             family,
             canonical_argv_compared: false,
+            record_profile: None,
             pin_envelope: "unrecorded",
             expected_exit_status: None,
             expected_stdout_sha256: None,
@@ -3980,6 +4028,7 @@ impl ArtifactRecheckResult {
             result: ArtifactRecheck::Inconclusive,
             family,
             canonical_argv_compared: false,
+            record_profile: None,
             pin_envelope: "unrecorded",
             expected_exit_status: None,
             expected_stdout_sha256: None,
@@ -4012,6 +4061,7 @@ fn recheck_artifact(
         link_build,
         files,
         source_text,
+        record_profile,
     } = loaded;
     let link_runtime = match link_build.runtime_source_sha256.as_deref() {
         Some(pinned) if pinned == sha256(MUMEI_RUNTIME_C.as_bytes()) => true,
@@ -4096,6 +4146,7 @@ fn recheck_artifact(
         result: ArtifactRecheck::Rechecked,
         family,
         canonical_argv_compared: link_build.canonical_arguments_sha256.is_some(),
+        record_profile,
         pin_envelope,
         expected_exit_status: pins_comparable
             .then_some(link_build.expected_exit_status)
@@ -4353,6 +4404,33 @@ mod tests {
     }
 
     #[test]
+    fn machine_tv_admission_matches_the_record_family_profile() {
+        assert_eq!(
+            machine_tv_admission_for_record(RecordFamily::Single, None).unwrap(),
+            RefinedAdmission::Reject
+        );
+        assert_eq!(
+            machine_tv_admission_for_record(RecordFamily::Module, Some(MODULE_PROFILE_V2)).unwrap(),
+            RefinedAdmission::V1
+        );
+        assert_eq!(
+            machine_tv_admission_for_record(RecordFamily::Module, Some(MODULE_PROFILE)).unwrap(),
+            RefinedAdmission::Reject
+        );
+        assert_eq!(
+            machine_tv_admission_for_record(RecordFamily::Multifile, Some(MULTIFILE_PROFILE_V2))
+                .unwrap(),
+            RefinedAdmission::V1
+        );
+        assert_eq!(
+            machine_tv_admission_for_record(RecordFamily::Multifile, Some(MULTIFILE_PROFILE))
+                .unwrap(),
+            RefinedAdmission::Reject
+        );
+        assert!(machine_tv_admission_for_record(RecordFamily::Module, None).is_err());
+    }
+
+    #[test]
     fn machine_tv_descriptor_omits_leaf_check_for_caller_only_equivalence() {
         let (checks_performed, checks_not_performed) =
             machine_tv_coverage_checks(0, 1, 0, 0, 0, MachineTvLoopCounts::default(), false);
@@ -4466,7 +4544,7 @@ mod tests {
         let (checks_performed, checks_not_performed) =
             machine_tv_coverage_checks(0, 0, 0, 0, 0, loop_counts, false);
         assert_eq!(
-            machine_tv_input_domain(true),
+            machine_tv_input_domain(true, false),
             format!(
                 "{MACHINE_CODE_TV_INPUT_DOMAIN}_and_loops_exiting_within_bound_{}",
                 semantic_contract::LOOP_BOUND
@@ -4481,6 +4559,28 @@ mod tests {
             assert!(!checks_performed.contains(&check));
             assert!(checks_not_performed.contains(&check));
         }
+    }
+
+    #[test]
+    fn machine_tv_refined_domain_label_matches_the_llvm_module_domain() {
+        assert_eq!(
+            machine_tv_input_domain(false, true),
+            "module_members_signed_i64_inputs_with_refined_scalar_signature_predicate_domains_not_process_exit_status"
+        );
+        assert_eq!(
+            machine_tv_input_domain(true, true),
+            format!(
+                "{MACHINE_CODE_TV_REFINED_INPUT_DOMAIN}_and_loops_exiting_within_bound_{}",
+                semantic_contract::LOOP_BOUND
+            )
+        );
+        assert_eq!(
+            machine_tv_input_domain(true, false),
+            format!(
+                "{MACHINE_CODE_TV_INPUT_DOMAIN}_and_loops_exiting_within_bound_{}",
+                semantic_contract::LOOP_BOUND
+            )
+        );
     }
 
     #[test]
