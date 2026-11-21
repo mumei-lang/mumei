@@ -18,6 +18,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei evidence sign` | 5 | Detachably sign a bounded record's raw bytes with a declared ed25519 key into a producer-signature envelope; binds the declared key id only |
 | `mumei evidence keygen` | 1 | Generate a fresh ed25519 producer keypair; writes the 64-char hex secret to a new file and prints only the public key |
 | `mumei evidence check` | 3 | Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity |
+| `mumei evidence check-schedule` | 2 | Core checks only the static representation and schedule consistency. A `selected` outcome names only a manifest-declared-success exit, never acceptance. `reported_outcome` is the adapter's manifest-declared self-report, never result polarity or a verdict. Manifest-declared argv, stdin and memory bounds are not attested by this record; embedded evidence_acceptance is carried, not re-judged. No adapter is executed and no grade is promoted. |
 | `mumei evidence accept` | 4 | Normalize one declared requirement against one Evidence record into a bounded verdict; no tool execution or proof acceptance |
 | `mumei evidence accept-list` | 4 | Normalize one declared requirement against a bounded Evidence list envelope — per-record verdicts plus an aggregate; no tool execution or proof acceptance |
 | `mumei evidence check-list` | 3 | Validate a bounded Evidence list envelope's representation — every record individually, not their truth or consistency |
@@ -241,6 +242,29 @@ Usage: mumei evidence check [OPTIONS] [INPUT]
 | `--stdin` | false | — | Read one common Evidence record from standard input (at most 65,536 bytes); never infer stdin from a missing file |
 | `--json` | false | — | Print a static representation-only diagnostic, not an accepted Evidence record or certificate |
 | `--expected-adapter <EXPECTED_ADAPTER>` | — | — | Require the record's declared producer adapter id; declared identity only, not producer authenticity |
+
+## `mumei evidence check-schedule`
+
+Core checks only the static representation and schedule consistency. A `selected` outcome names only a manifest-declared-success exit, never acceptance. `reported_outcome` is the adapter's manifest-declared self-report, never result polarity or a verdict. Manifest-declared argv, stdin and memory bounds are not attested by this record; embedded evidence_acceptance is carried, not re-judged. No adapter is executed and no grade is promoted.
+
+Usage:
+
+```text
+Usage: mumei evidence check-schedule [OPTIONS] [INPUT]
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `INPUT` | No | Regular mumei.attempt-schedule/v1 JSON file (at most 65,536 bytes) |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--stdin` | false | — | Read one attempt-schedule record from standard input (at most 65,536 bytes) |
+| `--json` | false | — | Print a static representation-only diagnostic; no adapter execution or grade promotion |
 
 ## `mumei evidence accept`
 

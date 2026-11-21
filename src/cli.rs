@@ -528,6 +528,21 @@ pub(crate) enum EvidenceCommand {
         #[arg(long)]
         expected_adapter: Option<String>,
     },
+    /// Validate one agent attempt-schedule record's representation and consistency only
+    #[command(
+        long_about = "Core checks only the static representation and schedule consistency. A `selected` outcome names only a manifest-declared-success exit, never acceptance. `reported_outcome` is the adapter's manifest-declared self-report, never result polarity or a verdict. Manifest-declared argv, stdin and memory bounds are not attested by this record; embedded evidence_acceptance is carried, not re-judged. No adapter is executed and no grade is promoted."
+    )]
+    CheckSchedule {
+        /// Regular mumei.attempt-schedule/v1 JSON file (at most 65,536 bytes)
+        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        input: Option<String>,
+        /// Read one attempt-schedule record from standard input (at most 65,536 bytes)
+        #[arg(long)]
+        stdin: bool,
+        /// Print a static representation-only diagnostic; no adapter execution or grade promotion
+        #[arg(long)]
+        json: bool,
+    },
     /// Normalize one declared requirement against one Evidence record into a bounded verdict; no tool execution or proof acceptance
     Accept {
         /// Regular Evidence v1 JSON record file (at most 65,536 bytes); not a native report envelope or proof certificate

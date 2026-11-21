@@ -1,4 +1,5 @@
 use crate::cli::EvidenceCommand;
+use mumei_core::attempt_schedule;
 use mumei_core::evidence_acceptance::{self, Verdict};
 use mumei_core::producer_signature::{self, PRODUCER_SIGNATURE_SCHEMA};
 use mumei_core::source_evidence::{self, AcceptOutcome, Options, Outcome, RecheckOutcome};
@@ -113,6 +114,10 @@ pub(crate) fn run(command: EvidenceCommand) {
             )
             .map(|()| 0),
             "Evidence representation check failed",
+        ),
+        EvidenceCommand::CheckSchedule { input, stdin, json } => (
+            check_schedule(input.as_deref().map(Path::new), stdin, json, &mut output).map(|()| 0),
+            "Attempt-schedule representation check failed",
         ),
         EvidenceCommand::CheckList {
             input,
@@ -1012,6 +1017,60 @@ fn check(
         .into_bytes()
     } else {
         TEXT.as_bytes().to_vec()
+    };
+    output
+        .write_all(&diagnostic)
+        .map_err(|_| "cannot write representation diagnostic")
+}
+
+fn check_schedule(
+    input: Option<&Path>,
+    stdin: bool,
+    json: bool,
+    output: &mut impl Write,
+) -> Result<(), &'static str> {
+    let bytes = match (input, stdin) {
+        (Some(path), false) => {
+            super::input::read_regular(path, attempt_schedule::MAX_INPUT_BYTES as u64)?
+        }
+        (None, true) => super::input::read_stdin(attempt_schedule::MAX_INPUT_BYTES as u64)?,
+        _ => return Err("choose exactly one attempt-schedule input"),
+    };
+    let schedule =
+        attempt_schedule::decode(&bytes).map_err(|_| "invalid attempt-schedule representation")?;
+    let diagnostic = if json {
+        let body = serde_json::json!({
+            "schema_version": "mumei.attempt-schedule-check/v1",
+            "schedule_schema_version": "mumei.attempt-schedule/v1",
+            "representation": "valid",
+            "acceptance": "not_evaluated",
+            "outcome": schedule.outcome.as_str(),
+            "attempt_count": schedule.attempt_count,
+            "reported_outcome_meaning": "adapter_self_report",
+            "checks_performed": ["representation_gate", "schedule_consistency"],
+            "checks_not_performed": [
+                "adapter_execution",
+                "reported_outcome_truth",
+                "evidence_acceptance",
+                "embedded_acceptance_validation",
+                "claim_truth",
+                "producer_authenticity",
+                "freshness",
+                "resource_enforcement",
+                "grade_promotion",
+            ],
+        });
+        let mut bytes = serde_json::to_vec_pretty(&body)
+            .map_err(|_| "cannot encode representation diagnostic")?;
+        bytes.push(b'\n');
+        bytes
+    } else {
+        format!(
+            "Attempt-schedule representation valid: outcome {}; {} attempt(s). Acceptance not evaluated; no adapter execution or grade promotion.\n",
+            schedule.outcome.as_str(),
+            schedule.attempt_count,
+        )
+        .into_bytes()
     };
     output
         .write_all(&diagnostic)
