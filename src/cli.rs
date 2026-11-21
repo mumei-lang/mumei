@@ -680,7 +680,7 @@ pub(crate) enum NativeBundleCommand {
         #[arg(long)]
         expected_build_id: String,
     },
-    /// Recheck the reproduced object's function-symbol surface and direct call edges against the pinned LLVM IR; no instruction-selection, register-allocation, relocation-arithmetic, linker, ABI or runtime semantics
+    /// Recheck object symbols, direct call edges and linked function placement/call targets; no instruction semantics, ABI or runtime claim
     RecheckObject {
         bundle: String,
         source: String,

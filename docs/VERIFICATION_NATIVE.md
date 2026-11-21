@@ -1283,10 +1283,12 @@ i64-to-OS-exit-code equivalence or an ABI/runtime guarantee. A user body differi
 only above bit 31 is still rejected even if the wrapper's low 32 bits coincide.
 Repinned object/executable bytes may still pass `recheck-llvm` when source and
 LLVM checks hold; the separate `recheck-object` checks the public function
-symbol surface and direct call edges against the IR. There is **no
-instruction-selection, register allocation, relocation-arithmetic, linker,
-system-library, OS, runtime or final-executable semantic proof**, nor producer
-authenticity or attestation that the object was emitted from these IR bytes.
+symbol surface and direct call edges against the IR, and checks linked
+placement and resolved PC-relative call sites for the program's own functions.
+CRT/startup code, the dynamic loader, libc, external symbols, non-call
+relocations and instruction semantics are not checked; this is not an ABI
+or general linker-semantics claim. Nor is there producer authenticity or
+attestation that the object was emitted from these IR bytes.
 The consumer binary, Core source model, Z3 and LLVM parser/verifier/interpreter
 remain trusted components. Packaging is not a hermetic deployment.
 
@@ -1723,7 +1725,7 @@ equivalent bytes (a different LLVM version, for example) fails closed rather
 than being normalized into agreement. The OS exit-status check is the
 separate opt-in stage below.
 
-### Pinned object symbol-surface and direct call-edge correspondence
+### Pinned object symbols, call edges, and linked placement correspondence
 
 `mumei native-bundle recheck-object` runs the full artifact recheck and then
 compares the reproduced `program.o` symbol surface and call edges with the
@@ -1733,13 +1735,21 @@ object symbol must be declared in the IR. For each externally visible function,
 the direct callees in the IR must equal the call-relocation targets inside that
 function's object byte range.
 
-Local/private function definitions, indirect calls, or object call relocations
-that cannot be assigned unambiguously to a visible function make call-edge
-comparison inconclusive (exit 3). A symbol or call-edge mismatch exits 1.
-This is the second bounded C10 Option B step: direct call-edge correspondence
-only. It makes no instruction-selection, register-allocation,
-relocation-arithmetic, linker, ABI or runtime claim. Full object-code
-translation validation remains the deeper Option B endpoint.
+It then checks each object function against its same-named global defined text
+symbol in the reproduced executable: sizes must match, and function bytes must
+match except at supported four-byte x86-64 `PLT32`/`PC32` relocation fields.
+Each field must equal the resolved PC-relative value for its target's
+executable address. Only the program's own functions are compared; CRT/startup
+code, the dynamic loader, libc and external symbols are outside this check.
+
+Local/private definitions, indirect calls, unsupported formats or relocations,
+external relocation targets, and ranges that cannot be sliced or assigned
+unambiguously make the relevant check inconclusive (exit 3). A symbol,
+call-edge, function-byte, size or resolved-call-target mismatch exits 1. This
+is the third bounded C10 Option B step. Non-call relocations and instruction
+semantics are not checked; this is not general linker-semantics or ABI
+validation. Full object-code translation validation remains the deeper Option B
+endpoint.
 
 ### Pinned executable exit-status recheck
 

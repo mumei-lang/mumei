@@ -4,7 +4,10 @@ use mumei_core::{
     hir, native_bundle::*, parser, proof_cert, resolver, semantic_contract, verification,
 };
 use mumei_emit_llvm::translation_validation::{self as tv, Options, Outcome};
-use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget, SectionKind, SymbolKind};
+use object::{
+    Architecture, BinaryFormat, Object, ObjectSection, ObjectSymbol, RelocationFlags,
+    RelocationTarget, SectionKind, SymbolKind,
+};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,
@@ -42,7 +45,7 @@ const LLVM_RECHECK_SCOPE: &str =
 const ARTIFACT_RECHECK_SCOPE: &str =
     "source_postcondition_llvm_snapshot_and_toolchain_identity_only/no_execution_or_runtime_semantics";
 const OBJECT_SYMBOL_CORRESPONDENCE_SCOPE: &str =
-    "artifact_reproduction_object_symbol_surface_and_direct_call_edges_only/no_instruction_abi_or_runtime_semantics";
+    "artifact_reproduction_object_symbols_call_edges_and_link_placement_only/no_instruction_abi_or_runtime_semantics";
 const EXIT_STATUS_RECHECK_SCOPE: &str =
     "artifact_reproduction_and_os_exit_status_observation_only/no_runtime_abi_or_semantic_proof";
 const STDOUT_RECHECK_SCOPE: &str =
@@ -601,7 +604,32 @@ pub(crate) fn run(command: NativeBundleCommand) {
                         Some(false) => {
                             Err(BundleError("native object call edges differ from LLVM IR"))
                         }
-                        Some(true) if json => {
+                        Some(true) => {
+                            let executable =
+                                fs::read(stage.path().join(BundleFile::Executable.file_name()));
+                            let Ok(executable) = executable else {
+                                eprintln!(
+                                    "Native object link correspondence inconclusive; staged executable could not be read."
+                                );
+                                drop(stage);
+                                std::process::exit(3);
+                            };
+                            let (link_corresponds, resolved_call_sites) =
+                                match object_link_corresponds(&object, &executable) {
+                                    Ok(Some(result)) => result,
+                                    Ok(None) | Err(()) => {
+                                        eprintln!(
+                                            "Native object link correspondence inconclusive; linked function bytes or call targets are not checkable."
+                                        );
+                                        drop(stage);
+                                        std::process::exit(3);
+                                    }
+                                };
+                            if !link_corresponds {
+                                Err(BundleError(
+                                    "linked executable function bytes or call targets differ from the object",
+                                ))
+                            } else if json {
                             let descriptor = serde_json::json!({
                                 "schema_version": "mumei.object-symbol-correspondence/v1",
                                 "scope": OBJECT_SYMBOL_CORRESPONDENCE_SCOPE,
@@ -612,6 +640,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                                     "toolchain_object_executable_reproduction",
                                     "object_symbol_correspondence",
                                     "object_call_edge_correspondence",
+                                    "object_link_correspondence",
                                 ],
                                 "checks_not_performed": [
                                     "optimizer_semantics",
@@ -623,6 +652,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                                     "runtime_observation_semantics",
                                 ],
                                 "call_edges": ir_surface.calls,
+                                "resolved_call_sites": resolved_call_sites,
                             });
                             serde_json::to_vec_pretty(&descriptor)
                                 .map_err(|_| BundleError("cannot encode object symbol descriptor"))
@@ -635,15 +665,15 @@ pub(crate) fn run(command: NativeBundleCommand) {
                                             BundleError("cannot write object symbol descriptor")
                                         })
                                 })
-                        }
-                        Some(true) => {
+                            } else {
                             let call_count: usize =
                                 ir_surface.calls.values().map(BTreeSet::len).sum();
                             println!(
-                                "Native object symbol surface and direct call edges correspond to the pinned LLVM IR: {} defined functions, {call_count} call edges.\nScope: {OBJECT_SYMBOL_CORRESPONDENCE_SCOPE}",
-                                ir_surface.defined.len()
+                                "Native object symbol surface, direct call edges and linked placement correspond to the pinned LLVM IR and executable: {} defined functions, {call_count} call edges, {resolved_call_sites} resolved call sites.\nScope: {OBJECT_SYMBOL_CORRESPONDENCE_SCOPE}",
+                                ir_surface.defined.len(),
                             );
                             Ok(())
+                            }
                         }
                     }
                 }
@@ -2619,6 +2649,22 @@ struct ObjectFunctionRange {
     end: u64,
 }
 
+struct ObjectLinkFunction {
+    section: object::SectionIndex,
+    object_address: u64,
+    object_size: u64,
+    executable_address: u64,
+    object_bytes: Vec<u8>,
+    executable_bytes: Vec<u8>,
+}
+
+struct ObjectLinkRelocation {
+    function_index: usize,
+    offset: usize,
+    target: String,
+    addend: i64,
+}
+
 fn object_symbol_surface(bytes: &[u8]) -> Result<ObjectSymbolSurface, ()> {
     let file = object::File::parse(bytes).map_err(|_| ())?;
     let mut surface = ObjectSymbolSurface {
@@ -2731,6 +2777,250 @@ fn object_call_edges_correspond(
     object: &ObjectSymbolSurface,
 ) -> Option<bool> {
     (ir.call_edges_checkable && object.call_edges_checkable).then(|| ir.calls == object.calls)
+}
+
+fn object_link_corresponds(
+    object_bytes: &[u8],
+    executable_bytes: &[u8],
+) -> Result<Option<(bool, usize)>, ()> {
+    let object_file = object::File::parse(object_bytes).map_err(|_| ())?;
+    let executable_file = object::File::parse(executable_bytes).map_err(|_| ())?;
+    if object_file.format() != BinaryFormat::Elf
+        || executable_file.format() != BinaryFormat::Elf
+        || object_file.architecture() != Architecture::X86_64
+        || executable_file.architecture() != Architecture::X86_64
+        || !object_file.is_little_endian()
+        || !executable_file.is_little_endian()
+    {
+        return Ok(None);
+    }
+
+    let mut executable_symbols =
+        BTreeMap::<String, Vec<(u64, u64, Option<object::SectionIndex>)>>::new();
+    for symbol in executable_file.symbols() {
+        if symbol.is_global() && symbol.is_definition() && symbol.kind() == SymbolKind::Text {
+            if let Ok(name) = symbol.name() {
+                executable_symbols
+                    .entry(name.to_owned())
+                    .or_default()
+                    .push((symbol.address(), symbol.size(), symbol.section_index()));
+            }
+        }
+    }
+
+    let mut functions = Vec::new();
+    let mut object_defined = BTreeSet::new();
+    let mut executable_addresses = BTreeMap::new();
+    for symbol in object_file.symbols() {
+        if !symbol.is_global() || !symbol.is_definition() || symbol.kind() != SymbolKind::Text {
+            continue;
+        }
+        let Ok(name) = symbol.name() else {
+            return Ok(None);
+        };
+        if name.is_empty() || !object_defined.insert(name.to_owned()) {
+            return Ok(None);
+        }
+        let Some(section_index) = symbol.section_index() else {
+            return Ok(None);
+        };
+        let Ok(object_section) = object_file.section_by_index(section_index) else {
+            return Ok(None);
+        };
+        if object_section.kind() != SectionKind::Text {
+            return Ok(None);
+        }
+        let object_size = symbol.size();
+        let Some(object_end) = symbol.address().checked_add(object_size) else {
+            return Ok(None);
+        };
+        let Ok(Some(object_bytes)) = object_section.data_range(symbol.address(), object_size)
+        else {
+            return Ok(None);
+        };
+        if object_bytes.len() as u64 != object_size {
+            return Ok(None);
+        }
+
+        let Some(executable_candidates) = executable_symbols.get(name) else {
+            return Ok(None);
+        };
+        if executable_candidates.len() != 1 {
+            return Ok(None);
+        }
+        let (executable_address, executable_size, executable_section_index) =
+            executable_candidates[0];
+        let Some(executable_section_index) = executable_section_index else {
+            return Ok(None);
+        };
+        let Ok(executable_section) = executable_file.section_by_index(executable_section_index)
+        else {
+            return Ok(None);
+        };
+        if executable_section.kind() != SectionKind::Text {
+            return Ok(None);
+        }
+        let Some(_executable_end) = executable_address.checked_add(executable_size) else {
+            return Ok(None);
+        };
+        let Ok(Some(executable_function_bytes)) =
+            executable_section.data_range(executable_address, executable_size)
+        else {
+            return Ok(None);
+        };
+        if executable_function_bytes.len() as u64 != executable_size {
+            return Ok(None);
+        }
+        if object_size != executable_size {
+            return Ok(Some((false, 0)));
+        }
+
+        if functions.iter().any(|function: &ObjectLinkFunction| {
+            function.section == section_index
+                && function.object_address < object_end
+                && symbol.address() < function.object_address + function.object_size
+        }) {
+            return Ok(None);
+        }
+        executable_addresses.insert(name.to_owned(), executable_address);
+        functions.push(ObjectLinkFunction {
+            section: section_index,
+            object_address: symbol.address(),
+            object_size,
+            executable_address,
+            object_bytes: object_bytes.to_vec(),
+            executable_bytes: executable_function_bytes.to_vec(),
+        });
+    }
+
+    let mut relocations = Vec::new();
+    for section in object_file.sections() {
+        if section.kind() != SectionKind::Text {
+            continue;
+        }
+        let section_index = section.index();
+        for (offset, relocation) in section.relocations() {
+            let mut containing = functions.iter().enumerate().filter(|(_, function)| {
+                function.section == section_index
+                    && function.object_address <= offset
+                    && offset < function.object_address + function.object_size
+            });
+            let Some((function_index, function)) = containing.next() else {
+                return Ok(None);
+            };
+            if containing.next().is_some() {
+                return Ok(None);
+            }
+            if relocation.size() != 32
+                || !matches!(
+                    relocation.flags(),
+                    RelocationFlags::Elf { r_type }
+                        if r_type == object::elf::R_X86_64_PLT32
+                            || r_type == object::elf::R_X86_64_PC32
+                )
+            {
+                return Ok(None);
+            }
+            let RelocationTarget::Symbol(symbol_index) = relocation.target() else {
+                return Ok(None);
+            };
+            let Ok(target) = object_file.symbol_by_index(symbol_index) else {
+                return Ok(None);
+            };
+            let Ok(target_name) = target.name() else {
+                return Ok(None);
+            };
+            if !object_defined.contains(target_name) {
+                return Ok(None);
+            }
+            let Some(relative_offset) = offset.checked_sub(function.object_address) else {
+                return Ok(None);
+            };
+            let Ok(relative_offset) = usize::try_from(relative_offset) else {
+                return Ok(None);
+            };
+            let Some(field_end) = relative_offset.checked_add(4) else {
+                return Ok(None);
+            };
+            let Ok(function_size) = usize::try_from(function.object_size) else {
+                return Ok(None);
+            };
+            if field_end > function_size {
+                return Ok(None);
+            }
+            relocations.push(ObjectLinkRelocation {
+                function_index,
+                offset: relative_offset,
+                target: target_name.to_owned(),
+                addend: relocation.addend(),
+            });
+        }
+    }
+
+    let mut resolved_call_sites = 0;
+    for (function_index, function) in functions.iter().enumerate() {
+        let mut function_relocations: Vec<_> = relocations
+            .iter()
+            .filter(|relocation| relocation.function_index == function_index)
+            .collect();
+        function_relocations.sort_by_key(|relocation| relocation.offset);
+        let mut compared_through = 0;
+        for relocation in function_relocations {
+            if relocation.offset < compared_through {
+                return Ok(None);
+            }
+            if function.object_bytes[compared_through..relocation.offset]
+                != function.executable_bytes[compared_through..relocation.offset]
+            {
+                return Ok(Some((false, resolved_call_sites)));
+            }
+            let field_end = relocation.offset + 4;
+            let Some(target_address) = executable_addresses.get(&relocation.target).copied() else {
+                return Ok(None);
+            };
+            let Ok(relative_offset) = u64::try_from(relocation.offset) else {
+                return Ok(None);
+            };
+            let Some(place_address) = function.executable_address.checked_add(relative_offset)
+            else {
+                return Ok(Some((false, resolved_call_sites)));
+            };
+            let Ok(target_address) = i64::try_from(target_address) else {
+                return Ok(Some((false, resolved_call_sites)));
+            };
+            let Ok(place_address) = i64::try_from(place_address) else {
+                return Ok(Some((false, resolved_call_sites)));
+            };
+            let Some(resolved_value) = target_address
+                .checked_add(relocation.addend)
+                .and_then(|value| value.checked_sub(place_address))
+            else {
+                return Ok(Some((false, resolved_call_sites)));
+            };
+            let Ok(resolved_value) = i32::try_from(resolved_value) else {
+                return Ok(Some((false, resolved_call_sites)));
+            };
+            let Some(actual_bytes) = function.executable_bytes.get(relocation.offset..field_end)
+            else {
+                return Ok(None);
+            };
+            let Ok(actual_bytes) = <[u8; 4]>::try_from(actual_bytes) else {
+                return Ok(None);
+            };
+            let actual_value = i32::from_le_bytes(actual_bytes);
+            if actual_value != resolved_value {
+                return Ok(Some((false, resolved_call_sites)));
+            }
+            compared_through = field_end;
+            resolved_call_sites += 1;
+        }
+        if function.object_bytes[compared_through..]
+            != function.executable_bytes[compared_through..]
+        {
+            return Ok(Some((false, resolved_call_sites)));
+        }
+    }
+    Ok(Some((true, resolved_call_sites)))
 }
 
 fn observation_pins_comparable(link_build: &LinkBuild) -> bool {
@@ -3076,6 +3366,134 @@ entry:
             object_call_edges_correspond(&ir_surface, &object_surface),
             Some(true)
         );
+    }
+
+    fn executable_symbol_file_offset(bytes: &[u8], name: &str, offset: u64) -> usize {
+        let file = object::File::parse(bytes).unwrap();
+        let symbol = file
+            .symbols()
+            .find(|symbol| {
+                symbol.name().ok() == Some(name)
+                    && symbol.is_global()
+                    && symbol.is_definition()
+                    && symbol.kind() == SymbolKind::Text
+            })
+            .unwrap();
+        assert!(offset < symbol.size());
+        let section = file
+            .section_by_index(symbol.section_index().unwrap())
+            .unwrap();
+        let (section_file_offset, _) = section.file_range().unwrap();
+        let symbol_section_offset = symbol.address().checked_sub(section.address()).unwrap();
+        usize::try_from(
+            section_file_offset
+                .checked_add(symbol_section_offset)
+                .unwrap()
+                .checked_add(offset)
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn object_call_relocation_offset(
+        object_bytes: &[u8],
+        function_name: &str,
+        target_name: &str,
+    ) -> u64 {
+        let file = object::File::parse(object_bytes).unwrap();
+        let function = file
+            .symbols()
+            .find(|symbol| {
+                symbol.name().ok() == Some(function_name)
+                    && symbol.is_global()
+                    && symbol.is_definition()
+                    && symbol.kind() == SymbolKind::Text
+            })
+            .unwrap();
+        let section_index = function.section_index().unwrap();
+        let function_end = function.address().checked_add(function.size()).unwrap();
+        for section in file.sections() {
+            if section.index() != section_index || section.kind() != SectionKind::Text {
+                continue;
+            }
+            for (offset, relocation) in section.relocations() {
+                if !(function.address() <= offset && offset < function_end) {
+                    continue;
+                }
+                let RelocationTarget::Symbol(symbol_index) = relocation.target() else {
+                    continue;
+                };
+                let target = file.symbol_by_index(symbol_index).unwrap();
+                if target.name().ok() == Some(target_name) {
+                    return offset - function.address();
+                }
+            }
+        }
+        panic!("missing object call relocation");
+    }
+
+    #[test]
+    fn object_link_correspondence_checks_function_bytes_and_resolved_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let ir_path = dir.path().join("module.ll");
+        let object_path = dir.path().join("module.o");
+        let executable_path = dir.path().join("module");
+        let ir = br#"
+define i64 @helper(i64 %argument) {
+entry:
+  %value = add i64 %argument, 1
+  ret i64 %value
+}
+
+define i64 @__mumei_user_main() {
+entry:
+  %value = call i64 @helper(i64 5)
+  ret i64 %value
+}
+
+define i32 @main() {
+entry:
+  %value = call i64 @__mumei_user_main()
+  %exit = trunc i64 %value to i32
+  ret i32 %exit
+}
+"#;
+        fs::write(&ir_path, ir).unwrap();
+        mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ir_path, &object_path)
+            .unwrap();
+        linker::link_recorded(std::slice::from_ref(&object_path), &executable_path).unwrap();
+
+        let object_bytes = fs::read(&object_path).unwrap();
+        let executable_bytes = fs::read(&executable_path).unwrap();
+        assert_eq!(
+            object_link_corresponds(&object_bytes, &executable_bytes),
+            Ok(Some((true, 2)))
+        );
+
+        let helper_offset = executable_symbol_file_offset(&executable_bytes, "helper", 0);
+        let mut altered_helper = executable_bytes.clone();
+        altered_helper[helper_offset] ^= 1;
+        assert!(matches!(
+            object_link_corresponds(&object_bytes, &altered_helper),
+            Ok(Some((false, _)))
+        ));
+
+        let call_field_offset =
+            object_call_relocation_offset(&object_bytes, "__mumei_user_main", "helper");
+        assert_eq!(call_field_offset, 7);
+        let call_field_file_offset = executable_symbol_file_offset(
+            &executable_bytes,
+            "__mumei_user_main",
+            call_field_offset,
+        );
+        let mut altered_call = executable_bytes.clone();
+        altered_call[call_field_file_offset] ^= 1;
+        assert!(matches!(
+            object_link_corresponds(&object_bytes, &altered_call),
+            Ok(Some((false, _)))
+        ));
+
+        assert!(object_link_corresponds(&object_bytes, b"not an executable").is_err());
     }
 
     fn executable_script(path: &Path, body: &str) {
