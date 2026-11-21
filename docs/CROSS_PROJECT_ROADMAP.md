@@ -3250,6 +3250,53 @@ and aliases/resources unsafe or unsupported. C09 remains a separate, limited
 LLVM translation-validation pilot after its C03/C08 prerequisites; neither
 compiler type metadata, finite replay nor C08 hash binding supplies that claim.
 
+### Wave 4 per-language lexical binding reports (Rust, Solidity, TypeScript)
+
+The C06 lexical binding reports add opt-in, single-file, tree-sitter producers
+for Rust ([mumei-agent
+#1033](https://github.com/mumei-lang/mumei-agent/pull/1033)), Solidity
+([#1038](https://github.com/mumei-lang/mumei-agent/pull/1038)) and TypeScript
+([#1042](https://github.com/mumei-lang/mumei-agent/pull/1042)). Each one emits a
+`mumei.<lang>-lexical-bindings/v1` report with the same shape and reads it
+through one shared fail-closed reader. The report covers bindings tied to the
+full source hash, declaration and scope UTF-8 byte spans, read/write/call
+references, explicit type facts, function records, conservative callee kinds,
+unresolved names and analysis gaps. Fixtures for each language keep shadowing
+and reassignment distinct: an initializer still sees the outer binding, and a
+write refers to the existing binding rather than creating a new one. TypeScript
+member and index assignments do not rebind, so they read the root binding.
+Solidity inherited overloads collapse only when a more-derived override or
+implementation has identical parameter type text.
+
+Type facts come only from explicit annotations. Rust `isize`/`usize` need an
+explicit pointer width. Solidity `uintN`/`intN`, `address` and `bytesN` widths
+are fixed by the language. TypeScript `number` is float64 and `bigint` is
+recorded as its own kind. Nothing is inferred from initializers or identifier
+spelling.
+
+Unresolved names never become trusted targets: prelude and builtin names,
+qualified paths, module/item boundaries, overloads, private or external bases,
+implicit globals and `arguments` stay unresolved. Imported names bind only to
+an import declaration, calls through them stay opaque, and glob imports are
+gaps.
+Macros, `cfg`, inline assembly, `eval`/`new Function`, decorators, temporal
+dead zone uses and unsupported syntax are gaps. Any unresolved name or gap makes
+`complete` false. A `direct_local` call is a declaration lookup to a
+body-bearing, non-generic, non-async local function (also non-virtual in
+Solidity and non-generator in TypeScript). It says nothing about
+purity, termination or effect transfer.
+
+The reader rejects stale reports (source hash, profile or target mismatch),
+malformed reports and internally inconsistent reports. These reports are not
+compiler type checks, proofs or verdicts. They add no default route, and Mumei
+gains no tool dependency. Existing audit keys, Seal Grades and Lean
+trust/freshness gates do not change, and no external verifier is adopted.
+
+This is still **partial C06**. Single-file lexical metadata does not give
+project, import or type-checked resolution, and C07 summaries over these
+reports are not wired yet. Go remains served by the compiler-backed `go/types`
+route above.
+
 ### Wave 4 first resolved-call dependency summaries
 
 The [C07 scalar dependency slice](https://github.com/mumei-lang/mumei-agent/pull/658)
