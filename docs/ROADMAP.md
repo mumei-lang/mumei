@@ -3063,6 +3063,11 @@ host is pinned or compared, and the producer host, libc/loader/kernel
 versions and CPU features are unrecorded, so the scope is some host of
 that OS/architecture, not an attested environment (design-memo Option D
 folded into Option A).
+The first bounded C10 Option B step, `native-bundle recheck-object`, checks
+only correspondence between the reproduced object's public function-symbol
+surface and the pinned LLVM IR; it makes no instruction-selection, register
+allocation, relocation, linker, ABI or runtime claim. Full object-code
+translation validation remains the deep endpoint.
 Sibling descriptors now name the exit-status observation only as
 `os_exit_status_observation` (formerly bare `os_exit_status` in
 non-exit-status `checks_not_performed` lists).

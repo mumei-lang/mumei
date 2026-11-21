@@ -1281,10 +1281,12 @@ The ephemeral success scope is
 Checking the wrapper shape makes **low-32-bit truncation explicit**, not an
 i64-to-OS-exit-code equivalence or an ABI/runtime guarantee. A user body differing
 only above bit 31 is still rejected even if the wrapper's low 32 bits coincide.
-Conversely, repinned garbage object/executable bytes may still pass when source
-and LLVM checks hold: there is **no LLVM-to-object, optimization, backend, linker,
-system-library, OS, runtime or final-executable semantic proof**, nor producer
-authenticity or attestation that the object was emitted from these IR bytes.
+Repinned object/executable bytes may still pass `recheck-llvm` when source and
+LLVM checks hold; the separate `recheck-object` checks only the public function
+symbol surface against the IR. There is **no instruction-selection, register
+allocation, relocation, linker, system-library, OS, runtime or final-executable
+semantic proof**, nor producer authenticity or attestation that the object was
+emitted from these IR bytes.
 The consumer binary, Core source model, Z3 and LLVM parser/verifier/interpreter
 remain trusted components. Packaging is not a hermetic deployment.
 
@@ -1720,6 +1722,21 @@ attestation claim; a toolchain that emits different but semantically
 equivalent bytes (a different LLVM version, for example) fails closed rather
 than being normalized into agreement. The OS exit-status check is the
 separate opt-in stage below.
+
+### Pinned object symbol-surface correspondence
+
+`mumei native-bundle recheck-object` runs the full artifact recheck and then
+compares the reproduced `program.o` symbol surface with the pinned `program.ll`.
+The externally visible IR function definitions must equal the object's
+non-local defined text symbols, and each non-empty undefined object symbol must
+be declared in the IR. A mismatch exits 1; a failed parse is inconclusive and
+exits 3. The JSON descriptor names artifact reproduction and
+`object_symbol_correspondence`.
+
+This is the first bounded C10 Option B step: symbol-surface correspondence only.
+It makes no instruction-selection, register-allocation, relocation, linker,
+ABI or runtime claim. Full object-code translation validation remains the
+deeper Option B endpoint.
 
 ### Pinned executable exit-status recheck
 

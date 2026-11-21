@@ -4,9 +4,11 @@ use mumei_core::{
     hir, native_bundle::*, parser, proof_cert, resolver, semantic_contract, verification,
 };
 use mumei_emit_llvm::translation_validation::{self as tv, Options, Outcome};
+use object::{Object, ObjectSymbol, SymbolKind};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::Stdio,
     time::{Duration, Instant},
@@ -39,6 +41,8 @@ const LLVM_RECHECK_SCOPE: &str =
     "source_postcondition_identity_and_llvm_snapshot_only/no_authenticity_or_binary_semantic_proof";
 const ARTIFACT_RECHECK_SCOPE: &str =
     "source_postcondition_llvm_snapshot_and_toolchain_identity_only/no_execution_or_runtime_semantics";
+const OBJECT_SYMBOL_CORRESPONDENCE_SCOPE: &str =
+    "artifact_reproduction_and_object_symbol_surface_only/no_instruction_abi_or_runtime_semantics";
 const EXIT_STATUS_RECHECK_SCOPE: &str =
     "artifact_reproduction_and_os_exit_status_observation_only/no_runtime_abi_or_semantic_proof";
 const STDOUT_RECHECK_SCOPE: &str =
@@ -540,6 +544,100 @@ pub(crate) fn run(command: NativeBundleCommand) {
                 Err(error) => Err(error),
             }
         }
+        NativeBundleCommand::RecheckObject {
+            bundle,
+            source,
+            expected_build_id,
+            json,
+        } => match recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id) {
+            Err(error) => Err(error),
+            Ok(ArtifactRecheckResult {
+                result: ArtifactRecheck::Different,
+                ..
+            }) => Err(BundleError(
+                "pinned artifact differs from the toolchain's output for the pinned inputs",
+            )),
+            Ok(ArtifactRecheckResult {
+                result: ArtifactRecheck::Inconclusive,
+                ..
+            }) => {
+                eprintln!(
+                    "Native source/LLVM recheck inconclusive; no object symbol correspondence established."
+                );
+                std::process::exit(3);
+            }
+            Ok(ArtifactRecheckResult {
+                result: ArtifactRecheck::Rechecked,
+                stage: Some(stage),
+                ..
+            }) => {
+                let ir = fs::read(stage.path().join(BundleFile::LlvmIr.file_name()));
+                let object = fs::read(stage.path().join(BundleFile::Object.file_name()));
+                let (Ok(ir), Ok(object)) = (ir, object) else {
+                    eprintln!("Native object symbol surface inconclusive; staged inputs could not be read.");
+                    drop(stage);
+                    std::process::exit(3);
+                };
+                let (Ok(ir_surface), Ok(object_surface)) =
+                    (tv::ir_function_surface(&ir), object_symbol_surface(&object))
+                else {
+                    eprintln!("Native object symbol surface inconclusive; LLVM IR or object parsing failed.");
+                    drop(stage);
+                    std::process::exit(3);
+                };
+                if !object_symbols_correspond(&ir_surface, &object_surface) {
+                    Err(BundleError(
+                        "native object symbol surface differs from LLVM IR",
+                    ))
+                } else if json {
+                    let descriptor = serde_json::json!({
+                        "schema_version": "mumei.object-symbol-correspondence/v1",
+                        "scope": OBJECT_SYMBOL_CORRESPONDENCE_SCOPE,
+                        "build_id": expected_build_id,
+                        "defined_functions": ir_surface.defined,
+                        "external_references": object_surface.undefined,
+                        "checks_performed": [
+                            "toolchain_object_executable_reproduction",
+                            "object_symbol_correspondence",
+                        ],
+                        "checks_not_performed": [
+                            "optimizer_semantics",
+                            "raw_link_argument_vector_reproduction",
+                            "abi_runtime_semantics",
+                            "os_exit_status_observation",
+                            "os_stdout_observation",
+                            "os_stderr_observation",
+                            "runtime_observation_semantics",
+                        ],
+                    });
+                    serde_json::to_vec_pretty(&descriptor)
+                        .map_err(|_| BundleError("cannot encode object symbol descriptor"))
+                        .and_then(|mut bytes| {
+                            bytes.push(b'\n');
+                            std::io::stdout()
+                                .lock()
+                                .write_all(&bytes)
+                                .map_err(|_| {
+                                    BundleError("cannot write object symbol descriptor")
+                                })
+                        })
+                } else {
+                    println!(
+                        "Native object symbol surface corresponds to the pinned LLVM IR: {} defined functions.\nScope: {OBJECT_SYMBOL_CORRESPONDENCE_SCOPE}",
+                        ir_surface.defined.len()
+                    );
+                    Ok(())
+                }
+            }
+            Ok(ArtifactRecheckResult {
+                result: ArtifactRecheck::Rechecked,
+                stage: None,
+                ..
+            }) => {
+                eprintln!("Native object symbol surface inconclusive; reproduced artifacts are unavailable.");
+                std::process::exit(3);
+            }
+        },
         NativeBundleCommand::RecheckExitStatus { bundle, source, expected_build_id } => {
             match recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id) {
                 Err(error) => Err(error),
@@ -2487,6 +2585,35 @@ struct ArtifactRecheckResult {
     stage: Option<tempfile::TempDir>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct ObjectSymbolSurface {
+    defined: BTreeSet<String>,
+    undefined: BTreeSet<String>,
+}
+
+fn object_symbol_surface(bytes: &[u8]) -> Result<ObjectSymbolSurface, ()> {
+    let file = object::File::parse(bytes).map_err(|_| ())?;
+    let mut surface = ObjectSymbolSurface::default();
+    for symbol in file.symbols() {
+        if symbol.is_undefined() {
+            let name = symbol.name().map_err(|_| ())?;
+            if !name.is_empty() {
+                surface.undefined.insert(name.to_owned());
+            }
+        } else if symbol.is_global() && symbol.is_definition() && symbol.kind() == SymbolKind::Text
+        {
+            surface
+                .defined
+                .insert(symbol.name().map_err(|_| ())?.to_owned());
+        }
+    }
+    Ok(surface)
+}
+
+fn object_symbols_correspond(ir: &tv::IrFunctionSurface, object: &ObjectSymbolSurface) -> bool {
+    object.defined == ir.defined && object.undefined.is_subset(&ir.declared)
+}
+
 fn observation_pins_comparable(link_build: &LinkBuild) -> bool {
     match &link_build.observation_envelope {
         None => true,
@@ -2642,6 +2769,77 @@ fn publish(_: &Path, _: &Path) -> Result<(), BundleError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_symbols_correspond_only_when_definitions_match_and_references_are_declared() {
+        let ir = tv::IrFunctionSurface {
+            defined: BTreeSet::from(["main".to_owned(), "helper".to_owned()]),
+            declared: BTreeSet::from(["external".to_owned(), "optional".to_owned()]),
+        };
+        let object = |defined: &[&str], undefined: &[&str]| ObjectSymbolSurface {
+            defined: defined.iter().map(|name| (*name).to_owned()).collect(),
+            undefined: undefined.iter().map(|name| (*name).to_owned()).collect(),
+        };
+
+        assert!(object_symbols_correspond(
+            &ir,
+            &object(&["main", "helper"], &["external"])
+        ));
+        assert!(!object_symbols_correspond(
+            &ir,
+            &object(&["main", "helper", "extra"], &["external"])
+        ));
+        assert!(!object_symbols_correspond(
+            &ir,
+            &object(&["main"], &["external"])
+        ));
+        assert!(!object_symbols_correspond(
+            &ir,
+            &object(&["main", "helper"], &["undeclared"])
+        ));
+        assert!(object_symbols_correspond(
+            &ir,
+            &object(&["main", "helper"], &["optional"])
+        ));
+    }
+
+    #[test]
+    fn object_symbol_surface_parses_compiled_object_symbols() {
+        let dir = tempfile::tempdir().unwrap();
+        let ir_path = dir.path().join("symbols.ll");
+        let object_path = dir.path().join("symbols.o");
+        let ir = br#"
+declare i64 @external_ref(i64)
+
+define internal i64 @local_helper() {
+entry:
+  ret i64 1
+}
+
+define i64 @visible() {
+entry:
+  %external = call i64 @external_ref(i64 2)
+  %local = call i64 @local_helper()
+  %sum = add i64 %external, %local
+  ret i64 %sum
+}
+"#;
+        fs::write(&ir_path, ir).unwrap();
+        mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ir_path, &object_path)
+            .unwrap();
+
+        let surface = object_symbol_surface(&fs::read(&object_path).unwrap()).unwrap();
+        assert_eq!(surface.defined, BTreeSet::from(["visible".to_owned()]));
+        assert_eq!(
+            surface.undefined,
+            BTreeSet::from(["external_ref".to_owned()])
+        );
+        assert!(object_symbols_correspond(
+            &tv::ir_function_surface(ir).unwrap(),
+            &surface
+        ));
+        assert!(object_symbol_surface(b"not an object").is_err());
+    }
 
     fn executable_script(path: &Path, body: &str) {
         std::fs::write(path, body).unwrap();

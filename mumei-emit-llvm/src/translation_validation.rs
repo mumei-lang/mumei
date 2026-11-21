@@ -1,13 +1,16 @@
 //! Opt-in equivalence checking of one C03 body and one supplied LLVM 17 SSA snapshot.
 //! Not postcondition verification, pipeline attestation or final-binary verification.
 
-use inkwell::{context::Context as LlvmContext, memory_buffer::MemoryBuffer, values::AsValueRef};
+use inkwell::{
+    context::Context as LlvmContext, memory_buffer::MemoryBuffer, module::Linkage,
+    values::AsValueRef,
+};
 use llvm_sys::{core::*, prelude::*, LLVMIntPredicate, LLVMOpcode, LLVMTypeKind};
 use mumei_core::semantic_contract::{
     aggregate_value, call_field_decl, encode_pure_i64_body, encode_pure_i64_module,
     module_source_profile, PureI64Body, RefinedAdmission, LOOP_BOUND, PURE_I64_WRAPPING_PROFILE,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use z3::{
     ast::{Ast, Bool, BV},
     Config, Context, SatResult, Solver,
@@ -111,6 +114,62 @@ const MAX_DEPTH: usize = 48;
 const MAX_BLOCKS: usize = 64;
 const MAX_INSTRUCTIONS: usize = 1024;
 const MAX_STATES: usize = 256;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IrFunctionSurface {
+    pub defined: BTreeSet<String>,
+    pub declared: BTreeSet<String>,
+}
+
+#[allow(clippy::result_unit_err)]
+pub fn ir_function_surface(ir: &[u8]) -> std::result::Result<IrFunctionSurface, ()> {
+    let context = LlvmContext::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            ir,
+            "function-surface.ll",
+        ))
+        .map_err(|_| ())?;
+    let mut surface = IrFunctionSurface::default();
+    for function in module.get_functions() {
+        let name = function.get_name().to_str().map_err(|_| ())?.to_owned();
+        if name.starts_with("llvm.") {
+            continue;
+        }
+        if function.count_basic_blocks() > 0 {
+            if !matches!(function.get_linkage(), Linkage::Private | Linkage::Internal) {
+                surface.defined.insert(name);
+            }
+        } else {
+            surface.declared.insert(name);
+        }
+    }
+    Ok(surface)
+}
+
+#[cfg(test)]
+mod ir_function_surface_tests {
+    use super::*;
+
+    #[test]
+    fn function_surface_keeps_external_definitions_and_declarations_only() {
+        let ir = br#"
+define i32 @visible() {
+entry:
+  ret i32 0
+}
+declare i32 @external(i32)
+define internal i32 @internal_fn() {
+entry:
+  ret i32 1
+}
+declare void @llvm.fake.intrinsic()
+"#;
+        let surface = ir_function_surface(ir).unwrap();
+        assert_eq!(surface.defined, BTreeSet::from(["visible".to_owned()]));
+        assert_eq!(surface.declared, BTreeSet::from(["external".to_owned()]));
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
