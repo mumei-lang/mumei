@@ -3903,9 +3903,16 @@ Missing pins or incomplete observation exit 3 as inconclusive; any
 mismatch exits 1; a match emits `mumei.runtime-observation/v1` with
 `runtime_observation_semantics` in `checks_performed`. The scope is
 bounded to the one OS-level invocation and claims no runtime/ABI,
-process-semantics or historical-execution proof. Existing accept
-descriptors stay unchanged; composition with acceptance and
-`recovery-eval` is Option A slice 3.
+process-semantics or historical-execution proof. Both JSON descriptors
+include the same envelope: `argv: []`, `stdin: "closed"`,
+`timeout_ms: 30000`, `channel_cap_bytes: 65536`,
+`environment: "inherited_unpinned"` and
+`working_directory: "inherited_unpinned"`. Multiple invocations,
+non-empty argv, stdin bytes, pinned environment/cwd and CPU/memory
+limits are unsupported and unclaimed; only the timeout and per-channel
+cap are enforced. Composition landed via `accept-observations`; Agent's
+`native-observations-accept` route (mumei-agent#1039) now performs
+`runtime_observation_semantics` from this descriptor.
 
 ### Wave 5 pinned executable runtime-observation acceptance (C10 consumer)
 
@@ -3914,8 +3921,9 @@ acceptance descriptor only after artifact reproduction and one invocation
 match exit status, stdout and stderr together. Its checks include
 `runtime_observation_semantics`, the conjunction no per-channel
 `accept-*` command can claim because those observations are made in
-separate runs. The Agent-side `RUNTIME_CHECK_VOCABULARY` performer
-registration (mumei-agent#1034) follows this Core descriptor.
+separate runs. The Agent `native-observations-accept` route
+(mumei-agent#1039) now performs `runtime_observation_semantics` from
+this Core descriptor.
 Sibling descriptors now name the exit-status observation only as
 `os_exit_status_observation` (formerly bare `os_exit_status` in
 non-exit-status `checks_not_performed` lists).

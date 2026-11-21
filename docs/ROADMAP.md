@@ -3042,8 +3042,14 @@ boundary](VERIFICATION_NATIVE.md#pinned-executable-runtime-observation-recheck).
 The paired `native-bundle accept-observations` emits an anonymous
 acceptance descriptor only when the artifact chain and all three
 observations match in one invocation; it is the only descriptor that
-performs `runtime_observation_semantics`. Agent-side performer
-registration is a follow-up. See the [runtime-observation acceptance
+performs `runtime_observation_semantics`. Its JSON envelope declares
+`argv: []`, `stdin: "closed"`, `timeout_ms: 30000`,
+`channel_cap_bytes: 65536`, `environment: "inherited_unpinned"` and
+`working_directory: "inherited_unpinned"`; it does not
+claim multiple invocations, non-empty argv, stdin bytes, pinned context
+or CPU/memory limits. The Agent
+`native-observations-accept` route (mumei-agent#1039) now performs this
+check from the descriptor. See the [runtime-observation acceptance
 boundary](VERIFICATION_NATIVE.md#pinned-executable-runtime-observation-acceptance).
 Sibling descriptors now name the exit-status observation only as
 `os_exit_status_observation` (formerly bare `os_exit_status` in

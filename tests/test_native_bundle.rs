@@ -693,8 +693,10 @@ fn runtime_observations_are_rechecked_on_one_invocation() {
         serde_json::json!({
             "argv": [],
             "stdin": "closed",
-            "timeout_ms": 30_000,
-            "channel_cap_bytes": 65_536,
+            "timeout_ms": 30000,
+            "channel_cap_bytes": 65536,
+            "environment": "inherited_unpinned",
+            "working_directory": "inherited_unpinned",
         })
     );
     assert_eq!(
@@ -806,6 +808,17 @@ fn runtime_observations_are_accepted_on_one_invocation() {
         "native_bundle_source_llvm_toolchain_reproduction_and_runtime_observation_semantics"
     );
     assert_eq!(
+        descriptor["invocation"],
+        serde_json::json!({
+            "argv": [],
+            "stdin": "closed",
+            "timeout_ms": 30000,
+            "channel_cap_bytes": 65536,
+            "environment": "inherited_unpinned",
+            "working_directory": "inherited_unpinned",
+        })
+    );
+    assert_eq!(
         descriptor["checks_performed"],
         serde_json::json!([
             "bundle_identity_binding",
@@ -894,6 +907,7 @@ fn stderr_acceptance_emits_the_observation_descriptor() {
     assert_success(&accept);
     let descriptor: serde_json::Value = serde_json::from_slice(&accept.stdout).unwrap();
     assert_eq!(descriptor["accepted"], true);
+    assert!(descriptor.get("invocation").is_none());
     assert!(
         descriptor["checks_performed"]
             .as_array()
