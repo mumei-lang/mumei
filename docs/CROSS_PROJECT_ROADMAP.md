@@ -6174,6 +6174,22 @@ embedded `evidence_acceptance` is carried, not re-judged.
 C11 stays partial; Evidence acceptance of adapter claims, C12's demand
 gate and grade promotion are unchanged.
 
+### C11 Core adapter-manifest attempt-field check (mumei)
+
+`mumei evidence check-adapter <input> | --stdin [--json]` applies a
+bounded representation and consistency check to the complete
+`mumei.verifier-adapter/v1` manifest. It does not execute an adapter or
+assess command safety, stdin semantics, host policy, or resource
+enforcement. Declared argv and stdin remain inert unless host policy opts
+in through `allow_manifest_attempt_argv` and
+`allow_manifest_attempt_stdin`; a host argv map takes precedence.
+Verdict markers describe adapter self-report vocabulary, never a verdict.
+`max_memory_mb` is the declared ceiling used only when host policy declares
+none; Core does not enforce it. No grade is promoted.
+
+C11 stays partial; Evidence acceptance of adapter claims, C12's demand
+gate and grade promotion are unchanged.
+
 ### Claim Book promotable gate (mumei #1172)
 
 [mumei#1172](https://github.com/mumei-lang/mumei/pull/1172) turns the

@@ -1,3 +1,11 @@
+### Unreleased: Core adapter-manifest representation check
+
+- Added `mumei evidence check-adapter <input> | --stdin [--json]` to validate
+  the full static representation of `mumei.verifier-adapter/v1`, including
+  manifest-declared attempt argv, stdin, verdict markers and memory bounds.
+  This performs no adapter execution, command-safety assessment, host-policy
+  evaluation, resource enforcement or grade promotion.
+
 ### Unreleased: Core attempt-schedule representation check
 
 - `mumei evidence check-schedule <input> | --stdin [--json]` validates the
