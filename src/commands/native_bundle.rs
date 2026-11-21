@@ -3139,6 +3139,25 @@ fn write_object_recheck(
     }
 }
 
+fn machine_tv_coverage_checks(
+    equivalent_leaf_count: usize,
+    equivalent_call_count: usize,
+) -> (Vec<&'static str>, Vec<&'static str>) {
+    let mut checks_performed = Vec::new();
+    let mut checks_not_performed = Vec::new();
+    if equivalent_leaf_count > 0 {
+        checks_performed.push("machine_code_leaf_function_tv");
+    } else {
+        checks_not_performed.push("machine_code_leaf_function_tv");
+    }
+    if equivalent_call_count > 0 {
+        checks_performed.push("machine_code_direct_call_site_tv");
+    } else {
+        checks_not_performed.push("machine_code_direct_call_site_tv");
+    }
+    (checks_performed, checks_not_performed)
+}
+
 fn write_machine_tv(
     data: ObjectRecheckData,
     expected_build_id: &str,
@@ -3187,6 +3206,7 @@ fn write_machine_tv(
     }
     let mut functions = BTreeMap::new();
     let mut equivalent_count = 0usize;
+    let mut equivalent_leaf_count = 0usize;
     let mut equivalent_call_count = 0usize;
     for function_name in &object_surface.defined {
         let has_source_calls = source_models
@@ -3217,6 +3237,8 @@ fn write_machine_tv(
                 equivalent_count += 1;
                 if has_source_calls {
                     equivalent_call_count += 1;
+                } else {
+                    equivalent_leaf_count += 1;
                 }
                 serde_json::json!({"outcome": "equivalent_within_profile"})
             }
@@ -3253,16 +3275,10 @@ fn write_machine_tv(
             "runtime_observation_semantics",
             "machine_code_tv_branching_functions",
         ];
-        if equivalent_count > 0 {
-            checks_performed.push("machine_code_leaf_function_tv");
-        } else {
-            checks_not_performed.push("machine_code_leaf_function_tv");
-        }
-        if equivalent_call_count > 0 {
-            checks_performed.push("machine_code_direct_call_site_tv");
-        } else {
-            checks_not_performed.push("machine_code_direct_call_site_tv");
-        }
+        let (machine_tv_checks, machine_tv_checks_not_performed) =
+            machine_tv_coverage_checks(equivalent_leaf_count, equivalent_call_count);
+        checks_performed.extend(machine_tv_checks);
+        checks_not_performed.extend(machine_tv_checks_not_performed);
         let descriptor = serde_json::json!({
             "schema_version": "mumei.machine-code-tv/v1",
             "scope": MACHINE_CODE_TV_SCOPE,
@@ -3450,6 +3466,13 @@ fn publish(_: &Path, _: &Path) -> Result<(), BundleError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machine_tv_descriptor_omits_leaf_check_for_caller_only_equivalence() {
+        let (checks_performed, checks_not_performed) = machine_tv_coverage_checks(0, 1);
+        assert_eq!(checks_performed, vec!["machine_code_direct_call_site_tv"]);
+        assert_eq!(checks_not_performed, vec!["machine_code_leaf_function_tv"]);
+    }
 
     #[test]
     fn object_symbols_correspond_only_when_definitions_match_and_references_are_declared() {
