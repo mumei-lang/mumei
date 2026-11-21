@@ -1960,11 +1960,19 @@ consumers must adopt the new preservation check names and function field.
 and machine-TV pipeline as `recheck-machine-tv`, then emits an acceptance
 descriptor only when at least one source-atom function is present, every
 source-atom function defined in the reproduced object is
-`equivalent_within_profile`, and every other object function has the exact
-`outside_profile` reason `not_a_source_atom` (the C `main` wrapper). A machine
-code difference exits 1. Unknown, any other outside-profile result, or no
-source-atom functions exits 3 with no descriptor; identity or artifact
-mismatches exit 1 as well.
+`equivalent_within_profile`, the applicable C `main` entry wrapper is
+`equivalent_within_profile`, and every remaining object function has the exact
+`outside_profile` reason `not_a_source_atom`. A machine-code difference exits
+1. Unknown, any other outside-profile result, or no source-atom functions
+exits 3 with no descriptor; identity or artifact mismatches exit 1 as well.
+
+When the source `main` model has the supported i64-carrier signature and
+`__mumei_user_main` is defined, `machine_code_entry_wrapper_tv` checks that the
+wrapper makes one unconditional zero-argument call to `__mumei_user_main` and
+returns the low 32 bits of its result. `argc` and `argv` remain fresh, unused
+inputs. The source signature gate selects the LLVM truncation path rather than
+the float `fptosi` path. This does not claim CRT or loader behavior, or OS
+exit-status semantics.
 
 On acceptance, `--json` emits the
 `mumei.native-evidence-acceptance/v1` family with `acceptance: "evaluated"` and
@@ -1979,9 +1987,11 @@ accepted descriptor uses the `_without_object_link` scope and leaves
 `object_link_correspondence` not performed.
 
 This is not reusable Evidence or a certificate and does not promote a grade.
-The register convention is assumed, not validated; the C `main` wrapper,
+The register convention is assumed, not validated; CRT and loader behavior,
 producer authenticity, historical execution, optimizer semantics, ABI/runtime
-semantics, OS observations, and grade/Lean checks remain outside the claim.
+semantics, OS exit-status observations, and grade/Lean checks remain outside
+the claim. The accepted descriptor omits `object_entry_wrapper_semantics` only
+when the bounded entry-wrapper check is equivalent.
 Core deliberately does not emit the agent-owned
 `object_translation_correspondence` name. The future mumei-agent
 `native-object-accept` route maps Core's

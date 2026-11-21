@@ -6704,6 +6704,32 @@ pub struct PureI64Body<'ctx> {
     pub bounded_memory: bool,
 }
 
+impl<'ctx> PureI64Body<'ctx> {
+    /// Construct a scalar body for a synthetic machine-TV obligation.
+    pub fn synthetic_scalar(function_name: impl Into<String>, value: BV<'ctx>) -> Self {
+        Self {
+            function_name: function_name.into(),
+            source_sha256: String::new(),
+            inputs: Vec::new(),
+            value,
+            call_sites: Vec::new(),
+            call_result_bounds: Vec::new(),
+            definedness: Vec::new(),
+            param_domain: Vec::new(),
+            subrange_params: false,
+            refined_signature: false,
+            composite_signature: false,
+            param_shapes: Vec::new(),
+            result_shape: None,
+            param_leaf_doubles: Vec::new(),
+            result_leaf_doubles: Vec::new(),
+            loop_bound_exits: None,
+            post_writes: HashMap::new(),
+            bounded_memory: false,
+        }
+    }
+}
+
 type BodyResult<T> = std::result::Result<T, SemanticContractError>;
 
 /// `allow_wrapping_arithmetic` admits wrapping i64 add/sub/mul in the encoded

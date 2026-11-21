@@ -4098,15 +4098,19 @@ Core's new `mumei native-bundle accept-object` producer reruns artifact
 reproduction, object symbol/call-edge checks and bounded machine-TV. It emits
 the `mumei.native-evidence-acceptance/v1` descriptor only when at least one
 source-atom function exists, all such functions are equivalent within the
-machine-TV profile, and other defined functions are exactly outside the
-source-atom set (the C `main` wrapper). The descriptor binds the expected
+machine-TV profile, the supported C `main` entry wrapper is equivalent when
+applicable, and every remaining non-source function is exactly outside the
+source-atom set. The wrapper check compares the low 32 bits returned by one
+unconditional call to `__mumei_user_main`; `argc` and `argv` are unused. The
+descriptor binds the expected
 build ID and reproduced LLVM/object hashes, performs the Core-owned
 `object_source_machine_code_correspondence` check, and carries machine-TV's
 dynamic coverage names. When linked object correspondence is uncheckable, the
 scope explicitly uses `_without_object_link` and leaves that check
 not performed. Different exits 1; inconclusive outcomes emit no descriptor and
-exit 3. This does not validate the register convention, wrapper semantics,
-ABI/runtime behavior, authenticity or historical execution.
+exit 3. This does not validate the register convention, CRT/loader semantics,
+OS exit-status semantics, ABI/runtime behavior, authenticity or historical
+execution.
 
 The future mumei-agent `native-object-accept` route maps the Core check
 `object_source_machine_code_correspondence` to its agent-owned
@@ -4122,8 +4126,9 @@ absent. When performed,
 not performed. Direct and cancellation-poll callees are assumed to preserve
 callee-saved registers; composition within a module requires independent
 preservation proofs for all source callees, while external callees remain an
-assumption. The argument/result register convention remains assumed. Agent
-consumers must adopt both check names and the function field.
+assumption. The argument/result register convention remains assumed. The
+entry-wrapper check is named `machine_code_entry_wrapper_tv`; agent consumers
+must adopt this and both preservation check names and the function field.
 
 ### Wave 5 declared producer-identity gate (C02 consumer)
 

@@ -3139,15 +3139,18 @@ remain counted as direct-call functions rather than forward- or acyclic-branch
 functions.
 
 The next C10 Option B producer adds `native-bundle accept-object`. It performs
-the same bounded machine-TV evaluation and emits an acceptance
-descriptor only when at least one source-atom function is present, every such
-function is equivalent and every other defined function has the exact
-`not_a_source_atom` outcome (the C `main` wrapper). Its Core-owned
+the same bounded machine-TV evaluation and emits an acceptance descriptor only
+when at least one source-atom function is present, every such function is
+equivalent, the supported C `main` entry wrapper is equivalent when applicable,
+and every remaining defined function has the exact `not_a_source_atom` outcome.
+The wrapper check compares the low 32 bits from one unconditional call to
+`__mumei_user_main`; `argc` and `argv` are unused. It does not claim CRT,
+loader, or OS exit-status semantics. Its Core-owned
 `object_source_machine_code_correspondence` check is mapped by the future
 mumei-agent `native-object-accept` route to the agent-owned
 `object_translation_correspondence` check; the Core descriptor does not emit
 the agent name. Inconclusive outcomes emit no descriptor, and ABI/runtime,
-wrapper, authenticity and historical-execution claims remain outside scope.
+authenticity and historical-execution claims remain outside scope.
 Machine-TV function entries separately report
 `callee_saved_preservation`, and descriptors perform
 `machine_code_callee_saved_register_preservation` only when every equivalent

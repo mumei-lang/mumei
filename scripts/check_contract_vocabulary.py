@@ -102,6 +102,7 @@ REQUIRED_NO_MM_LANGUAGE_PHRASES = [
 REQUIRED_C10_OPTION_B_MACHINE_TV_CHECKS = [
     "machine_code_callee_saved_register_preservation",
     "machine_code_callee_saved_preservation_assumed_for_external_callees",
+    "machine_code_entry_wrapper_tv",
 ]
 
 

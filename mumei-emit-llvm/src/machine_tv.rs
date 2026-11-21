@@ -2,7 +2,7 @@ use inkwell::targets::{InitializationConfig, Target};
 use llvm_sys::disassembler::{
     LLVMCreateDisasm, LLVMDisasmContextRef, LLVMDisasmDispose, LLVMDisasmInstruction,
 };
-use mumei_core::semantic_contract::{PureI64Body, LOOP_BOUND};
+use mumei_core::semantic_contract::{CallSite, PureI64Body, LOOP_BOUND};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{CStr, CString},
@@ -57,6 +57,12 @@ pub enum CalleeSavedPreservation {
     Preserved,
     Violated,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResultWidth {
+    I64,
+    I32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,6 +234,51 @@ pub fn check_function_with_preservation<'ctx>(
     call_targets: &BTreeMap<u64, CallTarget>,
     context: &'ctx Context,
 ) -> (FunctionOutcome, Option<CalleeSavedPreservation>) {
+    check_function_with_result_width(
+        bytes,
+        address,
+        model,
+        call_targets,
+        context,
+        ResultWidth::I64,
+    )
+}
+
+/// Check the C entry wrapper's low-32-bit result. Its call model assumes
+/// callees preserve these registers; external and cancellation-poll callees
+/// remain assumptions.
+pub fn check_entry_wrapper_with_preservation(
+    bytes: &[u8],
+    address: u64,
+    call_targets: &BTreeMap<u64, CallTarget>,
+    context: &Context,
+) -> (FunctionOutcome, Option<CalleeSavedPreservation>) {
+    let value = BV::fresh_const(context, "entry_wrapper_user_main_result", 64);
+    let mut model = PureI64Body::synthetic_scalar("main", value.clone());
+    model.call_sites.push(CallSite {
+        callee: "main".to_owned(),
+        args: Vec::new(),
+        result: value,
+        guard: Bool::from_bool(context, true),
+    });
+    check_function_with_result_width(
+        bytes,
+        address,
+        &model,
+        call_targets,
+        context,
+        ResultWidth::I32,
+    )
+}
+
+fn check_function_with_result_width<'ctx>(
+    bytes: &[u8],
+    address: u64,
+    model: &PureI64Body<'ctx>,
+    call_targets: &BTreeMap<u64, CallTarget>,
+    context: &'ctx Context,
+    result_width: ResultWidth,
+) -> (FunctionOutcome, Option<CalleeSavedPreservation>) {
     if !supports_signature(model) {
         if let Ok(instructions) = disassemble(bytes, address) {
             let function_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
@@ -272,7 +323,14 @@ pub fn check_function_with_preservation<'ctx>(
     let mut unknown_path = false;
     for path in &lifted.paths {
         let result = check_query_with_simplify_fallback(context, |solver| {
-            assert_path_equivalence_query(solver, model, &lifted.arguments, path, context);
+            assert_path_equivalence_query(
+                solver,
+                model,
+                &lifted.arguments,
+                path,
+                result_width,
+                context,
+            );
         });
         match result {
             SatResult::Unsat => {}
@@ -351,10 +409,17 @@ fn assert_path_equivalence_query<'ctx>(
     model: &PureI64Body<'ctx>,
     arguments: &[BV<'ctx>],
     path: &LiftedPath<'ctx>,
+    result_width: ResultWidth,
     context: &'ctx Context,
 ) {
     assert_path_assumptions(solver, model, arguments, path);
-    let output_matches = model.value._eq(&path.return_value);
+    let output_matches = match result_width {
+        ResultWidth::I64 => model.value._eq(&path.return_value),
+        ResultWidth::I32 => model
+            .value
+            .extract(31, 0)
+            ._eq(&path.return_value.extract(31, 0)),
+    };
     let mut equivalent_terms: Vec<&Bool> = path.call_argument_obligations.iter().collect();
     equivalent_terms.push(&output_matches);
     solver.assert(&Bool::and(context, &equivalent_terms).not());
@@ -3084,6 +3149,57 @@ entry:
                 addend: -4,
             },
         )])
+    }
+
+    fn entry_wrapper_call_targets() -> BTreeMap<u64, CallTarget> {
+        BTreeMap::from([(
+            2,
+            CallTarget {
+                name: "__mumei_user_main".to_owned(),
+                relocation_kind: CallRelocationKind::ElfX86_64Plt32,
+                relocation_size: 32,
+                addend: -4,
+            },
+        )])
+    }
+
+    #[test]
+    fn entry_wrapper_compares_low_32_bits_and_proves_preservation() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let call_targets = entry_wrapper_call_targets();
+        let real_wrapper = [0x50, 0xe8, 0, 0, 0, 0, 0x59, 0xc3];
+        assert_eq!(
+            check_entry_wrapper_with_preservation(&real_wrapper, 0, &call_targets, &context,),
+            (
+                FunctionOutcome::Equivalent,
+                Some(CalleeSavedPreservation::Preserved)
+            )
+        );
+
+        let increment_result = [0x50, 0xe8, 0, 0, 0, 0, 0x59, 0xff, 0xc0, 0xc3];
+        assert_eq!(
+            check_entry_wrapper_with_preservation(&increment_result, 0, &call_targets, &context,).0,
+            FunctionOutcome::Different
+        );
+
+        let zero_extend_result = [0x50, 0xe8, 0, 0, 0, 0, 0x59, 0x89, 0xc0, 0xc3];
+        assert_eq!(
+            check_entry_wrapper_with_preservation(&zero_extend_result, 0, &call_targets, &context,)
+                .0,
+            FunctionOutcome::Equivalent
+        );
+
+        let clobber_rbx = [0x50, 0xe8, 0, 0, 0, 0, 0x59, 0x48, 0x89, 0xfb, 0xc3];
+        assert_eq!(
+            check_entry_wrapper_with_preservation(&clobber_rbx, 0, &call_targets, &context,),
+            (
+                FunctionOutcome::Equivalent,
+                Some(CalleeSavedPreservation::Violated)
+            )
+        );
     }
 
     const WHILE_PROBE_SOURCE: &str =
