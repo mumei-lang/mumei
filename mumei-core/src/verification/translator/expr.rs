@@ -286,7 +286,7 @@ fn rec_fn_args<'a>(
         },
         |param_index| {
             call_env
-                .get(&format!("len_{}", callee.params[param_index].name))
+                .get(&array_len_key(&callee.params[param_index].name))
                 .cloned()
         },
         |param_index, field_index| {
@@ -572,11 +572,11 @@ fn unfold_constant_calls<'a>(
                 if type_name.and_then(array_element_type_name).is_some() {
                     call_env.insert(format!("__z3_arr_{}", param.name), arg.clone());
                     if let Some(len) = arg.as_array().and_then(|arr| call_result_len(vc, &arr)) {
-                        call_env.insert(format!("len_{}", param.name), len);
+                        call_env.insert(array_len_key(&param.name), len);
                     } else {
                         // A caller-env slot of the same name must not
                         // leak in as this argument's length.
-                        call_env.remove(&format!("len_{}", param.name));
+                        call_env.remove(&array_len_key(&param.name));
                     }
                 } else if let Some(sdef) = type_name.and_then(|name| vc.module_env.get_struct(name))
                 {
@@ -656,10 +656,16 @@ fn unfold_constant_calls<'a>(
             // mint.
             if result.as_array().is_some() {
                 let len_sort = array_len_symbol(vc.ctx, "probe", vc.bitvec_i64).get_sort();
-                let len_sym =
-                    rec_fn_result_projection(vc, atom, "len", &domain, &len_sort, &rec_args);
+                let len_sym = rec_fn_result_projection(
+                    vc,
+                    atom,
+                    &array_len_key("result"),
+                    &domain,
+                    &len_sort,
+                    &rec_args,
+                );
                 call_env.insert("__z3_arr_result".to_string(), result.clone());
-                call_env.insert("len_result".to_string(), len_sym);
+                call_env.insert(array_len_key("result"), len_sym);
             }
 
             let ensures = crate::verification::contract_view(
@@ -932,14 +938,12 @@ fn param_domain_facts<'a>(
     for param in &callee.params {
         let type_name = param.type_name.as_deref().map(str::trim);
         if type_name.and_then(array_element_type_name).is_some() {
-            let length = call_env
-                .get(&format!("len_{}", param.name))
-                .ok_or_else(|| {
-                    MumeiError::verification(format!(
-                        "missing array length for recursive parameter '{}'",
-                        param.name
-                    ))
-                })?;
+            let length = call_env.get(&array_len_key(&param.name)).ok_or_else(|| {
+                MumeiError::verification(format!(
+                    "missing array length for recursive parameter '{}'",
+                    param.name
+                ))
+            })?;
             let nonnegative = nonneg_constraint(vc.ctx, length).ok_or_else(|| {
                 MumeiError::verification(format!(
                     "invalid array length sort for recursive parameter '{}'",
@@ -1779,7 +1783,7 @@ fn array_eq_operand_len<'a>(
         }
         return array_len_value(vc.ctx, env, name, vc.bitvec_i64, solver_opt);
     }
-    tail_len_expr(vc, env, "eq_operand", "v", None, operand, val, 0)
+    tail_len_expr(vc, env, None, operand, val, 0, solver_opt)
 }
 
 /// `l_sel == r_sel` on array elements. `fp.eq` keeps the IEEE reading for
@@ -2553,7 +2557,7 @@ pub(crate) fn expr_to_z3<'a>(
                     if val.as_array().is_some() {
                         // `len([1, 2, 3])` / `len(if c { … } else { … })` —
                         // structural length from the expression itself.
-                        return Ok(tail_len_expr(vc, env, "len_arg", "v", None, arg, &val, 0));
+                        return Ok(tail_len_expr(vc, env, None, arg, &val, 0, solver_opt));
                     }
                     Err(MumeiError::type_error(
                         "len() expects an array or string argument",
@@ -2836,7 +2840,14 @@ pub(crate) fn expr_to_z3<'a>(
                                 alias_struct_fields(&mut call_env, &param.name, val);
                                 // 配列引数: `__z3_arr_`/`len_`/要素型スロットを
                                 // callee パラメータ名で配線（リテラルは len 実値）。
-                                wire_array_slots(vc, &param.name, args.get(i), val, &mut call_env);
+                                wire_array_slots(
+                                    vc,
+                                    &param.name,
+                                    args.get(i),
+                                    val,
+                                    &mut call_env,
+                                    solver_opt,
+                                );
                             }
                         }
 
@@ -3317,14 +3328,15 @@ pub(crate) fn expr_to_z3<'a>(
                                 let len_sort =
                                     array_len_symbol(vc.ctx, "probe", vc.bitvec_i64).get_sort();
                                 rec_fn_result_projection(
-                                    vc, &callee, "len", domain, &len_sort, rec_args,
+                                    vc,
+                                    &callee,
+                                    &array_len_key("result"),
+                                    domain,
+                                    &len_sort,
+                                    rec_args,
                                 )
                             } else {
-                                array_len_symbol(
-                                    ctx,
-                                    &format!("len_{}", result_name),
-                                    vc.bitvec_i64,
-                                )
+                                array_len_symbol(ctx, &result_name, vc.bitvec_i64)
                             };
                             // Array lengths are nonneg regardless of the
                             // callee's ensures — `array_len_value` asserts
@@ -3530,7 +3542,7 @@ pub(crate) fn expr_to_z3<'a>(
                             call_env.insert("result".to_string(), result_z3.clone());
                             if let Some(len_sym) = &result_len {
                                 call_env.insert("__z3_arr_result".to_string(), result_z3.clone());
-                                call_env.insert("len_result".to_string(), len_sym.clone());
+                                call_env.insert(array_len_key("result"), len_sym.clone());
                             }
                             // `ensures` reads post-write fields —
                             // freshen the callee's written composite
@@ -5464,7 +5476,14 @@ pub(crate) fn expr_to_z3<'a>(
                         if let Some(arg_val) = arg_vals.get(i) {
                             call_env.insert(param.name.clone(), arg_val.clone());
                             alias_struct_fields(&mut call_env, &param.name, arg_val);
-                            wire_array_slots(vc, &param.name, args.get(i), arg_val, &mut call_env);
+                            wire_array_slots(
+                                vc,
+                                &param.name,
+                                args.get(i),
+                                arg_val,
+                                &mut call_env,
+                                solver_opt,
+                            );
                         }
                     }
 
@@ -5799,7 +5818,7 @@ pub(crate) fn expr_to_z3<'a>(
                         call_env.insert("result".to_string(), result_z3.clone());
                         if let Some(len_sym) = &result_len {
                             call_env.insert("__z3_arr_result".to_string(), result_z3.clone());
-                            call_env.insert("len_result".to_string(), len_sym.clone());
+                            call_env.insert(array_len_key("result"), len_sym.clone());
                         }
                         // `ensures` reads post-write fields — freshen
                         // the callee's written composite params so its
@@ -6467,7 +6486,14 @@ fn apply_local_lambda<'a>(
     for (i, param) in params.iter().enumerate() {
         call_env.insert(param.name.clone(), arg_vals[i].clone());
         alias_struct_fields(&mut call_env, &param.name, &arg_vals[i]);
-        wire_array_slots(vc, &param.name, args.get(i), &arg_vals[i], &mut call_env);
+        wire_array_slots(
+            vc,
+            &param.name,
+            args.get(i),
+            &arg_vals[i],
+            &mut call_env,
+            solver_opt,
+        );
     }
 
     let mut call_lambdas = captured.clone();

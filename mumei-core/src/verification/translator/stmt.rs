@@ -265,11 +265,11 @@ fn havoc_vars<'a>(vc: &VCtx<'a>, env: &mut Env<'a>, vars: &std::collections::Has
             if env.contains_key(&arr_key) {
                 env.insert(arr_key, fresh);
             }
-            let len_key = format!("len_{name}");
+            let len_key = array_len_key(name);
             if env.contains_key(&len_key) {
                 env.insert(
                     len_key,
-                    Int::fresh_const(ctx, &format!("__havoc_len_{}_{}", name, uid)).into(),
+                    Int::fresh_const(ctx, &array_len_key(&format!("__havoc_{name}_{uid}"))).into(),
                 );
             }
             // A struct binding's field projections are separate env
@@ -1905,7 +1905,7 @@ pub(crate) fn stmt_to_z3<'a>(
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
             rebind_struct_binding_slots(vc, var, &val, env);
-            wire_array_slots(vc, var, Some(value), &val, env);
+            wire_array_slots(vc, var, Some(value), &val, env, solver_opt);
             profile_solver_assertion(vc, &format!("let_{}", var), None);
             Ok(val)
         }
@@ -1962,7 +1962,7 @@ pub(crate) fn stmt_to_z3<'a>(
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
             rebind_struct_binding_slots(vc, var, &val, env);
-            wire_array_slots(vc, var, Some(value), &val, env);
+            wire_array_slots(vc, var, Some(value), &val, env, solver_opt);
             profile_solver_assertion(vc, &format!("assign_{}", var), None);
             Ok(val)
         }

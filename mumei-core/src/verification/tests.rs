@@ -3130,7 +3130,7 @@ fn test_subsumption_check_array_length_does_not_alias_caller_symbol() {
     let cfg = Config::new();
     let ctx = Context::new(&cfg);
     let solver = Solver::new(&ctx);
-    let caller_len = Int::new_const(&ctx, "len_a");
+    let caller_len = Int::new_const(&ctx, super::translator::array_len_key("a").as_str());
     solver.assert(&caller_len._eq(&Int::from_i64(&ctx, 0)));
     let module_env = ModuleEnv::new();
     let vc = VCtx {

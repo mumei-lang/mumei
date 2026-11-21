@@ -2110,7 +2110,7 @@ fn verify_inner_impl(
     // 2c. 全パラメータに対して配列長シンボルを事前生成
     #[allow(clippy::map_entry)]
     for param in &atom.params {
-        let len_name = format!("len_{}", param.name);
+        let len_name = array_len_key(&param.name);
         if env.contains_key(&len_name) {
             continue;
         }
@@ -2579,6 +2579,7 @@ fn verify_inner_impl(
                 tail_expr(&hir_atom.body_stmt),
                 &body_result,
                 &mut env,
+                Some(&solver),
             );
             env.insert("result".to_string(), body_result.clone());
         }
@@ -2717,7 +2718,7 @@ fn verify_inner_impl(
                                     let type_name = param.type_name.as_deref()?;
                                     let lowering =
                                         length_companion_lowering(type_name, module_env)?;
-                                    let value = pre_body_env.get(&format!("len_{}", param.name))?;
+                                    let value = pre_body_env.get(&array_len_key(&param.name))?;
                                     Some(raise_length_companion(
                                         &model,
                                         &param.name,
@@ -2744,7 +2745,7 @@ fn verify_inner_impl(
                                 if name == "result"
                                     || params.contains(name.as_str())
                                     || name.starts_with("__")
-                                    || name.starts_with("len_")
+                                    || name.starts_with("len#")
                                 {
                                     continue;
                                 }
@@ -2757,7 +2758,7 @@ fn verify_inner_impl(
                                 if let Some(value) = pre_body_env.get(&param.name) {
                                     loss_env.insert(param.name.clone(), value.clone());
                                     for symbol in [
-                                        format!("len_{}", param.name),
+                                        array_len_key(&param.name),
                                         format!("__z3_arr_{}", param.name),
                                     ] {
                                         if let Some(value) = pre_body_env.get(&symbol) {
@@ -3343,6 +3344,7 @@ fn verify_inner_impl(
                 tail_expr(&hir_atom.body_stmt),
                 &body_result,
                 &mut env,
+                Some(&solver),
             );
             env.insert("result".to_string(), body_result.clone());
         }
@@ -3472,7 +3474,7 @@ fn verify_inner_impl(
                             for (name, value) in &env {
                                 if name.starts_with("__struct_result_")
                                     || name.starts_with("result_")
-                                    || name == "len_result"
+                                    || name == &array_len_key("result")
                                     || name.starts_with("__z3_arr_result")
                                 {
                                     witness_env.insert(name.clone(), value.clone());

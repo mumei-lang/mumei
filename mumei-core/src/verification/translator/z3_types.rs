@@ -534,16 +534,17 @@ pub(crate) fn is_bv_i64(value: &Dynamic<'_>) -> bool {
 /// Lengths follow the mode so that index comparisons (`i < len(arr)`) stay in
 /// one theory: mixing `bv2int` on the index with `int2bv` on the length makes
 /// Z3 answer `unknown` on otherwise trivial array contracts.
-pub(crate) fn array_len_symbol<'a>(
-    ctx: &'a Context,
-    len_name: &str,
-    bitvec_i64: bool,
-) -> Dynamic<'a> {
+pub(crate) fn array_len_symbol<'a>(ctx: &'a Context, name: &str, bitvec_i64: bool) -> Dynamic<'a> {
+    let len_name = array_len_key(name);
     if bitvec_i64 {
-        BV::new_const(ctx, len_name, I64_BITS).into()
+        BV::new_const(ctx, len_name.as_str(), I64_BITS).into()
     } else {
-        Int::new_const(ctx, len_name).into()
+        Int::new_const(ctx, len_name.as_str()).into()
     }
+}
+
+pub(crate) fn array_len_key(name: &str) -> String {
+    format!("len#{name}")
 }
 
 /// `value >= 0`, signed in the bit-vector encoding.
@@ -582,16 +583,53 @@ pub(crate) fn array_len_value<'a>(
     bitvec_i64: bool,
     solver_opt: Option<&Solver<'a>>,
 ) -> Dynamic<'a> {
-    let len_name = format!("len_{}", array);
+    let len_name = array_len_key(array);
     if let Some(existing) = env.get(&len_name) {
         return existing.clone();
     }
-    let len = array_len_symbol(ctx, &len_name, bitvec_i64);
+    let len = array_len_symbol(ctx, array, bitvec_i64);
     if let (Some(solver), Some(nonneg)) = (solver_opt, nonneg_constraint(ctx, &len)) {
         solver.assert(&nonneg);
     }
     env.insert(len_name, len.clone());
     len
+}
+
+fn fresh_array_len<'a>(vc: &VCtx<'a>, solver_opt: Option<&Solver<'a>>) -> Dynamic<'a> {
+    let len: Dynamic = if vc.bitvec_i64 {
+        BV::fresh_const(vc.ctx, &array_len_key("fresh"), I64_BITS).into()
+    } else {
+        Int::fresh_const(vc.ctx, &array_len_key("fresh")).into()
+    };
+    if let (Some(solver), Some(nonneg)) = (solver_opt, nonneg_constraint(vc.ctx, &len)) {
+        solver.assert(&nonneg);
+    }
+    len
+}
+
+pub(crate) fn array_len_for_value<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    arr: &Array<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> Dynamic<'a> {
+    if let Some(len) = call_result_len(vc, arr) {
+        return len;
+    }
+    let root = array_root_value(arr);
+    if root.kind() == z3::AstKind::App
+        && root.decl().kind() == z3::DeclKind::UNINTERPRETED
+        && root.num_children() == 0
+    {
+        return array_len_value(
+            vc.ctx,
+            env,
+            &root.decl().name().to_string(),
+            vc.bitvec_i64,
+            solver_opt,
+        );
+    }
+    fresh_array_len(vc, solver_opt)
 }
 
 pub(crate) fn mark_string_constraints(vc: &VCtx<'_>) {
@@ -694,6 +732,7 @@ pub(crate) fn wire_array_slots<'a>(
     value: Option<&Expr>,
     val: &Dynamic<'a>,
     env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
 ) {
     // For `var` sources the live array is the tracked `__z3_arr_<src>` chain —
     // `env[src]` is only the base const, and `src[i] = v` stores never rewrite
@@ -713,22 +752,24 @@ pub(crate) fn wire_array_slots<'a>(
         // would revive the original param const along with its requires-side
         // assertions (`arr[0] == 4` staying provable after `arr = 5`).
         // A `#`-suffixed name can never collide with a source identifier.
-        if env.contains_key(&format!("__z3_arr_{name}")) || env.contains_key(&format!("len_{name}"))
-        {
+        let len_key = array_len_key(name);
+        if env.contains_key(&format!("__z3_arr_{name}")) || env.contains_key(&len_key) {
             let sort = vc
                 .local_array_elem_types
                 .borrow()
                 .get(name)
                 .map(|s| array_element_sort_from_type(s.as_str(), vc.ieee754_f64))
                 .unwrap_or_else(|| array_element_sort(name, vc));
-            env.insert(
-                format!("__z3_arr_{name}"),
-                z3_array_for_sort(vc.ctx, &format!("{name}#rebound"), sort).into(),
+            static REBOUND_ARRAY_UID: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let rebound_name = format!(
+                "{name}#rebound#{}",
+                REBOUND_ARRAY_UID.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             );
-            env.insert(
-                format!("len_{name}"),
-                array_len_symbol(vc.ctx, &format!("len_{name}#rebound"), vc.bitvec_i64),
-            );
+            let rebound = z3_array_for_sort(vc.ctx, &rebound_name, sort);
+            let len = array_len_for_value(vc, env, &rebound, solver_opt);
+            env.insert(format!("__z3_arr_{name}"), rebound.into());
+            env.insert(len_key, len);
         }
         vc.local_array_elem_types.borrow_mut().remove(name);
         return;
@@ -739,7 +780,7 @@ pub(crate) fn wire_array_slots<'a>(
     env.insert(format!("__z3_arr_{name}"), arr_dyn.clone());
     let len: Dynamic = match value {
         Some(Expr::ArrayLit(elements)) => concrete_len_value(vc.ctx, elements.len(), vc.bitvec_i64),
-        Some(Expr::Variable(src)) => array_len_value(vc.ctx, env, src, vc.bitvec_i64, None),
+        Some(Expr::Variable(src)) => array_len_value(vc.ctx, env, src, vc.bitvec_i64, solver_opt),
         Some(Expr::IfThenElse {
             then_branch,
             else_branch,
@@ -754,37 +795,31 @@ pub(crate) fn wire_array_slots<'a>(
             match cond_hint {
                 Some(cond) => {
                     let len_t = match arr_dyn.nth_child(1) {
-                        Some(v) => branch_tail_len(vc, env, name, "then", then_branch, &v, 0),
-                        None => {
-                            array_len_symbol(vc.ctx, &format!("len_{name}#then"), vc.bitvec_i64)
-                        }
+                        Some(v) => branch_tail_len(vc, env, then_branch, &v, 0, solver_opt),
+                        None => fresh_array_len(vc, solver_opt),
                     };
                     let len_e = match arr_dyn.nth_child(2) {
-                        Some(v) => branch_tail_len(vc, env, name, "else", else_branch, &v, 0),
-                        None => {
-                            array_len_symbol(vc.ctx, &format!("len_{name}#else"), vc.bitvec_i64)
-                        }
+                        Some(v) => branch_tail_len(vc, env, else_branch, &v, 0, solver_opt),
+                        None => fresh_array_len(vc, solver_opt),
                     };
                     cond.ite(&len_t, &len_e)
                 }
-                None => array_len_symbol(vc.ctx, &format!("len_{name}#if"), vc.bitvec_i64),
+                None => fresh_array_len(vc, solver_opt),
             }
         }
-        Some(Expr::Block(stmt)) => branch_tail_len(vc, env, name, "block", stmt, &arr_dyn, 0),
+        Some(Expr::Block(stmt)) => branch_tail_len(vc, env, stmt, &arr_dyn, 0, solver_opt),
         Some(Expr::Match { arms, .. }) => {
             // The Match eval folds arms in reverse, producing the chain
             // `ite(c_1, v_1, ite(c_2, v_2, …, v_n))` — the last arm's value
             // is the innermost else child and carries no condition of its
             // own (exhaustiveness implies it when all earlier conds fail).
             // Mirror the spine on lengths: `len_<name> = ite(c_1, len_1, …)`.
-            match_arm_lens(vc, env, name, "m", arms, &arr_dyn, 0).unwrap_or_else(|| {
-                array_len_symbol(vc.ctx, &format!("len_{name}#match"), vc.bitvec_i64)
-            })
+            match_arm_lens(vc, env, arms, &arr_dyn, 0, solver_opt)
+                .unwrap_or_else(|| fresh_array_len(vc, solver_opt))
         }
-        _ => call_result_len(vc, &arr)
-            .unwrap_or_else(|| array_len_value(vc.ctx, env, name, vc.bitvec_i64, None)),
+        _ => array_len_for_value(vc, env, &arr, solver_opt),
     };
-    env.insert(format!("len_{name}"), len);
+    env.insert(array_len_key(name), len);
     vc.local_array_elem_types
         .borrow_mut()
         .insert(name.to_string(), elem_ty.to_string());
@@ -907,11 +942,10 @@ fn match_ite_spine<'a>(
 fn match_arm_lens<'a>(
     vc: &VCtx<'a>,
     env: &mut Env<'a>,
-    name: &str,
-    side: &str,
     arms: &[MatchArm],
     value: &Dynamic<'a>,
     depth: u32,
+    solver_opt: Option<&Solver<'a>>,
 ) -> Option<Dynamic<'a>> {
     if depth >= TAIL_LEN_DEPTH {
         return None;
@@ -920,18 +954,7 @@ fn match_arm_lens<'a>(
     let mut lens: Vec<Dynamic> = arms
         .iter()
         .zip(vals.iter())
-        .enumerate()
-        .map(|(i, (arm, val))| {
-            branch_tail_len(
-                vc,
-                env,
-                name,
-                &format!("{side}{i}"),
-                &arm.body,
-                val,
-                depth + 1,
-            )
-        })
+        .map(|(arm, val)| branch_tail_len(vc, env, &arm.body, val, depth + 1, solver_opt))
         .collect();
     let mut acc = lens.pop()?;
     for (cond, len_arm) in conds.iter().zip(lens.iter()).rev() {
@@ -945,25 +968,35 @@ fn match_arm_lens<'a>(
 fn branch_tail_len<'a>(
     vc: &VCtx<'a>,
     env: &mut Env<'a>,
-    name: &str,
-    side: &str,
     scope: &Stmt,
     val_node: &Dynamic<'a>,
     depth: u32,
+    solver_opt: Option<&Solver<'a>>,
 ) -> Dynamic<'a> {
     match stmt_tail_expr(scope) {
         Some(tail) => tail_len_expr(
             vc,
             env,
-            name,
-            side,
             Some(LetScope::of(scope)),
             tail,
             val_node,
             depth,
+            solver_opt,
         ),
-        None => array_len_symbol(vc.ctx, &format!("len_{name}#{side}"), vc.bitvec_i64),
+        None => array_value_len_or_fresh(vc, env, val_node, solver_opt),
     }
+}
+
+fn array_value_len_or_fresh<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    val_node: &Dynamic<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> Dynamic<'a> {
+    val_node
+        .as_array()
+        .map(|arr| array_len_for_value(vc, env, &arr, solver_opt))
+        .unwrap_or_else(|| fresh_array_len(vc, solver_opt))
 }
 
 /// Array length of a tail expression. `scope` is the enclosing block —
@@ -971,22 +1004,20 @@ fn branch_tail_len<'a>(
 /// the env (match-arm locals). `val_node` is the Z3 value the tail
 /// evaluated to, letting nested `if`/`match` tails mirror their own
 /// `ite` conditions on lengths. Anything unresolvable gets a fresh
-/// per-side symbol (fail-closed: it only makes proofs harder, never
+/// symbol (fail-closed: it only makes proofs harder, never
 /// easier).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tail_len_expr<'a>(
     vc: &VCtx<'a>,
     env: &mut Env<'a>,
-    name: &str,
-    side: &str,
     scope: Option<LetScope<'_>>,
     tail: &Expr,
     val_node: &Dynamic<'a>,
     depth: u32,
+    solver_opt: Option<&Solver<'a>>,
 ) -> Dynamic<'a> {
-    let fresh = || array_len_symbol(vc.ctx, &format!("len_{name}#{side}"), vc.bitvec_i64);
     if depth >= TAIL_LEN_DEPTH {
-        return fresh();
+        return array_value_len_or_fresh(vc, env, val_node, solver_opt);
     }
     match tail {
         Expr::ArrayLit(elements) => concrete_len_value(vc.ctx, elements.len(), vc.bitvec_i64),
@@ -995,19 +1026,18 @@ pub(crate) fn tail_len_expr<'a>(
                 Some((rhs, before)) => tail_len_expr(
                     vc,
                     env,
-                    name,
-                    side,
                     Some(sc.before(before)),
                     rhs,
                     val_node,
                     depth + 1,
+                    solver_opt,
                 ),
                 None if sc.env_is_current(src) => {
-                    array_len_value(vc.ctx, env, src, vc.bitvec_i64, None)
+                    array_len_value(vc.ctx, env, src, vc.bitvec_i64, solver_opt)
                 }
-                None => fresh(),
+                None => array_value_len_or_fresh(vc, env, val_node, solver_opt),
             },
-            None => array_len_value(vc.ctx, env, src, vc.bitvec_i64, None),
+            None => array_len_value(vc.ctx, env, src, vc.bitvec_i64, solver_opt),
         },
         Expr::IfThenElse {
             then_branch,
@@ -1019,57 +1049,29 @@ pub(crate) fn tail_len_expr<'a>(
                 val_node.nth_child(1),
                 val_node.nth_child(2),
             ) else {
-                return fresh();
+                return array_value_len_or_fresh(vc, env, val_node, solver_opt);
             };
-            let len_t = branch_tail_len(
-                vc,
-                env,
-                name,
-                &format!("{side}t"),
-                then_branch,
-                &t_val,
-                depth + 1,
-            );
-            let len_e = branch_tail_len(
-                vc,
-                env,
-                name,
-                &format!("{side}e"),
-                else_branch,
-                &e_val,
-                depth + 1,
-            );
+            let len_t = branch_tail_len(vc, env, then_branch, &t_val, depth + 1, solver_opt);
+            let len_e = branch_tail_len(vc, env, else_branch, &e_val, depth + 1, solver_opt);
             cond.ite(&len_t, &len_e)
         }
         Expr::Block(stmt) => match stmt_tail_expr(stmt) {
             Some(tail) => tail_len_expr(
                 vc,
                 env,
-                name,
-                side,
                 Some(scope.map_or_else(|| LetScope::of(stmt), |sc| sc.nested(stmt))),
                 tail,
                 val_node,
                 depth + 1,
+                solver_opt,
             ),
-            None => fresh(),
+            None => array_value_len_or_fresh(vc, env, val_node, solver_opt),
         },
-        Expr::Match { arms, .. } => match_arm_lens(
-            vc,
-            env,
-            name,
-            &format!("{side}m"),
-            arms,
-            val_node,
-            depth + 1,
-        )
-        .unwrap_or_else(fresh),
+        Expr::Match { arms, .. } => match_arm_lens(vc, env, arms, val_node, depth + 1, solver_opt)
+            .unwrap_or_else(|| array_value_len_or_fresh(vc, env, val_node, solver_opt)),
         // `len(f(..))` on a call result — or any other array value — picks
         // up the len symbol the Call arm registered for it.
-        _ => val_node
-            .as_array()
-            .and_then(|a| call_result_len(vc, &a))
-            .unwrap_or_else(fresh),
+        _ => array_value_len_or_fresh(vc, env, val_node, solver_opt),
     }
 }
 
@@ -1077,6 +1079,10 @@ pub(crate) fn tail_len_expr<'a>(
 /// base const that `store(store(base, …), …)` chains share. Aliases created
 /// by `let b = a` hold the same root even after either side stores.
 pub(crate) fn array_root_ast(arr: &z3::ast::Array) -> z3_sys::Z3_ast {
+    array_root_value(arr).get_z3_ast()
+}
+
+fn array_root_value<'a>(arr: &z3::ast::Array<'a>) -> Dynamic<'a> {
     let mut cur: Dynamic = arr.clone().into();
     loop {
         if cur.kind() == z3::AstKind::App && cur.decl().kind() == z3::DeclKind::STORE {
@@ -1087,7 +1093,7 @@ pub(crate) fn array_root_ast(arr: &z3::ast::Array) -> z3_sys::Z3_ast {
                 }
             }
         }
-        return cur.get_z3_ast();
+        return cur;
     }
 }
 

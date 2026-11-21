@@ -156,12 +156,12 @@ pub(crate) fn check_contract_subsumption<'a>(
             if let Some(nonneg) = nonneg_constraint(ctx, &len) {
                 array_len_constraints.push(nonneg);
             }
-            concrete_env.insert(format!("len_{}", param.name), len.clone());
-            contract_env.insert(format!("len_arg{i}"), len.clone());
+            concrete_env.insert(array_len_key(&param.name), len.clone());
+            contract_env.insert(array_len_key(&format!("arg{i}")), len.clone());
             if i == 0 {
-                contract_env.insert("len_x".to_string(), len.clone());
+                contract_env.insert(array_len_key("x"), len.clone());
             } else if i == 1 {
-                contract_env.insert("len_y".to_string(), len.clone());
+                contract_env.insert(array_len_key("y"), len.clone());
             }
         }
         param_values.push(z3_var.clone());

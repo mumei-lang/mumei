@@ -1,5 +1,5 @@
 use super::module_env::ModuleEnv;
-use super::translator::struct_field_key;
+use super::translator::{array_len_key, struct_field_key};
 use crate::lowering::{lower, LoweredType};
 use crate::parser::{Atom, EnumDef};
 use serde_json::{json, Map, Number, Value};
@@ -402,7 +402,7 @@ fn infer_untyped_struct_type(
 }
 
 fn has_untyped_array_metadata(binding: &str, env: &HashMap<String, Dynamic<'_>>) -> bool {
-    env.contains_key(&format!("len_{binding}")) || env.contains_key(&format!("__z3_arr_{binding}"))
+    env.contains_key(&array_len_key(binding)) || env.contains_key(&format!("__z3_arr_{binding}"))
 }
 
 pub fn classify_solver_symbol(
@@ -1083,7 +1083,7 @@ fn raise_array_value<'ctx>(
     module_env: &ModuleEnv,
 ) -> (String, &'static str, RaisedStatus) {
     let raw = value.to_string();
-    let Some(len_value) = env.get(&format!("len_{binding}")) else {
+    let Some(len_value) = env.get(&array_len_key(binding)) else {
         return unraisable(raw, "array", "array length is unavailable");
     };
     let Some(length) = model
@@ -1329,7 +1329,7 @@ fn symbol_field(symbol: &str, binding: &str) -> String {
 }
 
 fn is_internal_solver_symbol(name: &str) -> bool {
-    name.starts_with("len_")
+    name.starts_with("len#")
         || name.starts_with("__z3_arr_")
         || name.starts_with("__proj_")
         || name.starts_with("__mumei_struct_")

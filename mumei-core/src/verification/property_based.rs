@@ -1197,7 +1197,7 @@ fn seed_concrete_env<'a>(
         if let Some(GeneratedValue::Array(values)) = assignment.get(&param.name) {
             env.insert(format!("__z3_arr_{}", param.name), value);
             env.insert(
-                format!("len_{}", param.name),
+                super::translator::array_len_key(&param.name),
                 value_to_dynamic(
                     ctx,
                     &param.name,
