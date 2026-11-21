@@ -8,6 +8,11 @@ enum WordArray {
     Idle
 }
 
+enum LengthChoice {
+    Short,
+    AlsoShort
+}
+
 atom round_trip_length(xs: [i64]) -> i64
 requires: len(xs) > 2;
 ensures: result > 2;
@@ -56,6 +61,42 @@ body: {
     let e = Ev::Data([1, 2, 3]);
     match e {
         Ev::Data(ys) => len(ys),
+        Ev::Idle => 0
+    }
+};
+
+atom if_expression_ctor_length_is_known(c: bool) -> i64
+requires: true;
+ensures: result == 2;
+body: {
+    let e = Ev::Data(if c { [1, 2] } else { [3, 4] });
+    match e {
+        Ev::Data(ys) => len(ys),
+        Ev::Idle => 0
+    }
+};
+
+atom block_tail_ctor_length_is_known() -> i64
+requires: true;
+ensures: result == 3;
+body: {
+    let e = Ev::Data({ let ys = [1, 2, 3]; ys });
+    match e {
+        Ev::Data(xs) => len(xs),
+        Ev::Idle => 0
+    }
+};
+
+atom match_expression_ctor_length_is_known(c: LengthChoice) -> i64
+requires: true;
+ensures: result == 2;
+body: {
+    let e = Ev::Data(match c {
+        LengthChoice::Short => [1, 2],
+        LengthChoice::AlsoShort => [3, 4]
+    });
+    match e {
+        Ev::Data(xs) => len(xs),
         Ev::Idle => 0
     }
 };

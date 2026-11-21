@@ -685,6 +685,31 @@ pub(crate) fn array_len_for_expr<'a>(
         Some(crate::parser::ast::Expr::ArrayLit(elements)) => {
             concrete_len_value(vc.ctx, elements.len(), vc.bitvec_i64)
         }
+        Some(crate::parser::ast::Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        }) => {
+            let Some(cond) = value.nth_child(0).and_then(|c| c.as_bool()) else {
+                return fresh_array_len(vc, solver_opt);
+            };
+            let len_t = value
+                .nth_child(1)
+                .map(|v| branch_tail_len(vc, env, then_branch, &v, 0, solver_opt))
+                .unwrap_or_else(|| fresh_array_len(vc, solver_opt));
+            let len_e = value
+                .nth_child(2)
+                .map(|v| branch_tail_len(vc, env, else_branch, &v, 0, solver_opt))
+                .unwrap_or_else(|| fresh_array_len(vc, solver_opt));
+            cond.ite(&len_t, &len_e)
+        }
+        Some(crate::parser::ast::Expr::Block(stmt)) => {
+            branch_tail_len(vc, env, stmt, value, 0, solver_opt)
+        }
+        Some(crate::parser::ast::Expr::Match { arms, .. }) => {
+            match_arm_lens(vc, env, arms, value, 0, solver_opt)
+                .unwrap_or_else(|| fresh_array_len(vc, solver_opt))
+        }
         _ => value
             .as_array()
             .map(|arr| array_len_for_value(vc, env, &arr, solver_opt))
@@ -854,50 +879,9 @@ pub(crate) fn wire_array_slots<'a>(
         return;
     };
     let elem_ty = z3_range_type_name(&arr.get_sort());
-    let cond_hint = arr.nth_child(0).and_then(|c| c.as_bool());
     let arr_dyn: Dynamic = arr.clone().into();
     env.insert(format!("__z3_arr_{name}"), arr_dyn.clone());
-    let len: Dynamic = match value {
-        Some(Expr::ArrayLit(elements)) => concrete_len_value(vc.ctx, elements.len(), vc.bitvec_i64),
-        Some(Expr::Variable(src)) => array_len_value(vc.ctx, env, src, vc.bitvec_i64, solver_opt),
-        Some(Expr::IfThenElse {
-            then_branch,
-            else_branch,
-            ..
-        }) => {
-            // `arr` is already `ite(c, then_arr, else_arr)` — merge the
-            // branch lengths the same way so `len_<name>` is
-            // `ite(c, len_t, len_e)` instead of an unconstrained symbol:
-            // `let a = if c { [1,2] } else { [3,4] }; a[1]` is in bounds on
-            // both branches. Nested `if`/`match` tails recurse through the
-            // value node's own `ite` children.
-            match cond_hint {
-                Some(cond) => {
-                    let len_t = match arr_dyn.nth_child(1) {
-                        Some(v) => branch_tail_len(vc, env, then_branch, &v, 0, solver_opt),
-                        None => fresh_array_len(vc, solver_opt),
-                    };
-                    let len_e = match arr_dyn.nth_child(2) {
-                        Some(v) => branch_tail_len(vc, env, else_branch, &v, 0, solver_opt),
-                        None => fresh_array_len(vc, solver_opt),
-                    };
-                    cond.ite(&len_t, &len_e)
-                }
-                None => fresh_array_len(vc, solver_opt),
-            }
-        }
-        Some(Expr::Block(stmt)) => branch_tail_len(vc, env, stmt, &arr_dyn, 0, solver_opt),
-        Some(Expr::Match { arms, .. }) => {
-            // The Match eval folds arms in reverse, producing the chain
-            // `ite(c_1, v_1, ite(c_2, v_2, …, v_n))` — the last arm's value
-            // is the innermost else child and carries no condition of its
-            // own (exhaustiveness implies it when all earlier conds fail).
-            // Mirror the spine on lengths: `len_<name> = ite(c_1, len_1, …)`.
-            match_arm_lens(vc, env, arms, &arr_dyn, 0, solver_opt)
-                .unwrap_or_else(|| fresh_array_len(vc, solver_opt))
-        }
-        _ => array_len_for_value(vc, env, &arr, solver_opt),
-    };
+    let len = array_len_for_expr(vc, env, value, &arr_dyn, solver_opt);
     env.insert(array_len_key(name), len);
     vc.local_array_elem_types
         .borrow_mut()
