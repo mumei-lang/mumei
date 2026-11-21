@@ -3910,9 +3910,10 @@ include the same envelope: `argv: []`, `stdin: "closed"`,
 `working_directory: "inherited_unpinned"`. Multiple invocations,
 non-empty argv, stdin bytes, pinned environment/cwd and CPU/memory
 limits are unsupported and unclaimed; only the timeout and per-channel
-cap are enforced. Composition landed via `accept-observations`; Agent's
-`native-observations-accept` route (mumei-agent#1039) now performs
-`runtime_observation_semantics` from this descriptor.
+cap are enforced. Composition landed via `accept-observations`; this raw
+descriptor is not an Agent performer, while Agent's
+`native-observations-accept` route (mumei-agent#1039) performs
+`runtime_observation_semantics` from the `accept-observations` descriptor.
 
 ### Wave 5 pinned executable runtime-observation acceptance (C10 consumer)
 
