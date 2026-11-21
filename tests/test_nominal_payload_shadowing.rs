@@ -39,17 +39,37 @@ fn match_binding_shadows_outer_enum_payload_type() {
         .collect();
     assert_eq!(
         errors.len(),
-        1,
-        "only the deliberate unshadowed mismatch should fail:\n{payload:#}"
+        3,
+        "only the direct, nested, and unshadowed deliberate mismatches should fail:\n{payload:#}"
     );
-    assert_eq!(
-        errors[0]["atom"], "unshadowed_payload_mismatch",
-        "the shadowed call must remain accepted:\n{payload:#}"
-    );
-    assert!(
-        errors[0]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("expects struct 'A' but got struct 'B'")),
-        "the unshadowed call failed for the wrong reason:\n{payload:#}"
-    );
+    for (atom, expected_message) in [
+        (
+            "shadowed_wrong_struct_type",
+            "expects struct 'Q' but got struct 'P'",
+        ),
+        (
+            "nested_pattern_shadow_wrong_type",
+            "expects struct 'Q' but got struct 'P'",
+        ),
+        (
+            "unshadowed_payload_mismatch",
+            "expects struct 'A' but got struct 'B'",
+        ),
+    ] {
+        let atom_errors: Vec<_> = errors
+            .iter()
+            .filter(|entry| entry["atom"].as_str() == Some(atom))
+            .collect();
+        assert_eq!(
+            atom_errors.len(),
+            1,
+            "expected one failure for '{atom}':\n{payload:#}"
+        );
+        assert!(
+            atom_errors[0]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(expected_message)),
+            "atom '{atom}' failed for the wrong reason:\n{payload:#}"
+        );
+    }
 }

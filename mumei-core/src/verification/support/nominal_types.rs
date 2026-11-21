@@ -26,7 +26,7 @@ use super::super::module_env::ModuleEnv;
 use super::super::types::{MumeiError, MumeiResult};
 use crate::lowering::chan_payload_type;
 use crate::mir::resolve_alias_base;
-use crate::parser::{Atom, Expr, JoinSemantics, Span, Stmt};
+use crate::parser::{Atom, Expr, JoinSemantics, Pattern, Span, Stmt};
 use std::collections::HashMap;
 
 /// Declared type name of each variable in scope (`None` = unknown).
@@ -128,6 +128,55 @@ impl<'a> NominalChecker<'a> {
         }
         let base_key = self.enum_key(base_type)?;
         self.enum_payload_type(&base_key, field)
+    }
+
+    fn canonical_pattern_type(&self, type_name: &str) -> String {
+        self.struct_key(type_name)
+            .or_else(|| self.enum_key(type_name))
+            .unwrap_or_else(|| {
+                let base = type_name.split('<').next().unwrap_or(type_name).trim();
+                resolve_alias_base(self.module_env, base)
+            })
+    }
+
+    fn bind_pattern_types(&mut self, pattern: &Pattern, type_name: Option<&str>) {
+        match pattern {
+            Pattern::Variable(name) => {
+                let ty = type_name.map(|type_name| self.canonical_pattern_type(type_name));
+                self.types.insert(name.clone(), ty);
+            }
+            Pattern::Variant {
+                variant_name,
+                fields,
+            } => {
+                let field_types = type_name
+                    .and_then(|type_name| self.enum_key(type_name))
+                    .and_then(|enum_key| self.module_env.enums.get(&enum_key))
+                    .and_then(|enum_def| {
+                        enum_def.variants.iter().find(|variant| {
+                            variant.name == variant_name.rsplit("::").next().unwrap_or(variant_name)
+                        })
+                    })
+                    .filter(|variant| variant.field_types.len() == fields.len())
+                    .map(|variant| {
+                        variant
+                            .field_types
+                            .iter()
+                            .map(|field_type| field_type.display_name())
+                            .collect::<Vec<_>>()
+                    });
+                if let Some(field_types) = field_types {
+                    for (field_pattern, field_type) in fields.iter().zip(field_types) {
+                        self.bind_pattern_types(field_pattern, Some(&field_type));
+                    }
+                } else {
+                    for field_pattern in fields {
+                        self.bind_pattern_types(field_pattern, None);
+                    }
+                }
+            }
+            Pattern::Wildcard | Pattern::Literal(_) => {}
+        }
     }
 
     /// Declared type name of `expr` when it is syntactically evident.
@@ -408,17 +457,12 @@ impl<'a> NominalChecker<'a> {
             Expr::FieldAccess(base, _) => self.expr(base, span),
             Expr::Match { target, arms } => {
                 self.expr(target, span)?;
+                let target_type = self.enum_type_of(target);
                 let mut first: Option<String> = None;
                 for arm in arms {
+                    let target_type = target_type.clone();
                     let ty = self.scoped(|checker| {
-                        let mut bound = std::collections::HashSet::new();
-                        crate::hir::collect_pattern_bindings(
-                            &arm.pattern.clone().into(),
-                            &mut bound,
-                        );
-                        for name in bound {
-                            checker.types.insert(name, None);
-                        }
+                        checker.bind_pattern_types(&arm.pattern, target_type.as_deref());
                         if let Some(guard) = &arm.guard {
                             checker.expr(guard, span)?;
                         }
