@@ -117,8 +117,8 @@ impl<'a> NominalChecker<'a> {
         payload_type
     }
 
-    fn field_or_payload_type(&self, base: &Expr, field: &str) -> Option<&'a str> {
-        if let Some(base_key) = self.struct_type_of(base) {
+    fn field_or_payload_type(&self, base_type: &str, field: &str) -> Option<&'a str> {
+        if let Some(base_key) = self.struct_key(base_type) {
             if let Some(field_type) = self.field_type(&base_key, field) {
                 return Some(field_type);
             }
@@ -126,27 +126,34 @@ impl<'a> NominalChecker<'a> {
         if field == "tag" {
             return None;
         }
-        let base_key = self.enum_type_of(base)?;
+        let base_key = self.enum_key(base_type)?;
         self.enum_payload_type(&base_key, field)
     }
 
-    /// Struct type of `expr` when it is syntactically evident.
-    fn struct_type_of(&self, expr: &Expr) -> Option<String> {
+    /// Declared type name of `expr` when it is syntactically evident.
+    fn declared_type_name(&self, expr: &Expr) -> Option<String> {
         match expr {
-            Expr::StructInit { type_name, .. } => self.struct_key(type_name),
-            Expr::Variable(v) => self
-                .types
-                .get(v)
-                .and_then(|t| t.as_deref())
-                .and_then(|t| self.struct_key(t)),
-            Expr::Call(name, _) => self
-                .lookup_atom(name)
-                .and_then(|a| a.return_type.as_deref())
-                .and_then(|t| self.struct_key(t)),
-            Expr::ChanRecv { channel } => self.chan_payload_struct(channel).map(|(_, key)| key),
-            Expr::FieldAccess(base, field) => self
-                .field_or_payload_type(base, field)
-                .and_then(|ty| self.struct_key(ty)),
+            Expr::StructInit { type_name, .. } => Some(type_name.clone()),
+            Expr::Variable(v) => self.types.get(v).and_then(|ty| ty.clone()),
+            Expr::Call(name, _) => {
+                if let Some(atom) = self.lookup_atom(name) {
+                    atom.return_type.clone()
+                } else {
+                    self.module_env
+                        .resolve_variant_owner_by_hint(name, None)
+                        .ok()
+                        .flatten()
+                        .map(|def| def.name.clone())
+                }
+            }
+            Expr::ChanRecv { channel } => self
+                .chan_payload_struct(channel)
+                .map(|(payload, _)| payload),
+            Expr::FieldAccess(base, field) => {
+                let base_type = self.declared_type_name(base)?;
+                self.field_or_payload_type(&base_type, field)
+                    .map(str::to_string)
+            }
             Expr::IfThenElse {
                 then_branch,
                 else_branch,
@@ -160,30 +167,18 @@ impl<'a> NominalChecker<'a> {
         }
     }
 
+    /// Struct type of `expr` when it is syntactically evident.
+    fn struct_type_of(&self, expr: &Expr) -> Option<String> {
+        self.declared_type_name(expr)
+            .and_then(|type_name| self.struct_key(&type_name))
+    }
+
     /// Enum type of a constructor or a variable already known to be an enum.
     fn enum_type_of(&self, expr: &Expr) -> Option<String> {
         match expr {
-            Expr::Call(name, _) => {
-                if let Some(atom) = self.lookup_atom(name) {
-                    atom.return_type
-                        .as_deref()
-                        .and_then(|type_name| self.enum_key(type_name))
-                } else {
-                    self.module_env
-                        .resolve_variant_owner_by_hint(name, None)
-                        .ok()
-                        .flatten()
-                        .and_then(|def| self.enum_key(&def.name))
-                }
-            }
-            Expr::Variable(v) => self
-                .types
-                .get(v)
-                .and_then(|t| t.as_deref())
-                .and_then(|t| self.enum_key(t)),
-            Expr::FieldAccess(base, field) => self
-                .field_or_payload_type(base, field)
-                .and_then(|ty| self.enum_key(ty)),
+            Expr::Call(..) | Expr::Variable(..) | Expr::FieldAccess(..) => self
+                .declared_type_name(expr)
+                .and_then(|type_name| self.enum_key(&type_name)),
             _ => None,
         }
     }
