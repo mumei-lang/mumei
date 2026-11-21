@@ -46,6 +46,20 @@ requires: true;
 ensures: result == item_x;
 body: item.x
 
+struct RecursiveParam {
+    x: i64,
+    a_x: i64,
+    r: RecursiveParam
+}
+
+atom recursive_parameter_projection_overlap(
+    p: RecursiveParam,
+    p_r_a: RecursiveParam
+) -> i64
+requires: true;
+ensures: result == 0;
+body: 0
+
 atom let_name_collides_parameter_slot(p: ScalarP) -> i64
 requires: true;
 ensures: result == 1;

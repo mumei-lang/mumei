@@ -537,137 +537,217 @@ fn is_struct_projection_slot_name_with_memo(
     .any(|path| struct_field_path_exists(module_env, sdef, path, memo))
 }
 
-const MAX_PARAM_PROJECTION_DEPTH: usize = 16;
-const MAX_PARAM_PROJECTION_SLOT_NAMES: usize = 4096;
+const MAX_PROJECTION_CHAIN_DEPTH: usize = 16;
+const MAX_PROJECTION_COLLISION_SEARCH_NODES: usize = 200_000;
 
-#[derive(Clone, Debug)]
-struct StructProjectionPath {
-    flattened: String,
-    field_chain: String,
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum ProjectionSide {
+    First,
+    Second,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ProjectionSearchState {
+    first_type: Option<String>,
+    first_depth: usize,
+    second_type: Option<String>,
+    second_depth: usize,
+    ahead: Option<ProjectionSide>,
+    buffer: String,
+    diverged: bool,
 }
 
 #[derive(Clone, Debug)]
-enum StructProjectionPathError {
-    Collision {
-        struct_name: String,
-        first: String,
-        second: String,
-        flattened: String,
-    },
+struct ProjectionSearchNode {
+    state: ProjectionSearchState,
+    first_chain: Vec<String>,
+    second_chain: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectionCollisionError {
     LimitExceeded,
 }
 
-type StructProjectionPathMemo = std::collections::HashMap<
-    (String, usize, Vec<String>),
-    Result<Vec<StructProjectionPath>, StructProjectionPathError>,
->;
-
-fn struct_projection_paths(
+fn projection_chains_collide(
     module_env: &ModuleEnv,
-    sdef: &crate::parser::ast::StructDef,
-    depth: usize,
-    type_path: &mut Vec<String>,
-    memo: &mut StructProjectionPathMemo,
-) -> Result<Vec<StructProjectionPath>, StructProjectionPathError> {
-    let mut path_types = type_path.clone();
-    path_types.sort_unstable();
-    path_types.dedup();
-    let key = (sdef.name.clone(), depth, path_types);
-    if let Some(paths) = memo.get(&key) {
-        return paths.clone();
+    first: (&str, &str),
+    second: (&str, &str),
+    require_distinct: bool,
+) -> Result<Option<(String, String, String)>, ProjectionCollisionError> {
+    let (first_type, first_prefix) = first;
+    let (second_type, second_prefix) = second;
+    if module_env.get_struct(first_type).is_none() || module_env.get_struct(second_type).is_none() {
+        return Ok(None);
     }
 
-    let mut paths = std::collections::BTreeMap::<String, String>::new();
-    for field in &sdef.fields {
-        if let Some(first) = paths.get(&field.name) {
-            if first != &field.name {
-                return Err(StructProjectionPathError::Collision {
-                    struct_name: sdef.name.clone(),
-                    first: first.clone(),
-                    second: field.name.clone(),
-                    flattened: field.name.clone(),
+    let (ahead, buffer) = if first_prefix == second_prefix {
+        (None, String::new())
+    } else if let Some(suffix) = first_prefix.strip_prefix(second_prefix) {
+        (Some(ProjectionSide::First), suffix.to_string())
+    } else if let Some(suffix) = second_prefix.strip_prefix(first_prefix) {
+        (Some(ProjectionSide::Second), suffix.to_string())
+    } else {
+        return Ok(None);
+    };
+
+    let initial_state = ProjectionSearchState {
+        first_type: Some(first_type.to_string()),
+        first_depth: 0,
+        second_type: Some(second_type.to_string()),
+        second_depth: 0,
+        ahead,
+        buffer,
+        diverged: false,
+    };
+    let mut pending = std::collections::VecDeque::from([ProjectionSearchNode {
+        state: initial_state.clone(),
+        first_chain: Vec::new(),
+        second_chain: Vec::new(),
+    }]);
+    let mut visited = std::collections::HashSet::from([initial_state]);
+
+    while let Some(node) = pending.pop_front() {
+        let state = &node.state;
+        if state.buffer.is_empty()
+            && state.first_depth > 0
+            && state.second_depth > 0
+            && (!require_distinct || state.diverged || state.first_depth != state.second_depth)
+        {
+            let first_chain = node.first_chain.join(".");
+            let second_chain = node.second_chain.join(".");
+            let flattened = flattened_projection_name(first_prefix, &node.first_chain);
+            return Ok(Some((first_chain, second_chain, flattened)));
+        }
+
+        let sides = match state.ahead {
+            Some(ProjectionSide::First) => [Some(ProjectionSide::Second), None],
+            Some(ProjectionSide::Second) => [Some(ProjectionSide::First), None],
+            None => [Some(ProjectionSide::First), Some(ProjectionSide::Second)],
+        };
+        for side in sides.into_iter().flatten() {
+            let (current_type, depth, prefix) = match side {
+                ProjectionSide::First => {
+                    (state.first_type.as_deref(), state.first_depth, first_prefix)
+                }
+                ProjectionSide::Second => (
+                    state.second_type.as_deref(),
+                    state.second_depth,
+                    second_prefix,
+                ),
+            };
+            let Some(current_type) = current_type else {
+                continue;
+            };
+            if depth > MAX_PROJECTION_CHAIN_DEPTH {
+                continue;
+            }
+            let Some(sdef) = module_env.get_struct(current_type) else {
+                continue;
+            };
+            let extensions = sdef
+                .fields
+                .iter()
+                .map(|field| {
+                    let nested_type = if depth < MAX_PROJECTION_CHAIN_DEPTH {
+                        canonical_struct_type_in_module(module_env, &field.type_name)
+                    } else {
+                        None
+                    };
+                    (field.name.clone(), nested_type)
+                })
+                .collect::<Vec<_>>();
+
+            for (field, nested_type) in extensions {
+                let extension = if depth == 0 && prefix.is_empty() {
+                    field.clone()
+                } else {
+                    format!("_{field}")
+                };
+                let (next_ahead, next_buffer) = match state.ahead {
+                    None => (Some(side), extension),
+                    Some(ahead_side) => {
+                        if extension.starts_with(&state.buffer) {
+                            let remainder = extension[state.buffer.len()..].to_string();
+                            if remainder.is_empty() {
+                                (None, String::new())
+                            } else {
+                                (Some(side), remainder)
+                            }
+                        } else if state.buffer.starts_with(&extension) {
+                            let remainder = state.buffer[extension.len()..].to_string();
+                            if remainder.is_empty() {
+                                (None, String::new())
+                            } else {
+                                (Some(ahead_side), remainder)
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
+                };
+
+                let mut first_chain = node.first_chain.clone();
+                let mut second_chain = node.second_chain.clone();
+                let mut first_type = state.first_type.clone();
+                let mut first_depth = state.first_depth;
+                let mut second_type = state.second_type.clone();
+                let mut second_depth = state.second_depth;
+                match side {
+                    ProjectionSide::First => {
+                        first_chain.push(field);
+                        first_type = nested_type;
+                        first_depth += 1;
+                    }
+                    ProjectionSide::Second => {
+                        second_chain.push(field);
+                        second_type = nested_type;
+                        second_depth += 1;
+                    }
+                }
+                let diverged = state.diverged
+                    || first_chain
+                        .iter()
+                        .zip(&second_chain)
+                        .any(|(left, right)| left != right);
+                let next_state = ProjectionSearchState {
+                    first_type,
+                    first_depth,
+                    second_type,
+                    second_depth,
+                    ahead: next_ahead,
+                    buffer: next_buffer,
+                    diverged,
+                };
+                if visited.contains(&next_state) {
+                    continue;
+                }
+                if visited.len() >= MAX_PROJECTION_COLLISION_SEARCH_NODES {
+                    return Err(ProjectionCollisionError::LimitExceeded);
+                }
+                visited.insert(next_state.clone());
+                pending.push_back(ProjectionSearchNode {
+                    state: next_state,
+                    first_chain,
+                    second_chain,
                 });
             }
-        } else {
-            paths.insert(field.name.clone(), field.name.clone());
-        }
-        if paths.len() * 2 > MAX_PARAM_PROJECTION_SLOT_NAMES {
-            return Err(StructProjectionPathError::LimitExceeded);
-        }
-
-        let resolved = module_env.resolve_base_type(&field.type_name);
-        if depth >= MAX_PARAM_PROJECTION_DEPTH
-            || resolved.trim().starts_with('[')
-            || resolved.trim().ends_with("[]")
-        {
-            continue;
-        }
-        let Some(nested_type) = canonical_struct_type_in_module(module_env, &resolved) else {
-            continue;
-        };
-        if type_path.contains(&nested_type) {
-            continue;
-        }
-        let Some(nested) = module_env.get_struct(&nested_type) else {
-            continue;
-        };
-
-        type_path.push(nested_type);
-        let nested_paths = struct_projection_paths(module_env, nested, depth + 1, type_path, memo);
-        type_path.pop();
-        let nested_paths = nested_paths?;
-
-        for nested_path in nested_paths {
-            let flattened = format!("{}_{}", field.name, nested_path.flattened);
-            let field_chain = format!("{}.{}", field.name, nested_path.field_chain);
-            if let Some(first) = paths.get(&flattened) {
-                if first != &field_chain {
-                    return Err(StructProjectionPathError::Collision {
-                        struct_name: sdef.name.clone(),
-                        first: first.clone(),
-                        second: field_chain,
-                        flattened,
-                    });
-                }
-            } else {
-                paths.insert(flattened, field_chain);
-            }
-            if paths.len() * 2 > MAX_PARAM_PROJECTION_SLOT_NAMES {
-                return Err(StructProjectionPathError::LimitExceeded);
-            }
         }
     }
 
-    let paths = paths
-        .into_iter()
-        .map(|(flattened, field_chain)| StructProjectionPath {
-            flattened,
-            field_chain,
-        })
-        .collect::<Vec<_>>();
-    memo.insert(key, Ok(paths.clone()));
-    Ok(paths)
+    Ok(None)
 }
 
-fn struct_projection_slot_names(
-    module_env: &ModuleEnv,
-    binding: &str,
-    sdef: &crate::parser::ast::StructDef,
-) -> Option<Vec<String>> {
-    let mut memo = std::collections::HashMap::new();
-    let paths =
-        struct_projection_paths(module_env, sdef, 0, &mut vec![sdef.name.clone()], &mut memo)
-            .ok()?;
-    let mut names = Vec::with_capacity(paths.len() * 2);
-    for path in paths {
-        let path = path.flattened;
-        names.push(format!("{binding}_{path}"));
-        names.push(struct_field_key(binding, &path));
-        if names.len() > MAX_PARAM_PROJECTION_SLOT_NAMES {
-            return None;
-        }
+fn flattened_projection_name(prefix: &str, chain: &[String]) -> String {
+    if chain.is_empty() {
+        return prefix.to_string();
     }
-    Some(names)
+    let path = chain.join("_");
+    if prefix.is_empty() {
+        path
+    } else {
+        format!("{prefix}_{path}")
+    }
 }
 
 pub(crate) fn reject_struct_projection_path_collisions(
@@ -676,26 +756,24 @@ pub(crate) fn reject_struct_projection_path_collisions(
 ) -> MumeiResult<()> {
     let mut structs = module_env.structs.values().collect::<Vec<_>>();
     structs.sort_unstable_by(|left, right| left.name.cmp(&right.name));
-    let mut memo = std::collections::HashMap::new();
 
     for sdef in structs {
-        match struct_projection_paths(module_env, sdef, 0, &mut vec![sdef.name.clone()], &mut memo)
-        {
-            Ok(_) => {}
-            Err(StructProjectionPathError::Collision {
-                struct_name,
-                first,
-                second,
-                flattened,
-            }) => {
+        match projection_chains_collide(module_env, (&sdef.name, ""), (&sdef.name, ""), true) {
+            Ok(Some((first, second, flattened))) => {
+                let (path_a, path_b) = if first <= second {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
                 return Err(MumeiError::type_error_at(
                     format!(
-                        "struct '{struct_name}' has fields whose flattened projection paths collide ('{first}' and '{second}' both map to '{flattened}'); rename a field"
+                        "struct '{}' has fields whose flattened projection paths collide ('{path_a}' and '{path_b}' both map to '{flattened}'); rename a field",
+                        sdef.name
                     ),
                     atom.span.clone(),
                 ));
             }
-            Err(StructProjectionPathError::LimitExceeded) => {
+            Err(ProjectionCollisionError::LimitExceeded) => {
                 return Err(MumeiError::type_error_at(
                     format!(
                         "struct '{}' projection paths exceed the bounded collision-check limit; cannot establish collision-free fields",
@@ -704,6 +782,7 @@ pub(crate) fn reject_struct_projection_path_collisions(
                     atom.span.clone(),
                 ));
             }
+            Ok(None) => {}
         }
     }
 
@@ -761,23 +840,22 @@ pub(crate) fn reject_parameter_projection_slot_collisions(
             let Some(q_type) = struct_types[q_index].as_deref() else {
                 continue;
             };
-            let Some(q_struct) = module_env.get_struct(q_type) else {
-                continue;
-            };
-            let Some(q_slot_names) = struct_projection_slot_names(module_env, &q.name, q_struct)
-            else {
-                return Err(collision_error());
-            };
-            if q_slot_names.iter().any(|slot_name| {
-                is_struct_projection_slot_name_with_memo(
-                    module_env,
-                    &p.name,
-                    p_struct,
-                    slot_name,
-                    &mut path_memo,
-                )
-            }) {
-                return Err(collision_error());
+            let p_prefixes = [p.name.clone(), format!("{STRUCT_FIELD_PREFIX}{}", p.name)];
+            let q_prefixes = [q.name.clone(), format!("{STRUCT_FIELD_PREFIX}{}", q.name)];
+            for p_prefix in &p_prefixes {
+                for q_prefix in &q_prefixes {
+                    match projection_chains_collide(
+                        module_env,
+                        (p_type, p_prefix.as_str()),
+                        (q_type, q_prefix.as_str()),
+                        false,
+                    ) {
+                        Ok(Some(_)) | Err(ProjectionCollisionError::LimitExceeded) => {
+                            return Err(collision_error());
+                        }
+                        Ok(None) => {}
+                    }
+                }
             }
         }
     }
@@ -2636,7 +2714,7 @@ pub(crate) fn stmt_to_z3<'a>(
 #[cfg(test)]
 mod projection_slot_tests {
     use super::{
-        canonical_struct_type_in_module, is_struct_projection_slot_name,
+        canonical_struct_type_in_module, is_struct_projection_slot_name, projection_chains_collide,
         reject_parameter_projection_slot_collisions, struct_binding_slot_keys,
     };
     use crate::parser::{parse_module, Item};
@@ -2731,7 +2809,7 @@ mod projection_slot_tests {
     #[test]
     fn ambiguous_recursive_projection_path_search_is_bounded() {
         let module_env = module_env_with_structs(
-            "struct RecursiveAmbiguous { a: RecursiveAmbiguous, a_a: RecursiveAmbiguous }",
+            "struct RecursiveAmbiguous { a: RecursiveAmbiguous, aa: RecursiveAmbiguous }",
         );
         let sdef = module_env
             .get_struct("RecursiveAmbiguous")
@@ -2747,6 +2825,139 @@ mod projection_slot_tests {
         assert!(
             elapsed < Duration::from_secs(2),
             "projection-path search took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn pairwise_projection_search_handles_prefix_ahead_on_either_side() {
+        let module_env =
+            module_env_with_structs("struct Bare { x_y: i64 } struct Prefixed { y: i64 }");
+        let forward =
+            projection_chains_collide(&module_env, ("Bare", ""), ("Prefixed", "x"), false)
+                .expect("search stays within its node budget")
+                .expect("prefixes and fields collide");
+        assert_eq!(
+            forward,
+            ("x_y".to_string(), "y".to_string(), "x_y".to_string())
+        );
+
+        let reverse =
+            projection_chains_collide(&module_env, ("Prefixed", "x"), ("Bare", ""), false)
+                .expect("search stays within its node budget")
+                .expect("prefixes and fields collide");
+        assert_eq!(
+            reverse,
+            ("y".to_string(), "x_y".to_string(), "x_y".to_string())
+        );
+    }
+
+    #[test]
+    fn pairwise_projection_search_matches_one_token_to_a_chain() {
+        let module_env = module_env_with_structs(
+            "struct Whole { a_b: i64 } \
+             struct Chained { a: Tail } \
+             struct Tail { b: i64 }",
+        );
+        let collision =
+            projection_chains_collide(&module_env, ("Whole", ""), ("Chained", ""), true)
+                .expect("search stays within its node budget")
+                .expect("one token collides with a two-token chain");
+        assert_eq!(
+            collision,
+            ("a_b".to_string(), "a.b".to_string(), "a_b".to_string())
+        );
+    }
+
+    #[test]
+    fn pairwise_projection_search_preserves_underscores_inside_tokens() {
+        let module_env = module_env_with_structs(
+            "struct Left { a_b: LeftTail } \
+             struct LeftTail { c: i64 } \
+             struct Right { a: RightTail } \
+             struct RightTail { b_c: i64 }",
+        );
+        let collision = projection_chains_collide(&module_env, ("Left", ""), ("Right", ""), true)
+            .expect("search stays within its node budget")
+            .expect("underscore-bearing tokens collide");
+        assert_eq!(
+            collision,
+            (
+                "a_b.c".to_string(),
+                "a.b_c".to_string(),
+                "a_b_c".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn pairwise_projection_search_checks_empty_prefix_starts() {
+        let module_env = module_env_with_structs(
+            "struct EmptyPrefix { a: EmptyTail, a_b: i64 } \
+             struct EmptyTail { b: i64 }",
+        );
+        let collision =
+            projection_chains_collide(&module_env, ("EmptyPrefix", ""), ("EmptyPrefix", ""), true)
+                .expect("search stays within its node budget")
+                .expect("empty-prefix field paths collide");
+        assert_eq!(
+            collision,
+            ("a.b".to_string(), "a_b".to_string(), "a_b".to_string())
+        );
+    }
+
+    #[test]
+    fn pairwise_projection_search_is_fast_for_wide_recursive_structs() {
+        let module_env = module_env_with_structs(
+            "struct RecursiveWide { \
+                left: RecursiveWide, \
+                right: RecursiveWide, \
+                up: RecursiveWide, \
+                down: RecursiveWide \
+            }",
+        );
+        let started = Instant::now();
+        let collision = projection_chains_collide(
+            &module_env,
+            ("RecursiveWide", ""),
+            ("RecursiveWide", ""),
+            true,
+        )
+        .expect("search stays within its node budget");
+        let elapsed = started.elapsed();
+
+        assert_eq!(collision, None);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "wide recursive projection search took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn recursive_parameter_overlap_requires_pairwise_slot_search() {
+        let module_env = module_env_with_structs(
+            "struct RecursiveParam { x: i64, a_x: i64, r: RecursiveParam }",
+        );
+        let sdef = module_env
+            .get_struct("RecursiveParam")
+            .expect("recursive struct is registered");
+        assert!(!is_struct_projection_slot_name(
+            &module_env,
+            "p",
+            sdef,
+            "p_r_a"
+        ));
+
+        let collision = projection_chains_collide(
+            &module_env,
+            ("RecursiveParam", "p"),
+            ("RecursiveParam", "p_r_a"),
+            false,
+        )
+        .expect("search stays within its node budget")
+        .expect("recursive projection slot overlaps the other parameter");
+        assert_eq!(
+            collision,
+            ("r.a_x".to_string(), "x".to_string(), "p_r_a_x".to_string())
         );
     }
 }

@@ -1,8 +1,9 @@
 use serde_json::Value;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::time::{Duration, Instant};
 
-const NEGATIVE_FIXTURES: [(&str, &str, &str, &str); 5] = [
+const NEGATIVE_FIXTURES: [(&str, &str, &str, &str); 7] = [
     (
         "test_struct_path_collision_scalar.mm",
         "scalar_path_false_claim",
@@ -24,14 +25,26 @@ const NEGATIVE_FIXTURES: [(&str, &str, &str, &str); 5] = [
     (
         "test_struct_path_collision_nested.mm",
         "nested_path_collision",
-        "struct 'NestedCollision'",
-        "('child.x' and 'child_x' both map to 'child_x')",
+        "struct 'Holder'",
+        "('wrapped.child.x' and 'wrapped.child_x' both map to 'wrapped_child_x')",
     ),
     (
         "test_struct_path_collision_enum_payload.mm",
         "enum_payload_path_false_claim",
         "struct 'S'",
         "('inner.x' and 'inner_x' both map to 'inner_x')",
+    ),
+    (
+        "test_struct_path_collision_recursive.mm",
+        "recursive_path_false_claim",
+        "struct 'R'",
+        "('r.x' and 'r_x' both map to 'r_x')",
+    ),
+    (
+        "test_struct_path_collision_mutual.mm",
+        "mutual_recursive_path_collision",
+        "struct 'A'",
+        "('b.y' and 'b_y' both map to 'b_y')",
     ),
 ];
 
@@ -165,12 +178,19 @@ fn moved_deep_write_collisions_fail_closed_in_both_integer_modes() {
 #[test]
 fn noncolliding_and_recursive_struct_paths_remain_accepted_in_both_modes() {
     for bitvec_i64 in [false, true] {
+        let started = Instant::now();
         let output = run_verify("test_struct_path_collision_positive.mm", bitvec_i64);
+        let elapsed = started.elapsed();
+        eprintln!("recursive positive verification (bitvec={bitvec_i64}): {elapsed:?}");
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             output.status.success(),
             "positive struct-path fixture must verify (bitvec={bitvec_i64}):\n{stdout}\n{stderr}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "recursive positive took too long (bitvec={bitvec_i64}): {elapsed:?}"
         );
         let payload = verify_json(&output);
         assert_eq!(

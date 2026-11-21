@@ -16,7 +16,18 @@ struct ArrayRecursive {
     children: [ArrayRecursive]
 }
 
-atom safe_struct_paths(value: Safe, node: Recursive, array_node: ArrayRecursive) -> i64
+struct RecursiveWide {
+    left: RecursiveWide,
+    right: RecursiveWide,
+    up: RecursiveWide,
+    down: RecursiveWide
+}
+
+atom safe_struct_paths(
+    value: Safe,
+    node: Recursive,
+    array_node: ArrayRecursive
+) -> i64
     requires: true;
     ensures: true;
     body: 0
