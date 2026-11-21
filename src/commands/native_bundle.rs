@@ -3320,7 +3320,7 @@ fn write_machine_tv(
         let mut branch_shape = machine_tv::BranchShape::None;
         let mut has_conditional_call = false;
         let outcome = if let Some(model) = source_models.get(function_name) {
-            if model.inputs.len() > 6 {
+            if model.inputs.len() > machine_tv::MAX_ARGUMENT_COUNT {
                 FunctionOutcome::OutsideProfile("argument_count")
             } else if let Some((address, bytes)) =
                 object_function_bytes(&object_bytes, function_name)

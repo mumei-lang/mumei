@@ -1770,8 +1770,9 @@ functions by linear sweep and uses Z3 to compare straight-line and acyclic
 control-flow functions in the fixed machine-instruction profile with their
 `pure-i64` source-atom models. Direct calls are matched in order to the source
 `CallSite`s and compared as uninterpreted sites: their argument expressions
-must match the SysV integer argument registers, while each call result is the
-corresponding source call-result term. On each path, a machine call skips
+must match the first six SysV integer argument registers and any stack-passed
+argument slots, while each call result is the corresponding source call-result
+term. On each path, a machine call skips
 source sites whose guards are provably false on that path and matches the
 first site whose guard is provably true; an undecided guard is
 `conditional_call`.
@@ -1784,11 +1785,21 @@ The assumed convention places integer arguments in `rdi`, `rsi`, `rdx`,
 not verified. Caller-saved registers are fresh after calls and callee-saved
 registers are preserved by assumption. The register convention and
 callee-saved preservation are not ABI claims. Direct final `jmp` tail calls
-are treated as calls followed by returns. Functions containing both
+with at most six arguments are treated as calls followed by returns; wider
+tail calls are outside the profile. Functions containing both
 conditional branches and calls use the per-path guarded call matching
-described below. A small abstract stack
-handles register `pushq`/`popq` and immediate `%rsp` adjustments;
-`%rsp`-relative memory accesses are unsupported.
+described below. A small abstract stack handles register `pushq`/`popq`,
+immediate `%rsp` adjustments, and outgoing stack-argument setup using
+`pushq` or `movq` register/immediate stores to `off(%rsp)`.
+For up to 16 integer parameters/call arguments, the assumed convention places
+incoming argument `k >= 7` at entry-relative offset `+8*(k-6)` from `%rsp`,
+and outgoing argument `k >= 7` at call-time offset `+8*(k-7)`. This is an
+assumption, not an ABI claim. The incoming return-address/argument area is
+read-only. Only 64-bit `movq` and `addq` source reads from aligned, declared
+incoming slots are supported; other memory forms and invalid slots remain
+outside the profile. Writes to entry-relative offsets `>= 0` and tail calls
+with more than six arguments are outside the profile. Outgoing stack-argument
+slots are discarded after a call, so later memory reads from them fail closed.
 `%spl` byte writes are modeled, but make the stack pointer untrackable, so a
 function containing one cannot complete a supported return path.
 
@@ -1870,7 +1881,7 @@ and division/shift definedness, but does not restrict inputs by `requires`.
 Larger multiply-heavy functions may remain inconclusive within the solver
 budget; this is fail-closed and does not imply inequivalence.
 Outside-profile reasons include `argument_count`, `branch_target`,
-`call_order`, `conditional_call`, `cyclic_control_flow`,
+`call_arguments`, `call_order`, `conditional_call`, `cyclic_control_flow`,
 `division_trap`, `not_a_source_atom`, `path_bound`, `unsupported_flags`,
 `unsupported_instruction`, and `unsupported_signature`. A direct-call callee
 or count mismatch is reported as `call_order`. Direct calls in branching
@@ -1878,8 +1889,10 @@ functions are matched per path against ordered source `CallSite`s. Provably
 false source guards are skipped under the parameter domain, definedness,
 call-result bounds, current path conditions, and input-to-initial-register
 bindings; a guard that is undecided, or a machine call with no active source
-site, is `conditional_call`. At path completion, remaining source sites must
-all be provably false. Relocation coverage is checked across the union of
+site, is `conditional_call`. A missing outgoing stack slot is
+`call_arguments`; an argument count above 16 is `argument_count`. At path
+completion, remaining source sites must all be provably false. Relocation
+coverage is checked across the union of
 completed paths. A terminal direct tail-call `jmp` is supported on a branch
 arm; a tail-call jump that is not the final decoded instruction remains
 outside the profile as `unsupported_instruction`. Unsupported signatures,

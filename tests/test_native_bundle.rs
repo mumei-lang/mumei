@@ -39,6 +39,10 @@ atom chain_two(x: i64) -> i64 requires: true; ensures: true; body: { chain_leaf(
 atom chain_three(x: i64) -> i64 requires: true; ensures: true; body: { chain_two(x) + 1 };\n\
 atom chain_four(x: i64) -> i64 requires: true; ensures: true; body: { chain_three(x) + 1 };\n\
 atom main() -> i64 requires: true; ensures: true; body: { chain_four(0) };";
+const STACK_ARGS: &str =
+    "atom seven_args(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 requires: true; ensures: true; body: { a + b + c + d + e + f + g };\n\
+atom calls_seven(x: i64) -> i64 requires: true; ensures: true; body: { seven_args(x, 2, 3, 4, 5, 6, 7) };\n\
+atom main() -> i64 requires: true; ensures: true; body: { 0 };";
 const LEA_SUM: &str =
     "atom lea_sum(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { x + y };\n\
 atom main() -> i64 requires: true; ensures: true; body: { lea_sum(1, 2) };";
@@ -633,6 +637,29 @@ fn recheck_machine_tv_checks_branching_calls() {
     assert!(not_performed
         .iter()
         .any(|check| check == "machine_code_acyclic_branch_function_tv"));
+}
+
+#[test]
+fn recheck_machine_tv_checks_stack_passed_arguments() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), STACK_ARGS);
+    assert!(object_function_disassembly(&bundle, "seven_args")
+        .iter()
+        .any(|instruction| instruction.contains("(%rsp)")));
+    assert!(object_function_disassembly(&bundle, "calls_seven")
+        .iter()
+        .any(|instruction| instruction.contains("(%rsp)")));
+
+    let output = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    for name in ["seven_args", "calls_seven"] {
+        assert_eq!(
+            descriptor["functions"][name],
+            serde_json::json!({"outcome": "equivalent_within_profile"}),
+            "{name}"
+        );
+    }
 }
 
 #[test]
