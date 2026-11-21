@@ -3076,8 +3076,8 @@ validation remains the deep endpoint.
 
 The per-instruction C10 Option B TV profile adds opt-in
 `native-bundle recheck-machine-tv`, which runs the complete object recheck and
-then asks Z3 whether reproduced machine code for straight-line or acyclic
-branch functions matches each source atom's pure-i64 model. Unknown per-path
+then asks Z3 whether reproduced machine code for straight-line, acyclic-branch,
+or bounded-loop functions matches each source atom's pure-i64 model. Unknown per-path
 equivalence queries retry the identical obligations with `simplify → smt`
 under the same budget; constant-divisor magic-number sequences may remain
 inconclusive. Direct calls in
@@ -3085,9 +3085,12 @@ branching functions are matched per path to ordered source `CallSite`s;
 provably false guards are skipped and argument expressions and call-result
 terms are compared as uninterpreted sites. Unresolved guards remain outside
 the profile as `conditional_call`.
-Branches must land on decoded instruction starts; backward edges are
-supported when the reachable CFG is acyclic, while cycles remain outside the
-profile. Symbolic path exploration is bounded at 64 completed paths. The
+Branches must land on decoded instruction starts. Bounded loops use
+`LOOP_BOUND = 4` and the same `loop_bound_exits` input domain as LLVM
+translation validation. A per-path sixth visit to an instruction is dropped
+only after path conditions, input bindings, parameter domains, definedness,
+call-result bounds, and `loop_bound_exits` prove Unsat; Sat or Unknown returns
+`loop_bound`. Symbolic path exploration is bounded at 64 completed paths. The
 instruction profile includes `setcc`, byte-register views and extensions,
 masked immediate, implicit-one, and `%cl`-count shifts, and `or` logical flags.
 The division slice adds `cqto`/`cltd`, register `idivq`/`divq`/`divl`, and
@@ -3100,7 +3103,9 @@ flag; negation models subtract-from-zero flags, and `not` preserves flags.
 Memory-operand unary forms remain unsupported. Masked-zero shifts preserve
 the prior flags; nonzero shifts model only the result zero flag, and an
 undecided symbolic count makes flags unknown. These are bounded proof
-obligations, not a runtime no-trap or ABI claim. The x86-64 integer-register
+obligations, not a runtime no-trap or ABI claim. The cancellation poll returns
+zero under the no-cancellation-requested assumption; cancellation and runtime
+semantics are not checked. The x86-64 integer-register
 convention and callee-saved preservation are assumed, not verified. The C
 stack-argument slice supports up to 16 arguments under an assumed convention:
 incoming argument `k >= 7` is at entry-relative `%rsp + 8*(k-6)`, and outgoing
@@ -3122,8 +3127,13 @@ performed rather than implying it was established.
 `machine_code_acyclic_branch_function_tv` covers equivalent functions with
 backward but acyclic edges. The not-performed vocabulary changed from
 `machine_code_tv_backward_branch_functions` to
-`machine_code_tv_cyclic_control_flow_functions`; agent consumers should
-update it. `machine_code_conditional_call_function_tv` is performed when an
+`machine_code_tv_cyclic_control_flow_functions`; it is listed only when a
+function outcome is `cyclic_control_flow` or `loop_bound`. The
+`machine_code_bounded_loop_function_tv` check is performed for an equivalent
+function with a reachable loop; `machine_code_tv_loop_executions_beyond_bound`
+and `runtime_cancellation_semantics` remain not performed. mumei-agent
+consumers must adopt these new descriptor names.
+`machine_code_conditional_call_function_tv` is performed when an
 equivalent function has both a conditional branch and a call; those functions
 remain counted as direct-call functions rather than forward- or acyclic-branch
 functions.

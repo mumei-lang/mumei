@@ -394,7 +394,7 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     assert_success(&text);
     let text = String::from_utf8_lossy(&text.stdout);
     assert!(text.contains(
-        "Machine-code TV: 1 of 2 object functions equivalent to their source atoms within the acyclic-branch and conditional-call profile."
+        "Machine-code TV: 1 of 2 object functions equivalent to their source atoms within the acyclic-branch, conditional-call, and bounded-loop profile (0 bounded-loop functions)."
     ));
     assert!(text.contains(
         "Scope: artifact_reproduction_object_link_correspondence_and_acyclic_branch_and_conditional_call_function_machine_code_tv_only/no_abi_or_runtime_semantics"
@@ -443,11 +443,11 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
             "os_stdout_observation",
             "os_stderr_observation",
             "runtime_observation_semantics",
-            "machine_code_tv_cyclic_control_flow_functions",
             "machine_code_direct_call_site_tv",
             "machine_code_forward_branch_function_tv",
             "machine_code_acyclic_branch_function_tv",
             "machine_code_conditional_call_function_tv",
+            "machine_code_bounded_loop_function_tv",
         ])
     );
 }
@@ -492,7 +492,7 @@ fn recheck_machine_tv_reports_module_direct_call_and_wrapper_outcomes() {
         .unwrap()
         .iter()
         .any(|check| check == "machine_code_forward_branch_function_tv"));
-    assert!(descriptor["checks_not_performed"]
+    assert!(!descriptor["checks_not_performed"]
         .as_array()
         .unwrap()
         .iter()
@@ -552,7 +552,7 @@ fn recheck_machine_tv_checks_forward_and_acyclic_branches() {
         .iter()
         .any(|check| check == "machine_code_direct_call_site_tv"));
     let not_performed = descriptor["checks_not_performed"].as_array().unwrap();
-    assert!(not_performed
+    assert!(!not_performed
         .iter()
         .any(|check| check == "machine_code_tv_cyclic_control_flow_functions"));
     assert!(not_performed
@@ -4831,13 +4831,29 @@ fn loop_bundle_links_and_pins_runtime_but_keeps_runtime_out_of_claims() {
     let descriptor: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
     assert_eq!(
         descriptor["functions"]["loop_count"],
-        serde_json::json!({"outcome": "outside_profile", "reason": "cyclic_control_flow"})
+        serde_json::json!({"outcome": "equivalent_within_profile"})
     );
-    assert!(descriptor["checks_not_performed"]
-        .as_array()
-        .unwrap()
+    assert_eq!(
+        descriptor["input_domain"],
+        "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires_and_loops_exiting_within_bound_4"
+    );
+    let performed = descriptor["checks_performed"].as_array().unwrap();
+    assert!(performed
+        .iter()
+        .any(|check| check == "machine_code_bounded_loop_function_tv"));
+    let not_performed = descriptor["checks_not_performed"].as_array().unwrap();
+    assert!(not_performed
+        .iter()
+        .any(|check| check == "machine_code_tv_loop_executions_beyond_bound"));
+    assert!(not_performed
+        .iter()
+        .any(|check| check == "runtime_cancellation_semantics"));
+    assert!(not_performed
         .iter()
         .any(|check| check == "object_link_correspondence"));
+    assert!(!not_performed
+        .iter()
+        .any(|check| check == "machine_code_tv_cyclic_control_flow_functions"));
 
     let original_record = fs::read(bundle.join(RECORD_FILE)).unwrap();
     let mut runtime_setting_mismatch = record.clone();

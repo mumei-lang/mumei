@@ -4020,15 +4020,19 @@ nothing), so an older Core without the link check never yields
 
 Core's opt-in `mumei native-bundle recheck-machine-tv` runs the full linked
 object-correspondence pipeline, then checks reproduced machine code against
-pure-i64 source models with Z3 for straight-line and acyclic-branch
+pure-i64 source models with Z3 for straight-line, acyclic-branch, and bounded-loop
 functions in a fixed instruction whitelist. Conditional and unconditional
 local branches must target decoded instruction starts inside the function.
 Unknown per-path equivalence queries retry the identical obligations with
 `simplify → smt` under the same budget; constant-divisor magic-number
 sequences may remain inconclusive.
-Backward edges are supported if the reachable CFG remains acyclic; reachable
-cycles are outside the profile. Symbolic execution is bounded at 64 completed
-paths. Direct calls are matched per path to ordered source `CallSite`s;
+Backward edges are supported, including bounded loops under `LOOP_BOUND = 4`
+and the same `loop_bound_exits` input domain as LLVM translation validation.
+A path's sixth visit to an instruction is dropped only after its path
+conditions, input bindings, parameter domains, definedness, call-result bounds,
+and loop-exit domain prove Unsat; Sat or Unknown returns `loop_bound`.
+Symbolic execution is bounded at 64 completed paths. Direct calls are matched
+per path to ordered source `CallSite`s;
 provably false guards are skipped, while undecided guards remain outside the
 profile as `conditional_call`. Call arguments and result terms are compared
 as uninterpreted sites. The x86-64
@@ -4051,13 +4055,19 @@ flag; negation models subtract-from-zero flags, and `not` preserves flags.
 Memory-operand unary forms remain unsupported. Masked-zero shifts preserve
 the prior flags; nonzero shifts model only the result zero flag, and an
 undecided symbolic count makes flags unknown. These are bounded proof
-obligations, not runtime or ABI claims.
+obligations, not runtime or ABI claims. The cancellation poll returns zero
+under the no-cancellation-requested assumption; cancellation/runtime semantics
+remain unchecked.
 The `machine_code_forward_branch_function_tv` descriptor keeps its
 forward-only meaning; `machine_code_acyclic_branch_function_tv` covers
 equivalent functions with backward but acyclic edges. The not-performed
 vocabulary changed from `machine_code_tv_backward_branch_functions` to
-`machine_code_tv_cyclic_control_flow_functions`; agent consumers should
-update it. `machine_code_conditional_call_function_tv` is performed when an
+`machine_code_tv_cyclic_control_flow_functions`; it is listed only when a
+function outcome is `cyclic_control_flow` or `loop_bound`. The
+`machine_code_bounded_loop_function_tv` check is performed for an equivalent
+function with a reachable loop; `machine_code_tv_loop_executions_beyond_bound`
+and `runtime_cancellation_semantics` remain not performed. mumei-agent
+consumers must adopt these descriptor names. `machine_code_conditional_call_function_tv` is performed when an
 equivalent function has both a conditional branch and a call; such functions
 remain direct-call functions and are not counted as forward- or
 acyclic-branch functions. The C `main` wrapper, CRT/startup code, loader, libc and runtime
