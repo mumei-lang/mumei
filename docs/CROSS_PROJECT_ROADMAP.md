@@ -4121,8 +4121,10 @@ models under the record's pinned admission, as the LLVM recheck does; the
 single-file path retains `RefinedAdmission::Reject`. Refined scalar parameter
 predicates feed the machine-TV input domain, whose label matches LLVM's exact
 refined-signature module label and preserves any loop-bound suffix. Unsupported
-memory, composite/enum, non-i64 scalar and non-scalar f64 features remain
-outside the profile.
+memory, composite/enum, `i128`/`u128` leaves and non-scalar f64 features
+remain outside the profile. U64 leaves use full-width bitvectors without an
+extra signature-domain constraint; unsigned comparisons, division, remainder
+and logical right shift retain their source semantics.
 The C10 Option B machine-TV result adds `callee_saved_preservation` to each
 Equivalent function entry. Core performs
 `machine_code_callee_saved_register_preservation` only when at least one
@@ -9061,7 +9063,7 @@ C-ABI aggregate classification; SysV memory-class passing is not validated.
 F64 struct-call arguments use NaN-aware Query A matching plus a per-path
 exact-bit Query B obligation, whose failure is `call_arguments`, never
 `different`. F64 tail calls, enum signatures/call sites, structs with five
-or more leaves, u64/i128 leaves, post-writes, and bounded memory remain
+or more leaves, i128/u128 leaves, post-writes, and bounded memory remain
 fail-closed. Equivalent functions using struct signatures or direct calls
 report `machine_code_composite_register_aggregate_tv`. Aggregates wider than
 two leaves use

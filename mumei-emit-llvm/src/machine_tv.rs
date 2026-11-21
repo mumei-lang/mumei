@@ -470,7 +470,7 @@ pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
         && !model.has_post_writes()
         && !model.has_composite_features_beyond_struct_values
         && !model.has_enum_signature
-        && !model.has_non_i64_scalar_features
+        && !model.has_wide_scalar_features
         && !model.bounded_memory
 }
 
@@ -2543,13 +2543,22 @@ fn lift_division<'ctx>(
             let remainder = dividend.bvurem(&wide_divisor);
             let fits = quotient.extract(127, 64)._eq(&BV::from_u64(context, 0, 64));
             let nonzero = divisor._eq(&BV::from_u64(context, 0, 64)).not();
-            prove_division_safe(
+            let high_half_zero = call_guard_status(
                 model,
-                state,
+                &state.registers[2]._eq(&BV::from_u64(context, 0, 64)),
+                &state.path_conditions,
                 arguments,
-                &Bool::and(context, &[&nonzero, &fits]),
                 context,
-            )?;
+            ) == Some(true);
+            if high_half_zero {
+                prove_division_safe(model, state, arguments, &nonzero, context)?;
+                let dividend = state.registers[0].clone();
+                state.registers[0] = dividend.bvudiv(&divisor);
+                state.registers[2] = dividend.bvurem(&divisor);
+                return Ok(());
+            }
+            let safety = Bool::and(context, &[&nonzero, &fits]);
+            prove_division_safe(model, state, arguments, &safety, context)?;
             state.registers[0] = quotient.extract(63, 0);
             state.registers[2] = remainder.extract(63, 0);
         }
@@ -4727,8 +4736,196 @@ entry:
 
         let mut non_i64_model = source_model(source, &context);
         non_i64_model.has_non_i64_scalar_features = true;
+        non_i64_model.has_wide_scalar_features = true;
         assert_eq!(
             check_function(&bytes, 0, &non_i64_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_signature")
+        );
+    }
+
+    #[test]
+    fn u64_machine_tv_uses_full_width_unsigned_bitvector_semantics() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "atom add(a: u64, b: u64) -> u64 requires: true; ensures: true; body: { a + b };\n\
+            atom udiv(a: u64, b: u64) -> u64 requires: b != 0; ensures: true; body: { a / b };\n\
+            atom urem(a: u64, b: u64) -> u64 requires: b != 0; ensures: true; body: { a % b };\n\
+            atom ult(a: u64, b: u64) -> bool requires: true; ensures: true; body: { a < b };\n\
+            atom ugt(a: u64, b: u64) -> bool requires: true; ensures: true; body: { a > b };\n\
+            atom shr(a: u64, n: u64) -> u64 requires: true; ensures: true; body: { a >> n };\n\
+            atom umax(a: u64, b: u64) -> u64 requires: true; ensures: true; body: { if a > b { a } else { b } };";
+        let model = |name| {
+            source_model_named_with_admission(
+                source,
+                name,
+                &context,
+                RefinedAdmission::CompositeV10,
+            )
+        };
+        let add_model = model("add");
+        assert!(add_model.has_non_i64_scalar_features);
+        assert!(!add_model.has_wide_scalar_features);
+        assert!(add_model.inputs.iter().all(|input| input.get_size() == 64));
+        assert!(add_model.param_domain.is_empty());
+        assert!(supports_signature(&add_model));
+
+        let ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @add(i64 %a, i64 %b) {
+entry:
+  %r = add i64 %a, %b
+  ret i64 %r
+}
+define i64 @udiv(i64 %a, i64 %b) {
+entry:
+  %r = udiv i64 %a, %b
+  ret i64 %r
+}
+define i64 @urem(i64 %a, i64 %b) {
+entry:
+  %r = urem i64 %a, %b
+  ret i64 %r
+}
+define i64 @ult(i64 %a, i64 %b) {
+entry:
+  %c = icmp ult i64 %a, %b
+  %r = zext i1 %c to i64
+  ret i64 %r
+}
+define i64 @ugt(i64 %a, i64 %b) {
+entry:
+  %c = icmp ugt i64 %a, %b
+  %r = zext i1 %c to i64
+  ret i64 %r
+}
+define i64 @shr(i64 %a, i64 %n) {
+entry:
+  %r = lshr i64 %a, %n
+  ret i64 %r
+}
+define { i64, i64 } @pass({ i64, i64 } %p) {
+entry:
+  ret { i64, i64 } %p
+}
+define i64 @callee(i64 %x) {
+entry:
+  %r = add i64 %x, 1
+  ret i64 %r
+}
+define i64 @caller(i64 %x) {
+entry:
+  %r = call i64 @callee(i64 %x)
+  ret i64 %r
+}
+define i64 @umax(i64 %a, i64 %b) {
+entry:
+  %c = icmp ugt i64 %a, %b
+  %r = select i1 %c, i64 %a, i64 %b
+  ret i64 %r
+}
+"#;
+        for name in ["add", "udiv", "urem", "ult", "ugt", "shr", "umax"] {
+            let model = model(name);
+            let (address, bytes, targets) = compiled_function_with_targets(ir, name);
+            if matches!(name, "udiv" | "urem" | "ult" | "ugt" | "shr" | "umax") {
+                let disassembly = disassemble(&bytes, address)
+                    .unwrap()
+                    .iter()
+                    .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                println!("u64 {name} disassembly:\n{disassembly}");
+            }
+            assert_eq!(
+                check_function(&bytes, address, &model, &targets, &context),
+                FunctionOutcome::Equivalent,
+                "{name}"
+            );
+        }
+
+        let aggregate_source = "struct Pair { a: u64, b: i64 }\n\
+            atom pass(p: Pair) -> Pair requires: true; ensures: true; body: { p };\n\
+            atom callee(x: u64) -> u64 requires: true; ensures: true; body: { x + 1 };\n\
+            atom caller(x: u64) -> u64 requires: true; ensures: true; body: { callee(x) };";
+        let aggregate_model = |name| {
+            source_model_named_with_admission(
+                aggregate_source,
+                name,
+                &context,
+                RefinedAdmission::CompositeV10,
+            )
+        };
+        for name in ["pass", "callee", "caller"] {
+            let model = aggregate_model(name);
+            let (address, bytes, targets) = compiled_function_with_targets(ir, name);
+            assert_eq!(
+                check_function(&bytes, address, &model, &targets, &context),
+                FunctionOutcome::Equivalent,
+                "{name}"
+            );
+        }
+
+        let branch_source = "atom gt_branch(a: u64, b: u64) -> u64 requires: true; ensures: true; body: { if a > b { 1 } else { 0 } };\n\
+            atom lt_branch(a: u64, b: u64) -> u64 requires: true; ensures: true; body: { if a < b { 1 } else { 0 } };";
+        let branch_model = |name| {
+            source_model_named_with_admission(
+                branch_source,
+                name,
+                &context,
+                RefinedAdmission::CompositeV10,
+            )
+        };
+        let gt_model = branch_model("gt_branch");
+        let ja_bytes = [
+            0x48, 0x39, 0xf7, // cmpq %rsi, %rdi
+            0x0f, 0x87, 0x03, 0x00, 0x00, 0x00, // ja true
+            0x31, 0xc0, // xorl %eax, %eax
+            0xc3, // retq
+            0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&ja_bytes, 0, &gt_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+        let mut jg_bytes = ja_bytes;
+        jg_bytes[4] = 0x8f;
+        assert_eq!(
+            check_function(&jg_bytes, 0, &gt_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Different
+        );
+
+        let lt_model = branch_model("lt_branch");
+        let jb_bytes = [
+            0x48, 0x39, 0xf7, // cmpq %rsi, %rdi
+            0x0f, 0x82, 0x03, 0x00, 0x00, 0x00, // jb true
+            0x31, 0xc0, // xorl %eax, %eax
+            0xc3, // retq
+            0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&jb_bytes, 0, &lt_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let cvtsi2sdq = [0xf2, 0x48, 0x0f, 0x2a, 0xc7, 0xc3];
+        assert_eq!(
+            check_function(&cvtsi2sdq, 0, &add_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+
+        let wide_source = "atom wide(x: i128) -> i128 requires: true; ensures: true; body: { x };";
+        let wide_model = source_model_named_with_admission(
+            wide_source,
+            "wide",
+            &context,
+            RefinedAdmission::CompositeV21,
+        );
+        assert!(wide_model.has_wide_scalar_features);
+        assert_eq!(
+            check_function(&[0xc3], 0, &wide_model, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("unsupported_signature")
         );
     }

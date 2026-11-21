@@ -3882,6 +3882,49 @@ fn multifile_bundle_with_u64_leaves_builds_as_v13() {
 }
 
 #[test]
+fn recheck_machine_tv_accept_object_u64_module() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "struct Pair { amount: u64, tag: i64 }\n\
+         atom add(a: u64, b: u64) -> u64 requires: true; ensures: true; body: { a + b };\n\
+         atom pass(p: Pair) -> Pair requires: true; ensures: true; body: { p };\n\
+         atom callee(x: u64) -> u64 requires: true; ensures: true; body: { x + 1 };\n\
+         atom caller(x: u64) -> u64 requires: true; ensures: true; body: { callee(x) };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V13);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V10
+    );
+
+    let machine_tv = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&machine_tv);
+    let machine_tv: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
+    for function in ["add", "pass", "callee", "caller"] {
+        assert_eq!(
+            machine_tv["functions"][function]["outcome"],
+            "equivalent_within_profile"
+        );
+    }
+
+    let llvm = recheck_llvm(&source, &bundle, &id);
+    assert_success(&llvm);
+    assert_eq!(
+        machine_tv["input_domain"],
+        "module_members_all_signed_i64_inputs_not_process_exit_status"
+    );
+
+    let accepted = accept_object(&source, &bundle, &id, true);
+    assert_success(&accepted);
+    let accepted: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(accepted["accepted"], true);
+    assert_eq!(accepted["input_domain"], machine_tv["input_domain"]);
+}
+
+#[test]
 fn module_bundle_with_f64_leaves_builds_as_v15_and_rechecks() {
     // `f64` leaf parameters/fields/results pin the module at composite
     // v11: one 64-bit `double` slot per leaf carrying the IEEE-754 bit

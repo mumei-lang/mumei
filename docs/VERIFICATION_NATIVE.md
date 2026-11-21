@@ -1899,10 +1899,14 @@ with the loop-bound suffix above when applicable. Refined scalar parameter
 predicates are asserted through `param_domain`; return refinements remain
 postconditions and are not added to the machine return-value equality.
 Models with post-state writes, bounded memory/strings, composite or enum body
-features, non-i64 scalar leaves (`u64`, `i128`, `u128`), or f64
-leaves/arithmetic fail closed as
+features, `i128`/`u128` leaves, or f64 leaves/arithmetic fail closed as
 `unsupported_signature`. Scalar subranges and refined signatures remain
 supported because their input restrictions are carried by `param_domain`.
+`u64` leaves are also admitted as full-width 64-bit bitvectors with no
+additional parameter-domain constraint. Unsigned comparisons, division,
+remainder and logical right shift retain their unsigned bitvector semantics;
+division and shifts are compared only where defined. `i128`/`u128` remain
+outside machine-TV even though other pinned LLVM profiles admit them.
 Unknown per-path equivalence queries retry the identical obligations with
 `simplify → smt` under the same budget; constant-divisor magic-number
 sequences may remain inconclusive.

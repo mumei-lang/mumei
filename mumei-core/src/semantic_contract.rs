@@ -6769,6 +6769,8 @@ pub struct PureI64Body<'ctx> {
     pub has_f64_features: bool,
     /// True when the admitted module uses u64, i128 or u128 leaves.
     pub has_non_i64_scalar_features: bool,
+    /// True when the admitted module uses i128 or u128 leaves.
+    pub has_wide_scalar_features: bool,
 }
 
 impl<'ctx> PureI64Body<'ctx> {
@@ -6803,6 +6805,7 @@ impl<'ctx> PureI64Body<'ctx> {
             has_composite_features_beyond_struct_values: false,
             has_f64_features: false,
             has_non_i64_scalar_features: false,
+            has_wide_scalar_features: false,
         }
     }
 }
@@ -6814,6 +6817,7 @@ type AdmittedPureI64Module = (
     RefinedEnv,
     StructEnv,
     EnumEnv,
+    bool,
     bool,
     bool,
     bool,
@@ -6840,6 +6844,7 @@ pub fn encode_pure_i64_body<'ctx>(
         has_composite_features_beyond_struct_values,
         has_f64_features,
         has_non_i64_scalar_features,
+        has_wide_scalar_features,
     ) = bounded_pure_i64_module(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     let call_returns =
         call_return_kinds(&items, &refined, &structs, &enums, RefinedAdmission::Reject);
@@ -6859,6 +6864,7 @@ pub fn encode_pure_i64_body<'ctx>(
         has_composite_features_beyond_struct_values,
         has_f64_features,
         has_non_i64_scalar_features,
+        has_wide_scalar_features,
     )
 }
 
@@ -6883,6 +6889,7 @@ pub fn encode_pure_i64_module<'ctx>(
         has_composite_features_beyond_struct_values,
         has_f64_features,
         has_non_i64_scalar_features,
+        has_wide_scalar_features,
     ) = bounded_pure_i64_module(source, allow_wrapping_arithmetic, admission)?;
     let call_returns = call_return_kinds(&items, &refined, &structs, &enums, admission);
     items
@@ -6901,6 +6908,7 @@ pub fn encode_pure_i64_module<'ctx>(
                 has_composite_features_beyond_struct_values,
                 has_f64_features,
                 has_non_i64_scalar_features,
+                has_wide_scalar_features,
             )),
             _ => None,
         })
@@ -6976,6 +6984,7 @@ fn bounded_pure_i64_module(
         || enum_writes_used;
     let has_f64_features = f64_leaves || f64_arithmetic_used;
     let has_non_i64_scalar_features = u64_leaves || wide_leaves;
+    let has_wide_scalar_features = wide_leaves;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
     if !allow_wrapping_arithmetic && items.len() != 1 {
@@ -6996,6 +7005,7 @@ fn bounded_pure_i64_module(
         has_composite_features_beyond_struct_values,
         has_f64_features,
         has_non_i64_scalar_features,
+        has_wide_scalar_features,
     ))
 }
 
@@ -7013,6 +7023,7 @@ fn encode_atom_body<'ctx>(
     has_composite_features_beyond_struct_values: bool,
     has_f64_features: bool,
     has_non_i64_scalar_features: bool,
+    has_wide_scalar_features: bool,
 ) -> BodyResult<PureI64Body<'ctx>> {
     // A struct parameter contributes one input per field, so the limit
     // bounds the flattened signature.
@@ -7343,6 +7354,7 @@ fn encode_atom_body<'ctx>(
         has_composite_features_beyond_struct_values,
         has_f64_features,
         has_non_i64_scalar_features,
+        has_wide_scalar_features,
         post_writes: top_writes
             .into_iter()
             .filter(|(_, value)| {
@@ -7878,6 +7890,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
         has_composite_features_beyond_struct_values,
         has_f64_features,
         has_non_i64_scalar_features,
+        has_wide_scalar_features,
     ) = bounded_pure_i64_module(source, true, admission)?;
     let atom_items: Vec<&crate::parser::ast::Atom> = items
         .iter()
@@ -7911,6 +7924,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
                 has_composite_features_beyond_struct_values,
                 has_f64_features,
                 has_non_i64_scalar_features,
+                has_wide_scalar_features,
             )
         })
         .collect::<BodyResult<_>>()?;
@@ -13468,6 +13482,36 @@ atom add(b: B, e: u64) -> B requires: true; ensures: result.t == b.t + e; body: 
             module_source_profile(&flat, RefinedAdmission::CompositeV10).unwrap(),
             PURE_I64_COMPOSITE_PROFILE_V10
         );
+    }
+
+    #[test]
+    fn machine_tv_scalar_feature_flags_distinguish_u64_from_wide_leaves() {
+        let config = z3::Config::new();
+        let context = z3::Context::new(&config);
+        let u64_body = encode_pure_i64_module(
+            "atom id(x: u64) -> u64 requires: true; ensures: true; body: { x };",
+            &context,
+            true,
+            RefinedAdmission::CompositeV10,
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(u64_body.inputs.len(), 1);
+        assert_eq!(u64_body.inputs[0].get_size(), 64);
+        assert!(u64_body.param_domain.is_empty());
+        assert!(u64_body.has_non_i64_scalar_features);
+        assert!(!u64_body.has_wide_scalar_features);
+
+        let wide_body = encode_pure_i64_module(
+            "atom id(x: i128) -> i128 requires: true; ensures: true; body: { x };",
+            &context,
+            true,
+            RefinedAdmission::CompositeV21,
+        )
+        .unwrap()
+        .remove(0);
+        assert!(wide_body.has_non_i64_scalar_features);
+        assert!(wide_body.has_wide_scalar_features);
     }
 
     #[test]
