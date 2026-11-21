@@ -549,6 +549,9 @@ fn lift<'ctx>(
                     width,
                 };
             } else if instruction.mnemonic == "pushq" {
+                if !state.rsp_is_known || state.rsp_offset % 8 != 0 {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                }
                 let operands = split_operands(&instruction.operands);
                 let [source] = operands.as_slice() else {
                     return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
@@ -567,6 +570,9 @@ fn lift<'ctx>(
                 }
                 state.stack.push((state.rsp_offset, value));
             } else if instruction.mnemonic == "popq" {
+                if !state.rsp_is_known || state.rsp_offset % 8 != 0 {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                }
                 let operands = split_operands(&instruction.operands);
                 let [destination] = operands.as_slice() else {
                     return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
@@ -1293,6 +1299,9 @@ fn lift_rsp_adjustment<'ctx>(
     if *destination != "%rsp" {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
+    if !state.rsp_is_known || state.rsp_offset % 8 != 0 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
     let amount = immediate
         .strip_prefix('$')
         .and_then(parse_integer)
@@ -1359,6 +1368,9 @@ fn incoming_stack_argument<'ctx>(
     input_count: usize,
     arguments: &[BV<'ctx>],
 ) -> Result<BV<'ctx>, FunctionOutcome> {
+    if rsp_offset % 8 != 0 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
     let entry_offset = rsp_memory_entry_offset(operand, rsp_offset)?;
     if entry_offset <= 0 || entry_offset % 8 != 0 {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
@@ -1388,7 +1400,11 @@ fn lift_stack_store<'ctx>(
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
     let entry_offset = rsp_memory_entry_offset(destination, state.rsp_offset)?;
-    if entry_offset >= 0 || entry_offset < state.rsp_offset || entry_offset % 8 != 0 {
+    if state.rsp_offset % 8 != 0
+        || entry_offset >= 0
+        || entry_offset < state.rsp_offset
+        || entry_offset % 8 != 0
+    {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
     let value = operand_value(source, &state.registers, context, 64)
@@ -1515,8 +1531,8 @@ fn lift_call<'ctx>(
     if tail_call && call_site.args.len() > ARGUMENT_REGISTERS.len() {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    if call_site.args.len() > ARGUMENT_REGISTERS.len() && !rsp_is_known {
-        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+    if call_site.args.len() > ARGUMENT_REGISTERS.len() && (!rsp_is_known || rsp_offset % 8 != 0) {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
     for (argument, register_index) in call_site.args.iter().zip(ARGUMENT_REGISTERS) {
         call_state
@@ -1538,6 +1554,9 @@ fn lift_call<'ctx>(
         else {
             return Err(FunctionOutcome::OutsideProfile("call_arguments"));
         };
+        if stack_slot % 8 != 0 {
+            return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+        }
         let Some((_, stack_argument)) =
             stack.iter().find(|(candidate, _)| *candidate == stack_slot)
         else {
@@ -1968,7 +1987,7 @@ fn adjust_rsp<'ctx>(
     let Some(next_offset) = rsp_offset.checked_add(delta) else {
         return false;
     };
-    if next_offset > 0 {
+    if *rsp_offset % 8 != 0 || next_offset > 0 || next_offset % 8 != 0 {
         return false;
     }
     registers[4] = registers[4].bvadd(&BV::from_u64(context, delta as u64, 64));
@@ -2193,6 +2212,9 @@ fn lift_inc_dec<'ctx>(
         previous.bvadd(&one)
     };
     if index == 4 {
+        if !state.rsp_is_known || state.rsp_offset % 8 != 0 {
+            return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+        }
         let delta = if is_decrement { -1 } else { 1 };
         if !adjust_rsp(
             &mut state.registers,
@@ -2728,6 +2750,41 @@ entry:
         ];
         assert_eq!(
             check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+    }
+
+    #[test]
+    fn unaligned_rsp_adjustments_reject_overlapping_stack_words() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom helper(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { x };",
+            &context,
+        );
+        let overlapping_words = [
+            0x48, 0x83, 0xec, 0x04, // subq $4, %rsp
+            0x57, // pushq %rdi; slot starts at entry-relative -12
+            0x48, 0x89, 0x74, 0x24, 0x04, // movq %rsi, 4(%rsp); overlaps that slot at -8
+            0x58, // popq %rax
+            0x48, 0x83, 0xc4, 0x04, // addq $4, %rsp
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&overlapping_words, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+
+        assert_eq!(
+            check_function(
+                &[0x48, 0xff, 0xcc, 0xc3], // decq %rsp; retq
+                0,
+                &model,
+                &BTreeMap::new(),
+                &context
+            ),
             FunctionOutcome::OutsideProfile("unsupported_instruction")
         );
     }
