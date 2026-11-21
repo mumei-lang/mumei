@@ -6765,6 +6765,9 @@ pub struct PureI64Body<'ctx> {
     /// True when the module uses enum, write, merge or other composite
     /// features beyond plain struct values.
     pub has_composite_features_beyond_struct_values: bool,
+    /// True when the module uses enum values, enum scalar operations or
+    /// enum payload writes.
+    pub has_enum_composite_features: bool,
     /// True when the admitted module uses f64 leaves or arithmetic.
     pub has_f64_features: bool,
     /// True when the admitted module uses u64, i128 or u128 leaves.
@@ -6803,6 +6806,7 @@ impl<'ctx> PureI64Body<'ctx> {
             bounded_memory: false,
             has_composite_or_enum_features: false,
             has_composite_features_beyond_struct_values: false,
+            has_enum_composite_features: false,
             has_f64_features: false,
             has_non_i64_scalar_features: false,
             has_wide_scalar_features: false,
@@ -6817,6 +6821,7 @@ type AdmittedPureI64Module = (
     RefinedEnv,
     StructEnv,
     EnumEnv,
+    bool,
     bool,
     bool,
     bool,
@@ -6842,6 +6847,7 @@ pub fn encode_pure_i64_body<'ctx>(
         bounded_memory,
         has_composite_or_enum_features,
         has_composite_features_beyond_struct_values,
+        has_enum_composite_features,
         has_f64_features,
         has_non_i64_scalar_features,
         has_wide_scalar_features,
@@ -6862,6 +6868,7 @@ pub fn encode_pure_i64_body<'ctx>(
         bounded_memory,
         has_composite_or_enum_features,
         has_composite_features_beyond_struct_values,
+        has_enum_composite_features,
         has_f64_features,
         has_non_i64_scalar_features,
         has_wide_scalar_features,
@@ -6887,6 +6894,7 @@ pub fn encode_pure_i64_module<'ctx>(
         bounded_memory,
         has_composite_or_enum_features,
         has_composite_features_beyond_struct_values,
+        has_enum_composite_features,
         has_f64_features,
         has_non_i64_scalar_features,
         has_wide_scalar_features,
@@ -6906,6 +6914,7 @@ pub fn encode_pure_i64_module<'ctx>(
                 bounded_memory,
                 has_composite_or_enum_features,
                 has_composite_features_beyond_struct_values,
+                has_enum_composite_features,
                 has_f64_features,
                 has_non_i64_scalar_features,
                 has_wide_scalar_features,
@@ -6982,6 +6991,7 @@ fn bounded_pure_i64_module(
         || enum_scalar_ops_used
         || nested_writes_used
         || enum_writes_used;
+    let has_enum_composite_features = enum_values_used || enum_scalar_ops_used || enum_writes_used;
     let has_f64_features = f64_leaves || f64_arithmetic_used;
     let has_non_i64_scalar_features = u64_leaves || wide_leaves;
     let has_wide_scalar_features = wide_leaves;
@@ -7003,6 +7013,7 @@ fn bounded_pure_i64_module(
         arrays || strs,
         has_composite_or_enum_features,
         has_composite_features_beyond_struct_values,
+        has_enum_composite_features,
         has_f64_features,
         has_non_i64_scalar_features,
         has_wide_scalar_features,
@@ -7021,6 +7032,7 @@ fn encode_atom_body<'ctx>(
     bounded_memory: bool,
     has_composite_or_enum_features: bool,
     has_composite_features_beyond_struct_values: bool,
+    has_enum_composite_features: bool,
     has_f64_features: bool,
     has_non_i64_scalar_features: bool,
     has_wide_scalar_features: bool,
@@ -7352,6 +7364,7 @@ fn encode_atom_body<'ctx>(
         bounded_memory,
         has_composite_or_enum_features,
         has_composite_features_beyond_struct_values,
+        has_enum_composite_features,
         has_f64_features,
         has_non_i64_scalar_features,
         has_wide_scalar_features,
@@ -7888,6 +7901,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
         bounded_memory,
         has_composite_or_enum_features,
         has_composite_features_beyond_struct_values,
+        has_enum_composite_features,
         has_f64_features,
         has_non_i64_scalar_features,
         has_wide_scalar_features,
@@ -7922,6 +7936,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
                 bounded_memory,
                 has_composite_or_enum_features,
                 has_composite_features_beyond_struct_values,
+                has_enum_composite_features,
                 has_f64_features,
                 has_non_i64_scalar_features,
                 has_wide_scalar_features,
@@ -12660,6 +12675,46 @@ mod tests {
             RefinedAdmission::CompositeV4
         )
         .is_err());
+    }
+
+    #[test]
+    fn composite_metadata_separates_struct_and_enum_features() {
+        let context = z3::Context::new(&z3::Config::new());
+        let struct_source = "struct P { x: i64, y: i64 }\n\
+            atom setx(p: P, v: i64) -> P requires: true; ensures: true; body: { p.x = v; p };";
+        let struct_model = encode_pure_i64_module(
+            struct_source,
+            &context,
+            true,
+            RefinedAdmission::CompositeV23,
+        )
+        .unwrap()
+        .into_iter()
+        .find(|body| body.function_name == "setx")
+        .unwrap();
+        assert!(struct_model.has_composite_features_beyond_struct_values);
+        assert!(!struct_model.has_enum_composite_features);
+
+        let enum_source = "enum E { Off, Val(x: i64) }\n\
+            atom make(x: i64) -> i64 requires: true; ensures: true; body: { let e = E::Val(x); match e { E::Val(y) => y, _ => 0 } };";
+        let enum_model =
+            encode_pure_i64_module(enum_source, &context, true, RefinedAdmission::CompositeV23)
+                .unwrap()
+                .into_iter()
+                .find(|body| body.function_name == "make")
+                .unwrap();
+        assert!(enum_model.has_enum_composite_features);
+
+        let match_source = "enum E { Off, Val(x: i64) }\n\
+            atom pick(e: E) -> i64 requires: true; ensures: true; body: { match e { E::Val(y) => y, _ => 0 } };";
+        let match_model =
+            encode_pure_i64_module(match_source, &context, true, RefinedAdmission::CompositeV23)
+                .unwrap()
+                .into_iter()
+                .find(|body| body.function_name == "pick")
+                .unwrap();
+        assert!(match_model.has_enum_signature);
+        assert!(!match_model.has_enum_composite_features);
     }
 
     #[test]
