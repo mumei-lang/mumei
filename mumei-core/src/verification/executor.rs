@@ -2108,9 +2108,25 @@ fn verify_inner_impl(
     datatype::assert_enum_value_domains(&vc, &solver, &env);
 
     // 2c. 全パラメータに対して配列長シンボルを事前生成
-    #[allow(clippy::map_entry)]
     for param in &atom.params {
-        let len_name = format!("len_{}", param.name);
+        let len_name = array_len_key(&param.name);
+        let root_len_name = array_root_len_key(&param.name);
+        let is_array = param.type_name.as_deref().is_some_and(|type_name| {
+            let resolved = module_env.resolve_base_type(type_name);
+            resolved.trim_start().starts_with('[') || resolved.trim_end().ends_with("[]")
+        });
+        if is_array {
+            let len = env
+                .get(&root_len_name)
+                .or_else(|| env.get(&len_name))
+                .cloned()
+                .unwrap_or_else(|| {
+                    array_root_len_value(&ctx, &mut env, &param.name, bitvec_i64, Some(&solver))
+                });
+            env.insert(root_len_name, len.clone());
+            env.insert(len_name, len);
+            continue;
+        }
         if env.contains_key(&len_name) {
             continue;
         }
@@ -2579,6 +2595,7 @@ fn verify_inner_impl(
                 tail_expr(&hir_atom.body_stmt),
                 &body_result,
                 &mut env,
+                Some(&solver),
             );
             env.insert("result".to_string(), body_result.clone());
         }
@@ -2710,6 +2727,7 @@ fn verify_inner_impl(
                                     ));
                                 }
                             }
+                            let mut length_companion_solver_names = HashSet::new();
                             let length_companions = atom
                                 .params
                                 .iter()
@@ -2717,12 +2735,21 @@ fn verify_inner_impl(
                                     let type_name = param.type_name.as_deref()?;
                                     let lowering =
                                         length_companion_lowering(type_name, module_env)?;
-                                    let value = pre_body_env.get(&format!("len_{}", param.name))?;
-                                    Some(raise_length_companion(
-                                        &model,
-                                        &param.name,
-                                        value,
-                                        lowering,
+                                    let value = pre_body_env.get(&array_len_key(&param.name))?;
+                                    length_companion_solver_names
+                                        .insert(format!("len_{}", param.name));
+                                    length_companion_solver_names
+                                        .insert(array_len_key(&param.name));
+                                    length_companion_solver_names
+                                        .insert(array_root_len_key(&param.name));
+                                    Some((
+                                        param.name.clone(),
+                                        raise_length_companion(
+                                            &model,
+                                            &param.name,
+                                            value,
+                                            lowering,
+                                        ),
                                     ))
                                 })
                                 .collect::<Vec<_>>();
@@ -2744,7 +2771,7 @@ fn verify_inner_impl(
                                 if name == "result"
                                     || params.contains(name.as_str())
                                     || name.starts_with("__")
-                                    || name.starts_with("len_")
+                                    || name.starts_with("len#")
                                 {
                                     continue;
                                 }
@@ -2757,7 +2784,8 @@ fn verify_inner_impl(
                                 if let Some(value) = pre_body_env.get(&param.name) {
                                     loss_env.insert(param.name.clone(), value.clone());
                                     for symbol in [
-                                        format!("len_{}", param.name),
+                                        array_len_key(&param.name),
+                                        array_root_len_key(&param.name),
                                         format!("__z3_arr_{}", param.name),
                                     ] {
                                         if let Some(value) = pre_body_env.get(&symbol) {
@@ -2781,18 +2809,23 @@ fn verify_inner_impl(
                                 &loss_env,
                                 module_env,
                             );
-                            let length_companion_names = length_companions
-                                .iter()
-                                .map(|value| value.source_name.clone())
-                                .collect::<HashSet<_>>();
                             let mut raised_loss = raised_loss;
-                            raised_loss.values.extend(length_companions);
+                            for (binding, mut companion) in length_companions {
+                                if raised_loss
+                                    .values
+                                    .iter()
+                                    .any(|value| value.source_name == companion.source_name)
+                                {
+                                    companion.source_name = format!("len({binding})");
+                                }
+                                raised_loss.values.push(companion);
+                            }
                             raised_loss
                                 .values
                                 .sort_by(|left, right| left.source_name.cmp(&right.source_name));
                             raised_loss
                                 .omitted_solver_symbols
-                                .retain(|symbol| !length_companion_names.contains(symbol));
+                                .retain(|symbol| !length_companion_solver_names.contains(symbol));
                             for value in &raised_loss.values {
                                 if !raised_counterexample
                                     .values
@@ -2807,7 +2840,7 @@ fn verify_inner_impl(
                                 .extend(raised_loss.omitted_solver_symbols.iter().cloned());
                             raised_counterexample
                                 .omitted_solver_symbols
-                                .retain(|symbol| !length_companion_names.contains(symbol));
+                                .retain(|symbol| !length_companion_solver_names.contains(symbol));
                             raised_counterexample
                                 .values
                                 .sort_by(|a, b| a.source_name.cmp(&b.source_name));
@@ -3343,6 +3376,7 @@ fn verify_inner_impl(
                 tail_expr(&hir_atom.body_stmt),
                 &body_result,
                 &mut env,
+                Some(&solver),
             );
             env.insert("result".to_string(), body_result.clone());
         }
@@ -3472,7 +3506,7 @@ fn verify_inner_impl(
                             for (name, value) in &env {
                                 if name.starts_with("__struct_result_")
                                     || name.starts_with("result_")
-                                    || name == "len_result"
+                                    || name == &array_len_key("result")
                                     || name.starts_with("__z3_arr_result")
                                 {
                                     witness_env.insert(name.clone(), value.clone());

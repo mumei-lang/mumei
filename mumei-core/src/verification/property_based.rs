@@ -1196,15 +1196,14 @@ fn seed_concrete_env<'a>(
         env.insert(param.name.clone(), value.clone());
         if let Some(GeneratedValue::Array(values)) = assignment.get(&param.name) {
             env.insert(format!("__z3_arr_{}", param.name), value);
-            env.insert(
-                format!("len_{}", param.name),
-                value_to_dynamic(
-                    ctx,
-                    &param.name,
-                    &GeneratedValue::Int(values.len() as i64),
-                    bitvec_i64,
-                ),
+            let len = value_to_dynamic(
+                ctx,
+                &param.name,
+                &GeneratedValue::Int(values.len() as i64),
+                bitvec_i64,
             );
+            env.insert(super::translator::array_len_key(&param.name), len.clone());
+            env.insert(super::translator::array_root_len_key(&param.name), len);
         }
     }
     let result_value = result

@@ -41,7 +41,8 @@ pub(crate) use temporal::{
 };
 pub(crate) use z3_types::{
     array_element_sort, array_element_sort_from_type, array_element_type_from_annotation,
-    array_element_type_name, array_len_symbol, array_len_value, as_bv_i64, as_int_like,
+    array_element_type_name, array_len_for_value, array_len_key, array_len_symbol, array_len_value,
+    array_root_len_key, array_root_len_symbol, array_root_len_value, as_bv_i64, as_int_like,
     atom_stores_to_array, call_result_len, coerce_array_store_value, coerce_to_array_elem_sort,
     coerce_to_float, concrete_len_value, float_eq, float_from_f64, havoc_array_args,
     havoc_array_name, havoc_written_callee_fields, index_in_bounds, is_admissible_trigger,

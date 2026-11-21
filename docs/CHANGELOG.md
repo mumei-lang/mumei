@@ -1,3 +1,11 @@
+### Unreleased: root-keyed struct-field array lengths
+
+- Array lengths now follow their tracked Z3 array roots, so distinct struct
+  fields cannot share a length while aliases preserve the source length.
+  Unresolvable branch lengths use fresh nonnegative symbols.
+  `VERIFIER_POLICY_VERSION` is bumped 25 → 26 so cached verdicts are
+  re-derived.
+
 ### Unreleased: keep array types out of struct projection slots
 
 - Array types and aliases resolving to arrays are no longer treated as struct
