@@ -80,12 +80,14 @@ fn observation_host() -> serde_json::Value {
     })
 }
 
-/// Spawn `executable` under the pinned envelope: empty environment,
-/// working directory = the executable's own directory, no arguments.
+/// Resolve `executable` to an absolute path when possible, then spawn it under
+/// the pinned envelope: empty environment, cwd = its directory, no arguments.
 fn observation_command(executable: &Path) -> std::process::Command {
-    let mut command = std::process::Command::new(executable);
+    let resolved_executable =
+        std::path::absolute(executable).unwrap_or_else(|_| executable.to_path_buf());
+    let mut command = std::process::Command::new(&resolved_executable);
     command.env_clear();
-    if let Some(dir) = executable
+    if let Some(dir) = resolved_executable
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
     {
@@ -2695,10 +2697,26 @@ mod tests {
     }
 
     #[test]
-    fn observation_command_skips_an_empty_executable_parent() {
-        let executable = Path::new("bare-executable");
-        assert_eq!(executable.parent(), Some(Path::new("")));
-        assert_eq!(observation_command(executable).get_current_dir(), None);
+    fn observation_command_resolves_a_relative_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let printer = sub.join("printer.sh");
+        executable_script(
+            &printer,
+            "#!/bin/sh\nprintf '%s|%s' \"${HOME-unset}\" \"$(pwd -P)\"",
+        );
+        let canonical_dir = sub.canonicalize().unwrap();
+        let expected = format!("unset|{}", canonical_dir.display());
+        let observation = observed_invocation(&printer).unwrap();
+        assert_eq!(observation.stdout_sha256, sha256(expected.as_bytes()));
+
+        let command = observation_command(Path::new("rel/exe"));
+        let program = Path::new(command.get_program());
+        assert!(program.is_absolute());
+        assert!(program.ends_with(Path::new("rel/exe")));
+        let expected_cwd = std::env::current_dir().unwrap().join("rel");
+        assert_eq!(command.get_current_dir(), Some(expected_cwd.as_path()));
     }
 
     #[test]
