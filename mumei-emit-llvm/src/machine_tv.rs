@@ -3988,6 +3988,54 @@ join:
             ),
             FunctionOutcome::Equivalent
         );
+
+        let match_source = "struct P { x: i64, y: i64 }\n\
+            atom pick(c: i64, a: i64, b: i64) -> P requires: true; ensures: true; body: { match c { 0 => P { x: a, y: b }, _ => P { x: b, y: a } } };";
+        let match_model = source_model_named_with_admission(
+            match_source,
+            "pick",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(match_model.has_composite_features_beyond_struct_values);
+        assert!(!match_model.has_enum_composite_features);
+
+        let match_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i64 } @pick(i64 %0, i64 %1, i64 %2) {
+entry:
+  br label %match.try_0
+match.merge:
+  %match_result = phi { i64, i64 } [ %struct_y, %match.body_0 ], [ %struct_y2, %match.body_1 ], [ zeroinitializer, %match.unreachable ]
+  ret { i64, i64 } %match_result
+match.unreachable:
+  br label %match.merge
+match.try_0:
+  %pat_lit_eq = icmp eq i64 %0, 0
+  br i1 %pat_lit_eq, label %match.body_0, label %match.try_1
+match.try_1:
+  br i1 true, label %match.body_1, label %match.unreachable
+match.body_0:
+  %struct_x = insertvalue { i64, i64 } undef, i64 %1, 0
+  %struct_y = insertvalue { i64, i64 } %struct_x, i64 %2, 1
+  br label %match.merge
+match.body_1:
+  %struct_x1 = insertvalue { i64, i64 } undef, i64 %2, 0
+  %struct_y2 = insertvalue { i64, i64 } %struct_x1, i64 %1, 1
+  br label %match.merge
+}
+"#;
+        let (match_address, match_bytes, match_targets) =
+            compiled_function_with_targets(match_ir, "pick");
+        assert_eq!(
+            check_function(
+                &match_bytes,
+                match_address,
+                &match_model,
+                &match_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
     }
 
     #[test]
