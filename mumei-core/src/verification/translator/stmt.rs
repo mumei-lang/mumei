@@ -459,11 +459,11 @@ fn struct_field_path_exists(
     vc: &VCtx,
     sdef: &crate::parser::ast::StructDef,
     path: &str,
-    visiting: &mut std::collections::HashSet<(String, String)>,
+    memo: &mut std::collections::HashMap<(String, String), bool>,
 ) -> bool {
     let key = (sdef.name.clone(), path.to_string());
-    if !visiting.insert(key.clone()) {
-        return false;
+    if let Some(found) = memo.get(&key) {
+        return *found;
     }
     let found = sdef.fields.iter().any(|field| {
         if path == field.name {
@@ -481,9 +481,9 @@ fn struct_field_path_exists(
         let Some(nested) = vc.module_env.get_struct(&nested_type) else {
             return false;
         };
-        struct_field_path_exists(vc, nested, rest, visiting)
+        struct_field_path_exists(vc, nested, rest, memo)
     });
-    visiting.remove(&key);
+    memo.insert(key, found);
     found
 }
 
@@ -493,13 +493,14 @@ fn is_struct_projection_slot_name(
     sdef: &crate::parser::ast::StructDef,
     name: &str,
 ) -> bool {
+    let mut memo = std::collections::HashMap::new();
     [
         format!("{binding}_"),
         format!("{}{}_", STRUCT_FIELD_PREFIX, binding),
     ]
     .iter()
     .filter_map(|prefix| name.strip_prefix(prefix))
-    .any(|path| struct_field_path_exists(vc, sdef, path, &mut std::collections::HashSet::new()))
+    .any(|path| struct_field_path_exists(vc, sdef, path, &mut memo))
 }
 
 fn reject_struct_projection_slot_collisions(
