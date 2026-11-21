@@ -6422,6 +6422,43 @@ enough, since a member only reads and writes through the group
 once its own token entry exists. `[]chan chan T` payloads stay
 closed.
 
+### External chan-element extraction (mumei-agent #1028)
+
+[mumei-agent#1028](https://github.com/mumei-lang/mumei-agent/pull/1028)
+admits `d := GS[i]` / `var d = GS[i]` / `var d chan T = GS[i]` /
+`d = GS[i]` on an external chan-element container (package-level or
+imported `lib.GS[i]`). An external element queue has no identity of its
+own, so `GS[i]` *as a value* records the imported CallTransfer on the
+container identity, as `<-GS[i]` does, and the extracted name binds as
+an external queue (`external_chan_locals`). Sends through it broadcast
+into `indirect_writes`, reads union `indirect_writes`, and the
+extraction's index deps are kept as per-name selectors, so
+`d := GS[i]; d <- 1; return <-GS[0]` still depends on `i`. A local
+`[]chan` share group that takes an external member (`GC`, `GS[i]`, an
+extracted name) through a literal, an element store or `append`
+becomes caller-visible in both directions. Aliases detached by a
+`make` reseat or a swap keep their external status. `[][]chan` nests,
+`[]chan chan T` elements, comma-ok `d, ok := GM[k]` and func-literal
+calls taking `GS[i]` stay closed.
+
+### Local `chan chan T` queues (mumei-agent #1036)
+
+[mumei-agent#1036](https://github.com/mumei-lang/mumei-agent/pull/1036)
+opens local `cc := make(chan chan T)` / `var cc chan chan T` (scalar
+`T`) as a bound chan-element container under the conflated share-group
+model a local `[]chan T` uses. `cc <- c` joins `c`'s queue to the group
+like `append`. Every receive form (`d := <-cc`, `d = <-cc`, comma-ok,
+`for d := range cc`, `select`) joins `d` to the group like `d := s[i]`.
+`cc2 <- <-cc` joins the two groups. Ops on the outer local queue record
+no CallTransfer, so a fully local program stays
+`none_in_supported_fragment`, while external members (`GC`, `GS[i]`)
+keep the group caller-visible. Conditional receive-reassigns keep the
+old alias joined, and parallel assigns resolve from the pre-state. A
+local queue escaping (call/`go` argument, `return`, store, closure
+capture, `&cc`, reseat onto `G()`/a param), `chan chan chan T`,
+`[]chan chan T`, and a received channel used as an operation target
+(`(<-cc) <- x`, `<-(<-cc)`) stay closed.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
