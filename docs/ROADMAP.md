@@ -3099,6 +3099,11 @@ the prior flags; nonzero shifts model only the result zero flag, and an
 undecided symbolic count makes flags unknown. These are bounded proof
 obligations, not a runtime no-trap or ABI claim. The x86-64 integer-register
 convention and callee-saved preservation are assumed, not verified. The C
+stack-argument slice supports up to 16 arguments under an assumed convention:
+incoming argument `k >= 7` is at entry-relative `%rsp + 8*(k-6)`, and outgoing
+argument `k >= 7` is at call-time `%rsp + 8*(k-7)`. Only 64-bit `movq`/`addq`
+incoming reads and modeled outgoing stores are supported; the incoming area
+is read-only. The
 `main` wrapper, CRT/startup
 code, loader, libc and runtime are not covered. Full object-code TV remains
 the deeper endpoint.

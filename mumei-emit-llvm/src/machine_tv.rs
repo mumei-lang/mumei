@@ -16,6 +16,7 @@ use z3::{
 
 pub const TIMEOUT_MS: u32 = 5_000;
 pub const RESOURCE_LIMIT: u32 = 1_000_000;
+pub const MAX_ARGUMENT_COUNT: usize = 16;
 
 static INITIALIZE_X86: Once = Once::new();
 
@@ -215,10 +216,14 @@ pub fn check_function<'ctx>(
         }
         return FunctionOutcome::OutsideProfile("unsupported_signature");
     }
-    if model.inputs.len() > 6 {
+    if model.inputs.len() > MAX_ARGUMENT_COUNT {
         return FunctionOutcome::OutsideProfile("argument_count");
     }
-    if model.call_sites.iter().any(|site| site.args.len() > 6) {
+    if model
+        .call_sites
+        .iter()
+        .any(|site| site.args.len() > MAX_ARGUMENT_COUNT)
+    {
         return FunctionOutcome::OutsideProfile("argument_count");
     }
     let instructions = match disassemble(bytes, address) {
@@ -349,6 +354,7 @@ struct MachineState<'ctx> {
     registers: Vec<BV<'ctx>>,
     known_upper_32_zero: [bool; 16],
     stack: Vec<(i64, BV<'ctx>)>,
+    outgoing_cleanup_slots: BTreeSet<i64>,
     rsp_offset: i64,
     rsp_is_known: bool,
     flags: FlagState<'ctx>,
@@ -374,15 +380,20 @@ fn lift<'ctx>(
     let registers = (0..16)
         .map(|_| BV::fresh_const(context, "machine_initial_register", 64))
         .collect::<Vec<_>>();
-    let arguments: Vec<_> = ARGUMENT_REGISTERS
-        .iter()
-        .map(|index| registers[*index].extract(63, 0))
+    let arguments: Vec<_> = (0..model.inputs.len())
+        .map(|index| {
+            ARGUMENT_REGISTERS.get(index).map_or_else(
+                || BV::fresh_const(context, "machine_initial_stack_argument", 64),
+                |register_index| registers[*register_index].extract(63, 0),
+            )
+        })
         .collect();
     let mut pending = vec![MachineState {
         instruction_index: 0,
         registers,
         known_upper_32_zero: [false; 16],
         stack: Vec::new(),
+        outgoing_cleanup_slots: BTreeSet::new(),
         rsp_offset: 0,
         rsp_is_known: true,
         flags: FlagState::Unknown,
@@ -432,6 +443,7 @@ fn lift<'ctx>(
                     if index + 1 != instructions.len()
                         || state.rsp_offset != 0
                         || !state.stack.is_empty()
+                        || !state.outgoing_cleanup_slots.is_empty()
                     {
                         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
                     }
@@ -441,8 +453,13 @@ fn lift<'ctx>(
                         call_targets,
                         &mut state.call_state,
                         &mut state.registers,
+                        &mut state.stack,
+                        state.rsp_offset,
+                        &mut state.outgoing_cleanup_slots,
+                        state.rsp_is_known,
                         &state.path_conditions,
                         &arguments,
+                        true,
                         context,
                     )?;
                     state.flags = FlagState::Unknown;
@@ -461,6 +478,7 @@ fn lift<'ctx>(
                 if !instruction.operands.is_empty()
                     || state.rsp_offset != 0
                     || !state.stack.is_empty()
+                    || !state.outgoing_cleanup_slots.is_empty()
                 {
                     return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
                 }
@@ -498,8 +516,13 @@ fn lift<'ctx>(
                     call_targets,
                     &mut state.call_state,
                     &mut state.registers,
+                    &mut state.stack,
+                    state.rsp_offset,
+                    &mut state.outgoing_cleanup_slots,
+                    state.rsp_is_known,
                     &state.path_conditions,
                     &arguments,
+                    false,
                     context,
                 )?;
                 state.flags = FlagState::Unknown;
@@ -526,6 +549,9 @@ fn lift<'ctx>(
                     width,
                 };
             } else if instruction.mnemonic == "pushq" {
+                if !state.rsp_is_known || state.rsp_offset % 8 != 0 {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                }
                 let operands = split_operands(&instruction.operands);
                 let [source] = operands.as_slice() else {
                     return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
@@ -544,6 +570,9 @@ fn lift<'ctx>(
                 }
                 state.stack.push((state.rsp_offset, value));
             } else if instruction.mnemonic == "popq" {
+                if !state.rsp_is_known || state.rsp_offset % 8 != 0 {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                }
                 let operands = split_operands(&instruction.operands);
                 let [destination] = operands.as_slice() else {
                     return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
@@ -551,23 +580,61 @@ fn lift<'ctx>(
                 let Some((register_index, width)) = parse_register(destination) else {
                     return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
                 };
-                let Some((stack_slot, _)) = state.stack.last() else {
-                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-                };
-                if width != 64 || register_index == 4 || *stack_slot != state.rsp_offset {
+                if width != 64 || register_index == 4 {
                     return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
                 }
-                let (_, value) = state.stack.pop().expect("stack was checked as non-empty");
-                if !adjust_rsp(
-                    &mut state.registers,
-                    &mut state.stack,
-                    &mut state.rsp_offset,
-                    8,
-                    context,
-                ) || !write_register(&mut state.registers, register_index, value, 64)
+                if let Some(stack_index) = state
+                    .stack
+                    .iter()
+                    .rposition(|(stack_slot, _)| *stack_slot == state.rsp_offset)
                 {
+                    let (_, value) = state.stack.remove(stack_index);
+                    if !adjust_rsp(
+                        &mut state.registers,
+                        &mut state.stack,
+                        &mut state.rsp_offset,
+                        8,
+                        context,
+                    ) || !write_register(&mut state.registers, register_index, value, 64)
+                    {
+                        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                    }
+                } else if state.outgoing_cleanup_slots.remove(&state.rsp_offset) {
+                    if !adjust_rsp(
+                        &mut state.registers,
+                        &mut state.stack,
+                        &mut state.rsp_offset,
+                        8,
+                        context,
+                    ) || !write_register(
+                        &mut state.registers,
+                        register_index,
+                        BV::fresh_const(context, "machine_outgoing_stack_cleanup", 64),
+                        64,
+                    ) {
+                        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                    }
+                } else {
                     return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
                 }
+            } else if instruction.mnemonic == "movq"
+                && split_operands(&instruction.operands)
+                    .get(1)
+                    .is_some_and(|destination| destination.contains('('))
+            {
+                lift_stack_store(instruction, &mut state, context)?;
+            } else if instruction.mnemonic == "movq"
+                && split_operands(&instruction.operands)
+                    .first()
+                    .is_some_and(|source| source.contains('('))
+            {
+                lift_stack_argument_move(instruction, &mut state, model, &arguments)?;
+            } else if instruction.mnemonic == "addq"
+                && split_operands(&instruction.operands)
+                    .first()
+                    .is_some_and(|source| source.contains('('))
+            {
+                lift_stack_argument_add(instruction, &mut state, model, &arguments)?;
             } else if matches!(instruction.mnemonic.as_str(), "addq" | "subq")
                 && split_operands(&instruction.operands)
                     .get(1)
@@ -688,6 +755,9 @@ fn lift<'ctx>(
                 }
                 _ => (),
             }
+            state
+                .outgoing_cleanup_slots
+                .retain(|stack_slot| *stack_slot >= state.rsp_offset);
             state.instruction_index += 1;
         }
     }
@@ -1229,6 +1299,9 @@ fn lift_rsp_adjustment<'ctx>(
     if *destination != "%rsp" {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
+    if !state.rsp_is_known || state.rsp_offset % 8 != 0 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
     let amount = immediate
         .strip_prefix('$')
         .and_then(parse_integer)
@@ -1263,6 +1336,144 @@ fn lift_rsp_adjustment<'ctx>(
     Ok(())
 }
 
+fn parse_rsp_memory_displacement(operand: &str) -> Option<i64> {
+    let open = operand.find('(')?;
+    let close = operand.rfind(')')?;
+    if close + 1 != operand.len() || operand[open + 1..close].trim() != "%rsp" {
+        return None;
+    }
+    let displacement = operand[..open].trim();
+    if displacement.is_empty() {
+        return Some(0);
+    }
+    let value = parse_integer(displacement)?;
+    if displacement.starts_with('-') {
+        Some(value as i64)
+    } else {
+        i64::try_from(value).ok()
+    }
+}
+
+fn rsp_memory_entry_offset(operand: &str, rsp_offset: i64) -> Result<i64, FunctionOutcome> {
+    let displacement = parse_rsp_memory_displacement(operand)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    rsp_offset
+        .checked_add(displacement)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))
+}
+
+fn incoming_stack_argument<'ctx>(
+    operand: &str,
+    rsp_offset: i64,
+    input_count: usize,
+    arguments: &[BV<'ctx>],
+) -> Result<BV<'ctx>, FunctionOutcome> {
+    if rsp_offset % 8 != 0 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let entry_offset = rsp_memory_entry_offset(operand, rsp_offset)?;
+    if entry_offset <= 0 || entry_offset % 8 != 0 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let slot_index = usize::try_from(entry_offset / 8)
+        .map_err(|_| FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let stack_argument_count = input_count.saturating_sub(ARGUMENT_REGISTERS.len());
+    if slot_index == 0 || slot_index > stack_argument_count {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    arguments
+        .get(ARGUMENT_REGISTERS.len() + slot_index - 1)
+        .cloned()
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))
+}
+
+fn lift_stack_store<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    if !state.rsp_is_known {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let entry_offset = rsp_memory_entry_offset(destination, state.rsp_offset)?;
+    if state.rsp_offset % 8 != 0
+        || entry_offset >= 0
+        || entry_offset < state.rsp_offset
+        || entry_offset % 8 != 0
+    {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let value = operand_value(source, &state.registers, context, 64)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    if let Some((_, stack_value)) = state
+        .stack
+        .iter_mut()
+        .find(|(stack_slot, _)| *stack_slot == entry_offset)
+    {
+        *stack_value = value;
+    } else {
+        state.stack.push((entry_offset, value));
+    }
+    state.outgoing_cleanup_slots.remove(&entry_offset);
+    Ok(())
+}
+
+fn lift_stack_argument_move<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    model: &PureI64Body<'ctx>,
+    arguments: &[BV<'ctx>],
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    if !state.rsp_is_known {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let value = incoming_stack_argument(source, state.rsp_offset, model.inputs.len(), arguments)?;
+    let (register_index, width) = parse_register(destination)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    if width != 64
+        || register_index == 4
+        || !write_register(&mut state.registers, register_index, value, 64)
+    {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    Ok(())
+}
+
+fn lift_stack_argument_add<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    model: &PureI64Body<'ctx>,
+    arguments: &[BV<'ctx>],
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    if !state.rsp_is_known {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let right = incoming_stack_argument(source, state.rsp_offset, model.inputs.len(), arguments)?;
+    let (register_index, width) = parse_register(destination)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    if width != 64 || register_index == 4 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let left = state.registers[register_index].clone();
+    if !write_register(&mut state.registers, register_index, left.bvadd(&right), 64) {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    state.flags = FlagState::Unknown;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lift_call<'ctx>(
     instruction: &Instruction,
@@ -1270,8 +1481,13 @@ fn lift_call<'ctx>(
     call_targets: &BTreeMap<u64, CallTarget>,
     call_state: &mut CallState<'ctx>,
     registers: &mut [BV<'ctx>],
+    stack: &mut Vec<(i64, BV<'ctx>)>,
+    rsp_offset: i64,
+    outgoing_cleanup_slots: &mut BTreeSet<i64>,
+    rsp_is_known: bool,
     path_conditions: &[Bool<'ctx>],
     arguments: &[BV<'ctx>],
+    tail_call: bool,
     context: &'ctx Context,
 ) -> Result<(), FunctionOutcome> {
     let operands = split_operands(&instruction.operands);
@@ -1309,13 +1525,51 @@ fn lift_call<'ctx>(
     if target.name != crate::translation_validation::native_function_name(&call_site.callee) {
         return Err(FunctionOutcome::OutsideProfile("call_order"));
     }
-    if call_site.args.len() > ARGUMENT_REGISTERS.len() {
+    if call_site.args.len() > MAX_ARGUMENT_COUNT {
         return Err(FunctionOutcome::OutsideProfile("argument_count"));
+    }
+    if tail_call && call_site.args.len() > ARGUMENT_REGISTERS.len() {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    if call_site.args.len() > ARGUMENT_REGISTERS.len() && (!rsp_is_known || rsp_offset % 8 != 0) {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
     for (argument, register_index) in call_site.args.iter().zip(ARGUMENT_REGISTERS) {
         call_state
             .argument_obligations
             .push(argument._eq(&registers[register_index]));
+    }
+    let mut outgoing_slots = BTreeSet::new();
+    for (argument_index, argument) in call_site
+        .args
+        .iter()
+        .enumerate()
+        .skip(ARGUMENT_REGISTERS.len())
+    {
+        let word_index = i64::try_from(argument_index - ARGUMENT_REGISTERS.len())
+            .map_err(|_| FunctionOutcome::OutsideProfile("call_arguments"))?;
+        let Some(stack_slot) = word_index
+            .checked_mul(8)
+            .and_then(|offset| rsp_offset.checked_add(offset))
+        else {
+            return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+        };
+        if stack_slot % 8 != 0 {
+            return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+        }
+        let Some((_, stack_argument)) =
+            stack.iter().find(|(candidate, _)| *candidate == stack_slot)
+        else {
+            return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+        };
+        call_state
+            .argument_obligations
+            .push(argument._eq(stack_argument));
+        outgoing_slots.insert(stack_slot);
+    }
+    if !tail_call && !outgoing_slots.is_empty() {
+        stack.retain(|(stack_slot, _)| !outgoing_slots.contains(stack_slot));
+        outgoing_cleanup_slots.extend(outgoing_slots);
     }
     registers[0] = call_site.result.clone();
     for register_index in [1, 2, 6, 7, 8, 9, 10, 11] {
@@ -1733,7 +1987,7 @@ fn adjust_rsp<'ctx>(
     let Some(next_offset) = rsp_offset.checked_add(delta) else {
         return false;
     };
-    if next_offset > 0 {
+    if *rsp_offset % 8 != 0 || next_offset > 0 || next_offset % 8 != 0 {
         return false;
     }
     registers[4] = registers[4].bvadd(&BV::from_u64(context, delta as u64, 64));
@@ -1958,6 +2212,9 @@ fn lift_inc_dec<'ctx>(
         previous.bvadd(&one)
     };
     if index == 4 {
+        if !state.rsp_is_known || state.rsp_offset % 8 != 0 {
+            return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+        }
         let delta = if is_decrement { -1 } else { 1 };
         if !adjust_rsp(
             &mut state.registers,
@@ -2493,6 +2750,41 @@ entry:
         ];
         assert_eq!(
             check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+    }
+
+    #[test]
+    fn unaligned_rsp_adjustments_reject_overlapping_stack_words() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom helper(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { x };",
+            &context,
+        );
+        let overlapping_words = [
+            0x48, 0x83, 0xec, 0x04, // subq $4, %rsp
+            0x57, // pushq %rdi; slot starts at entry-relative -12
+            0x48, 0x89, 0x74, 0x24, 0x04, // movq %rsi, 4(%rsp); overlaps that slot at -8
+            0x58, // popq %rax
+            0x48, 0x83, 0xc4, 0x04, // addq $4, %rsp
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&overlapping_words, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+
+        assert_eq!(
+            check_function(
+                &[0x48, 0xff, 0xcc, 0xc3], // decq %rsp; retq
+                0,
+                &model,
+                &BTreeMap::new(),
+                &context
+            ),
             FunctionOutcome::OutsideProfile("unsupported_instruction")
         );
     }
@@ -3728,6 +4020,171 @@ entry:
         assert_eq!(
             check_function(&bytes, 0, &model, &helper_call_targets(&[10]), &context),
             FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn survey_stack_argument_bytes_match_and_invalid_slots_fail_closed() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let seven_source =
+            "atom seven_args(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 \
+            requires: true; ensures: true; body: { a + b + c + d + e + f + g };";
+        let seven_model = source_model_named(seven_source, "seven_args", &context);
+        let seven_bytes = [
+            0x48, 0x01, 0xfe, // addq %rdi, %rsi
+            0x48, 0x8d, 0x04, 0x0a, // leaq (%rdx,%rcx), %rax
+            0x48, 0x01, 0xf0, // addq %rsi, %rax
+            0x4c, 0x01, 0xc0, // addq %r8, %rax
+            0x4c, 0x01, 0xc8, // addq %r9, %rax
+            0x48, 0x03, 0x44, 0x24, 0x08, // addq 8(%rsp), %rax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&seven_bytes, 0, &seven_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+        let seventh_only_source =
+            "atom seventh_only(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 \
+            requires: true; ensures: true; body: { g };";
+        let seventh_only_model = source_model_named(seventh_only_source, "seventh_only", &context);
+        assert_eq!(
+            check_function(
+                &[0x48, 0x8b, 0x44, 0x24, 0x08, 0xc3], // movq 8(%rsp), %rax; retq
+                0,
+                &seventh_only_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let mut wrong_slot = seven_bytes;
+        wrong_slot[20] = 0x10;
+        assert_eq!(
+            check_function(&wrong_slot, 0, &seven_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+        assert_eq!(
+            check_function(
+                &[0x8b, 0x44, 0x24, 0x08, 0xc3], // movl 8(%rsp), %eax; retq
+                0,
+                &seventh_only_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+        assert_eq!(
+            check_function(
+                &[0x48, 0x89, 0x44, 0x24, 0x08, 0xc3], // movq %rax, 8(%rsp); retq
+                0,
+                &seven_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+        assert_eq!(
+            check_function(
+                &[0x48, 0x89, 0x7c, 0x24, 0xf8, 0xc3], // movq %rdi, -8(%rsp); retq
+                0,
+                &seventh_only_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+
+        let caller_source = format!(
+            "{seven_source}\n\
+            atom calls_seven(x: i64) -> i64 requires: true; ensures: true; \
+            body: {{ seven_args(x, 2, 3, 4, 5, 6, 7) }};"
+        );
+        let caller_model = source_model_named(&caller_source, "calls_seven", &context);
+        let caller_bytes = [
+            0x50, // pushq %rax
+            0x48, 0xc7, 0x04, 0x24, 0x07, 0x00, 0x00, 0x00, // movq $7, (%rsp)
+            0xbe, 0x02, 0x00, 0x00, 0x00, // movl $2, %esi
+            0xba, 0x03, 0x00, 0x00, 0x00, // movl $3, %edx
+            0xb9, 0x04, 0x00, 0x00, 0x00, // movl $4, %ecx
+            0x41, 0xb8, 0x05, 0x00, 0x00, 0x00, // movl $5, %r8d
+            0x41, 0xb9, 0x06, 0x00, 0x00, 0x00, // movl $6, %r9d
+            0xe8, 0x00, 0x00, 0x00, 0x00, // callq seven_args
+            0x59, // popq %rcx
+            0xc3, // retq
+        ];
+        let call_targets = |field_offset: u64| {
+            BTreeMap::from([(
+                field_offset,
+                CallTarget {
+                    name: "seven_args".into(),
+                    relocation_kind: CallRelocationKind::ElfX86_64Plt32,
+                    relocation_size: 32,
+                    addend: -4,
+                },
+            )])
+        };
+        assert_eq!(
+            check_function(&caller_bytes, 0, &caller_model, &call_targets(37), &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let mut wrong_outgoing_argument = caller_bytes;
+        wrong_outgoing_argument[5] = 0x08;
+        assert_eq!(
+            check_function(
+                &wrong_outgoing_argument,
+                0,
+                &caller_model,
+                &call_targets(37),
+                &context
+            ),
+            FunctionOutcome::Different
+        );
+
+        let mut missing_slot = vec![0x48, 0x83, 0xec, 0x08]; // subq $8, %rsp
+        missing_slot.extend([0x90; 8]);
+        missing_slot.extend_from_slice(&caller_bytes[9..]);
+        assert_eq!(
+            check_function(&missing_slot, 0, &caller_model, &call_targets(40), &context),
+            FunctionOutcome::OutsideProfile("call_arguments")
+        );
+
+        let mut read_after_call = caller_bytes.to_vec();
+        read_after_call
+            .splice(41..41, [0x48, 0x8b, 0x04, 0x24])
+            .for_each(drop); // movq (%rsp), %rax
+        assert_eq!(
+            check_function(
+                &read_after_call,
+                0,
+                &caller_model,
+                &call_targets(37),
+                &context
+            ),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+
+        let tail_call = [0xe9, 0x00, 0x00, 0x00, 0x00]; // jmp seven_args
+        assert_eq!(
+            check_function(&tail_call, 0, &caller_model, &call_targets(1), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+
+        let mut too_many_model = source_model(
+            "atom too_many() -> i64 requires: true; ensures: true; body: { 0 };",
+            &context,
+        );
+        too_many_model.inputs.extend(
+            (0..17)
+                .map(|index| BV::fresh_const(&context, &format!("too_many_argument_{index}"), 64)),
+        );
+        assert_eq!(
+            check_function(&[0xc3], 0, &too_many_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("argument_count")
         );
     }
 

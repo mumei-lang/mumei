@@ -4031,6 +4031,11 @@ profile as `conditional_call`. Call arguments and result terms are compared
 as uninterpreted sites. The x86-64
 integer-register convention and callee-saved preservation are assumed, not
 verified, and make no ABI claim.
+The stack-argument slice supports up to 16 arguments under an assumed
+convention: incoming argument `k >= 7` is at entry-relative `%rsp + 8*(k-6)`,
+and outgoing argument `k >= 7` is at call-time `%rsp + 8*(k-7)`. Only
+64-bit `movq`/`addq` reads from valid incoming slots and modeled outgoing
+stores are supported; the incoming argument area is read-only.
 The instruction profile includes `setcc`, byte-register views and extensions,
 masked immediate, implicit-one, and `%cl`-count shifts, and `or` logical flags.
 The division slice adds `cqto`/`cltd`, register `idivq`/`divq`/`divl`, and
