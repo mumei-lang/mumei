@@ -1150,7 +1150,9 @@ When linked, the record pins `runtime_source_sha256`; older records and
 runtime-free builds omit the optional field. Rechecks relink the runtime only
 when that recorded hash matches the current embedded source, otherwise they
 fail closed as inconclusive. The runtime is a build input only: its behavior
-and semantics are outside every verified claim.
+and semantics are outside every verified claim. `settings.runtime` must be
+`system-crt+embedded-mumei-runtime-c` exactly when the hash is present and
+`system-crt-only/no-mumei-runtime` otherwise.
 
 `native-bundle.json` (`mumei.native-bundle/v1`) binds the full source hash,
 specification/implementation/atom hashes, compiler-local HIR/MIR fingerprints,

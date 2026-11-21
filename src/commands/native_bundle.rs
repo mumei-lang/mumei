@@ -1784,6 +1784,7 @@ fn build_single(source: &str, input: &Path, output: &Path) -> Result<String, Bun
         || link_build.expected_stderr_sha256.is_some();
     link_build.observation_envelope = has_observation_pin.then(pinned_observation_envelope);
     let files = components(stage.path())?;
+    let settings = BuildSettings::expected_for(&link_build);
     let record = NativeBundleRecord {
         schema: SCHEMA.into(),
         profile: PROFILE.into(),
@@ -1792,7 +1793,7 @@ fn build_single(source: &str, input: &Path, output: &Path) -> Result<String, Bun
         source: binding,
         object_build,
         link_build,
-        settings: BuildSettings::default(),
+        settings,
         files: files
             .iter()
             .map(|(role, bytes)| (*role, ContentIdentity::of(bytes)))
@@ -2006,6 +2007,7 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
         proof_work.path(),
         admission,
     )?;
+    let settings = BuildSettings::expected_for(&link_build);
     let record = ModuleNativeBundleRecord {
         schema: MODULE_SCHEMA.into(),
         profile: record_profile(
@@ -2045,7 +2047,7 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
         source: binding.clone(),
         object_build,
         link_build,
-        settings: BuildSettings::default(),
+        settings,
         files: files
             .iter()
             .map(|(role, bytes)| (*role, ContentIdentity::of(bytes)))
@@ -2186,6 +2188,7 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
         proof_work.path(),
         admission,
     )?;
+    let settings = BuildSettings::expected_for(&link_build);
     let sources_dir = stage.path().join(SOURCES_DIR);
     fs::create_dir(&sources_dir).map_err(|_| BundleError("cannot stage source members"))?;
     for (name, text) in &members {
@@ -2238,7 +2241,7 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
         },
         object_build,
         link_build,
-        settings: BuildSettings::default(),
+        settings,
         files: files
             .iter()
             .map(|(role, bytes)| (*role, ContentIdentity::of(bytes)))

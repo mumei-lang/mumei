@@ -4729,6 +4729,19 @@ fn artifact_recheck_reproduces_pinned_object_and_executable() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("toolchain_identity_only"));
     assert!(stdout.contains("no_execution_or_runtime_semantics"));
+
+    let mut runtime_mismatch = record;
+    runtime_mismatch["settings"]["runtime"] = serde_json::Value::String(
+        native_bundle::RUNTIME_SYSTEM_CRT_WITH_EMBEDDED_MUMEI_C.to_owned(),
+    );
+    let bytes = serde_json::to_vec(&runtime_mismatch).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    let mismatched_id = native_bundle::sha256(&bytes);
+    let rejected = check(&source, &bundle, &mismatched_id);
+    assert_eq!(rejected.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("unsupported schema, scope or settings")
+    );
 }
 
 #[test]
@@ -4739,6 +4752,10 @@ fn loop_bundle_links_and_pins_runtime_but_keeps_runtime_out_of_claims() {
         serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
     let runtime_hash = native_bundle::sha256(include_str!("../runtime/mumei_runtime.c").as_bytes());
     assert_eq!(record["link_build"]["runtime_source_sha256"], runtime_hash);
+    assert_eq!(
+        record["settings"]["runtime"],
+        native_bundle::RUNTIME_SYSTEM_CRT_WITH_EMBEDDED_MUMEI_C
+    );
     assert!(!BundleFile::ALL
         .iter()
         .any(|file| file.file_name() == "mumei_runtime.c"));
@@ -4760,6 +4777,20 @@ fn loop_bundle_links_and_pins_runtime_but_keeps_runtime_out_of_claims() {
         .unwrap()
         .iter()
         .any(|check| check == "object_link_correspondence"));
+
+    let original_record = fs::read(bundle.join(RECORD_FILE)).unwrap();
+    let mut runtime_setting_mismatch = record.clone();
+    runtime_setting_mismatch["settings"]["runtime"] =
+        serde_json::Value::String(native_bundle::RUNTIME_SYSTEM_CRT_ONLY.to_owned());
+    let bytes = serde_json::to_vec(&runtime_setting_mismatch).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    let mismatched_id = native_bundle::sha256(&bytes);
+    let rejected = check(&source, &bundle, &mismatched_id);
+    assert_eq!(rejected.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("unsupported schema, scope or settings")
+    );
+    fs::write(bundle.join(RECORD_FILE), original_record).unwrap();
 
     let mut tampered = record;
     tampered["link_build"]["runtime_source_sha256"] = serde_json::Value::String("0".repeat(64));

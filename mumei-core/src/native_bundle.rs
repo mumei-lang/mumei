@@ -571,6 +571,19 @@ pub struct BuildSettings {
     pub solver_timeout_ms: u64,
 }
 
+pub const RUNTIME_SYSTEM_CRT_ONLY: &str = "system-crt-only/no-mumei-runtime";
+pub const RUNTIME_SYSTEM_CRT_WITH_EMBEDDED_MUMEI_C: &str = "system-crt+embedded-mumei-runtime-c";
+
+impl BuildSettings {
+    pub fn expected_for(link_build: &LinkBuild) -> Self {
+        let mut settings = Self::default();
+        if link_build.runtime_source_sha256.is_some() {
+            settings.runtime = RUNTIME_SYSTEM_CRT_WITH_EMBEDDED_MUMEI_C.to_owned();
+        }
+        settings
+    }
+}
+
 #[cfg(test)]
 mod observation_envelope_tests {
     use super::*;
@@ -595,6 +608,21 @@ mod observation_envelope_tests {
 
         let serialized = serde_json::to_value(link_build).unwrap();
         assert!(serialized.get("observation_envelope").is_none());
+    }
+
+    #[test]
+    fn expected_settings_follow_the_recorded_runtime_source() {
+        let mut link_build: LinkBuild = serde_json::from_value(legacy_link_build()).unwrap();
+        assert_eq!(
+            BuildSettings::expected_for(&link_build).runtime,
+            RUNTIME_SYSTEM_CRT_ONLY
+        );
+
+        link_build.runtime_source_sha256 = Some("runtime-hash".into());
+        assert_eq!(
+            BuildSettings::expected_for(&link_build).runtime,
+            RUNTIME_SYSTEM_CRT_WITH_EMBEDDED_MUMEI_C
+        );
     }
 
     #[test]
@@ -629,7 +657,7 @@ impl Default for BuildSettings {
             code_model: "default".into(),
             link_optimization: "O2".into(),
             link_libraries: ["m", "pthread", "dl", "z3"].map(str::to_owned).to_vec(),
-            runtime: "system-crt-only/no-mumei-runtime".into(),
+            runtime: RUNTIME_SYSTEM_CRT_ONLY.into(),
             entry_abi: "C-main-i32-from-i64".into(),
             project_config: "not-loaded/fixed-profile".into(),
             proof_cache: "disabled/fresh-z3".into(),
@@ -755,7 +783,7 @@ pub fn load_pinned_record(
         || record.profile != PROFILE
         || record.scope != SCOPE
         || record.system_scope != SYSTEM_SCOPE
-        || record.settings != BuildSettings::default()
+        || record.settings != BuildSettings::expected_for(&record.link_build)
         || record.files.len() != BundleFile::ALL.len()
         || BundleFile::ALL
             .iter()
@@ -1354,7 +1382,7 @@ pub fn load_pinned_module_record(
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
         || record.system_scope != SYSTEM_SCOPE
-        || record.settings != BuildSettings::default()
+        || record.settings != BuildSettings::expected_for(&record.link_build)
         || record.files.len() != BundleFile::ALL.len()
         || BundleFile::ALL
             .iter()
@@ -1434,7 +1462,7 @@ pub fn load_pinned_multifile_record(
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
         || record.system_scope != SYSTEM_SCOPE
-        || record.settings != BuildSettings::default()
+        || record.settings != BuildSettings::expected_for(&record.link_build)
         || record.files.len() != BundleFile::ALL.len()
         || BundleFile::ALL
             .iter()
