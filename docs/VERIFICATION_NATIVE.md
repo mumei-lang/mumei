@@ -1906,6 +1906,14 @@ and CPU/memory resource limits are not supported or claimed; only the
 30-second timeout and 64 KiB per-channel cap are enforced, and none of
 those properties is covered by `runtime_observation_semantics`.
 
+Both runtime-observation descriptors also carry `host` (`os`, `arch`,
+`family`), the running consumer binary's compile-time target, recorded
+as an observation of where the invocation ran and never as a claim. The
+producer's host, libc/loader/kernel versions and CPU features are not
+recorded or compared; because the record pins no host,
+`runtime_observation_semantics` is scoped to "some host of that os/arch",
+not to an attested environment.
+
 ### Pinned executable runtime-observation acceptance
 
 `mumei native-bundle accept-observations` runs the same artifact

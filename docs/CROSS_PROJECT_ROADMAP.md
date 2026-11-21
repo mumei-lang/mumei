@@ -3916,6 +3916,12 @@ descriptor is not an Agent performer, while Agent's
 `runtime_observation_semantics` from the `accept-observations` descriptor.
 Agent acceptance rests on Core's exit code and input recheck; the
 envelope is Core-reported and not validated by the Agent.
+Following design-memo Option D folded into Option A, both runtime
+descriptors report the consumer binary's compile-time `os`/`arch`/
+`family` as host observations, never claims; no host is pinned or
+compared, producer host/libc/loader/kernel versions and CPU features
+are unrecorded, so the scope is only some host of that OS/architecture,
+not an attested environment.
 
 ### Wave 5 pinned executable runtime-observation acceptance (C10 consumer)
 

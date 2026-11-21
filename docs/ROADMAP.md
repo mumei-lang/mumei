@@ -3052,6 +3052,12 @@ or CPU/memory limits. The Agent
 check from the descriptor; its acceptance rests on Core's exit code and
 input recheck, and it does not validate the Core-reported envelope. See the [runtime-observation acceptance
 boundary](VERIFICATION_NATIVE.md#pinned-executable-runtime-observation-acceptance).
+Both runtime-observation descriptors also report the consumer binary's
+compile-time `os`/`arch`/`family` as host observations, not claims; no
+host is pinned or compared, and the producer host, libc/loader/kernel
+versions and CPU features are unrecorded, so the scope is some host of
+that OS/architecture, not an attested environment (design-memo Option D
+folded into Option A).
 Sibling descriptors now name the exit-status observation only as
 `os_exit_status_observation` (formerly bare `os_exit_status` in
 non-exit-status `checks_not_performed` lists).
