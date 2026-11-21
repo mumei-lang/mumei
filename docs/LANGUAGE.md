@@ -146,6 +146,13 @@ payloads such as `e.p.inner.x`. Without a proven tag, or for positional,
 ambiguous and unknown payload names, verification keeps the existing
 conservative behavior.
 
+Struct-valued payloads and nested struct fields can also be read as values:
+`let q = e.p; let i = e.p.inner; get_x(e.p)`. Each enum boundary must be
+solver-proven. These reads preserve the declared struct type and project their
+fields from the payload selectors; they are available in body-side verification
+with a solver, not in solverless `requires` or `ensures` translation. Reading
+an existing struct value does not re-assume or re-check its invariants.
+
 Deep writes may pass through enum-valued payloads and struct fields when each
 enum tag along the path is proven. Named struct payloads and their nested
 struct fields recheck refined types, `where` constraints and invariants while

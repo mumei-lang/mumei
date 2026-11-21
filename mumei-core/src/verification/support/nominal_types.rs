@@ -117,6 +117,19 @@ impl<'a> NominalChecker<'a> {
         payload_type
     }
 
+    fn field_or_payload_type(&self, base: &Expr, field: &str) -> Option<&'a str> {
+        if let Some(base_key) = self.struct_type_of(base) {
+            if let Some(field_type) = self.field_type(&base_key, field) {
+                return Some(field_type);
+            }
+        }
+        if field == "tag" {
+            return None;
+        }
+        let base_key = self.enum_type_of(base)?;
+        self.enum_payload_type(&base_key, field)
+    }
+
     /// Struct type of `expr` when it is syntactically evident.
     fn struct_type_of(&self, expr: &Expr) -> Option<String> {
         match expr {
@@ -131,11 +144,9 @@ impl<'a> NominalChecker<'a> {
                 .and_then(|a| a.return_type.as_deref())
                 .and_then(|t| self.struct_key(t)),
             Expr::ChanRecv { channel } => self.chan_payload_struct(channel).map(|(_, key)| key),
-            Expr::FieldAccess(base, field) => {
-                let base_key = self.struct_type_of(base)?;
-                let ty = self.field_type(&base_key, field)?;
-                self.struct_key(ty)
-            }
+            Expr::FieldAccess(base, field) => self
+                .field_or_payload_type(base, field)
+                .and_then(|ty| self.struct_key(ty)),
             Expr::IfThenElse {
                 then_branch,
                 else_branch,
@@ -170,6 +181,9 @@ impl<'a> NominalChecker<'a> {
                 .get(v)
                 .and_then(|t| t.as_deref())
                 .and_then(|t| self.enum_key(t)),
+            Expr::FieldAccess(base, field) => self
+                .field_or_payload_type(base, field)
+                .and_then(|ty| self.enum_key(ty)),
             _ => None,
         }
     }

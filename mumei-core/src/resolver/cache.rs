@@ -57,7 +57,10 @@ use std::path::Path;
 /// Version 20 models tag-gated direct enum payload reads (`e.port`,
 /// `b.e.port`, `e.p.inner.x`) as datatype selectors instead of flattened-key
 /// or unconstrained values, so cached verdicts must be re-derived.
-pub const VERIFIER_POLICY_VERSION: u32 = 20;
+/// Version 21 materializes struct-valued named enum payload reads (`e.p`,
+/// `e.p.inner`) as struct handles over datatype selectors when each owning tag
+/// is proven, so cached verdicts must be re-derived.
+pub const VERIFIER_POLICY_VERSION: u32 = 21;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -2465,7 +2468,7 @@ body: { p.a };\n";
         let baseline = proof_hash_for(source, "g");
         assert_eq!(
             baseline,
-            "a26c5c4b528b90fa4953f5573334d3f123c038e5b2ead1cb837099722afe6813"
+            "86995073c9e8bcd238280073da798116daf0566d90075d0d3ad2e9b1b61ecc0b"
         );
         let changed = proof_hash_for(
             &source.replace(
@@ -2478,7 +2481,7 @@ body: { p.a };\n";
     }
 
     #[test]
-    fn effect_free_proof_hash_matches_policy_version_20() {
+    fn effect_free_proof_hash_matches_policy_version_21() {
         let hash = proof_hash_for(
             "atom main(x: i64) -> i64\n\
              requires: true;\n\
@@ -2489,7 +2492,7 @@ body: { p.a };\n";
 
         assert_eq!(
             hash,
-            "e93f85b592232909093acb03c42576f4ae11eb810901123221facad0b2279012"
+            "68ef1b1451596b4643abfb06218b0b0edcdaa8b343095838a242fdefcedf00f6"
         );
     }
 }

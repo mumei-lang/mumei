@@ -1970,32 +1970,79 @@ fn enum_payload_field_read<'a>(
         return Ok(None);
     }
 
-    let leaf_offset = if path.len() == 1 {
-        if payload_width != 1 || !field_leaves[0].0.is_empty() {
+    let mut terminal_type = field_type.to_string();
+    for segment in &path[1..] {
+        let resolved = vc.module_env.resolve_base_type(&terminal_type);
+        let Some(sdef) = vc.module_env.get_struct(&resolved).or_else(|| {
+            vc.module_env
+                .get_struct(datatype::type_name_base(&resolved))
+        }) else {
+            return Ok(None);
+        };
+        let Some(field) = sdef.fields.iter().find(|field| field.name == *segment) else {
+            return Ok(None);
+        };
+        terminal_type = field.type_name.clone();
+    }
+    let resolved_terminal_type = vc.module_env.resolve_base_type(&terminal_type);
+    let terminal_struct = vc
+        .module_env
+        .get_struct(&resolved_terminal_type)
+        .or_else(|| {
+            vc.module_env
+                .get_struct(datatype::type_name_base(&resolved_terminal_type))
+        });
+    let (leaf_offset, struct_leaf_width) = if terminal_struct.is_some() {
+        let Some(struct_leaves) = datatype::field_leaf_types(&terminal_type, vc.module_env) else {
+            return Ok(None);
+        };
+        if struct_leaves.is_empty() {
             return Ok(None);
         }
-        0
+        let path_prefix = path[1..].join("_");
+        let selected_leaf_names: Vec<String> = struct_leaves
+            .iter()
+            .map(|(name, _)| {
+                if path_prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{path_prefix}_{name}")
+                }
+            })
+            .collect();
+        let Some(leaf_offset) =
+            field_leaves
+                .windows(selected_leaf_names.len())
+                .position(|leaves| {
+                    leaves
+                        .iter()
+                        .map(|(name, _)| name)
+                        .eq(selected_leaf_names.iter())
+                })
+        else {
+            return Ok(None);
+        };
+        (leaf_offset, selected_leaf_names.len())
     } else {
-        let mut field_type = field_type.to_string();
-        for segment in &path[1..] {
-            let resolved = vc.module_env.resolve_base_type(&field_type);
-            let Some(sdef) = vc
-                .module_env
-                .get_struct(datatype::type_name_base(&resolved))
+        let leaf_offset = if path.len() == 1 {
+            if payload_width != 1 || !field_leaves[0].0.is_empty() {
+                return Ok(None);
+            }
+            0
+        } else {
+            let leaf_name = path[1..].join("_");
+            let Some(leaf_offset) = field_leaves.iter().position(|(name, _)| name == &leaf_name)
             else {
                 return Ok(None);
             };
-            let Some(field) = sdef.fields.iter().find(|field| field.name == *segment) else {
-                return Ok(None);
-            };
-            field_type = field.type_name.clone();
-        }
-        let leaf_name = path[1..].join("_");
-        let Some(leaf_offset) = field_leaves.iter().position(|(name, _)| name == &leaf_name) else {
-            return Ok(None);
+            leaf_offset
         };
-        leaf_offset
+        (leaf_offset, 0)
     };
+
+    if terminal_struct.is_some() && solver_opt.is_none() {
+        return Ok(None);
+    }
 
     if solver_opt.is_none() {
         let mut tag_conditions = Vec::with_capacity(enum_prefixes.len());
@@ -2204,6 +2251,38 @@ fn enum_payload_field_read<'a>(
     solver.pop(1);
     if !tag_proven {
         return Ok(None);
+    }
+    if let Some(sdef) = terminal_struct {
+        let mut leaves = Vec::with_capacity(struct_leaf_width);
+        for offset in leaf_offset..leaf_offset + struct_leaf_width {
+            let Some(leaf) = datatype::variant_selector_apply(
+                &sort,
+                variant_idx,
+                payload_offset + offset,
+                &base,
+            ) else {
+                return Ok(None);
+            };
+            leaves.push(leaf);
+        }
+        let env_keys_before: std::collections::HashSet<String> = env.keys().cloned().collect();
+        let Some(direct) = crate::verification::translator::pattern::rebuild_payload_direct_fields(
+            vc.ctx, vc, env, sdef, &leaves,
+        ) else {
+            let new_keys: Vec<String> = env
+                .keys()
+                .filter(|key| !env_keys_before.contains(*key))
+                .cloned()
+                .collect();
+            for key in new_keys {
+                env.remove(&key);
+            }
+            return Ok(None);
+        };
+        let handle = crate::verification::translator::fresh_struct_handle(vc.ctx, &sdef.name);
+        let handle_name = handle.decl().name();
+        crate::verification::translator::bind_struct_fields(env, &handle_name, &direct);
+        return Ok(Some(handle));
     }
     Ok(datatype::variant_selector_apply(
         &sort,

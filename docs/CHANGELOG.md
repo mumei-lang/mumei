@@ -1,3 +1,11 @@
+### Unreleased: struct-valued direct enum payload reads
+
+- Named struct payloads and nested struct fields can be read as values, aliased
+  with `let`, and passed to calls when every owning enum tag is proven. The
+  materialized handles preserve declared struct types and reuse payload
+  selectors; they do not re-assume or re-check struct invariants. Solverless
+  contracts, unproven tags, arrays and recursive shapes remain conservative.
+
 ### Unreleased: direct enum payload reads
 
 - Finite enums now model direct reads from uniquely owned named payloads when
