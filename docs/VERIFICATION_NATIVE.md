@@ -1970,6 +1970,30 @@ proved preserved; external and poll callees remain assumptions. The register
 argument/result convention itself remains assumed, not validated. Agent
 consumers must adopt the new preservation check names and function field.
 
+Scalar f64 leaves are admitted only under a record profile that admits f64
+arithmetic. The bounded SSE2 profile handles register-only `movsd`, `movapd`,
+`movaps`, `movq`, `addsd`, `subsd`, `mulsd`, `divsd`, and `cmpeqsd`; f64
+parameters use the first eight XMM argument registers independently of the
+integer argument registers, and f64 results use the low 64 bits of `xmm0`.
+f64 results compare equal when their bit patterns match or both are NaN, so
+NaN payloads are not claimed. Arithmetic models round to nearest, ties to even,
+and implement the specified x86 NaN propagation. MXCSR RNE, masked exceptions,
+and disabled FTZ/DAZ are assumptions, reported as
+`machine_code_tv_mxcsr_control_state`; `machine_code_tv_nan_payload_bits` is
+also not performed. When an equivalent function has a scalar f64 leaf,
+`machine_code_f64_scalar_function_tv` is performed. Memory operands fail
+closed. `ucomisd` remains outside the profile because the current flags model
+does not encode its unordered ZF/PF/CF state exactly. Agent consumers must adopt
+the three f64 check names.
+Scalar f64 function parameters use the XMM entry registers, but direct call
+sites with an f64 argument fail closed as `call_arguments`: source NaN payload
+bits are unspecified, while a callee may observe them when producing an integer
+result. f64 call results remain supported and are bound from the low 64 bits of
+`xmm0`. When an equivalent function has a scalar f64 leaf,
+`register_convention_assumed` names the XMM argument/result registers with
+`sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_result_rax_or_xmm0`;
+otherwise the descriptor retains the integer-only convention string.
+
 ### Object-stage machine-code acceptance (C10 Option B)
 
 `mumei native-bundle accept-object` runs the same artifact, object-correspondence

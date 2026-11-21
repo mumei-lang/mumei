@@ -4121,8 +4121,8 @@ models under the record's pinned admission, as the LLVM recheck does; the
 single-file path retains `RefinedAdmission::Reject`. Refined scalar parameter
 predicates feed the machine-TV input domain, whose label matches LLVM's exact
 refined-signature module label and preserves any loop-bound suffix. Unsupported
-memory, composite/enum, non-i64 scalar and f64 features remain outside the
-profile.
+memory, composite/enum, non-i64 scalar and non-scalar f64 features remain
+outside the profile.
 The C10 Option B machine-TV result adds `callee_saved_preservation` to each
 Equivalent function entry. Core performs
 `machine_code_callee_saved_register_preservation` only when at least one
@@ -4136,6 +4136,17 @@ preservation proofs for all source callees, while external callees remain an
 assumption. The argument/result register convention remains assumed. The
 entry-wrapper check is named `machine_code_entry_wrapper_tv`; agent consumers
 must adopt this and both preservation check names and the function field.
+
+The C10 Option B machine-TV slice admits register-only scalar f64 functions
+under the record's f64 profile, with NaN-aware result comparison, `xmm0`–`xmm7`
+entry registers for f64 parameters and the low 64 bits of `xmm0` for f64
+results. Direct call sites with f64 arguments fail closed as `call_arguments`;
+f64 call results remain supported. MXCSR RNE, masked exceptions, disabled
+FTZ/DAZ, and NaN payload bits are not established. Core
+performs `machine_code_f64_scalar_function_tv` for equivalent scalar-f64
+functions and lists `machine_code_tv_mxcsr_control_state` and
+`machine_code_tv_nan_payload_bits` as not performed. Composite f64 and
+`ucomisd` remain outside the profile; agent consumers must adopt these names.
 
 ### Wave 5 declared producer-identity gate (C02 consumer)
 
