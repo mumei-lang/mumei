@@ -33,6 +33,15 @@ atom shr_pos(x: i64, n: i64) -> i64 requires: x >= 0 && x <= 1000 && n >= 0 && n
 atom shr_signed(x: i64, n: i64) -> i64 requires: x >= -1000 && x <= 1000 && n >= 0 && n <= 63; ensures: true; body: { x >> n };\n\
 atom shl32_v(x: i32, n: i32) -> i32 requires: x >= 0 && x <= 1000 && n >= 0 && n <= 30; ensures: true; body: { x << n };\n\
 atom main() -> i64 requires: true; ensures: true; body: { 0 };";
+const CALL_CHAIN: &str =
+    "atom chain_leaf(x: i64) -> i64 requires: true; ensures: true; body: { x + 1 };\n\
+atom chain_two(x: i64) -> i64 requires: true; ensures: true; body: { chain_leaf(x) + 1 };\n\
+atom chain_three(x: i64) -> i64 requires: true; ensures: true; body: { chain_two(x) + 1 };\n\
+atom chain_four(x: i64) -> i64 requires: true; ensures: true; body: { chain_three(x) + 1 };\n\
+atom main() -> i64 requires: true; ensures: true; body: { chain_four(0) };";
+const LEA_SUM: &str =
+    "atom lea_sum(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { x + y };\n\
+atom main() -> i64 requires: true; ensures: true; body: { lea_sum(1, 2) };";
 
 fn cli(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_mumei"))
@@ -686,6 +695,36 @@ fn recheck_machine_tv_checks_variable_count_shifts() {
             "{name}"
         );
     }
+}
+
+#[test]
+fn recheck_machine_tv_checks_unary_ops_and_base_index_lea() {
+    let chain_root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(chain_root.path(), CALL_CHAIN);
+    let output = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    for name in ["chain_leaf", "chain_two", "chain_three", "chain_four"] {
+        assert_eq!(
+            descriptor["functions"][name],
+            serde_json::json!({"outcome": "equivalent_within_profile"}),
+            "{name}"
+        );
+    }
+
+    let lea_root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(lea_root.path(), LEA_SUM);
+    assert_eq!(
+        object_function_disassembly(&bundle, "lea_sum"),
+        ["leaq (%rdi,%rsi), %rax", "retq"]
+    );
+    let output = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        descriptor["functions"]["lea_sum"],
+        serde_json::json!({"outcome": "equivalent_within_profile"})
+    );
 }
 
 #[test]
