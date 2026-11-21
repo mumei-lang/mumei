@@ -147,20 +147,20 @@ fn recheck_object_reports_single_bundle_symbol_surface() {
     assert_success(&text);
     let text = String::from_utf8_lossy(&text.stdout);
     assert!(text.contains(
-        "Native object symbol surface corresponds to the pinned LLVM IR: 2 defined functions."
+        "Native object symbol surface and direct call edges correspond to the pinned LLVM IR: 2 defined functions, 1 call edges."
     ));
 
     let output = recheck_object(&source, &bundle, &id, true);
     assert_success(&output);
     let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(descriptor.as_object().unwrap().len(), 7);
+    assert_eq!(descriptor.as_object().unwrap().len(), 8);
     assert_eq!(
         descriptor["schema_version"],
         "mumei.object-symbol-correspondence/v1"
     );
     assert_eq!(
         descriptor["scope"],
-        "artifact_reproduction_and_object_symbol_surface_only/no_instruction_abi_or_runtime_semantics"
+        "artifact_reproduction_object_symbol_surface_and_direct_call_edges_only/no_instruction_abi_or_runtime_semantics"
     );
     assert_eq!(
         descriptor["defined_functions"],
@@ -172,7 +172,15 @@ fn recheck_object_reports_single_bundle_symbol_surface() {
         serde_json::json!([
             "toolchain_object_executable_reproduction",
             "object_symbol_correspondence",
+            "object_call_edge_correspondence",
         ])
+    );
+    assert_eq!(
+        descriptor["call_edges"],
+        serde_json::json!({
+            "__mumei_user_main": [],
+            "main": ["__mumei_user_main"],
+        })
     );
     assert_eq!(
         descriptor["checks_not_performed"],
@@ -200,6 +208,14 @@ fn recheck_object_reports_module_and_multifile_symbol_surfaces() {
         serde_json::json!(["__mumei_user_main", "helper", "main"])
     );
     assert_eq!(
+        module_descriptor["call_edges"],
+        serde_json::json!({
+            "__mumei_user_main": ["helper"],
+            "helper": [],
+            "main": ["__mumei_user_main"],
+        })
+    );
+    assert_eq!(
         module_descriptor["external_references"],
         serde_json::json!([])
     );
@@ -213,6 +229,14 @@ fn recheck_object_reports_module_and_multifile_symbol_surfaces() {
     assert_eq!(
         multifile_descriptor["defined_functions"],
         serde_json::json!(["__mumei_user_main", "helper", "main"])
+    );
+    assert_eq!(
+        multifile_descriptor["call_edges"],
+        serde_json::json!({
+            "__mumei_user_main": ["helper"],
+            "helper": [],
+            "main": ["__mumei_user_main"],
+        })
     );
 }
 

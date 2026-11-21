@@ -119,6 +119,8 @@ const MAX_STATES: usize = 256;
 pub struct IrFunctionSurface {
     pub defined: BTreeSet<String>,
     pub declared: BTreeSet<String>,
+    pub calls: BTreeMap<String, BTreeSet<String>>,
+    pub call_edges_checkable: bool,
 }
 
 #[allow(clippy::result_unit_err)]
@@ -130,16 +132,47 @@ pub fn ir_function_surface(ir: &[u8]) -> std::result::Result<IrFunctionSurface, 
             "function-surface.ll",
         ))
         .map_err(|_| ())?;
-    let mut surface = IrFunctionSurface::default();
+    let mut surface = IrFunctionSurface {
+        call_edges_checkable: true,
+        ..IrFunctionSurface::default()
+    };
     for function in module.get_functions() {
         let name = function.get_name().to_str().map_err(|_| ())?.to_owned();
         if name.starts_with("llvm.") {
             continue;
         }
         if function.count_basic_blocks() > 0 {
-            if !matches!(function.get_linkage(), Linkage::Private | Linkage::Internal) {
-                surface.defined.insert(name);
+            if matches!(function.get_linkage(), Linkage::Private | Linkage::Internal) {
+                surface.call_edges_checkable = false;
+                continue;
             }
+            surface.defined.insert(name.clone());
+            let mut callees = BTreeSet::new();
+            unsafe {
+                let mut block = LLVMGetFirstBasicBlock(function.as_value_ref());
+                while !block.is_null() {
+                    let mut instruction = LLVMGetFirstInstruction(block);
+                    while !instruction.is_null() {
+                        if LLVMGetInstructionOpcode(instruction) == LLVMOpcode::LLVMCall {
+                            let callee = LLVMGetCalledValue(instruction);
+                            if callee.is_null() || LLVMIsAFunction(callee).is_null() {
+                                surface.call_edges_checkable = false;
+                            } else if let Some(callee_name) = callee_name(callee) {
+                                if callee_name.is_empty() {
+                                    surface.call_edges_checkable = false;
+                                } else if !callee_name.starts_with("llvm.") {
+                                    callees.insert(callee_name);
+                                }
+                            } else {
+                                surface.call_edges_checkable = false;
+                            }
+                        }
+                        instruction = LLVMGetNextInstruction(instruction);
+                    }
+                    block = LLVMGetNextBasicBlock(block);
+                }
+            }
+            surface.calls.insert(name, callees);
         } else {
             surface.declared.insert(name);
         }
@@ -168,6 +201,11 @@ declare void @llvm.fake.intrinsic()
         let surface = ir_function_surface(ir).unwrap();
         assert_eq!(surface.defined, BTreeSet::from(["visible".to_owned()]));
         assert_eq!(surface.declared, BTreeSet::from(["external".to_owned()]));
+        assert_eq!(
+            surface.calls,
+            BTreeMap::from([("visible".to_owned(), BTreeSet::new())])
+        );
+        assert!(!surface.call_edges_checkable);
     }
 }
 

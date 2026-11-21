@@ -4,7 +4,7 @@ use mumei_core::{
     hir, native_bundle::*, parser, proof_cert, resolver, semantic_contract, verification,
 };
 use mumei_emit_llvm::translation_validation::{self as tv, Options, Outcome};
-use object::{Object, ObjectSymbol, SymbolKind};
+use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget, SectionKind, SymbolKind};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,
@@ -42,7 +42,7 @@ const LLVM_RECHECK_SCOPE: &str =
 const ARTIFACT_RECHECK_SCOPE: &str =
     "source_postcondition_llvm_snapshot_and_toolchain_identity_only/no_execution_or_runtime_semantics";
 const OBJECT_SYMBOL_CORRESPONDENCE_SCOPE: &str =
-    "artifact_reproduction_and_object_symbol_surface_only/no_instruction_abi_or_runtime_semantics";
+    "artifact_reproduction_object_symbol_surface_and_direct_call_edges_only/no_instruction_abi_or_runtime_semantics";
 const EXIT_STATUS_RECHECK_SCOPE: &str =
     "artifact_reproduction_and_os_exit_status_observation_only/no_runtime_abi_or_semantic_proof";
 const STDOUT_RECHECK_SCOPE: &str =
@@ -589,44 +589,63 @@ pub(crate) fn run(command: NativeBundleCommand) {
                     Err(BundleError(
                         "native object symbol surface differs from LLVM IR",
                     ))
-                } else if json {
-                    let descriptor = serde_json::json!({
-                        "schema_version": "mumei.object-symbol-correspondence/v1",
-                        "scope": OBJECT_SYMBOL_CORRESPONDENCE_SCOPE,
-                        "build_id": expected_build_id,
-                        "defined_functions": ir_surface.defined,
-                        "external_references": object_surface.undefined,
-                        "checks_performed": [
-                            "toolchain_object_executable_reproduction",
-                            "object_symbol_correspondence",
-                        ],
-                        "checks_not_performed": [
-                            "optimizer_semantics",
-                            "raw_link_argument_vector_reproduction",
-                            "abi_runtime_semantics",
-                            "os_exit_status_observation",
-                            "os_stdout_observation",
-                            "os_stderr_observation",
-                            "runtime_observation_semantics",
-                        ],
-                    });
-                    serde_json::to_vec_pretty(&descriptor)
-                        .map_err(|_| BundleError("cannot encode object symbol descriptor"))
-                        .and_then(|mut bytes| {
-                            bytes.push(b'\n');
-                            std::io::stdout()
-                                .lock()
-                                .write_all(&bytes)
-                                .map_err(|_| {
-                                    BundleError("cannot write object symbol descriptor")
-                                })
-                        })
                 } else {
-                    println!(
-                        "Native object symbol surface corresponds to the pinned LLVM IR: {} defined functions.\nScope: {OBJECT_SYMBOL_CORRESPONDENCE_SCOPE}",
-                        ir_surface.defined.len()
-                    );
-                    Ok(())
+                    match object_call_edges_correspond(&ir_surface, &object_surface) {
+                        None => {
+                            eprintln!(
+                                "Native object call-edge correspondence inconclusive; direct call edges are not checkable."
+                            );
+                            drop(stage);
+                            std::process::exit(3);
+                        }
+                        Some(false) => {
+                            Err(BundleError("native object call edges differ from LLVM IR"))
+                        }
+                        Some(true) if json => {
+                            let descriptor = serde_json::json!({
+                                "schema_version": "mumei.object-symbol-correspondence/v1",
+                                "scope": OBJECT_SYMBOL_CORRESPONDENCE_SCOPE,
+                                "build_id": expected_build_id,
+                                "defined_functions": ir_surface.defined,
+                                "external_references": object_surface.undefined,
+                                "checks_performed": [
+                                    "toolchain_object_executable_reproduction",
+                                    "object_symbol_correspondence",
+                                    "object_call_edge_correspondence",
+                                ],
+                                "checks_not_performed": [
+                                    "optimizer_semantics",
+                                    "raw_link_argument_vector_reproduction",
+                                    "abi_runtime_semantics",
+                                    "os_exit_status_observation",
+                                    "os_stdout_observation",
+                                    "os_stderr_observation",
+                                    "runtime_observation_semantics",
+                                ],
+                                "call_edges": ir_surface.calls,
+                            });
+                            serde_json::to_vec_pretty(&descriptor)
+                                .map_err(|_| BundleError("cannot encode object symbol descriptor"))
+                                .and_then(|mut bytes| {
+                                    bytes.push(b'\n');
+                                    std::io::stdout()
+                                        .lock()
+                                        .write_all(&bytes)
+                                        .map_err(|_| {
+                                            BundleError("cannot write object symbol descriptor")
+                                        })
+                                })
+                        }
+                        Some(true) => {
+                            let call_count: usize =
+                                ir_surface.calls.values().map(BTreeSet::len).sum();
+                            println!(
+                                "Native object symbol surface and direct call edges correspond to the pinned LLVM IR: {} defined functions, {call_count} call edges.\nScope: {OBJECT_SYMBOL_CORRESPONDENCE_SCOPE}",
+                                ir_surface.defined.len()
+                            );
+                            Ok(())
+                        }
+                    }
                 }
             }
             Ok(ArtifactRecheckResult {
@@ -2589,22 +2608,115 @@ struct ArtifactRecheckResult {
 struct ObjectSymbolSurface {
     defined: BTreeSet<String>,
     undefined: BTreeSet<String>,
+    calls: BTreeMap<String, BTreeSet<String>>,
+    call_edges_checkable: bool,
+}
+
+struct ObjectFunctionRange {
+    name: String,
+    section: object::SectionIndex,
+    start: u64,
+    end: u64,
 }
 
 fn object_symbol_surface(bytes: &[u8]) -> Result<ObjectSymbolSurface, ()> {
     let file = object::File::parse(bytes).map_err(|_| ())?;
-    let mut surface = ObjectSymbolSurface::default();
+    let mut surface = ObjectSymbolSurface {
+        call_edges_checkable: true,
+        ..ObjectSymbolSurface::default()
+    };
+    let mut ranges = Vec::new();
     for symbol in file.symbols() {
         if symbol.is_undefined() {
             let name = symbol.name().map_err(|_| ())?;
             if !name.is_empty() {
                 surface.undefined.insert(name.to_owned());
             }
-        } else if symbol.is_global() && symbol.is_definition() && symbol.kind() == SymbolKind::Text
-        {
-            surface
-                .defined
-                .insert(symbol.name().map_err(|_| ())?.to_owned());
+        } else if symbol.is_definition() && symbol.kind() == SymbolKind::Text {
+            if !symbol.is_global() {
+                surface.call_edges_checkable = false;
+                continue;
+            }
+            let name = symbol.name().map_err(|_| ())?.to_owned();
+            surface.defined.insert(name.clone());
+            surface.calls.entry(name.clone()).or_default();
+            let Some(section) = symbol.section_index() else {
+                surface.call_edges_checkable = false;
+                continue;
+            };
+            let size = symbol.size();
+            let Some(end) = symbol.address().checked_add(size) else {
+                surface.call_edges_checkable = false;
+                continue;
+            };
+            if size == 0 {
+                surface.call_edges_checkable = false;
+                continue;
+            }
+            ranges.push(ObjectFunctionRange {
+                name,
+                section,
+                start: symbol.address(),
+                end,
+            });
+        }
+    }
+
+    for (index, range) in ranges.iter().enumerate() {
+        for other in ranges.iter().skip(index + 1) {
+            if range.section == other.section && range.start < other.end && other.start < range.end
+            {
+                surface.call_edges_checkable = false;
+            }
+        }
+    }
+
+    for section in file.sections() {
+        if section.kind() != SectionKind::Text {
+            continue;
+        }
+        let section_index = section.index();
+        for (offset, relocation) in section.relocations() {
+            let mut containing = ranges.iter().filter(|range| {
+                range.section == section_index && range.start <= offset && offset < range.end
+            });
+            let Some(function) = containing.next() else {
+                surface.call_edges_checkable = false;
+                continue;
+            };
+            if containing.next().is_some() {
+                surface.call_edges_checkable = false;
+                continue;
+            }
+            if relocation.subtractor().is_some() {
+                surface.call_edges_checkable = false;
+                continue;
+            }
+            let RelocationTarget::Symbol(symbol_index) = relocation.target() else {
+                surface.call_edges_checkable = false;
+                continue;
+            };
+            let Ok(target) = file.symbol_by_index(symbol_index) else {
+                surface.call_edges_checkable = false;
+                continue;
+            };
+            if target.kind() == SymbolKind::Section {
+                surface.call_edges_checkable = false;
+                continue;
+            }
+            let Ok(name) = target.name() else {
+                surface.call_edges_checkable = false;
+                continue;
+            };
+            if !surface.defined.contains(name) && !surface.undefined.contains(name) {
+                surface.call_edges_checkable = false;
+                continue;
+            }
+            if let Some(callees) = surface.calls.get_mut(&function.name) {
+                callees.insert(name.to_owned());
+            } else {
+                surface.call_edges_checkable = false;
+            }
         }
     }
     Ok(surface)
@@ -2612,6 +2724,13 @@ fn object_symbol_surface(bytes: &[u8]) -> Result<ObjectSymbolSurface, ()> {
 
 fn object_symbols_correspond(ir: &tv::IrFunctionSurface, object: &ObjectSymbolSurface) -> bool {
     object.defined == ir.defined && object.undefined.is_subset(&ir.declared)
+}
+
+fn object_call_edges_correspond(
+    ir: &tv::IrFunctionSurface,
+    object: &ObjectSymbolSurface,
+) -> Option<bool> {
+    (ir.call_edges_checkable && object.call_edges_checkable).then(|| ir.calls == object.calls)
 }
 
 fn observation_pins_comparable(link_build: &LinkBuild) -> bool {
@@ -2775,10 +2894,17 @@ mod tests {
         let ir = tv::IrFunctionSurface {
             defined: BTreeSet::from(["main".to_owned(), "helper".to_owned()]),
             declared: BTreeSet::from(["external".to_owned(), "optional".to_owned()]),
+            calls: BTreeMap::from([
+                ("helper".to_owned(), BTreeSet::new()),
+                ("main".to_owned(), BTreeSet::new()),
+            ]),
+            call_edges_checkable: true,
         };
         let object = |defined: &[&str], undefined: &[&str]| ObjectSymbolSurface {
             defined: defined.iter().map(|name| (*name).to_owned()).collect(),
             undefined: undefined.iter().map(|name| (*name).to_owned()).collect(),
+            calls: BTreeMap::new(),
+            call_edges_checkable: true,
         };
 
         assert!(object_symbols_correspond(
@@ -2801,6 +2927,69 @@ mod tests {
             &ir,
             &object(&["main", "helper"], &["optional"])
         ));
+    }
+
+    #[test]
+    fn object_call_edges_correspond_requires_checkable_equal_call_sets() {
+        let calls = BTreeMap::from([
+            ("other".to_owned(), BTreeSet::new()),
+            (
+                "visible".to_owned(),
+                BTreeSet::from(["external_ref".to_owned(), "other".to_owned()]),
+            ),
+        ]);
+        let ir = tv::IrFunctionSurface {
+            defined: BTreeSet::from(["other".to_owned(), "visible".to_owned()]),
+            declared: BTreeSet::from(["external_ref".to_owned()]),
+            calls: calls.clone(),
+            call_edges_checkable: true,
+        };
+        let object = ObjectSymbolSurface {
+            defined: ir.defined.clone(),
+            undefined: ir.declared.clone(),
+            calls: calls.clone(),
+            call_edges_checkable: true,
+        };
+        assert_eq!(object_call_edges_correspond(&ir, &object), Some(true));
+
+        let missing_edge = ObjectSymbolSurface {
+            calls: BTreeMap::from([
+                ("other".to_owned(), BTreeSet::new()),
+                (
+                    "visible".to_owned(),
+                    BTreeSet::from(["external_ref".to_owned()]),
+                ),
+            ]),
+            ..object.clone()
+        };
+        assert_eq!(
+            object_call_edges_correspond(&ir, &missing_edge),
+            Some(false)
+        );
+
+        let extra_edge = ObjectSymbolSurface {
+            calls: BTreeMap::from([
+                (
+                    "other".to_owned(),
+                    BTreeSet::from(["external_ref".to_owned()]),
+                ),
+                (
+                    "visible".to_owned(),
+                    BTreeSet::from(["external_ref".to_owned(), "other".to_owned()]),
+                ),
+            ]),
+            ..object.clone()
+        };
+        assert_eq!(object_call_edges_correspond(&ir, &extra_edge), Some(false));
+
+        let mut unchecked_ir = ir.clone();
+        unchecked_ir.call_edges_checkable = false;
+        assert_eq!(object_call_edges_correspond(&unchecked_ir, &object), None);
+        let unchecked_object = ObjectSymbolSurface {
+            call_edges_checkable: false,
+            ..object
+        };
+        assert_eq!(object_call_edges_correspond(&ir, &unchecked_object), None);
     }
 
     #[test]
@@ -2834,11 +3023,59 @@ entry:
             surface.undefined,
             BTreeSet::from(["external_ref".to_owned()])
         );
-        assert!(object_symbols_correspond(
-            &tv::ir_function_surface(ir).unwrap(),
-            &surface
-        ));
+        let ir_surface = tv::ir_function_surface(ir).unwrap();
+        assert!(object_symbols_correspond(&ir_surface, &surface));
+        assert!(!ir_surface.call_edges_checkable);
+        assert!(
+            !surface.call_edges_checkable,
+            "observed object surface: {surface:#?}"
+        );
+        assert_eq!(object_call_edges_correspond(&ir_surface, &surface), None);
         assert!(object_symbol_surface(b"not an object").is_err());
+    }
+
+    #[test]
+    fn object_symbol_surface_tracks_checkable_direct_call_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let ir_path = dir.path().join("calls.ll");
+        let object_path = dir.path().join("calls.o");
+        let ir = br#"
+declare i64 @external_ref(i64)
+
+define i64 @other() {
+entry:
+  ret i64 3
+}
+
+define i64 @visible() {
+entry:
+  %external = call i64 @external_ref(i64 2)
+  %other = call i64 @other()
+  %sum = add i64 %external, %other
+  ret i64 %sum
+}
+"#;
+        fs::write(&ir_path, ir).unwrap();
+        mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ir_path, &object_path)
+            .unwrap();
+
+        let ir_surface = tv::ir_function_surface(ir).unwrap();
+        let object_surface = object_symbol_surface(&fs::read(&object_path).unwrap()).unwrap();
+        let expected = BTreeMap::from([
+            ("other".to_owned(), BTreeSet::new()),
+            (
+                "visible".to_owned(),
+                BTreeSet::from(["external_ref".to_owned(), "other".to_owned()]),
+            ),
+        ]);
+        assert!(ir_surface.call_edges_checkable);
+        assert!(object_surface.call_edges_checkable);
+        assert_eq!(ir_surface.calls, expected);
+        assert_eq!(object_surface.calls, expected);
+        assert_eq!(
+            object_call_edges_correspond(&ir_surface, &object_surface),
+            Some(true)
+        );
     }
 
     fn executable_script(path: &Path, body: &str) {
