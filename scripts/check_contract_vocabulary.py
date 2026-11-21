@@ -105,6 +105,7 @@ REQUIRED_C10_OPTION_B_MACHINE_TV_CHECKS = [
     "machine_code_entry_wrapper_tv",
     "machine_code_f64_scalar_function_tv",
     "machine_code_composite_register_aggregate_tv",
+    "machine_code_tv_sysv_memory_class_aggregate_abi",
     "machine_code_tv_mxcsr_control_state",
     "machine_code_tv_nan_payload_bits",
 ]

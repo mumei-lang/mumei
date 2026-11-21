@@ -4265,6 +4265,60 @@ fn recheck_machine_tv_accepts_small_integer_struct_aggregates() {
 }
 
 #[test]
+fn recheck_machine_tv_accept_object_three_leaf_struct_aggregates_in_one_source_file() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "struct T { a: i64, b: i64, c: i64 }\n\
+         atom sum3(p: T) -> i64 requires: true; ensures: true; body: { p.a + p.b + p.c };\n\
+         atom mk3(a: i64, b: i64, c: i64) -> T requires: true; ensures: true; body: { T { a: a, b: b, c: c } };\n\
+         atom caller() -> i64 requires: true; ensures: true; body: { sum3(mk3(1, 2, 3)) };\n\
+         atom fwd(p: T) -> i64 requires: true; ensures: true; body: { sum3(p) };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V6);
+
+    let machine_tv = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&machine_tv);
+    let machine_tv: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
+    assert_eq!(
+        machine_tv["register_convention_assumed"],
+        "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax_llvm_first_class_aggregates_split_into_registers_result_rax_rdx_rcx_xmm0_xmm1"
+    );
+    for function in ["sum3", "mk3", "caller", "fwd"] {
+        assert_eq!(
+            machine_tv["functions"][function]["outcome"],
+            "equivalent_within_profile"
+        );
+    }
+    assert!(machine_tv["checks_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check == "machine_code_composite_register_aggregate_tv"));
+    assert!(machine_tv["checks_not_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check == "machine_code_tv_sysv_memory_class_aggregate_abi"));
+
+    let accepted = accept_object(&source, &bundle, &id, true);
+    assert_success(&accepted);
+    let accepted: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(accepted["accepted"], true);
+    assert_eq!(
+        accepted["register_convention_assumed"],
+        "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax_llvm_first_class_aggregates_split_into_registers_result_rax_rdx_rcx_xmm0_xmm1"
+    );
+    assert!(accepted["checks_not_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check == "machine_code_tv_sysv_memory_class_aggregate_abi"));
+}
+
+#[test]
 fn recheck_machine_tv_accepts_mixed_f64_struct_aggregates() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build_source(

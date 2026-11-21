@@ -446,13 +446,16 @@ pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
             .zip(&model.param_leaf_doubles)
             .all(|(shape, leaves)| match shape {
                 None => leaves.len() == 1,
-                Some(count) => (1..=2).contains(count) && leaves.len() == *count,
+                Some(count) => {
+                    (1..=MAX_AGGREGATE_LEAF_COUNT).contains(count) && leaves.len() == *count
+                }
             });
     let result_shape_supported = match model.result_shape {
         None => model.result_leaf_doubles.len() <= 1 && model.value.get_size() == 64,
         Some(count) => {
-            (1..=2).contains(&count)
+            (1..=MAX_AGGREGATE_LEAF_COUNT).contains(&count)
                 && model.result_leaf_doubles.len() == count
+                && aggregate_result_register_classes_supported(&model.result_leaf_doubles)
                 && model.value.get_size() == (64 * count) as u32
         }
     };
@@ -471,6 +474,25 @@ pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
         && !model.bounded_memory
 }
 
+const MAX_AGGREGATE_LEAF_COUNT: usize = 4;
+const INTEGER_RESULT_REGISTERS: [usize; 3] = [0, 2, 1];
+const FLOAT_RESULT_REGISTER_COUNT: usize = 2;
+
+fn aggregate_result_register_classes_supported(result_leaf_doubles: &[bool]) -> bool {
+    let integer_leaf_count = result_leaf_doubles
+        .iter()
+        .filter(|is_double| !**is_double)
+        .count();
+    let float_leaf_count = result_leaf_doubles
+        .iter()
+        .filter(|is_double| **is_double)
+        .count();
+    !result_leaf_doubles.is_empty()
+        && result_leaf_doubles.len() <= MAX_AGGREGATE_LEAF_COUNT
+        && integer_leaf_count <= INTEGER_RESULT_REGISTERS.len()
+        && float_leaf_count <= FLOAT_RESULT_REGISTER_COUNT
+}
+
 fn call_site_shapes_are_consistent(site: &CallSite<'_>) -> bool {
     let mut argument_leaf_count = 0usize;
     for shape in &site.argument_shapes {
@@ -480,8 +502,16 @@ fn call_site_shapes_are_consistent(site: &CallSite<'_>) -> bool {
         let Some(leaf_doubles) = site.arg_leaf_doubles.get(argument_leaf_count..end) else {
             return false;
         };
-        if let CallValueShape::Struct { has_f64, .. } = shape {
-            if *has_f64 != leaf_doubles.iter().any(|is_double| *is_double) {
+        if let CallValueShape::Struct {
+            leaf_count,
+            has_enum,
+            has_f64,
+        } = shape
+        {
+            if *has_enum
+                || !(1..=MAX_AGGREGATE_LEAF_COUNT).contains(leaf_count)
+                || *has_f64 != leaf_doubles.iter().any(|is_double| *is_double)
+            {
                 return false;
             }
         }
@@ -491,6 +521,11 @@ fn call_site_shapes_are_consistent(site: &CallSite<'_>) -> bool {
         return false;
     };
     if site.result_leaf_doubles.len() != site.result_shape.leaf_count() {
+        return false;
+    }
+    if matches!(site.result_shape, CallValueShape::Struct { .. })
+        && !aggregate_result_register_classes_supported(&site.result_leaf_doubles)
+    {
         return false;
     }
     match site.result_shape {
@@ -1558,7 +1593,7 @@ fn finish_path<'ctx>(
                     float_result_index += 1;
                     result
                 } else {
-                    let register_index = [0, 2][integer_result_index];
+                    let register_index = INTEGER_RESULT_REGISTERS[integer_result_index];
                     integer_result_index += 1;
                     state.registers[register_index].extract(63, 0)
                 }
@@ -2059,7 +2094,7 @@ fn call_value_shape_supported(shape: CallValueShape) -> bool {
             leaf_count,
             has_enum: false,
             ..
-        } => (1..=2).contains(&leaf_count),
+        } => (1..=MAX_AGGREGATE_LEAF_COUNT).contains(&leaf_count),
         CallValueShape::Enum { .. } | CallValueShape::Struct { .. } => false,
     }
 }
@@ -2073,7 +2108,9 @@ fn call_site_has_unsupported_composite_shape(site: &CallSite<'_>) -> bool {
     }) || (matches!(
         site.result_shape,
         CallValueShape::Struct { .. } | CallValueShape::Enum { .. }
-    ) && !call_value_shape_supported(site.result_shape))
+    ) && (!call_value_shape_supported(site.result_shape)
+        || (matches!(site.result_shape, CallValueShape::Struct { .. })
+            && !aggregate_result_register_classes_supported(&site.result_leaf_doubles))))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2328,9 +2365,10 @@ fn apply_call_result_and_clobbers<'ctx>(
             leaf_count,
             has_enum: false,
             has_f64,
-        } if (1..=2).contains(&leaf_count) => {
+        } if (1..=MAX_AGGREGATE_LEAF_COUNT).contains(&leaf_count) => {
             if result_leaf_doubles.len() != leaf_count
                 || has_f64 != result_leaf_doubles.iter().any(|is_double| *is_double)
+                || !aggregate_result_register_classes_supported(result_leaf_doubles)
             {
                 return Err(FunctionOutcome::OutsideProfile("call_arguments"));
             }
@@ -2343,7 +2381,7 @@ fn apply_call_result_and_clobbers<'ctx>(
                     xmm_registers[float_result_index] = upper.concat(&leaf);
                     float_result_index += 1;
                 } else {
-                    registers[[0, 2][integer_result_index]] = leaf;
+                    registers[INTEGER_RESULT_REGISTERS[integer_result_index]] = leaf;
                     integer_result_index += 1;
                 }
             }
@@ -3783,6 +3821,291 @@ entry:
     }
 
     #[test]
+    fn llvm_first_class_aggregate_return_limits_match_codegen() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+
+        let three_integer_source = "struct T { a: i64, b: i64, c: i64 }\n\
+            atom mk3(a: i64, b: i64, c: i64) -> T requires: true; ensures: true; body: { T { a: a, b: b, c: c } };\n\
+            atom sum3(p: T) -> i64 requires: true; ensures: true; body: { p.a + p.b + p.c };\n\
+            atom main() -> i64 requires: true; ensures: true; body: { sum3(mk3(1, 2, 3)) };";
+        let mk3_model = source_model_named_with_admission(
+            three_integer_source,
+            "mk3",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let sum3_model = source_model_named_with_admission(
+            three_integer_source,
+            "sum3",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let main_model = source_model_named_with_admission(
+            three_integer_source,
+            "main",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let three_integer_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i64, i64 } @mk3(i64 %a, i64 %b, i64 %c) {
+entry:
+  %p0 = insertvalue { i64, i64, i64 } undef, i64 %a, 0
+  %p1 = insertvalue { i64, i64, i64 } %p0, i64 %b, 1
+  %p2 = insertvalue { i64, i64, i64 } %p1, i64 %c, 2
+  ret { i64, i64, i64 } %p2
+}
+define { i64, i64, i64 } @mk3_swapped(i64 %a, i64 %b, i64 %c) {
+entry:
+  %p0 = insertvalue { i64, i64, i64 } undef, i64 %a, 0
+  %p1 = insertvalue { i64, i64, i64 } %p0, i64 %c, 1
+  %p2 = insertvalue { i64, i64, i64 } %p1, i64 %b, 2
+  ret { i64, i64, i64 } %p2
+}
+define i64 @sum3({ i64, i64, i64 } %p) {
+entry:
+  %a = extractvalue { i64, i64, i64 } %p, 0
+  %b = extractvalue { i64, i64, i64 } %p, 1
+  %c = extractvalue { i64, i64, i64 } %p, 2
+  %ab = add i64 %a, %b
+  %result = add i64 %ab, %c
+  ret i64 %result
+}
+define i64 @main() {
+entry:
+  %p = call { i64, i64, i64 } @mk3(i64 1, i64 2, i64 3)
+  %result = call i64 @sum3({ i64, i64, i64 } %p)
+  ret i64 %result
+}
+"#;
+        let (mk3_address, mk3_bytes, mk3_targets) =
+            compiled_function_with_targets(three_integer_ir, "mk3");
+        let mk3_disassembly = disassemble(&mk3_bytes, mk3_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("three-i64 aggregate return disassembly:\n{mk3_disassembly}");
+        assert_eq!(
+            check_function(&mk3_bytes, mk3_address, &mk3_model, &mk3_targets, &context),
+            FunctionOutcome::Equivalent
+        );
+        let (swapped_address, swapped_bytes, swapped_targets) =
+            compiled_function_with_targets(three_integer_ir, "mk3_swapped");
+        assert_eq!(
+            check_function(
+                &swapped_bytes,
+                swapped_address,
+                &mk3_model,
+                &swapped_targets,
+                &context
+            ),
+            FunctionOutcome::Different
+        );
+        let (sum3_address, sum3_bytes, sum3_targets) =
+            compiled_function_with_targets(three_integer_ir, "sum3");
+        assert_eq!(
+            check_function(
+                &sum3_bytes,
+                sum3_address,
+                &sum3_model,
+                &sum3_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+        let (main_address, main_bytes, main_targets) =
+            compiled_function_with_targets(three_integer_ir, "main");
+        let main_disassembly = disassemble(&main_bytes, main_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("three-i64 aggregate call disassembly:\n{main_disassembly}");
+        assert_eq!(
+            check_function(
+                &main_bytes,
+                main_address,
+                &main_model,
+                &main_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let four_integer_source = "struct I4 { a: i64, b: i64, c: i64, d: i64 }\n\
+            atom mk4(a: i64, b: i64, c: i64, d: i64) -> I4 requires: true; ensures: true; body: { I4 { a: a, b: b, c: c, d: d } };\n\
+            atom sum4(x: i64, y: i64, p: I4) -> i64 requires: true; ensures: true; body: { x + y + p.a + p.b + p.c + p.d };\n\
+            atom main4() -> i64 requires: true; ensures: true; body: { sum4(10, 20, I4 { a: 1, b: 2, c: 3, d: 4 }) };";
+        let mk4_model = source_model_named_with_admission(
+            four_integer_source,
+            "mk4",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let sum4_model = source_model_named_with_admission(
+            four_integer_source,
+            "sum4",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let main4_model = source_model_named_with_admission(
+            four_integer_source,
+            "main4",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let four_integer_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i64, i64, i64 } @mk4(i64 %a, i64 %b, i64 %c, i64 %d) {
+entry:
+  %p0 = insertvalue { i64, i64, i64, i64 } undef, i64 %a, 0
+  %p1 = insertvalue { i64, i64, i64, i64 } %p0, i64 %b, 1
+  %p2 = insertvalue { i64, i64, i64, i64 } %p1, i64 %c, 2
+  %p3 = insertvalue { i64, i64, i64, i64 } %p2, i64 %d, 3
+  ret { i64, i64, i64, i64 } %p3
+}
+define i64 @sum4(i64 %x, i64 %y, { i64, i64, i64, i64 } %p) {
+entry:
+  %a = extractvalue { i64, i64, i64, i64 } %p, 0
+  %b = extractvalue { i64, i64, i64, i64 } %p, 1
+  %c = extractvalue { i64, i64, i64, i64 } %p, 2
+  %d = extractvalue { i64, i64, i64, i64 } %p, 3
+  %xy = add i64 %x, %y
+  %ab = add i64 %xy, %a
+  %abc = add i64 %ab, %b
+  %abcd = add i64 %abc, %c
+  %result = add i64 %abcd, %d
+  ret i64 %result
+}
+define i64 @main4() {
+entry:
+  %p0 = insertvalue { i64, i64, i64, i64 } undef, i64 1, 0
+  %p1 = insertvalue { i64, i64, i64, i64 } %p0, i64 2, 1
+  %p2 = insertvalue { i64, i64, i64, i64 } %p1, i64 3, 2
+  %p3 = insertvalue { i64, i64, i64, i64 } %p2, i64 4, 3
+  %result = call i64 @sum4(i64 10, i64 20, { i64, i64, i64, i64 } %p3)
+  ret i64 %result
+}
+"#;
+        let (mk4_address, mk4_bytes, mk4_targets) =
+            compiled_function_with_targets(four_integer_ir, "mk4");
+        let mk4_disassembly = disassemble(&mk4_bytes, mk4_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("four-i64 aggregate return disassembly:\n{mk4_disassembly}");
+        assert_eq!(
+            check_function(&mk4_bytes, mk4_address, &mk4_model, &mk4_targets, &context),
+            FunctionOutcome::OutsideProfile("unsupported_signature")
+        );
+        let (sum4_address, sum4_bytes, sum4_targets) =
+            compiled_function_with_targets(four_integer_ir, "sum4");
+        assert_eq!(
+            check_function(
+                &sum4_bytes,
+                sum4_address,
+                &sum4_model,
+                &sum4_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+        let (main4_address, main4_bytes, main4_targets) =
+            compiled_function_with_targets(four_integer_ir, "main4");
+        assert_eq!(
+            check_function(
+                &main4_bytes,
+                main4_address,
+                &main4_model,
+                &main4_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let mixed_source = "struct M { a: i64, b: f64, c: i64, d: f64 }\n\
+            atom mixed(a: i64, b: f64, c: i64, d: f64) -> M requires: true; ensures: true; body: { M { a: a, b: b, c: c, d: d } };";
+        let mixed_model = source_model_named_with_admission(
+            mixed_source,
+            "mixed",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let mixed_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, double, i64, double } @mixed(i64 %a, double %b, i64 %c, double %d) {
+entry:
+  %p0 = insertvalue { i64, double, i64, double } undef, i64 %a, 0
+  %p1 = insertvalue { i64, double, i64, double } %p0, double %b, 1
+  %p2 = insertvalue { i64, double, i64, double } %p1, i64 %c, 2
+  %p3 = insertvalue { i64, double, i64, double } %p2, double %d, 3
+  ret { i64, double, i64, double } %p3
+}
+"#;
+        let (mixed_address, mixed_bytes, mixed_targets) =
+            compiled_function_with_targets(mixed_ir, "mixed");
+        let mixed_disassembly = disassemble(&mixed_bytes, mixed_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("mixed four-leaf aggregate return disassembly:\n{mixed_disassembly}");
+        assert_eq!(
+            check_function(
+                &mixed_bytes,
+                mixed_address,
+                &mixed_model,
+                &mixed_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let three_float_source = "struct F3 { a: f64, b: f64, c: f64 }\n\
+            atom mkf3(a: f64, b: f64, c: f64) -> F3 requires: true; ensures: true; body: { F3 { a: a, b: b, c: c } };";
+        let mkf3_model = source_model_named_with_admission(
+            three_float_source,
+            "mkf3",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let three_float_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { double, double, double } @mkf3(double %a, double %b, double %c) {
+entry:
+  %p0 = insertvalue { double, double, double } undef, double %a, 0
+  %p1 = insertvalue { double, double, double } %p0, double %b, 1
+  %p2 = insertvalue { double, double, double } %p1, double %c, 2
+  ret { double, double, double } %p2
+}
+"#;
+        let (mkf3_address, mkf3_bytes, mkf3_targets) =
+            compiled_function_with_targets(three_float_ir, "mkf3");
+        let mkf3_disassembly = disassemble(&mkf3_bytes, mkf3_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("three-f64 aggregate return disassembly:\n{mkf3_disassembly}");
+        assert_eq!(
+            check_function(
+                &mkf3_bytes,
+                mkf3_address,
+                &mkf3_model,
+                &mkf3_targets,
+                &context
+            ),
+            FunctionOutcome::OutsideProfile("unsupported_signature")
+        );
+    }
+
+    #[test]
     fn f64_only_struct_after_integer_stack_arguments_uses_xmm_registers() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
@@ -3908,8 +4231,22 @@ entry:
             &context,
             RefinedAdmission::CompositeV23,
         );
+        assert!(supports_signature(&three_leaf));
         assert_eq!(
             check_function(&[0xc3], 0, &three_leaf, &BTreeMap::new(), &context),
+            FunctionOutcome::Different
+        );
+
+        let five_leaf_source = "struct Five { a: i64, b: i64, c: i64, d: i64, e: i64 }\n\
+            atom identity(value: Five) -> Five requires: true; ensures: true; body: { value };";
+        let five_leaf = source_model_named_with_admission(
+            five_leaf_source,
+            "identity",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert_eq!(
+            check_function(&[0xc3], 0, &five_leaf, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("unsupported_signature")
         );
 
@@ -4166,7 +4503,7 @@ entry:
                 &wide_arg_targets,
                 &context,
             ),
-            FunctionOutcome::OutsideProfile("call_arguments")
+            FunctionOutcome::Different
         );
 
         let float_source = "struct F { value: f64 }\n\
@@ -4221,6 +4558,54 @@ entry:
                 &wide_result_targets,
                 &context,
             ),
+            FunctionOutcome::Different
+        );
+
+        let three_float_result_source = "struct F3 { a: f64, b: f64, c: f64 }\n\
+            atom make_f3(a: f64, b: f64, c: f64) -> F3 requires: true; ensures: true; body: { F3 { a: a, b: b, c: c } };\n\
+            atom use_f3(a: f64, b: f64, c: f64) -> f64 requires: true; ensures: true; body: { let p = make_f3(a, b, c); p.c };";
+        let mut three_float_result_targets = targets.clone();
+        three_float_result_targets.get_mut(&1).unwrap().name = "make_f3".to_owned();
+        assert_eq!(
+            check_function(
+                &regular_bytes,
+                0,
+                &model(three_float_result_source, "use_f3"),
+                &three_float_result_targets,
+                &context,
+            ),
+            FunctionOutcome::OutsideProfile("call_arguments")
+        );
+
+        let four_integer_result_source = "struct I4 { a: i64, b: i64, c: i64, d: i64 }\n\
+            atom make_i4() -> I4 requires: true; ensures: true; body: { I4 { a: 1, b: 2, c: 3, d: 4 } };\n\
+            atom use_i4() -> i64 requires: true; ensures: true; body: { let p = make_i4(); p.d };";
+        let mut four_integer_result_targets = targets.clone();
+        four_integer_result_targets.get_mut(&1).unwrap().name = "make_i4".to_owned();
+        assert_eq!(
+            check_function(
+                &regular_bytes,
+                0,
+                &model(four_integer_result_source, "use_i4"),
+                &four_integer_result_targets,
+                &context,
+            ),
+            FunctionOutcome::OutsideProfile("call_arguments")
+        );
+
+        let five_leaf_result_source = "struct Five { a: i64, b: i64, c: i64, d: i64, e: i64 }\n\
+            atom make_five() -> Five requires: true; ensures: true; body: { Five { a: 1, b: 2, c: 3, d: 4, e: 5 } };\n\
+            atom use_five() -> i64 requires: true; ensures: true; body: { let p = make_five(); p.e };";
+        let mut five_leaf_result_targets = targets.clone();
+        five_leaf_result_targets.get_mut(&1).unwrap().name = "make_five".to_owned();
+        assert_eq!(
+            check_function(
+                &regular_bytes,
+                0,
+                &model(five_leaf_result_source, "use_five"),
+                &five_leaf_result_targets,
+                &context,
+            ),
             FunctionOutcome::OutsideProfile("call_arguments")
         );
 
@@ -4237,6 +4622,22 @@ entry:
                 &context,
             ),
             FunctionOutcome::OutsideProfile("call_arguments")
+        );
+
+        let after_four_source = "struct T { a: i64, b: i64, c: i64 }\n\
+            atom target(a: i64, b: i64, c: i64, d: i64, p: T) -> i64 requires: true; ensures: true; body: { p.a + p.b + p.c };\n\
+            atom after_four(a: i64, b: i64, c: i64, d: i64) -> i64 requires: true; ensures: true; body: { target(a, b, c, d, T { a: 1, b: 2, c: 3 }) };";
+        let mut after_four_targets = targets;
+        after_four_targets.get_mut(&1).unwrap().name = "target".to_owned();
+        assert_eq!(
+            check_function(
+                &regular_bytes,
+                0,
+                &model(after_four_source, "after_four"),
+                &after_four_targets,
+                &context,
+            ),
+            FunctionOutcome::OutsideProfile("argument_count")
         );
     }
 
