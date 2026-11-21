@@ -109,6 +109,7 @@ Agent table is exact against mumei-agent origin/develop at commit `a706a416dd256
 | `evidence_check_consistency` | `core_path: str, evidence_path: str, attempt_timeout_ms: int = 30000, expected_adapter: str \| None = None` | `report` |
 | `native_recheck` | `core_path: str, bundle_dir: str, source_path: str, expected_build_id: str, attempt_timeout_ms: int = 30000` | `report` |
 | `native_accept` | `core_path: str, bundle_dir: str, source_path: str, expected_build_id: str, attempt_timeout_ms: int = 60000` | `report` |
+| `native_object_accept` | `core_path: str, bundle_dir: str, source_path: str, expected_build_id: str, attempt_timeout_ms: int = 60000` | `report` |
 | `native_artifact_recheck` | `core_path: str, bundle_dir: str, source_path: str, expected_build_id: str, attempt_timeout_ms: int = 60000` | `report` |
 | `native_exit_status_recheck` | `core_path: str, bundle_dir: str, source_path: str, expected_build_id: str, attempt_timeout_ms: int = 60000` | `report` |
 | `native_exit_status_accept` | `core_path: str, bundle_dir: str, source_path: str, expected_build_id: str, attempt_timeout_ms: int = 60000` | `report` |
