@@ -6366,6 +6366,21 @@ still names the same queues, so `_opaque_container_bind` joins `b` to
 like the slice form. `[N][M]chan` nested arrays, `[]chan chan` and
 `[][]chan` extraction stay closed.
 
+### External chan-element containers (mumei-agent #1022)
+
+[mumei-agent#1022](https://github.com/mumei-lang/mumei-agent/pull/1022)
+admits the same element surface on a chan-element container living in
+external state — `var GS []chan T` / `var GM map[K]chan T` /
+`var GA [N]chan T` package-level, or an imported member `lib.GS[i]`.
+The element queues have no declared identity of their own, so
+`GS[i] <- x` / `<-GS[i]` / `close(GS[i])` / `for v := range GS[i]`
+record an imported CallTransfer on the *container's* identity (like a
+`lib.VA[i] = v` member write): sends broadcast `value ∪ index` deps
+into `indirect_writes`, reads return `indirect_writes` plus the
+index's deps, and `select` alternatives resolve through the same
+operand paths. `[][]chan` nests, `[]chan chan`, `d := GS[i]`
+extraction and `map[string]chan` variable keys stay closed.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
