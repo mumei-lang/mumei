@@ -429,6 +429,9 @@ fn adjust_rsp<'ctx>(
     let Some(next_offset) = rsp_offset.checked_add(delta) else {
         return false;
     };
+    if next_offset > 0 {
+        return false;
+    }
     registers[4] = registers[4].bvadd(&BV::from_u64(context, delta as u64, 64));
     *rsp_offset = next_offset;
     if delta > 0 {
@@ -1028,6 +1031,28 @@ entry:
             0x48, 0x83, 0xc4, 0x10, // addq $16, %rsp
             0x48, 0x83, 0xec, 0x10, // subq $16, %rsp
             0x58, // popq %rax
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+    }
+
+    #[test]
+    fn abstract_stack_rejects_rsp_above_function_entry() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom helper(x: i64) -> i64 requires: true; ensures: true; body: { x };",
+            &context,
+        );
+        let bytes = [
+            0x48, 0x83, 0xc4, 0x08, // addq $8, %rsp
+            0x57, // pushq %rdi
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
             0xc3,
         ];
         assert_eq!(
