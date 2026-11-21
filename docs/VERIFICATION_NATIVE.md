@@ -1144,6 +1144,16 @@ and native-main LLVM path, persists target-bound LLVM input, emits the object,
 and links that object. It does not pair arbitrary caller-supplied files after
 the fact. The source is rechecked for changes before publication.
 
+The linker includes the embedded `mumei_runtime.c` only when the emitted
+object has an undefined symbol matching a function exported by that runtime.
+When linked, the record pins `runtime_source_sha256`; older records and
+runtime-free builds omit the optional field. Rechecks relink the runtime only
+when that recorded hash matches the current embedded source, otherwise they
+fail closed as inconclusive. The runtime is a build input only: its behavior
+and semantics are outside every verified claim. `settings.runtime` must be
+`system-crt+embedded-mumei-runtime-c` exactly when the hash is present and
+`system-crt-only/no-mumei-runtime` otherwise.
+
 `native-bundle.json` (`mumei.native-bundle/v1`) binds the full source hash,
 specification/implementation/atom hashes, compiler-local HIR/MIR fingerprints,
 Translator IR/version/bridge identities, an explicitly empty source-dependency
@@ -1753,8 +1763,9 @@ endpoint.
 
 ### Acyclic-branch direct-call C10 Option B TV profile
 
-`mumei native-bundle recheck-machine-tv` first runs the complete
-`recheck-object` pipeline. It then disassembles the reproduced object's
+`mumei native-bundle recheck-machine-tv` first reproduces the artifact and
+checks object symbols and call edges. It checks linked object correspondence
+when checkable, then disassembles the reproduced object's
 functions by linear sweep and uses Z3 to compare straight-line and acyclic
 control-flow functions in the fixed machine-instruction profile with their
 `pure-i64` source-atom models. Direct calls are matched in order to the source
@@ -1764,6 +1775,9 @@ corresponding source call-result term. On each path, a machine call skips
 source sites whose guards are provably false on that path and matches the
 first site whose guard is provably true; an undecided guard is
 `conditional_call`.
+If an external runtime call target prevents linked-object correspondence,
+`recheck-object` remains inconclusive; machine-TV reports that link check as
+not performed and can still report the loop function as outside profile.
 
 The assumed convention places integer arguments in `rdi`, `rsi`, `rdx`,
 `rcx`, `r8`, and `r9`, with the result in `rax`; it is declared and assumed,

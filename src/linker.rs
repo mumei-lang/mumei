@@ -2,8 +2,11 @@
 // P7-B: Linker Pipeline — Link LLVM IR to native binary via clang
 // =============================================================================
 
-use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 /// Cross-platform helper to find an executable on PATH.
 /// Uses `which` on Unix and `where` on Windows.
@@ -221,6 +224,28 @@ pub fn link_recorded(
     inputs: &[PathBuf],
     output: &Path,
 ) -> Result<mumei_core::native_bundle::LinkBuild, String> {
+    link_recorded_inner(inputs, output, None)
+}
+
+pub fn link_recorded_with_runtime(
+    inputs: &[PathBuf],
+    runtime_source: &Path,
+    output: &Path,
+) -> Result<mumei_core::native_bundle::LinkBuild, String> {
+    use mumei_core::native_bundle::sha256;
+
+    let runtime_bytes = fs::read(runtime_source)
+        .map_err(|_| "Unsupported native runtime source observation".to_owned())?;
+    let mut inputs_with_runtime = inputs.to_vec();
+    inputs_with_runtime.push(runtime_source.to_path_buf());
+    link_recorded_inner(&inputs_with_runtime, output, Some(sha256(&runtime_bytes)))
+}
+
+fn link_recorded_inner(
+    inputs: &[PathBuf],
+    output: &Path,
+    runtime_source_sha256: Option<String>,
+) -> Result<mumei_core::native_bundle::LinkBuild, String> {
     use mumei_core::native_bundle::{sha256, LinkBuild};
     let fail = || "Unsupported native bundle linker observation".to_owned();
     let linker = find_c_linker().map_err(|_| fail())?;
@@ -319,6 +344,7 @@ pub fn link_recorded(
         linker_version,
         arguments_sha256,
         canonical_arguments_sha256,
+        runtime_source_sha256,
         expected_exit_status: None,
         expected_stdout_sha256: None,
         expected_stderr_sha256: None,
