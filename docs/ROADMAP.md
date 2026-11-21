@@ -3030,6 +3030,15 @@ trio — exit status, stdout and stderr are each pinned and reproduced —
 while runtime, ABI and historical-execution claims stay out of scope.
 See the [stderr recheck
 boundary](VERIFICATION_NATIVE.md#pinned-executable-stderr-recheck).
+The C10 runtime-observation slice adds
+`native-bundle recheck-observations`: after artifact reproduction it runs
+the reproduced executable once and compares exit status, stdout digest and
+stderr digest together against all three pins. A match emits the
+`mumei.runtime-observation/v1` descriptor; missing pins or an incomplete
+observation are inconclusive, and any mismatch is `Different`. The scope
+is one invocation's observations only — no runtime/ABI or
+historical-execution claim. See the [runtime-observation recheck
+boundary](VERIFICATION_NATIVE.md#pinned-executable-runtime-observation-recheck).
 General optimizer/ABI/runtime assurance and producer authenticity stay
 open — the records now pin the intra-source call graph as
 `source_dependencies_sha256`, the canonical JSON of the Claim Book
