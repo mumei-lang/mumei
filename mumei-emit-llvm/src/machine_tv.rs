@@ -3884,6 +3884,35 @@ fn lift_call<'ctx>(
         call_state.used_call_targets.insert(field_offset);
         return Ok(());
     }
+    if let Some(operation) = ti3_libcall_operation(&target.name) {
+        // compiler-rt `__*ti3` helpers implement an i128/u128
+        // operation that the source model keeps as an expression, so
+        // no call site is consumed: apply the SysV pair convention
+        // (a in rsi:rdi, b in rcx:rdx, result in rdx:rax) directly.
+        if tail_call || !model.has_wide_scalar_features {
+            return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+        }
+        let dividend = registers[6].concat(&registers[7]);
+        let divisor = registers[1].concat(&registers[2]);
+        let result = match operation {
+            Ti3Operation::SignedDivide => dividend.bvsdiv(&divisor),
+            Ti3Operation::SignedRemainder => dividend.bvsrem(&divisor),
+            Ti3Operation::UnsignedDivide => dividend.bvudiv(&divisor),
+            Ti3Operation::UnsignedRemainder => dividend.bvurem(&divisor),
+            Ti3Operation::Multiply => dividend.bvmul(&divisor),
+        };
+        apply_call_result_and_clobbers(
+            registers,
+            xmm_registers,
+            result,
+            false,
+            CallValueShape::Scalar { leaf_count: 2 },
+            &[false, false],
+            context,
+        )?;
+        call_state.used_call_targets.insert(field_offset);
+        return Ok(());
+    }
     let mut skipped_false_guard = false;
     let call_site = loop {
         let Some(call_site) = model.call_sites.get(call_state.call_index) else {
@@ -4143,6 +4172,33 @@ fn lift_call<'ctx>(
     call_state.used_call_targets.insert(field_offset);
     call_state.call_index += 1;
     Ok(())
+}
+
+enum Ti3Operation {
+    SignedDivide,
+    SignedRemainder,
+    UnsignedDivide,
+    UnsignedRemainder,
+    Multiply,
+}
+
+/// Whether `name` is a compiler-rt 128-bit helper the lifter models
+/// (`__divti3`, `__modti3`, `__udivti3`, `__umodti3`, `__multi3`). LLVM
+/// injects these symbols at codegen time, so they never appear in the
+/// IR's declared set.
+pub fn is_ti3_libcall(name: &str) -> bool {
+    ti3_libcall_operation(name).is_some()
+}
+
+fn ti3_libcall_operation(name: &str) -> Option<Ti3Operation> {
+    match name {
+        "__divti3" => Some(Ti3Operation::SignedDivide),
+        "__modti3" => Some(Ti3Operation::SignedRemainder),
+        "__udivti3" => Some(Ti3Operation::UnsignedDivide),
+        "__umodti3" => Some(Ti3Operation::UnsignedRemainder),
+        "__multi3" => Some(Ti3Operation::Multiply),
+        _ => None,
+    }
 }
 
 fn apply_call_result_and_clobbers<'ctx>(
@@ -8955,15 +9011,18 @@ define i64 @after_five(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i128 %x) {
             check_function(&swapped_result, address, &model("copy"), &targets, &context,),
             FunctionOutcome::Different
         );
+        // The backend lowers `sdiv`/`udiv i128` to `__divti3`/`__udivti3`
+        // calls, which the lifter models by their SysV pair convention —
+        // no source call site is consumed.
         let (address, bytes, targets) = compiled_function_with_targets(ir, "divide");
         assert_eq!(
             check_function(&bytes, address, &model("divide"), &targets, &context),
-            FunctionOutcome::OutsideProfile("call_order")
+            FunctionOutcome::Equivalent
         );
         let (address, bytes, targets) = compiled_function_with_targets(ir, "udivide");
         assert_eq!(
             check_function(&bytes, address, &model("udivide"), &targets, &context),
-            FunctionOutcome::OutsideProfile("call_order")
+            FunctionOutcome::Equivalent
         );
         let (address, bytes, targets) = compiled_function_with_targets(ir, "after_five");
         // Seven flattened INTEGER leaves: `x.lo` stays in `r9` and only
@@ -12852,6 +12911,55 @@ entry:
                 &context
             ),
             FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn ti3_libcall_results_match_their_wide_operator() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "atom udiv128(a: u128, b: u128) -> u128 requires: b != 0; ensures: true; body: { a / b };\n\
+            atom urem128(a: u128, b: u128) -> u128 requires: b != 0; ensures: true; body: { a % b };";
+        let libcall = |name: &str| {
+            BTreeMap::from([(
+                1u64,
+                CallTarget {
+                    name: name.to_owned(),
+                    relocation_kind: CallRelocationKind::ElfX86_64Plt32,
+                    relocation_size: 32,
+                    addend: -4,
+                },
+            )])
+        };
+        // `callq <target>` + `retq`: the lifted result must equal the
+        // modeled 128-bit operator over the SysV register pairs. A
+        // single helper pair is checked — each equivalence spends
+        // solver budget on a 128-bit division query.
+        let call_ret = [0xe8, 0x00, 0x00, 0x00, 0x00, 0xc3];
+        let udiv_model = source_model_named_with_admission(
+            source,
+            "udiv128",
+            &context,
+            RefinedAdmission::CompositeV21,
+        );
+        assert!(udiv_model.has_wide_scalar_features);
+        assert_eq!(
+            check_function(&call_ret, 0, &udiv_model, &libcall("__udivti3"), &context),
+            FunctionOutcome::Equivalent
+        );
+        // Without wide scalar features the helpers stay fail-closed.
+        let narrow = source_model_named_with_admission(
+            "atom id(x: i64) -> i64 requires: true; ensures: true; body: { x };",
+            "id",
+            &context,
+            RefinedAdmission::CompositeV21,
+        );
+        assert!(!narrow.has_wide_scalar_features);
+        assert_eq!(
+            check_function(&call_ret, 0, &narrow, &libcall("__udivti3"), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
         );
     }
 }

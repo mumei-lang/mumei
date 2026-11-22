@@ -1954,8 +1954,16 @@ profile models add/subtract, negation, signed/unsigned comparison,
 pass-through and direct scalar calls. Wide multiplication remains
 fail-closed as `unsupported_instruction`: the bounded solver returned
 `Unknown` for LLVM's limb-product sequence. Wide struct leaves remain
-fail-closed; division libcalls such as `__divti3`/`__udivti3` remain external
-non-source calls and fail closed as `call_order`.
+fail-closed. The compiler-rt 128-bit helpers the backend emits for
+`sdiv`/`srem`/`udiv`/`urem`/`mul i128` — `__divti3`, `__modti3`,
+`__udivti3`, `__umodti3` and `__multi3` — are modeled directly: no
+source call site is consumed, the lifter applies their SysV register-
+pair convention (operands in `rsi:rdi` and `rcx:rdx`, result in
+`rdx:rax`), and the object/link correspondence treats them as expected
+backend-injected symbols whose relocations must resolve to the linked
+helper. Whether a given helper satisfies the source operator is still
+checked per function — `srem i128` stays inconclusive because the
+source-to-LLVM recheck does not decide it.
 Unknown per-path equivalence queries retry the identical obligations with
 `simplify → smt` under the same budget; constant-divisor magic-number
 sequences may remain inconclusive.
