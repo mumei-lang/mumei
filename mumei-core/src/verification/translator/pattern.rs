@@ -443,6 +443,7 @@ pub(crate) fn pattern_bind_variables<'a>(
                                     continue;
                                 };
                                 if let Pattern::Variable(name) = field_pattern {
+                                    super::z3_types::mark_array_shared(ctx, env, name);
                                     env.insert(name.clone(), array.clone());
                                     env.insert(format!("__z3_arr_{name}"), array.clone());
                                     let len_key = super::z3_types::array_len_key(name);

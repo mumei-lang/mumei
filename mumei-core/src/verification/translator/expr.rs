@@ -12,6 +12,41 @@ use serde_json::json;
 use z3::ast::Ast as _;
 use z3::{FuncDecl, Sort};
 
+fn field_access_chain_text(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Variable(name) => Some(name.clone()),
+        Expr::FieldAccess(inner, field) => {
+            Some(format!("{}.{}", field_access_chain_text(inner)?, field))
+        }
+        _ => None,
+    }
+}
+
+fn reject_shared_array_mutating_call_args<'a>(
+    vc: &VCtx<'a>,
+    callee: CalleeRef<'_>,
+    args: &[Expr],
+    arg_values: &[Dynamic<'a>],
+    env: &Env<'a>,
+) -> Result<(), MumeiError> {
+    for name in super::may_write::callee_may_write_args(vc, callee, args, env) {
+        if super::z3_types::is_array_shared(env, &name) {
+            return Err(super::z3_types::shared_array_mutation_error(&name));
+        }
+    }
+    for index in super::may_write::callee_may_write_arg_indices(vc, callee, args, env) {
+        let (Some(arg), Some(value)) = (args.get(index), arg_values.get(index)) else {
+            continue;
+        };
+        if value.as_array().is_some() && matches!(arg, Expr::FieldAccess(_, _)) {
+            if let Some(name) = field_access_chain_text(arg) {
+                return Err(super::z3_types::shared_array_mutation_error(&name));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Generations of constant-argument contract instances unfolded below a congruent call (§8 D7).
 pub(crate) const CONSTANT_UNFOLD_DEPTH: usize = 32;
 /// Upper bound on the total number of unfolded instances per top-level call.
@@ -2884,6 +2919,13 @@ pub(crate) fn expr_to_z3<'a>(
                         let recursive_instance = vc.is_instantiating_contract(&callee.name);
                         // The unconstrained recursive result only weakens assumptions.
                         vc.reject_quantifier_dependent_call(name, &arg_vals)?;
+                        reject_shared_array_mutating_call_args(
+                            vc,
+                            CalleeRef::Name(name.as_str()),
+                            args,
+                            &arg_vals,
+                            env,
+                        )?;
                         let cong = vc.callee_congruent(&callee);
                         let scc_internal = cong && scc_internal_call(vc, &callee);
 
@@ -3810,6 +3852,9 @@ pub(crate) fn expr_to_z3<'a>(
                                         if datatype::array_payload_element_type(&field_leaves)
                                             .is_some()
                                         {
+                                            if let Expr::Variable(name) = arg {
+                                                super::z3_types::mark_array_shared(ctx, env, name);
+                                            }
                                             let array = match arg {
                                                 Expr::Variable(name) => env
                                                     .get(&format!("__z3_arr_{name}"))
@@ -4685,6 +4730,9 @@ pub(crate) fn expr_to_z3<'a>(
                     .and_then(|field| datatype::field_leaf_types(&field.type_name, vc.module_env))
                     .is_some_and(|leaves| datatype::array_payload_element_type(&leaves).is_some());
                 if array_field {
+                    if let Expr::Variable(name) = field_expr {
+                        super::z3_types::mark_array_shared(ctx, env, name);
+                    }
                     let array = match field_expr {
                         Expr::Variable(name) => env
                             .get(&format!("__z3_arr_{name}"))
@@ -5615,6 +5663,13 @@ pub(crate) fn expr_to_z3<'a>(
                     }
                     let recursive_instance = vc.is_instantiating_contract(&callee_atom.name);
                     vc.reject_quantifier_dependent_call(callee_name, &arg_vals)?;
+                    reject_shared_array_mutating_call_args(
+                        vc,
+                        CalleeRef::Expr(callee.as_ref()),
+                        args,
+                        &arg_vals,
+                        env,
+                    )?;
                     let cong = vc.callee_congruent(&callee_atom);
                     let scc_internal = cong && scc_internal_call(vc, &callee_atom);
 
@@ -6057,6 +6112,13 @@ pub(crate) fn expr_to_z3<'a>(
                 arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
             }
             vc.reject_quantifier_dependent_call("call", &arg_vals)?;
+            reject_shared_array_mutating_call_args(
+                vc,
+                CalleeRef::Expr(callee.as_ref()),
+                args,
+                &arg_vals,
+                env,
+            )?;
 
             // The callee didn't resolve to a known atom — a concrete
             // `atom_ref` target or contract callee may still store through
@@ -6630,6 +6692,7 @@ fn apply_local_lambda<'a>(
     for arg in args {
         arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
     }
+    reject_shared_array_mutating_call_args(vc, CalleeRef::Expr(expr), args, &arg_vals, env)?;
 
     let mut call_env = env.clone();
     for (i, param) in params.iter().enumerate() {

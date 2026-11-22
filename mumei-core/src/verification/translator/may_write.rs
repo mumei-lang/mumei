@@ -77,6 +77,49 @@ pub(crate) fn callee_may_write_args(
     }
 }
 
+pub(crate) fn callee_may_write_arg_indices(
+    vc: &VCtx<'_>,
+    callee: CalleeRef<'_>,
+    args: &[Expr],
+    env: &Env<'_>,
+) -> HashSet<usize> {
+    let module_env = vc.module_env;
+    match callee {
+        CalleeRef::Name(name) => {
+            if let Some(lambda) = vc.local_lambdas.borrow().get(name).cloned() {
+                return lambda_may_write_arg_indices(module_env, &lambda, args);
+            }
+            match resolve_atom(module_env, name) {
+                Some(atom) => atom_may_write_arg_indices(module_env, atom, args),
+                None => all_arg_indices(args),
+            }
+        }
+        CalleeRef::Expr(Expr::AtomRef { name }) => match module_env.get_atom(name) {
+            Some(atom) => atom_may_write_arg_indices(module_env, atom, args),
+            None => all_arg_indices(args),
+        },
+        CalleeRef::Expr(Expr::Variable(var)) => {
+            if let Some(lambda) = vc.local_lambdas.borrow().get(var).cloned() {
+                return lambda_may_write_arg_indices(module_env, &lambda, args);
+            }
+            if env.contains_key(&format!("__atom_ref_{var}")) {
+                if let Some(atom) = module_env.get_atom(var) {
+                    return atom_may_write_arg_indices(module_env, atom, args);
+                }
+            }
+            all_arg_indices(args)
+        }
+        CalleeRef::Expr(lambda_expr @ Expr::Lambda { .. }) => {
+            let closure = LocalLambda::Closure {
+                expr: lambda_expr.clone(),
+                captured: vc.local_lambdas.borrow().clone(),
+            };
+            lambda_may_write_arg_indices(module_env, &closure, args)
+        }
+        CalleeRef::Expr(_) => all_arg_indices(args),
+    }
+}
+
 /// `mod.f` resolves as `mod::f` too, matching the runtime `Call` path.
 fn resolve_atom<'m>(module_env: &'m ModuleEnv, name: &str) -> Option<&'m crate::parser::Atom> {
     module_env
@@ -101,6 +144,23 @@ pub(crate) fn atom_may_write_args(
         }
     }
     out
+}
+
+fn atom_may_write_arg_indices(
+    module_env: &ModuleEnv,
+    callee: &crate::parser::Atom,
+    args: &[Expr],
+) -> HashSet<usize> {
+    args.iter()
+        .enumerate()
+        .filter_map(|(i, _)| {
+            callee
+                .params
+                .get(i)
+                .filter(|param| atom_stores_to_array(module_env, callee, &param.name))
+                .map(|_| i)
+        })
+        .collect()
 }
 
 /// Variable args whose lambda param the body stores through, plus every
@@ -147,6 +207,37 @@ pub(crate) fn lambda_may_write_args(
     out
 }
 
+fn lambda_may_write_arg_indices(
+    module_env: &ModuleEnv,
+    lambda: &LocalLambda<'_>,
+    args: &[Expr],
+) -> HashSet<usize> {
+    match lambda {
+        LocalLambda::Closure { expr, .. } => {
+            let Expr::Lambda { params, body, .. } = expr else {
+                return HashSet::new();
+            };
+            args.iter()
+                .enumerate()
+                .filter_map(|(i, _)| {
+                    params
+                        .get(i)
+                        .filter(|param| stmt_stores_to_var(module_env, body, &param.name))
+                        .map(|_| i)
+                })
+                .collect()
+        }
+        LocalLambda::Ite {
+            then_lam, else_lam, ..
+        } => {
+            let mut indices = lambda_may_write_arg_indices(module_env, then_lam, args);
+            indices.extend(lambda_may_write_arg_indices(module_env, else_lam, args));
+            indices
+        }
+        LocalLambda::Opaque => HashSet::new(),
+    }
+}
+
 /// Dynamic path (callee body unavailable): every variable arg may be
 /// written — fail closed.
 fn all_var_args(args: &[Expr]) -> HashSet<String> {
@@ -156,4 +247,8 @@ fn all_var_args(args: &[Expr]) -> HashSet<String> {
             _ => None,
         })
         .collect()
+}
+
+fn all_arg_indices(args: &[Expr]) -> HashSet<usize> {
+    (0..args.len()).collect()
 }

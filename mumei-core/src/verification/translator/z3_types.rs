@@ -381,6 +381,18 @@ pub(crate) fn merge_branch_envs<'a>(
 ) {
     let mut merged: Env<'a> = HashMap::new();
     for (key, then_val) in then_env.iter() {
+        if key.starts_with(ARRAY_SHARED_PREFIX) {
+            let else_val = else_env.get(key);
+            let value = if is_shared_marker_value(then_val) {
+                then_val
+            } else if let Some(else_val) = else_val.filter(|value| is_shared_marker_value(value)) {
+                else_val
+            } else {
+                then_val
+            };
+            merged.insert(key.clone(), value.clone());
+            continue;
+        }
         let merged_val = match else_env.get(key) {
             Some(else_val) => {
                 dynamic_ite(c, then_val, else_val).unwrap_or_else(|| else_val.clone())
@@ -411,8 +423,12 @@ pub(crate) fn merge_arm_env_into<'a>(
     cond: &Bool<'a>,
     bound: &std::collections::HashSet<String>,
 ) {
+    let first_arm = merged.is_none();
     let acc = merged.get_or_insert_with(|| base_env.clone());
     for (key, base_val) in base_env.iter() {
+        if key.starts_with(ARRAY_SHARED_PREFIX) {
+            continue;
+        }
         if bound.contains(key) {
             continue;
         }
@@ -426,6 +442,47 @@ pub(crate) fn merge_arm_env_into<'a>(
             }
         }
     }
+    let marker_keys: std::collections::HashSet<String> = base_env
+        .keys()
+        .chain(arm_env.keys())
+        .filter(|key| key.starts_with(ARRAY_SHARED_PREFIX))
+        .cloned()
+        .collect();
+    for key in marker_keys {
+        if key
+            .strip_prefix(ARRAY_SHARED_PREFIX)
+            .is_some_and(|name| bound.contains(name))
+        {
+            if let Some(value) = base_env.get(&key) {
+                acc.insert(key, value.clone());
+            } else {
+                acc.remove(&key);
+            }
+            continue;
+        }
+        let arm_val = arm_env.get(&key).or_else(|| base_env.get(&key));
+        if first_arm {
+            if let Some(value) = arm_val {
+                acc.insert(key, value.clone());
+            } else {
+                acc.remove(&key);
+            }
+            continue;
+        }
+        let acc_val = acc.get(&key);
+        let value = match (acc_val, arm_val) {
+            (Some(value), _) if is_shared_marker_value(value) => Some(value.clone()),
+            (_, Some(value)) if is_shared_marker_value(value) => Some(value.clone()),
+            (Some(value), _) => Some(value.clone()),
+            (_, Some(value)) => Some(value.clone()),
+            (None, None) => None,
+        };
+        if let Some(value) = value {
+            acc.insert(key, value);
+        } else {
+            acc.remove(&key);
+        }
+    }
     // Arm-local `__struct_<handle>_<field>` slots (each arm's
     // StructInit registers its fresh handle's fields) must survive the
     // merge: `project_struct_fields` reads them back through the folded
@@ -433,6 +490,9 @@ pub(crate) fn merge_arm_env_into<'a>(
     // struct with unconstrained fields. They take their arm-local value
     // verbatim — the `ite` selects the right handle per path.
     for (key, arm_val) in arm_env.iter() {
+        if key.starts_with(ARRAY_SHARED_PREFIX) {
+            continue;
+        }
         if !(key.starts_with(STRUCT_FIELD_PREFIX) || key.starts_with(ARRAY_VALUE_LEN_PREFIX))
             || base_env.contains_key(key)
             || bound.contains(key)
@@ -545,6 +605,41 @@ pub(crate) fn array_len_symbol<'a>(ctx: &'a Context, name: &str, bitvec_i64: boo
 
 pub(crate) fn array_len_key(name: &str) -> String {
     format!("len#{name}")
+}
+
+pub(crate) const ARRAY_SHARED_PREFIX: &str = "__array_shared#";
+
+pub(crate) fn array_shared_key(name: &str) -> String {
+    format!("{ARRAY_SHARED_PREFIX}{name}")
+}
+
+pub(crate) fn is_array_shared(env: &Env<'_>, name: &str) -> bool {
+    env.get(&array_shared_key(name))
+        .is_some_and(is_shared_marker_value)
+}
+
+pub(crate) fn mark_array_shared<'a>(ctx: &'a Context, env: &mut Env<'a>, name: &str) {
+    env.insert(array_shared_key(name), Bool::from_bool(ctx, true).into());
+}
+
+pub(crate) fn clear_array_shared<'a>(ctx: &'a Context, env: &mut Env<'a>, name: &str) {
+    let key = array_shared_key(name);
+    if env.contains_key(&key) {
+        env.insert(key, Bool::from_bool(ctx, false).into());
+    }
+}
+
+fn is_shared_marker_value(value: &Dynamic<'_>) -> bool {
+    value
+        .as_bool()
+        .and_then(|marker| marker.as_bool())
+        .unwrap_or(false)
+}
+
+pub(crate) fn shared_array_mutation_error(name: &str) -> MumeiError {
+    MumeiError::type_error(format!(
+        "array '{name}' shares its buffer with a struct field or enum payload; mutating it is not supported — rebuild the field with a field write instead"
+    ))
 }
 
 pub(crate) fn array_root_len_key(name: &str) -> String {

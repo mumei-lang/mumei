@@ -13,6 +13,41 @@ use serde_json::json;
 
 const ENUM_STRUCT_ARRAY_REBUILD_KEY: &str = "__enum_struct_array_rebuild";
 
+fn array_binding_is_shared_source(value: &Expr, env: &Env<'_>) -> bool {
+    match value {
+        Expr::Variable(name) => super::z3_types::is_array_shared(env, name),
+        Expr::FieldAccess(_, _) => true,
+        _ => false,
+    }
+}
+
+fn mark_array_source_shared<'a>(vc: &VCtx<'a>, env: &mut Env<'a>, value: &Expr) {
+    let Expr::Variable(name) = value else {
+        return;
+    };
+    let is_array = env
+        .get(&format!("__z3_arr_{name}"))
+        .and_then(|value| value.as_array())
+        .is_some()
+        || env.get(name).and_then(|value| value.as_array()).is_some();
+    if is_array {
+        super::z3_types::mark_array_shared(vc.ctx, env, name);
+    }
+}
+
+fn collect_array_shared_markers<'a>(env: &Env<'a>) -> Env<'a> {
+    env.iter()
+        .filter(|(key, value)| {
+            key.starts_with(super::z3_types::ARRAY_SHARED_PREFIX)
+                && value
+                    .as_bool()
+                    .and_then(|marker| marker.as_bool())
+                    .unwrap_or(false)
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
 /// Insert `__z3_arr_<var>` for every caller variable the call may store
 /// through — the same may-write set `havoc_array_args` /
 /// `apply_local_lambda` havoc at call evaluation, so loop-carried havoc
@@ -368,6 +403,7 @@ fn check_while_invariant<'a>(
         *vc.local_lambdas.borrow_mut() = lambdas_snapshot.clone();
         *vc.call_result_lens.borrow_mut() = call_result_lens_snapshot.clone();
     };
+    let mut loop_shared_markers = std::collections::HashMap::new();
     let result = (|| -> MumeiResult<bool> {
         let inv = expr_to_z3(vc, invariant, env, None)?
             .as_bool()
@@ -395,6 +431,7 @@ fn check_while_invariant<'a>(
                 solver.assert(&inv_h);
                 solver.assert(&c_h);
                 stmt_to_z3(vc, body, &mut step_env, Some(solver))?;
+                loop_shared_markers.extend(collect_array_shared_markers(&step_env));
                 let inv_after = expr_to_z3(vc, invariant, &mut step_env, None)?
                     .as_bool()
                     .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
@@ -408,6 +445,7 @@ fn check_while_invariant<'a>(
     })();
     restore();
     *env = env_snapshot;
+    env.extend(loop_shared_markers);
     result
 }
 
@@ -2152,6 +2190,8 @@ pub(crate) fn stmt_to_z3<'a>(
                 }
             }
             let val = expr_to_z3(vc, value, env, solver_opt)?;
+            let shared = val.as_array().is_some() && array_binding_is_shared_source(value, env);
+            super::z3_types::clear_array_shared(ctx, env, var);
             record_binding_enum_type(vc, var, value);
             record_binding_int_type(vc, var, value);
             record_binding_struct_type(vc, var, value);
@@ -2160,11 +2200,15 @@ pub(crate) fn stmt_to_z3<'a>(
             alias_struct_fields(env, var, &val);
             rebind_struct_binding_slots(vc, var, &val, env, solver_opt);
             wire_array_slots(vc, var, Some(value), &val, env, solver_opt);
+            if shared {
+                super::z3_types::mark_array_shared(ctx, env, var);
+            }
             profile_solver_assertion(vc, &format!("let_{}", var), None);
             Ok(val)
         }
         Stmt::Assign { var, value, .. } => {
             if var.contains('.') {
+                mark_array_source_shared(vc, env, value);
                 let Some((resource, _field)) = vc.module_env.is_resource_state_var(var) else {
                     if let Some(val) = struct_field_assign(vc, var, value, env, solver_opt)? {
                         return Ok(val);
@@ -2209,6 +2253,8 @@ pub(crate) fn stmt_to_z3<'a>(
             }
             reject_struct_projection_slot_collisions(vc, var, value, env)?;
             let val = expr_to_z3(vc, value, env, solver_opt)?;
+            let shared = val.as_array().is_some() && array_binding_is_shared_source(value, env);
+            super::z3_types::clear_array_shared(ctx, env, var);
             record_binding_enum_type(vc, var, value);
             record_binding_int_type(vc, var, value);
             record_binding_struct_type(vc, var, value);
@@ -2217,6 +2263,9 @@ pub(crate) fn stmt_to_z3<'a>(
             alias_struct_fields(env, var, &val);
             rebind_struct_binding_slots(vc, var, &val, env, solver_opt);
             wire_array_slots(vc, var, Some(value), &val, env, solver_opt);
+            if shared {
+                super::z3_types::mark_array_shared(ctx, env, var);
+            }
             profile_solver_assertion(vc, &format!("assign_{}", var), None);
             Ok(val)
         }
@@ -2226,6 +2275,9 @@ pub(crate) fn stmt_to_z3<'a>(
             value,
             ..
         } => {
+            if super::z3_types::is_array_shared(env, array) {
+                return Err(super::z3_types::shared_array_mutation_error(array));
+            }
             // Indices stay `Int`-sorted under `--bitvec-i64`; bridge a `BV(64)`
             // index through the signed bit-vector/integer conversion.
             let idx_value = expr_to_z3(vc, index, env, solver_opt)?;
@@ -2284,6 +2336,7 @@ pub(crate) fn stmt_to_z3<'a>(
         } => {
             // Loop Invariant 検証ロジック
             if let Some(solver) = solver_opt {
+                let mut loop_shared_markers = std::collections::HashMap::new();
                 // Vars the body assigns that were bound before the loop —
                 // they are havoced so induction is checked from *any* state
                 // satisfying the invariant, not only the concrete entry
@@ -2445,6 +2498,7 @@ pub(crate) fn stmt_to_z3<'a>(
                     solver.assert(&inv_h);
                     solver.assert(&c_h);
                     stmt_to_z3(vc, body, &mut step_env, Some(solver))?;
+                    loop_shared_markers.extend(collect_array_shared_markers(&step_env));
                     let inv_after = expr_to_z3(vc, &effective_invariant, &mut step_env, None)?
                         .as_bool()
                         .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
@@ -2506,6 +2560,7 @@ pub(crate) fn stmt_to_z3<'a>(
                     solver.assert(&inv_h);
                     solver.assert(&c_h);
                     stmt_to_z3(vc, body, &mut term_env, Some(solver))?;
+                    loop_shared_markers.extend(collect_array_shared_markers(&term_env));
                     let v_after = as_int_like(&expr_to_z3(vc, dec_expr, &mut term_env, None)?)
                         .ok_or(MumeiError::type_error(
                             "decreases expression must be integer",
@@ -2547,6 +2602,7 @@ pub(crate) fn stmt_to_z3<'a>(
                     .not();
                 rebind_deferred_obligations(vc, marks, &inv_post);
                 solver.assert(&Bool::and(ctx, &[&inv_post, &c_not_post]));
+                post_env.extend(loop_shared_markers);
                 *env = post_env;
                 return Ok(Bool::and(ctx, &[&inv_post, &c_not_post]).into());
             }
