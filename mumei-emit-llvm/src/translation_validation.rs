@@ -12,7 +12,7 @@ use mumei_core::semantic_contract::{
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use z3::{
-    ast::{Ast, Bool, BV},
+    ast::{Array, Ast, Bool, BV},
     Config, Context, SatResult, Solver,
 };
 
@@ -444,6 +444,7 @@ fn validate(
             &native_call_renames(native),
             false,
             optimized,
+            false,
         )?
     };
     let loops = model.loop_bound_exits.is_some();
@@ -566,6 +567,7 @@ fn validate_module(
                 &BTreeMap::new(),
                 false,
                 optimized,
+                false,
             )?
         };
         any_definedness |= !model.definedness.is_empty() || !ir_definedness.is_empty();
@@ -677,7 +679,7 @@ pub fn validate_native_module(
         }
         if model.function_name == "main" {
             mains += 1;
-            if !model.inputs.is_empty() {
+            if !model.param_shapes.is_empty() {
                 return Err(ValidationError(
                     "native profile requires zero-argument main",
                 ));
@@ -711,6 +713,20 @@ pub fn validate_native_module(
         .get_function("__mumei_user_main")
         .ok_or(ValidationError("missing source function"))?;
     let any_memory = models.iter().any(|model| model.bounded_memory);
+    let array_param_members: BTreeMap<String, Vec<bool>> = models
+        .iter()
+        .map(|model| {
+            let name = if model.function_name == "main" {
+                "__mumei_user_main"
+            } else {
+                model.function_name.as_str()
+            };
+            (
+                name.to_owned(),
+                model.array_params.iter().map(Option::is_some).collect(),
+            )
+        })
+        .collect();
     unsafe {
         check_native_module_multi(
             module.as_mut_ptr(),
@@ -718,6 +734,8 @@ pub fn validate_native_module(
             any_memory,
             admission.admits_f64_arithmetic(),
             admission.admits_str_leaves(),
+            &array_param_members,
+            admission.admits_array_params(),
         )?
     };
     let call_renames = native_call_renames(true);
@@ -727,6 +745,7 @@ pub fn validate_native_module(
     let mut any_subrange = false;
     let mut any_loops = false;
     let mut any_refined = false;
+    let mut any_array_params = false;
     let mut outcome = Outcome::EquivalentWithinProfile;
     // The report names the same source profile the record pins: the
     // profile the module gate itself resolves — refined v1 or v2 when
@@ -751,6 +770,7 @@ pub fn validate_native_module(
                 &call_renames,
                 admission.admits_f64_arithmetic(),
                 false,
+                admission.admits_array_params(),
             )?
         };
         any_definedness |= !model.definedness.is_empty() || !ir_definedness.is_empty();
@@ -758,6 +778,7 @@ pub fn validate_native_module(
         any_subrange |= model.subrange_params;
         any_loops |= model.loop_bound_exits.is_some();
         any_refined |= model.refined_signature;
+        any_array_params |= model.array_params.iter().any(Option::is_some);
         outcome = match (outcome, member_outcome) {
             (Outcome::Different, _) | (_, Outcome::Different) => Outcome::Different,
             (Outcome::UndefinedBehavior, _) | (_, Outcome::UndefinedBehavior) => {
@@ -771,6 +792,28 @@ pub fn validate_native_module(
             outcome: member_outcome,
         });
     }
+    let base_input_domain = if any_refined {
+        "module_members_signed_i64_inputs_with_refined_scalar_signature_predicate_domains_not_process_exit_status"
+    } else if any_definedness {
+        if any_subrange {
+            "module_members_signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_process_exit_status"
+        } else if any_param_domain {
+            "module_members_signed_i64_inputs_with_bool_params_restricted_to_0_or_1_where_division_and_shift_defined_not_process_exit_status"
+        } else {
+            "module_members_signed_i64_inputs_where_division_and_shift_defined_not_process_exit_status"
+        }
+    } else if any_subrange {
+        "module_members_signed_i64_inputs_with_signature_bounded_param_domains_not_process_exit_status"
+    } else if any_param_domain {
+        "module_members_signed_i64_inputs_with_bool_params_restricted_to_0_or_1_not_process_exit_status"
+    } else {
+        "module_members_all_signed_i64_inputs_not_process_exit_status"
+    };
+    let input_domain = if any_array_params {
+        format!("{base_input_domain}_with_read_only_i64_array_params_nonnegative_len")
+    } else {
+        base_input_domain.to_owned()
+    };
     Ok(ModuleValidationReport {
         profile: match (any_loops, any_memory) {
             (false, false) => NATIVE_MODULE_PROFILE,
@@ -783,26 +826,7 @@ pub fn validate_native_module(
         data_layout: DATA_LAYOUT,
         checked_stage:
             "native_module_user_bodies_and_truncating_wrapper_snapshot_no_pipeline_attestation",
-        input_domain: loop_domain_label(
-            if any_refined {
-                "module_members_signed_i64_inputs_with_refined_scalar_signature_predicate_domains_not_process_exit_status"
-            } else if any_definedness {
-                if any_subrange {
-                    "module_members_signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_process_exit_status"
-                } else if any_param_domain {
-                    "module_members_signed_i64_inputs_with_bool_params_restricted_to_0_or_1_where_division_and_shift_defined_not_process_exit_status"
-                } else {
-                    "module_members_signed_i64_inputs_where_division_and_shift_defined_not_process_exit_status"
-                }
-            } else if any_subrange {
-                "module_members_signed_i64_inputs_with_signature_bounded_param_domains_not_process_exit_status"
-            } else if any_param_domain {
-                "module_members_signed_i64_inputs_with_bool_params_restricted_to_0_or_1_not_process_exit_status"
-            } else {
-                "module_members_all_signed_i64_inputs_not_process_exit_status"
-            },
-            any_loops,
-        ),
+        input_domain: loop_domain_label(&input_domain, any_loops),
         unroll_bound: any_loops.then_some(LOOP_BOUND),
         source_sha256: models
             .first()
@@ -851,6 +875,7 @@ unsafe fn compare_function<'ctx>(
     call_renames: &BTreeMap<String, String>,
     f64_arithmetic: bool,
     optimized: bool,
+    array_params_admitted: bool,
 ) -> Result<(Outcome, Vec<(Bool<'ctx>, Bool<'ctx>)>)> {
     // A source `while` relaxes the CFG gate only for that atom's member:
     // cycles elsewhere still reject as unsupported.
@@ -858,6 +883,7 @@ unsafe fn compare_function<'ctx>(
     // A struct parameter is one aggregate formal on the IR side and its
     // flattened field slots on the source side, so the IR arity is the
     // declared parameter count, not the slot count.
+    let array_param_mask: Vec<bool> = model.array_params.iter().map(Option::is_some).collect();
     check_function(
         raw,
         model.param_shapes.len(),
@@ -868,6 +894,8 @@ unsafe fn compare_function<'ctx>(
             bounded_memory: model.bounded_memory,
             f64_arithmetic,
             optimized,
+            array_param_mask: Some(&array_param_mask),
+            array_params_admitted,
         },
     )?;
     let mut encoder = IrEncoder::new(context, call_renames, loops, optimized);
@@ -876,6 +904,7 @@ unsafe fn compare_function<'ctx>(
         &model.inputs,
         &model.param_shapes,
         &model.param_leaf_doubles,
+        &model.array_params,
     )?;
     let ir_definedness: Vec<(Bool<'ctx>, Bool<'ctx>)> = encoder
         .definedness
@@ -1350,6 +1379,7 @@ unsafe fn check_module(
                 bounded_memory,
                 f64_arithmetic,
                 optimized,
+                ..CheckGates::default()
             },
         )?;
         member = LLVMGetNextFunction(member);
@@ -1672,13 +1702,66 @@ unsafe fn member_result_shape(member: LLVMValueRef) -> Option<usize> {
     aggregate_fields(LLVMGetReturnType(LLVMGlobalGetValueType(member))).map(|n| n as usize)
 }
 
+unsafe fn array_param_formal_type(ty: LLVMTypeRef) -> bool {
+    if LLVMGetTypeKind(ty) != LLVMTypeKind::LLVMStructTypeKind
+        || LLVMIsPackedStruct(ty) != 0
+        || LLVMIsLiteralStruct(ty) == 0
+        || LLVMCountStructElementTypes(ty) != 2
+    {
+        return false;
+    }
+    let len = LLVMStructGetTypeAtIndex(ty, 0);
+    let data = LLVMStructGetTypeAtIndex(ty, 1);
+    LLVMGetTypeKind(len) == LLVMTypeKind::LLVMIntegerTypeKind
+        && LLVMGetIntTypeWidth(len) == 64
+        && LLVMGetTypeKind(data) == LLVMTypeKind::LLVMPointerTypeKind
+        && LLVMGetPointerAddressSpace(data) == 0
+}
+
+unsafe fn array_param_argument_index(
+    function: LLVMValueRef,
+    value: LLVMValueRef,
+    array_param_mask: &[bool],
+) -> Option<usize> {
+    if LLVMIsAArgument(value).is_null() {
+        return None;
+    }
+    (0..LLVMCountParams(function) as usize)
+        .find(|&index| LLVMGetParam(function, index as u32) == value)
+        .filter(|&index| array_param_mask.get(index) == Some(&true))
+}
+
+unsafe fn is_array_param_pointer(
+    function: LLVMValueRef,
+    value: LLVMValueRef,
+    array_param_mask: &[bool],
+) -> bool {
+    if LLVMGetTypeKind(LLVMTypeOf(value)) != LLVMTypeKind::LLVMPointerTypeKind
+        || LLVMIsAInstruction(value).is_null()
+    {
+        return false;
+    }
+    match LLVMGetInstructionOpcode(value) {
+        LLVMOpcode::LLVMExtractValue => {
+            LLVMGetNumIndices(value) == 1
+                && *LLVMGetIndices(value) == 1
+                && array_param_argument_index(function, LLVMGetOperand(value, 0), array_param_mask)
+                    .is_some()
+        }
+        LLVMOpcode::LLVMGetElementPtr => {
+            is_array_param_pointer(function, LLVMGetOperand(value, 0), array_param_mask)
+        }
+        _ => false,
+    }
+}
+
 /// `result_shape` is the source result layout: `None` for a scalar
 /// result (an i64/i1 return), `Some(n)` for a struct result, whose
 /// return must be an admitted aggregate of exactly `n` slots.
 /// The admission gates a member check runs under: which relaxations
 /// the active profile grants the emitted IR.
 #[derive(Clone, Copy, Default)]
-struct CheckGates {
+struct CheckGates<'a> {
     /// Cycles pass the CFG screen; the per-atom comparison re-gates
     /// them against each model's loop admission.
     allow_cycles: bool,
@@ -1692,6 +1775,10 @@ struct CheckGates {
     /// Post-`default<O2>` profile surface (the canonical optimizer
     /// intrinsics and instruction shapes).
     optimized: bool,
+    /// Declared parameter positions backed by read-only `[i64]` models.
+    array_param_mask: Option<&'a [bool]>,
+    /// Only the V26 native-module admission enables array-parameter IR.
+    array_params_admitted: bool,
 }
 
 unsafe fn check_function(
@@ -1699,9 +1786,30 @@ unsafe fn check_function(
     params: usize,
     result_shape: Option<usize>,
     result_leaf_doubles: Option<&[bool]>,
-    gates: CheckGates,
+    gates: CheckGates<'_>,
 ) -> Result<()> {
     check_function_header(function, params, gates.optimized)?;
+    let array_param_mask = gates.array_param_mask.unwrap_or(&[]);
+    if gates
+        .array_param_mask
+        .is_some_and(|mask| mask.len() != params)
+    {
+        return Err(ValidationError("unsupported LLVM signature"));
+    }
+    for index in 0..params {
+        let param_type = LLVMTypeOf(LLVMGetParam(function, index as u32));
+        let is_array_param = array_param_mask.get(index).copied().unwrap_or(false);
+        if is_array_param {
+            if !gates.array_params_admitted {
+                return Err(ValidationError("array parameter outside profile"));
+            }
+            if !array_param_formal_type(param_type) {
+                return Err(ValidationError("LLVM array parameter type mismatch"));
+            }
+        } else if array_param_formal_type(param_type) {
+            return Err(ValidationError("unsupported use of array parameter memory"));
+        }
+    }
     let ret = LLVMGetReturnType(LLVMGlobalGetValueType(function));
     match (result_shape, result_leaf_doubles) {
         (None, leaf_kinds) => {
@@ -1771,6 +1879,25 @@ unsafe fn check_function(
                 // the base of a `getelementptr`, the address of a
                 // `load`, the address of a `store`. Everywhere else a
                 // pointer would escape tracking, so it fails closed.
+                if array_param_argument_index(function, value, array_param_mask).is_some() {
+                    let array_extract = opcode == LLVMOpcode::LLVMExtractValue
+                        && i == 0
+                        && LLVMGetNumIndices(inst) == 1
+                        && *LLVMGetIndices(inst) <= 1;
+                    if !array_extract {
+                        return Err(ValidationError("unsupported use of array parameter memory"));
+                    }
+                    continue;
+                }
+                if is_array_param_pointer(function, value, array_param_mask) {
+                    let pointer_ok = gates.array_params_admitted
+                        && matches!(opcode, LLVMOpcode::LLVMGetElementPtr | LLVMOpcode::LLVMLoad)
+                        && i == 0;
+                    if !pointer_ok {
+                        return Err(ValidationError("unsupported use of array parameter memory"));
+                    }
+                    continue;
+                }
                 if !is_callee
                     && LLVMGetTypeKind(LLVMTypeOf(value)) == LLVMTypeKind::LLVMPointerTypeKind
                 {
@@ -1895,7 +2022,13 @@ unsafe fn check_function(
                         }
                         _ => false,
                     };
-                    if !gates.bounded_memory
+                    let array_param_pointer = gates.array_params_admitted
+                        && is_array_param_pointer(
+                            function,
+                            LLVMGetOperand(inst, 0),
+                            array_param_mask,
+                        );
+                    if (!gates.bounded_memory && !array_param_pointer)
                         || !(2..=3).contains(&operands)
                         || !outer_zero
                         || !cell_indexed
@@ -1914,7 +2047,15 @@ unsafe fn check_function(
                 // byte-cell coverage in either model is a separate
                 // slice (checked by the v23 bundle test).
                 LLVMOpcode::LLVMLoad => {
-                    if !gates.bounded_memory || width(LLVMTypeOf(inst))? != 64 {
+                    let array_param_pointer = gates.array_params_admitted
+                        && is_array_param_pointer(
+                            function,
+                            LLVMGetOperand(inst, 0),
+                            array_param_mask,
+                        );
+                    if (!gates.bounded_memory && !array_param_pointer)
+                        || width(LLVMTypeOf(inst))? != 64
+                    {
                         return Err(ValidationError("unsupported LLVM load"));
                     }
                 }
@@ -1951,6 +2092,34 @@ unsafe fn check_function(
                 // result is an i64 leaf or an admitted aggregate
                 // (extracting a nested struct field).
                 LLVMOpcode::LLVMExtractValue => {
+                    if array_param_argument_index(
+                        function,
+                        LLVMGetOperand(inst, 0),
+                        array_param_mask,
+                    )
+                    .is_some()
+                    {
+                        let index = *LLVMGetIndices(inst);
+                        let result = LLVMTypeOf(inst);
+                        let supported = match index {
+                            0 => {
+                                LLVMGetTypeKind(result) == LLVMTypeKind::LLVMIntegerTypeKind
+                                    && LLVMGetIntTypeWidth(result) == 64
+                            }
+                            1 => {
+                                LLVMGetTypeKind(result) == LLVMTypeKind::LLVMPointerTypeKind
+                                    && LLVMGetPointerAddressSpace(result) == 0
+                            }
+                            _ => false,
+                        };
+                        if LLVMGetNumIndices(inst) != 1 || !supported {
+                            return Err(ValidationError(
+                                "unsupported use of array parameter memory",
+                            ));
+                        }
+                        inst = LLVMGetNextInstruction(inst);
+                        continue;
+                    }
                     if LLVMGetNumIndices(inst) != 1 {
                         return Err(ValidationError("unsupported LLVM aggregate value"));
                     }
@@ -2139,6 +2308,8 @@ unsafe fn check_native_module_multi(
     bounded_memory: bool,
     f64_arithmetic: bool,
     str_leaves: bool,
+    array_param_members: &BTreeMap<String, Vec<bool>>,
+    array_params_admitted: bool,
 ) -> Result<()> {
     check_module_environment(module, str_leaves)?;
     let main = LLVMGetNamedFunction(module, c"main".as_ptr());
@@ -2163,6 +2334,11 @@ unsafe fn check_native_module_multi(
             && !(LLVMIsDeclaration(member) != 0
                 && callee_name(member).as_deref() == Some(CANCEL_POLL_INTRINSIC))
         {
+            let member_name = callee_name(member);
+            let array_param_mask = member_name
+                .as_ref()
+                .and_then(|name| array_param_members.get(name))
+                .map(Vec::as_slice);
             check_function(
                 member,
                 LLVMCountParams(member) as usize,
@@ -2172,6 +2348,8 @@ unsafe fn check_native_module_multi(
                     allow_cycles: true,
                     bounded_memory,
                     f64_arithmetic,
+                    array_param_mask,
+                    array_params_admitted,
                     ..CheckGates::default()
                 },
             )?;
@@ -2276,6 +2454,12 @@ enum OptIntrinsic<'ctx> {
     Call,
 }
 
+#[derive(Clone)]
+enum PointerProvenance<'ctx> {
+    Alloca { allocation: usize, offset: BV<'ctx> },
+    ArrayParameter { parameter: usize, offset: BV<'ctx> },
+}
+
 struct IrEncoder<'ctx, 'renames> {
     ctx: &'ctx Context,
     call_renames: &'renames BTreeMap<String, String>,
@@ -2323,10 +2507,12 @@ struct IrEncoder<'ctx, 'renames> {
     /// Entries never change once written, so unlike `arrays` the map
     /// needs no restore at branches.
     alloca_lens: HashMap<usize, u64>,
-    /// Pointer provenance: `alloca` and `getelementptr` results map to
-    /// their backing `alloca` plus an element offset (the whitelist
-    /// keeps every index i64, so offsets stay element counts).
-    ptrs: HashMap<usize, (usize, BV<'ctx>)>,
+    /// Read-only array parameter models, in declared parameter order.
+    array_params: Vec<Option<(BV<'ctx>, Array<'ctx>)>>,
+    array_param_args: HashMap<usize, usize>,
+    /// Pointer provenance: local `alloca` or read-only array parameter
+    /// plus an element offset (the whitelist keeps every index i64).
+    ptrs: HashMap<usize, PointerProvenance<'ctx>>,
 }
 impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
     fn new(
@@ -2346,6 +2532,8 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             aggregates: HashMap::new(),
             arrays: HashMap::new(),
             alloca_lens: HashMap::new(),
+            array_params: Vec::new(),
+            array_param_args: HashMap::new(),
             ptrs: HashMap::new(),
         }
     }
@@ -2400,11 +2588,20 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             .alloca_lens
             .get(&alloca)
             .ok_or(ValidationError("untracked LLVM pointer"))?;
-        let zero = BV::from_u64(self.ctx, 0, 64);
         let limit = BV::from_u64(self.ctx, slots, 64);
+        self.memory_in_bounds_len(&limit, offset, guard)
+    }
+
+    fn memory_in_bounds_len(
+        &mut self,
+        len: &BV<'ctx>,
+        offset: &BV<'ctx>,
+        guard: &Bool<'ctx>,
+    ) -> Result<()> {
+        let zero = BV::from_u64(self.ctx, 0, 64);
         self.definedness.push((
             guard.clone(),
-            Bool::and(self.ctx, &[&offset.bvsge(&zero), &offset.bvslt(&limit)]),
+            Bool::and(self.ctx, &[&offset.bvsge(&zero), &offset.bvslt(len)]),
             0,
             false,
         ));
@@ -2707,11 +2904,23 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
         inputs: &[BV<'ctx>],
         shapes: &[Option<usize>],
         leaf_doubles: &[Vec<bool>],
+        array_params: &[Option<(BV<'ctx>, Array<'ctx>)>],
     ) -> Result<Vec<(Bool<'ctx>, BV<'ctx>)>> {
+        if array_params.len() != shapes.len() || leaf_doubles.len() != shapes.len() {
+            return Err(ValidationError("LLVM parameter shape mismatch"));
+        }
+        self.array_params = array_params.to_vec();
         let mut values = HashMap::new();
         let mut slots = inputs.iter();
         for (i, shape) in shapes.iter().enumerate() {
             let param = LLVMGetParam(function, i as u32);
+            if array_params[i].is_some() {
+                if shape.is_some() || !array_param_formal_type(LLVMTypeOf(param)) {
+                    return Err(ValidationError("LLVM array parameter type mismatch"));
+                }
+                self.array_param_args.insert(param as usize, i);
+                continue;
+            }
             match shape {
                 // A parameter's LLVM width must match the source signature:
                 // i64 for every parameter; a declared `bool` carries 0/1 and
@@ -3015,13 +3224,16 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 );
                 self.ptrs.insert(
                     inst as usize,
-                    (inst as usize, BV::from_u64(self.ctx, 0, 64)),
+                    PointerProvenance::Alloca {
+                        allocation: inst as usize,
+                        offset: BV::from_u64(self.ctx, 0, 64),
+                    },
                 );
                 inst = LLVMGetNextInstruction(inst);
                 continue;
             }
             if op == LLVMOpcode::LLVMGetElementPtr {
-                let (alloca, base) = self
+                let provenance = self
                     .ptrs
                     .get(&(LLVMGetOperand(inst, 0) as usize))
                     .cloned()
@@ -3029,53 +3241,114 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 // Element offsets: the whitelist binds any leading
                 // constant 0 of the two-index array form, so summing
                 // every index is the addressed cell.
-                let mut offset = base;
+                let mut offset = match &provenance {
+                    PointerProvenance::Alloca { offset, .. }
+                    | PointerProvenance::ArrayParameter { offset, .. } => offset.clone(),
+                };
                 for index in 1..LLVMGetNumOperands(inst) {
                     offset =
                         offset.bvadd(&self.value(LLVMGetOperand(inst, index as u32), &values)?);
                 }
-                self.ptrs.insert(inst as usize, (alloca, offset));
+                let provenance = match provenance {
+                    PointerProvenance::Alloca { allocation, .. } => {
+                        PointerProvenance::Alloca { allocation, offset }
+                    }
+                    PointerProvenance::ArrayParameter { parameter, .. } => {
+                        PointerProvenance::ArrayParameter { parameter, offset }
+                    }
+                };
+                self.ptrs.insert(inst as usize, provenance);
                 inst = LLVMGetNextInstruction(inst);
                 continue;
             }
             if op == LLVMOpcode::LLVMStore {
                 let cell = self.value(LLVMGetOperand(inst, 0), &values)?;
-                let (alloca, offset) = self
+                let provenance = self
                     .ptrs
                     .get(&(LLVMGetOperand(inst, 1) as usize))
                     .cloned()
                     .ok_or(ValidationError("untracked LLVM pointer"))?;
-                self.memory_in_bounds(alloca, &offset, &guard)?;
+                let PointerProvenance::Alloca { allocation, offset } = provenance else {
+                    return Err(ValidationError("unsupported use of array parameter memory"));
+                };
+                self.memory_in_bounds(allocation, &offset, &guard)?;
                 let array = self
                     .arrays
-                    .get(&alloca)
+                    .get(&allocation)
                     .cloned()
                     .ok_or(ValidationError("untracked LLVM pointer"))?;
-                self.arrays.insert(alloca, array.store(&offset, &cell));
+                self.arrays.insert(allocation, array.store(&offset, &cell));
                 inst = LLVMGetNextInstruction(inst);
                 continue;
             }
             if op == LLVMOpcode::LLVMLoad {
-                let (alloca, offset) = self
+                let provenance = self
                     .ptrs
                     .get(&(LLVMGetOperand(inst, 0) as usize))
                     .cloned()
                     .ok_or(ValidationError("untracked LLVM pointer"))?;
-                self.memory_in_bounds(alloca, &offset, &guard)?;
-                let array = self
-                    .arrays
-                    .get(&alloca)
-                    .cloned()
-                    .ok_or(ValidationError("untracked LLVM pointer"))?;
-                values.insert(
-                    inst as usize,
-                    array
-                        .select(&offset)
-                        .as_bv()
-                        .ok_or(ValidationError("unsupported LLVM load"))?,
-                );
+                let value = match provenance {
+                    PointerProvenance::Alloca { allocation, offset } => {
+                        self.memory_in_bounds(allocation, &offset, &guard)?;
+                        self.arrays
+                            .get(&allocation)
+                            .cloned()
+                            .ok_or(ValidationError("untracked LLVM pointer"))?
+                            .select(&offset)
+                            .as_bv()
+                            .ok_or(ValidationError("unsupported LLVM load"))?
+                    }
+                    PointerProvenance::ArrayParameter { parameter, offset } => {
+                        let (len, store) = self
+                            .array_params
+                            .get(parameter)
+                            .and_then(Option::as_ref)
+                            .map(|(len, store)| (len.clone(), store.clone()))
+                            .ok_or(ValidationError("untracked array parameter"))?;
+                        self.memory_in_bounds_len(&len, &offset, &guard)?;
+                        store
+                            .select(&offset)
+                            .as_bv()
+                            .ok_or(ValidationError("unsupported LLVM load"))?
+                    }
+                };
+                values.insert(inst as usize, value);
                 inst = LLVMGetNextInstruction(inst);
                 continue;
+            }
+            if op == LLVMOpcode::LLVMExtractValue {
+                let aggregate = LLVMGetOperand(inst, 0);
+                if let Some(parameter) = self.array_param_args.get(&(aggregate as usize)).copied() {
+                    if LLVMGetNumIndices(inst) != 1 {
+                        return Err(ValidationError("unsupported use of array parameter memory"));
+                    }
+                    let (len, _) = self
+                        .array_params
+                        .get(parameter)
+                        .and_then(Option::as_ref)
+                        .ok_or(ValidationError("untracked array parameter"))?;
+                    match *LLVMGetIndices(inst) {
+                        0 => {
+                            values.insert(inst as usize, len.clone());
+                        }
+                        1 => {
+                            self.ptrs.insert(
+                                inst as usize,
+                                PointerProvenance::ArrayParameter {
+                                    parameter,
+                                    offset: BV::from_u64(self.ctx, 0, 64),
+                                },
+                            );
+                        }
+                        _ => {
+                            return Err(ValidationError(
+                                "unsupported use of array parameter memory",
+                            ));
+                        }
+                    }
+                    inst = LLVMGetNextInstruction(inst);
+                    continue;
+                }
             }
             let value = if op == LLVMOpcode::LLVMExtractValue {
                 // `check_function` admitted only a one-index read of an

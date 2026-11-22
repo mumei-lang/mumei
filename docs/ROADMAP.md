@@ -3699,13 +3699,16 @@ The C03 `mumei.pure-i64-composite/v25` source profile records simple
 stateful effect declarations and atom effect annotations; `perform`
 is a value no-op in the contract, with effect containment and temporal
 conformance remaining separate verifier obligations. Native module and
-multifile bundles pin v25 sources at profile v28, and semantic-contract
-sidecars now produce, recheck and accept under CompositeV25.
+multifile bundles pin v25 sources at profile v28, while semantic-contract
+sidecar production, recheck and acceptance use CompositeV26.
 
-The C03 `mumei.pure-i64-composite/v26` extractor profile adds read-only
-owned `[i64]` parameters with explicit in-bounds proof obligations and a
-disclosed nonnegative-length assumption. Native-bundle and sidecar
-consumers remain on CompositeV25.
+The C03 `mumei.pure-i64-composite/v26` profile adds read-only owned
+`[i64]` parameters with explicit in-bounds obligations and a disclosed
+nonnegative-length assumption. Native module and multifile bundle v29
+and semantic-contract sidecar consumers now use CompositeV26. Native
+translation validation maps the `{ i64, ptr }` ABI and fails closed on
+unsupported pointer uses; object-level machine TV remains unsupported
+for these signatures, so object acceptance is inconclusive.
 
 `mumei build --semantic-contract` is an opt-in production sidecar. It binds the
 exact emitted `.ll` bytes by SHA-256 only; correspondence remains unchecked,

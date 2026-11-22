@@ -7468,6 +7468,10 @@ pub struct PureI64Body<'ctx> {
     pub function_name: String,
     pub source_sha256: String,
     pub inputs: Vec<BV<'ctx>>,
+    /// Array-parameter memory models in declared parameter order: the
+    /// nonnegative length and unconstrained element store for exact
+    /// read-only `[i64]` parameters; `None` for every other parameter.
+    pub array_params: Vec<Option<(BV<'ctx>, Array<'ctx>)>>,
     pub value: BV<'ctx>,
     /// Every `Expr::Call` the body encoding produced, in encounter
     /// order. The translation-validation path ignores them (a call
@@ -7581,6 +7585,7 @@ impl<'ctx> PureI64Body<'ctx> {
             function_name: function_name.into(),
             source_sha256: String::new(),
             inputs: Vec::new(),
+            array_params: Vec::new(),
             value,
             call_sites: Vec::new(),
             call_result_bounds: Vec::new(),
@@ -8070,6 +8075,19 @@ fn encode_atom_body<'ctx>(
         function_name: atom.name.clone(),
         source_sha256,
         inputs,
+        array_params: atom
+            .params
+            .iter()
+            .map(|param| match env.get(&param.name) {
+                Some(SourceValue::Array {
+                    len,
+                    store,
+                    parameter: true,
+                    ..
+                }) => Some((len.clone(), store.clone())),
+                _ => None,
+            })
+            .collect(),
         value,
         call_sites,
         call_result_bounds,

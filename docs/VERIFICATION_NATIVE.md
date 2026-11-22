@@ -616,12 +616,12 @@ edges; the LLVM edge remains unchecked, while C09's opt-in
 fail closed, and no edge is labeled lossy.
 
 The opt-in `mumei build --semantic-contract` path writes a sidecar beside
-emitted LLVM IR, using the CompositeV25 module profile. Its SHA-256 binds the
+emitted LLVM IR, using the CompositeV26 module profile. Its SHA-256 binds the
 exact `.ll` bytes only; correspondence remains unchecked, and it is not emitted
 by default. The consumer recheck below is diagnostic only, not acceptance.
 
 `mumei evidence recheck-sidecar <SIDECAR> --source <SRC> --artifact <LL>`
-checks the sidecar shape and artifact hash, freshly extracts the CompositeV25
+checks the sidecar shape and artifact hash, freshly extracts the CompositeV26
 contracts from caller-supplied source, and rechecks their module obligations.
 Existing effect-free v24 sidecars remain byte-identical and recheck under the
 widened admission.
@@ -1638,7 +1638,7 @@ these features is marked validated. Modules without effect features keep
 their existing profile pin and serialized contract bytes. Native module
 and multifile bundles use profile v28 for v25 sources, while effect-free
 bundles retain their previous profile pins. Semantic-contract sidecar
-production, recheck and acceptance now use CompositeV25; effect-free
+production, recheck and acceptance now use CompositeV26; effect-free
 sidecar bytes remain unchanged.
 
 The C03 `mumei.pure-i64-composite/v26` source admission extends V25
@@ -1659,10 +1659,20 @@ unless every parameter-read obligation is proved.
 
 Array parameters cannot be mutated, aliased or used as whole values,
 passed to calls or `perform`, or returned. Local-array behavior is
-unchanged. Nonnegative lengths rely on the in-language producer
-invariant and are not checked at FFI boundaries. V26 is limited to the
-semantic-contract extractor in this change; native-bundle, sidecar and
-`record_profile` consumers remain on CompositeV25.
+unchanged. Native translation validation requires the exact LLVM
+`{ i64, ptr }` formal, models its extracted length and pointer, and
+matches i64-indexed GEPs and loads to the source store with guarded
+signed bounds obligations. Pointer stores, calls, escape, `phi`,
+`select`, `ptrtoint` and unsupported uses fail closed. The object-level
+machine-code TV does not support array-parameter signatures and reports
+them outside profile, making object acceptance inconclusive rather than
+skipping them.
+
+The length model assumes nonnegative lengths. This is an in-language
+producer invariant, not a check performed at FFI boundaries. Native
+module and multifile bundles pin V26 sources at profile v29; sidecar
+production, recheck and acceptance use CompositeV26. Array-free bundle
+profile pins and sidecar bytes remain unchanged.
 
 Nothing deeper is claimed: the fragment admitted by the profile grew,
 the guarantees did not — the same identity-plus-recheck scopes apply,
