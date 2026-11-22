@@ -6700,6 +6700,63 @@ entry:
     }
 
     #[test]
+    fn wide_alias_leaf_doubles_match_codegen() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // An alias-typed 128-bit leaf must lay out the same two
+        // 64-bit ABI slots the literal leaf takes: a literal-name
+        // check would record one slot and desync the signature.
+        let alias_source = "type Big = u128 where v <= 10;\n\
+            atom wide(a: Big) -> Big requires: true; ensures: true; body: { a };";
+        let alias_model = source_model_named_with_admission(
+            alias_source,
+            "wide",
+            &context,
+            RefinedAdmission::CompositeV21,
+        );
+        assert_eq!(alias_model.param_leaf_doubles, vec![vec![false, false]]);
+        assert_eq!(alias_model.result_leaf_doubles, vec![false, false]);
+        assert_eq!(alias_model.inputs.len(), 2);
+        assert!(supports_signature(&alias_model));
+        // The same two-slot shape inside an enum payload slot: tag
+        // plus two non-double leaves (`pure-i64-composite/v22`).
+        let enum_source = "type Big = u128 where v <= 10;\n\
+            enum F { A(Big), B(Big) }\n\
+            atom pick(f: F) -> u128 requires: true; ensures: true; body: { match f { F::A(x) => x, _ => 0 } };";
+        let enum_model = source_model_named_with_admission(
+            enum_source,
+            "pick",
+            &context,
+            RefinedAdmission::CompositeV22,
+        );
+        assert_eq!(
+            enum_model.param_leaf_doubles,
+            vec![vec![false, false, false]]
+        );
+        assert_eq!(enum_model.param_shapes, vec![Some(3)]);
+        // An enum-typed struct field with an alias wide payload also
+        // expands: tag + two slots, then the `i64` sibling leaf.
+        let nested_source = "type Big = u128 where v <= 10;\n\
+            enum F { A(Big), B(Big) }\n\
+            struct S { f: F, k: i64 }\n\
+            atom get(s: S) -> i64 requires: true; ensures: true; body: { s.k };";
+        let nested_model = source_model_named_with_admission(
+            nested_source,
+            "get",
+            &context,
+            RefinedAdmission::CompositeV22,
+        );
+        assert_eq!(
+            nested_model.param_leaf_doubles,
+            vec![vec![false, false, false, false]]
+        );
+        assert_eq!(nested_model.param_shapes, vec![Some(4)]);
+        assert_eq!(nested_model.inputs.len(), 4);
+    }
+
+    #[test]
     fn i128_u128_machine_tv_models_two_gpr_scalar_values() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
