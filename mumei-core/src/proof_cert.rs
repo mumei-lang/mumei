@@ -884,6 +884,74 @@ mod tests {
     }
 
     #[test]
+    fn verify_certificate_in_env_excludes_generic_enum_type_parameters() {
+        let source = "enum E { A, B }\n\
+                      enum Opt<E> { Some(v: E), Nothing }\n\
+                      atom read(value: Opt<i64>) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: 0;\n";
+        let (cert, root, _) = signature_type_dependency_fixture(source, "read");
+        let dependency_hashes = cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(dependency_hashes.contains_key("enum:Opt"));
+        assert!(!dependency_hashes.contains_key("enum:E"));
+
+        let changed_source = source.replace("enum E { A, B }", "enum E { A, B, C }");
+        let (_, _, changed_env) = signature_type_dependency_fixture(&changed_source, "read");
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_PROVEN);
+    }
+
+    #[test]
+    fn verify_certificate_in_env_excludes_generic_struct_and_atom_type_parameters() {
+        let generic_struct = "struct T { field: i64 }\n\
+                              struct Box<T> { value: T }\n\
+                              atom read(value: Box<i64>) -> i64\n\
+                              requires: true;\n\
+                              ensures: true;\n\
+                              body: 0;\n";
+        let (struct_cert, struct_root, _) =
+            signature_type_dependency_fixture(generic_struct, "read");
+        let struct_hashes = struct_cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(struct_hashes.contains_key("struct:Box"));
+        assert!(!struct_hashes.contains_key("struct:T"));
+
+        let changed_struct = generic_struct.replace("T { field: i64 }", "T { field: bool }");
+        let (_, _, changed_struct_env) = signature_type_dependency_fixture(&changed_struct, "read");
+        let struct_check = verify_certificate_in_env(
+            &struct_cert,
+            &[&struct_root],
+            false,
+            Some(&changed_struct_env),
+        );
+        assert_eq!(struct_check[0].status, status::CERTIFICATE_PROVEN);
+
+        let generic_atom = "struct T { field: i64 }\n\
+                            atom read<T>(value: T) -> i64\n\
+                            requires: true;\n\
+                            ensures: true;\n\
+                            body: 0;\n";
+        let (atom_cert, atom_root, _) = signature_type_dependency_fixture(generic_atom, "read");
+        let atom_hashes = atom_cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(!atom_hashes.contains_key("struct:T"));
+
+        let changed_atom = generic_atom.replace("T { field: i64 }", "T { field: bool }");
+        let (_, _, changed_atom_env) = signature_type_dependency_fixture(&changed_atom, "read");
+        let atom_check =
+            verify_certificate_in_env(&atom_cert, &[&atom_root], false, Some(&changed_atom_env));
+        assert_eq!(atom_check[0].status, status::CERTIFICATE_PROVEN);
+    }
+
+    #[test]
     fn verify_certificate_in_env_terminates_for_recursive_enum_dependencies() {
         let recursive = "enum L { Cons(h: i64, t: Self), Nil }\n\
                          atom read(value: L) -> i64\n\

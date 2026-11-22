@@ -904,6 +904,7 @@ fn compute_dependency_hashes_with_names(
             }
         }
     } else {
+        let atom_type_params = atom.type_params.iter().cloned().collect::<HashSet<_>>();
         let mut pending_type_names = Vec::new();
         for type_name in atom
             .params
@@ -911,11 +912,15 @@ fn compute_dependency_hashes_with_names(
             .filter_map(|param| param.type_name.as_deref())
             .chain(atom.return_type.as_deref())
         {
-            collect_signature_type_names(type_name, &mut pending_type_names);
+            collect_signature_type_names(type_name, &mut pending_type_names, &atom_type_params);
         }
         for param in &atom.params {
             if let Some(type_ref) = &param.type_ref {
-                collect_signature_type_names(&type_ref.name, &mut pending_type_names);
+                collect_signature_type_names(
+                    &type_ref.name,
+                    &mut pending_type_names,
+                    &atom_type_params,
+                );
             }
         }
 
@@ -935,20 +940,38 @@ fn compute_dependency_hashes_with_names(
                 if module_env.get_struct(base_name).is_some()
                     || module_env.enums.contains_key(base_name)
                 {
-                    collect_signature_type_names(&refined._base_type, &mut pending_type_names);
+                    collect_signature_type_names(
+                        &refined._base_type,
+                        &mut pending_type_names,
+                        &atom_type_params,
+                    );
                 }
             }
             if let Some(struct_def) = module_env.get_struct(&name) {
                 struct_names.insert(name.clone());
+                let bound_params = struct_def
+                    .type_params
+                    .iter()
+                    .cloned()
+                    .collect::<HashSet<_>>();
                 for field in &struct_def.fields {
-                    collect_signature_type_names(&field.type_name, &mut pending_type_names);
+                    collect_signature_type_names(
+                        &field.type_name,
+                        &mut pending_type_names,
+                        &bound_params,
+                    );
                 }
             }
             if let Some(enum_def) = module_env.enums.get(&name) {
                 enum_names.insert(name.clone());
+                let bound_params = enum_def.type_params.iter().cloned().collect::<HashSet<_>>();
                 for variant in &enum_def.variants {
                     for field_type in &variant.field_types {
-                        collect_signature_type_names(&field_type.name, &mut pending_type_names);
+                        collect_signature_type_names(
+                            &field_type.name,
+                            &mut pending_type_names,
+                            &bound_params,
+                        );
                     }
                 }
             }
@@ -998,14 +1021,18 @@ fn compute_dependency_hashes_with_names(
     hashes
 }
 
-fn collect_signature_type_names(type_name: &str, names: &mut Vec<String>) {
+fn collect_signature_type_names(
+    type_name: &str,
+    names: &mut Vec<String>,
+    bound_params: &HashSet<String>,
+) {
     let type_name = type_name.trim();
     if type_name.is_empty() {
         return;
     }
 
     let bare_name = type_name.split('<').next().unwrap_or(type_name).trim();
-    if !bare_name.is_empty() {
+    if !bare_name.is_empty() && !bound_params.contains(bare_name) {
         names.push(bare_name.to_string());
     }
 
@@ -1027,13 +1054,17 @@ fn collect_signature_type_names(type_name: &str, names: &mut Vec<String>) {
             '<' => nesting += 1,
             '>' => nesting = nesting.saturating_sub(1),
             ',' if nesting == 0 => {
-                collect_signature_type_names(&arguments[argument_start..index], names);
+                collect_signature_type_names(
+                    &arguments[argument_start..index],
+                    names,
+                    bound_params,
+                );
                 argument_start = index + 1;
             }
             _ => {}
         }
     }
-    collect_signature_type_names(&arguments[argument_start..], names);
+    collect_signature_type_names(&arguments[argument_start..], names, bound_params);
 }
 
 fn compute_dependency_hash_for_callee(atom: &Atom, module_env: &ModuleEnv) -> String {
