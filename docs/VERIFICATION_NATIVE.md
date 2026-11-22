@@ -1604,8 +1604,11 @@ without a declared return type only when compiler inference resolves
 its result to exactly `i64`; all other inferred types remain rejected.
 Its specification identity retains `return_type: null` and adds
 `inferred_return_type: "i64"`, and a module pins v24 only when an atom
-uses this rule. Native bundles do not yet pin v24 and continue to
-reject omitted return types.
+uses this rule. Native module and multifile bundles admit this source
+profile at bundle v27, pinning `/v27` only when a non-main atom uses
+inferred `i64`; earlier bundle versions keep their original admission.
+The `main` atom still requires an explicit `-> i64`, and the single-atom
+producer remains unchanged.
 
 Nothing deeper is claimed: the fragment admitted by the profile grew,
 the guarantees did not — the same identity-plus-recheck scopes apply,

@@ -151,18 +151,17 @@ pub const MODULE_PROFILE_V24: &str = "mumei.native-pure-i64-module-linux-x86_64/
 pub const MODULE_PROFILE_V25: &str = "mumei.native-pure-i64-module-linux-x86_64/v25";
 /// v25 plus one-level nested enum payloads (`pure-i64-composite/v23`).
 pub const MODULE_PROFILE_V26: &str = "mumei.native-pure-i64-module-linux-x86_64/v26";
+/// v26 plus compiler-inferred i64 returns on non-main atoms
+/// (`pure-i64-composite/v24`).
+pub const MODULE_PROFILE_V27: &str = "mumei.native-pure-i64-module-linux-x86_64/v27";
 pub const MODULE_SCOPE: &str =
     "identity_consistency_only/no_authenticity_or_artifact_semantic_proof";
 pub const MODULE_RECHECK_PROFILE: &str = "mumei.native-module-source-recheck/v1";
 
 /// The admission mode a pinned module/multifile record demands: v1
-/// records re-derive under the literal-scalar gate, v2 under the
-/// single-level refined-scalar gate, v3 under the widened one, v4
-/// under the composite one, v5 under composite v2, v6 under
-/// composite v3, v7 under composite v4, v8 under composite v5, v9
-/// under composite v6, v10 under composite v7 and v11 under
-/// composite v8.
-/// Anything else is not this schema's record.
+/// uses `Reject`, v2/v3 use `V1`/`V2`, and v4–v27 map in order to
+/// `Composite` through `CompositeV24`. Anything else is not this
+/// schema's record.
 pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, BundleError> {
     match profile {
         MODULE_PROFILE => Ok(RefinedAdmission::Reject),
@@ -191,6 +190,7 @@ pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, Bundl
         MODULE_PROFILE_V24 => Ok(RefinedAdmission::CompositeV21),
         MODULE_PROFILE_V25 => Ok(RefinedAdmission::CompositeV22),
         MODULE_PROFILE_V26 => Ok(RefinedAdmission::CompositeV23),
+        MODULE_PROFILE_V27 => Ok(RefinedAdmission::CompositeV24),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -275,8 +275,13 @@ pub const MULTIFILE_PROFILE_V24: &str = "mumei.native-pure-i64-multifile-linux-x
 pub const MULTIFILE_PROFILE_V25: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v25";
 /// v25 plus one-level nested enum payloads (`pure-i64-composite/v23`).
 pub const MULTIFILE_PROFILE_V26: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v26";
+/// Multifile v27: v26 plus compiler-inferred i64 returns on non-main
+/// atoms (`pure-i64-composite/v24`).
+pub const MULTIFILE_PROFILE_V27: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v27";
 pub const MULTIFILE_RECHECK_PROFILE: &str = "mumei.native-multifile-source-recheck/v1";
 
+/// Decode a multifile record's pinned source admission; v27 uses
+/// `CompositeV24`, while older profile numbers retain their own gates.
 pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, BundleError> {
     match profile {
         MULTIFILE_PROFILE => Ok(RefinedAdmission::Reject),
@@ -305,6 +310,7 @@ pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, Bu
         MULTIFILE_PROFILE_V24 => Ok(RefinedAdmission::CompositeV21),
         MULTIFILE_PROFILE_V25 => Ok(RefinedAdmission::CompositeV22),
         MULTIFILE_PROFILE_V26 => Ok(RefinedAdmission::CompositeV23),
+        MULTIFILE_PROFILE_V27 => Ok(RefinedAdmission::CompositeV24),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -1378,6 +1384,7 @@ pub fn load_pinned_module_record(
             MODULE_PROFILE_V24,
             MODULE_PROFILE_V25,
             MODULE_PROFILE_V26,
+            MODULE_PROFILE_V27,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1458,6 +1465,7 @@ pub fn load_pinned_multifile_record(
             MULTIFILE_PROFILE_V24,
             MULTIFILE_PROFILE_V25,
             MULTIFILE_PROFILE_V26,
+            MULTIFILE_PROFILE_V27,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1542,9 +1550,11 @@ fn check_leaf_widths(
         MODULE_PROFILE_V24
             | MODULE_PROFILE_V25
             | MODULE_PROFILE_V26
+            | MODULE_PROFILE_V27
             | MULTIFILE_PROFILE_V24
             | MULTIFILE_PROFILE_V25
             | MULTIFILE_PROFILE_V26
+            | MULTIFILE_PROFILE_V27
     );
     // v24 pins only when a wide leaf is actually declared in an atom
     // signature, so a v24 record must show a 128 somewhere. v25 pins on
@@ -2203,6 +2213,14 @@ mod source_recheck_tests {
         assert_eq!(
             multifile_refined_admission(MULTIFILE_PROFILE_V20).unwrap(),
             RefinedAdmission::CompositeV17
+        );
+        assert_eq!(
+            module_refined_admission(MODULE_PROFILE_V27).unwrap(),
+            RefinedAdmission::CompositeV24
+        );
+        assert_eq!(
+            multifile_refined_admission(MULTIFILE_PROFILE_V27).unwrap(),
+            RefinedAdmission::CompositeV24
         );
         assert!(module_refined_admission("mumei.other/v1").is_err());
         assert!(multifile_refined_admission("mumei.other/v1").is_err());

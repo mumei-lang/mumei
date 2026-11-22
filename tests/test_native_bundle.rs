@@ -10,6 +10,9 @@ use std::{
 };
 
 const GOOD: &str = "atom main() -> i64 requires: true; ensures: result == 7; body: { 7 };";
+const INFERRED_I64_MODULE: &str =
+    "atom inc(x: i64) requires: x >= 0 && x <= 100; ensures: result == x + 1; body: { x + 1 };\n\
+     atom main() -> i64 requires: true; ensures: result == 4; body: { inc(3) };";
 const BRANCH: &str = "atom absd(x: i64, y: i64) -> i64 requires: x >= 0 && x <= 1000 && y >= 0 && y <= 1000; ensures: result >= 0; body: { if x > y { x - y } else { y - x } };\n\
 atom clamp(x: i64) -> i64 requires: true; ensures: result <= 10; body: { if x > 10 { 10 } else { x } };\n\
 atom pick(b: bool, x: i64) -> i64 requires: true; ensures: true; body: { if b { x } else { 0 } };\n\
@@ -6498,4 +6501,98 @@ fn module_bundle_with_nested_enum_payload_builds_as_v26_and_rechecks() {
     assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
         .status
         .success());
+}
+
+#[test]
+fn module_bundle_with_inferred_i64_return_builds_as_v27_and_rechecks() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), INFERRED_I64_MODULE);
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V27);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V24
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    assert_success(&recheck_object(&source, &bundle, &id, false));
+    assert_success(&recheck_machine_tv(&source, &bundle, &id, false));
+    assert_success(&consume("recheck-exit-status", &source, &bundle, &id));
+    assert_success(&accept_object(&source, &bundle, &id, false));
+
+    let explicit_root = tempfile::tempdir().unwrap();
+    let explicit_source =
+        INFERRED_I64_MODULE.replace("atom inc(x: i64)", "atom inc(x: i64) -> i64");
+    let (_, explicit_bundle, _) = build_source(explicit_root.path(), &explicit_source);
+    let explicit_record = module_record(&explicit_bundle);
+    assert_eq!(explicit_record["profile"], native_bundle::MODULE_PROFILE);
+    assert_eq!(
+        explicit_record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_WRAPPING_PROFILE
+    );
+
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V26.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    let tampered = recheck(&source, &bundle, &native_bundle::sha256(&bytes));
+    assert!(!tampered.status.success());
+}
+
+#[test]
+fn module_bundle_rejects_inferred_non_i64_return() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        &source,
+        "atom predicate(x: i64) requires: true; ensures: true; body: { x > 0 };\n\
+         atom main() -> i64 requires: true; ensures: result == 4; body: { 4 };",
+    )
+    .unwrap();
+    let output = cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unsupported or invalid module source")
+    );
+}
+
+#[test]
+fn multifile_bundle_with_inferred_i64_return_builds_as_v27() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        root.path().join("helpers.mm"),
+        "atom inc(x: i64) requires: x >= 0 && x <= 100; ensures: result == x + 1; body: { x + 1 };",
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "import \"helpers\" as h;\n\
+         atom main() -> i64 requires: true; ensures: result == 4; body: { h::inc(3) };",
+    )
+    .unwrap();
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MULTIFILE_PROFILE_V27);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V24
+    );
+    assert_success(&check(&source, &bundle, &id));
 }
