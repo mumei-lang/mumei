@@ -1,7 +1,7 @@
 use crate::codegen::lowering::{
     array_struct_type, bitpreserve_cast, box_payload_to_i64, declare_chan_send_owned,
-    enum_llvm_type, payload_needs_box, release_boxed_payload, resolve_param_type,
-    resolve_return_type, unbox_payload_from_i64, wide_int_cast, ArrayPtr,
+    ensure_type_acyclic, enum_llvm_type, payload_needs_box, release_boxed_payload,
+    resolve_param_type, resolve_return_type, unbox_payload_from_i64, wide_int_cast, ArrayPtr,
 };
 use crate::codegen::pattern_emit::{
     bind_pattern_variables, compile_pattern_test, find_field_index, find_field_index_by_name,
@@ -264,11 +264,11 @@ pub(crate) fn emit_lambda_function<'a>(
                 context,
                 p.type_ref.as_ref().map(|t| t.to_string()).as_deref(),
                 module_env,
-            )
+            )?
             .into(),
         );
     }
-    let mut ret_ty = resolve_param_type(context, return_type.map(|s| s.as_str()), module_env);
+    let mut ret_ty = resolve_param_type(context, return_type.map(|s| s.as_str()), module_env)?;
 
     // An undeclared `|x: f64| x * 2.0` returns `double`, not `i64` — probe
     // the body's actual result type by compiling once, then rebuild with
@@ -1257,7 +1257,7 @@ fn emit_enum_payload_field_read<'ctx>(
             "enum '{enum_type}' field '{field_name}' is not a named payload"
         )));
     }
-    let expected_type = resolve_param_type(context, Some(&declared_type), module_env);
+    let expected_type = resolve_param_type(context, Some(&declared_type), module_env)?;
     let slot_type = enum_value
         .get_type()
         .get_field_type_at_index(index)
@@ -1409,35 +1409,6 @@ pub(crate) fn resolve_named_type(module_env: &ModuleEnv, type_name: &str) -> Str
         .unwrap_or(base.as_str())
         .trim()
         .to_string()
-}
-
-/// Whether `enum_def` (transitively) references itself in a payload field.
-/// `enum_llvm_type` lowers field types eagerly, so constructing a recursive
-/// enum would recurse forever — construction is rejected instead (the same
-/// pre-existing limitation as enum-typed params).
-fn enum_is_recursive(module_env: &ModuleEnv, enum_def: &mumei_core::parser::EnumDef) -> bool {
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut queue: Vec<String> = vec![enum_def.name.clone()];
-    while let Some(name) = queue.pop() {
-        if !seen.insert(name.clone()) {
-            continue;
-        }
-        let Some(e) = module_env.get_enum(&name) else {
-            continue;
-        };
-        for variant in &e.variants {
-            for field_ty in &variant.field_types {
-                let base = resolve_named_type(module_env, &field_ty.name);
-                if base == enum_def.name {
-                    return true;
-                }
-                if module_env.get_enum(&base).is_some() {
-                    queue.push(base);
-                }
-            }
-        }
-    }
-    false
 }
 
 pub(crate) fn infer_struct_type_name(
@@ -1843,12 +1814,7 @@ fn emit_enum_variant_init<'a>(
     let enum_def = module_env.get_enum(enum_name).ok_or_else(|| {
         MumeiError::codegen(format!("Enum '{}' not found in module_env", enum_name))
     })?;
-    if enum_is_recursive(module_env, enum_def) {
-        return Err(MumeiError::codegen(format!(
-            "enum '{}' is recursive — variant construction is unsupported in codegen",
-            enum_name
-        )));
-    }
+    ensure_type_acyclic(module_env, enum_name)?;
     let variant = enum_def
         .variants
         .iter()
@@ -1873,7 +1839,7 @@ fn emit_enum_variant_init<'a>(
         .iter()
         .position(|v| v.name == variant_name)
         .unwrap_or(0);
-    let enum_type = enum_llvm_type(context, enum_def, Some(module_env));
+    let enum_type = enum_llvm_type(context, enum_def, module_env)?;
     // Payload slots this variant does not fill must read as zero, not
     // undef: the verification-side model pads the flattened slot union
     // with zeroed slots, and translation validation compares them.
@@ -2134,25 +2100,28 @@ pub(crate) fn compile_hir_expr<'a>(
                 // directly, so each callee lowers at most once per module.
                 let callee_fn = if let Some(callee) = resolved_callee {
                     let callee_symbol = callee.name.as_str();
-                    Some(module.get_function(callee_symbol).unwrap_or_else(|| {
+                    if let Some(existing) = module.get_function(callee_symbol) {
+                        Some(existing)
+                    } else {
                         let sig = mumei_core::hir::lower_atom_to_hir(callee).signature;
                         let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = sig
                             .params
                             .iter()
                             .map(|p| {
-                                resolve_param_type(context, p.ty.as_deref(), module_env).into()
+                                resolve_param_type(context, p.ty.as_deref(), module_env)
+                                    .map(Into::into)
                             })
-                            .collect();
+                            .collect::<MumeiResult<_>>()?;
 
                         // Plan 18: Resolve callee return type from its return_type annotation
-                        let callee_ret_type = resolve_return_type(context, &sig, module_env);
+                        let callee_ret_type = resolve_return_type(context, &sig, module_env)?;
                         let fn_type = callee_ret_type.fn_type(&callee_param_types, false);
-                        module.add_function(
+                        Some(module.add_function(
                             callee_symbol,
                             fn_type,
                             Some(inkwell::module::Linkage::External),
-                        )
-                    }))
+                        ))
+                    }
                 } else {
                     // A callee absent from module_env may already be declared
                     // in this module — e.g. `__mumei_user_main`, the renamed
@@ -2160,23 +2129,27 @@ pub(crate) fn compile_hir_expr<'a>(
                     // it, not the C wrapper `main`). When it is not declared
                     // yet (a caller compiled before `main` itself), declare it
                     // from `main`'s own signature so the call still resolves.
-                    module.get_function(name).or_else(|| {
-                        if name != "__mumei_user_main" {
-                            return None;
-                        }
-                        module_env.get_atom("main").map(|main_atom| {
+                    if let Some(existing) = module.get_function(name) {
+                        Some(existing)
+                    } else if name == "__mumei_user_main" {
+                        if let Some(main_atom) = module_env.get_atom("main") {
                             let sig = mumei_core::hir::lower_atom_to_hir(main_atom).signature;
                             let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = sig
                                 .params
                                 .iter()
                                 .map(|p| {
-                                    resolve_param_type(context, p.ty.as_deref(), module_env).into()
+                                    resolve_param_type(context, p.ty.as_deref(), module_env)
+                                        .map(Into::into)
                                 })
-                                .collect();
-                            let ret = resolve_return_type(context, &sig, module_env);
-                            module.add_function(name, ret.fn_type(&param_types, false), None)
-                        })
-                    })
+                                .collect::<MumeiResult<_>>()?;
+                            let ret = resolve_return_type(context, &sig, module_env)?;
+                            Some(module.add_function(name, ret.fn_type(&param_types, false), None))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
                 };
                 if let Some(callee_fn) = callee_fn {
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
@@ -2875,7 +2848,7 @@ pub(crate) fn compile_hir_expr<'a>(
                         // Plan 9: Use resolve_param_type for consistent type resolution
                         resolve_param_type(context, Some(f.type_name.as_str()), module_env)
                     })
-                    .collect();
+                    .collect::<MumeiResult<_>>()?;
                 let struct_type = context.struct_type(&field_types.to_vec(), false);
                 let mut struct_val = struct_type.get_undef();
                 for (field_name, _) in fields.iter() {
@@ -3284,10 +3257,12 @@ pub(crate) fn compile_hir_expr<'a>(
                 let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee_sig
                     .params
                     .iter()
-                    .map(|p| resolve_param_type(context, p.ty.as_deref(), module_env).into())
-                    .collect();
+                    .map(|p| {
+                        resolve_param_type(context, p.ty.as_deref(), module_env).map(Into::into)
+                    })
+                    .collect::<MumeiResult<_>>()?;
                 // Plan 18: Use resolve_return_type for consistent type resolution
-                let callee_ret = resolve_return_type(context, &callee_sig, module_env);
+                let callee_ret = resolve_return_type(context, &callee_sig, module_env)?;
                 let fn_type = callee_ret.fn_type(&callee_param_types, false);
                 module.add_function(name, fn_type, Some(inkwell::module::Linkage::External))
             } else {
@@ -3400,10 +3375,12 @@ pub(crate) fn compile_hir_expr<'a>(
                 if let Some(f) = module.get_function(name) {
                     f.get_type().get_return_type()
                 } else {
-                    module_env.get_atom(name).map(|a| {
+                    if let Some(a) = module_env.get_atom(name) {
                         let callee_sig = mumei_core::hir::lower_atom_to_hir(a).signature;
-                        resolve_return_type(context, &callee_sig, module_env)
-                    })
+                        Some(resolve_return_type(context, &callee_sig, module_env)?)
+                    } else {
+                        None
+                    }
                 }
             } else {
                 None
@@ -3531,7 +3508,7 @@ pub(crate) fn compile_hir_expr<'a>(
             let payload = match chan_payload_type_name(channel, var_types) {
                 Some(name) => {
                     reject_array_chan_payload(&name, "send")?;
-                    let payload_ty = resolve_param_type(context, Some(name.as_str()), module_env);
+                    let payload_ty = resolve_param_type(context, Some(name.as_str()), module_env)?;
                     let coerced = coerce_to_chan_payload(builder, val, payload_ty)?;
                     if (payload_needs_box(payload_ty) || payload_needs_box(coerced.get_type()))
                         && coerced.get_type() != payload_ty
@@ -3644,6 +3621,7 @@ pub(crate) fn compile_hir_expr<'a>(
             }
             let payload_ty = payload_name
                 .map(|name| resolve_param_type(context, Some(name.as_str()), module_env))
+                .transpose()?
                 .filter(|ty| *ty != context.i64_type().into());
             match payload_ty {
                 Some(ty) => {

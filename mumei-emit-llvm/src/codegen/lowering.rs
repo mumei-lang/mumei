@@ -5,7 +5,7 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValueEnum, FunctionValue};
 use inkwell::AddressSpace;
 use mumei_core::lowering::{lower, LoweredType};
-use mumei_core::verification::{ModuleEnv, MumeiError};
+use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 
 pub(crate) fn array_struct_type(context: &Context) -> inkwell::types::StructType<'_> {
     let i64_type = context.i64_type();
@@ -16,6 +16,91 @@ pub(crate) fn array_struct_type(context: &Context) -> inkwell::types::StructType
 /// An array fat pointer unpacked for codegen: `(len, element_type, data)`.
 /// `element_type` is the LLVM type used for GEP/load/store on `data`.
 pub(crate) type ArrayPtr<'a> = (BasicValueEnum<'a>, BasicTypeEnum<'a>, BasicValueEnum<'a>);
+
+pub(crate) fn type_cycle_path(module_env: &ModuleEnv, type_name: &str) -> Option<Vec<String>> {
+    fn visit(
+        module_env: &ModuleEnv,
+        type_name: &str,
+        owner: Option<&str>,
+        path: &mut Vec<String>,
+        completed: &mut std::collections::HashSet<String>,
+    ) -> Option<Vec<String>> {
+        let type_name = type_name.trim();
+        let type_name = if type_name == "Self" {
+            owner?
+        } else {
+            type_name
+        };
+        let base = module_env.resolve_base_type(type_name);
+        let array_element = base
+            .strip_prefix("[]<")
+            .and_then(|inner| inner.strip_suffix('>'))
+            .or_else(|| {
+                base.strip_prefix('[')
+                    .and_then(|inner| inner.strip_suffix(']'))
+            });
+        if let Some(element) = array_element {
+            return visit(module_env, element, owner, path, completed);
+        }
+
+        let name = base
+            .split('<')
+            .next()
+            .unwrap_or(base.as_str())
+            .trim()
+            .to_string();
+        let enum_def = module_env.get_enum(&name);
+        let struct_def = module_env.get_struct(&name);
+        if enum_def.is_none() && struct_def.is_none() {
+            return None;
+        }
+        if let Some(index) = path.iter().position(|entry| entry == &name) {
+            let mut cycle = path[index..].to_vec();
+            cycle.push(name);
+            return Some(cycle);
+        }
+        if completed.contains(&name) {
+            return None;
+        }
+
+        path.push(name.clone());
+        let cycle = if let Some(enum_def) = enum_def {
+            enum_def
+                .variants
+                .iter()
+                .flat_map(|variant| variant.field_types.iter())
+                .find_map(|field| visit(module_env, &field.name, Some(&name), path, completed))
+        } else if let Some(struct_def) = struct_def {
+            struct_def
+                .fields
+                .iter()
+                .find_map(|field| visit(module_env, &field.type_name, Some(&name), path, completed))
+        } else {
+            None
+        };
+        path.pop();
+        completed.insert(name);
+        cycle
+    }
+
+    visit(
+        module_env,
+        type_name,
+        None,
+        &mut Vec::new(),
+        &mut std::collections::HashSet::new(),
+    )
+}
+
+pub(crate) fn ensure_type_acyclic(module_env: &ModuleEnv, type_name: &str) -> MumeiResult<()> {
+    if let Some(cycle) = type_cycle_path(module_env, type_name) {
+        return Err(MumeiError::codegen(format!(
+            "type '{type_name}' is recursive ({}); recursive types are not supported in LLVM codegen",
+            cycle.join(" -> ")
+        )));
+    }
+    Ok(())
+}
 
 fn basic_type_rank<'a>(ty: BasicTypeEnum<'a>) -> (u32, bool, bool) {
     match ty {
@@ -76,8 +161,9 @@ fn union_slot_type<'a>(a: BasicTypeEnum<'a>, b: BasicTypeEnum<'a>) -> BasicTypeE
 pub(crate) fn enum_llvm_type<'a>(
     context: &'a Context,
     enum_def: &mumei_core::parser::EnumDef,
-    module_env: Option<&ModuleEnv>,
-) -> inkwell::types::StructType<'a> {
+    module_env: &ModuleEnv,
+) -> MumeiResult<inkwell::types::StructType<'a>> {
+    ensure_type_acyclic(module_env, &enum_def.name)?;
     let max_fields = enum_def
         .variants
         .iter()
@@ -92,16 +178,10 @@ pub(crate) fn enum_llvm_type<'a>(
         for variant in &enum_def.variants {
             if slot < variant.field_types.len() {
                 let type_name = &variant.field_types[slot].name;
-                let slot_type = if let Some(menv) = module_env {
-                    resolve_param_type(context, Some(type_name.as_str()), menv)
-                } else {
-                    match lower(type_name.as_str()) {
-                        LoweredType::F64 => context.f64_type().into(),
-                        LoweredType::Str => {
-                            context.ptr_type(inkwell::AddressSpace::default()).into()
-                        }
-                        _ => context.i64_type().into(),
-                    }
+                let slot_type = match lower(type_name.as_str()) {
+                    LoweredType::F64 => context.f64_type().into(),
+                    LoweredType::Str => context.ptr_type(inkwell::AddressSpace::default()).into(),
+                    _ => resolve_param_type(context, Some(type_name.as_str()), module_env)?,
                 };
                 match resolved_type {
                     None => resolved_type = Some(slot_type),
@@ -111,7 +191,7 @@ pub(crate) fn enum_llvm_type<'a>(
         }
         field_types.push(resolved_type.unwrap_or(context.i64_type().into()));
     }
-    context.struct_type(&field_types, false)
+    Ok(context.struct_type(&field_types, false))
 }
 
 pub(crate) fn bitpreserve_cast<'a>(
@@ -436,13 +516,14 @@ pub(crate) fn struct_llvm_type<'a>(
     context: &'a Context,
     struct_def: &mumei_core::parser::StructDef,
     module_env: &ModuleEnv,
-) -> inkwell::types::StructType<'a> {
+) -> MumeiResult<inkwell::types::StructType<'a>> {
+    ensure_type_acyclic(module_env, &struct_def.name)?;
     let field_types: Vec<BasicTypeEnum> = struct_def
         .fields
         .iter()
         .map(|f| resolve_param_type(context, Some(f.type_name.as_str()), module_env))
-        .collect();
-    context.struct_type(&field_types, false)
+        .collect::<MumeiResult<_>>()?;
+    Ok(context.struct_type(&field_types, false))
 }
 
 /// LLVM element type for an array parameter's declared `inner` type.
@@ -454,6 +535,7 @@ pub(crate) fn array_elem_llvm_type<'a>(
     type_name: &str,
     module_env: &ModuleEnv,
 ) -> Result<Option<inkwell::types::BasicTypeEnum<'a>>, MumeiError> {
+    ensure_type_acyclic(module_env, type_name)?;
     let base = module_env.resolve_base_type(type_name);
     let inner_name = if let Some(inner) = base
         .strip_prefix("[]<")
@@ -517,7 +599,7 @@ pub(crate) fn array_elem_llvm_type<'a>(
             )));
         }
         return Ok(Some(
-            struct_llvm_type(context, struct_def, module_env).into(),
+            struct_llvm_type(context, struct_def, module_env)?.into(),
         ));
     }
     if let Some(enum_def) = module_env.get_enum(enum_base) {
@@ -531,7 +613,7 @@ pub(crate) fn array_elem_llvm_type<'a>(
                 LoweredType::Array(_) => true,
                 LoweredType::Other(name) => {
                     if let Some(enum_def) = module_env.get_enum(&name) {
-                        if enum_def.is_recursive
+                        if type_cycle_path(module_env, &name).is_some()
                             || !enum_def.type_params.is_empty()
                             || !visiting.insert(enum_def.name.clone())
                         {
@@ -562,7 +644,7 @@ pub(crate) fn array_elem_llvm_type<'a>(
                 _ => false,
             }
         }
-        if enum_def.is_recursive
+        if type_cycle_path(module_env, enum_base).is_some()
             || !enum_def.type_params.is_empty()
             || has_array_payload(enum_base, module_env, &mut std::collections::HashSet::new())
         {
@@ -598,7 +680,7 @@ pub(crate) fn array_elem_llvm_type<'a>(
             context,
             Some(&inner_base),
             module_env,
-        )))
+        )?))
     } else if let Some(generic_base) = inner_base.split('<').next() {
         if module_env.get_enum(generic_base).is_some() {
             return Err(MumeiError::codegen(format!(
@@ -616,9 +698,10 @@ pub(crate) fn resolve_param_type<'a>(
     context: &'a Context,
     type_name: Option<&str>,
     module_env: &ModuleEnv,
-) -> inkwell::types::BasicTypeEnum<'a> {
+) -> MumeiResult<inkwell::types::BasicTypeEnum<'a>> {
     match type_name {
         Some(name) => {
+            ensure_type_acyclic(module_env, name)?;
             let base = module_env.resolve_base_type(name);
             // TODO(strict-preservation): `lower()` unifies `Str`/`String` into
             // `LoweredType::Str`, so `"String"` now maps to a pointer here.
@@ -634,25 +717,28 @@ pub(crate) fn resolve_param_type<'a>(
             // leaf, which the record's `leaf_widths` pairs back into
             // the two 64-bit ABI slots the source model uses.
             if base == "i128" || base == "u128" {
-                return context.i128_type().into();
+                return Ok(context.i128_type().into());
             }
             match lower(&base) {
-                LoweredType::F64 => context.f64_type().into(),
-                LoweredType::Str => context.ptr_type(inkwell::AddressSpace::default()).into(),
-                LoweredType::Array(_) => array_struct_type(context).into(),
+                LoweredType::F64 => Ok(context.f64_type().into()),
+                LoweredType::Str => Ok(context.ptr_type(inkwell::AddressSpace::default()).into()),
+                LoweredType::Array(_) => Ok(array_struct_type(context).into()),
                 _ => {
                     // Plan 14: Check if type is an enum
-                    if let Some(enum_def) = module_env.get_enum(name) {
-                        return enum_llvm_type(context, enum_def, Some(module_env)).into();
+                    if let Some(enum_def) = module_env
+                        .get_enum(name)
+                        .or_else(|| module_env.get_enum(&base))
+                    {
+                        return Ok(enum_llvm_type(context, enum_def, module_env)?.into());
                     }
                     if let Some(struct_def) = module_env.get_struct(&base) {
-                        return struct_llvm_type(context, struct_def, module_env).into();
+                        return Ok(struct_llvm_type(context, struct_def, module_env)?.into());
                     }
-                    context.i64_type().into()
+                    Ok(context.i64_type().into())
                 }
             }
         }
-        None => context.i64_type().into(),
+        None => Ok(context.i64_type().into()),
     }
 }
 
@@ -663,7 +749,7 @@ pub fn declare_extern_functions<'ctx>(
     module: &Module<'ctx>,
     extern_blocks: &[mumei_core::parser::ExternBlock],
     module_env: &ModuleEnv,
-) {
+) -> MumeiResult<()> {
     for eb in extern_blocks {
         for ext_fn in &eb.functions {
             // Skip if already declared (e.g. by a previous block)
@@ -673,8 +759,10 @@ pub fn declare_extern_functions<'ctx>(
             let param_types: Vec<BasicMetadataTypeEnum> = ext_fn
                 .param_types
                 .iter()
-                .map(|ty| resolve_param_type(context, Some(ty.as_str()), module_env).into())
-                .collect();
+                .map(|ty| {
+                    resolve_param_type(context, Some(ty.as_str()), module_env).map(Into::into)
+                })
+                .collect::<MumeiResult<_>>()?;
 
             let ret_base = module_env.resolve_base_type(&ext_fn.return_type);
             let fn_type = match lower(&ret_base) {
@@ -693,6 +781,7 @@ pub fn declare_extern_functions<'ctx>(
             );
         }
     }
+    Ok(())
 }
 
 /// Resolve the LLVM return type from the HIR signature: the declared
@@ -703,29 +792,12 @@ pub(crate) fn resolve_return_type<'a>(
     context: &'a Context,
     signature: &mumei_core::hir::HirSignature,
     module_env: &ModuleEnv,
-) -> inkwell::types::BasicTypeEnum<'a> {
+) -> MumeiResult<inkwell::types::BasicTypeEnum<'a>> {
     if let Some(ref ret_type) = signature.return_type {
-        let base = module_env.resolve_base_type(ret_type);
-        if base == "i128" || base == "u128" {
-            return context.i128_type().into();
-        }
-        match lower(&base) {
-            LoweredType::F64 => context.f64_type().into(),
-            LoweredType::Str => context.ptr_type(AddressSpace::default()).into(),
-            LoweredType::Array(_) => array_struct_type(context).into(),
-            _ => {
-                if let Some(enum_def) = module_env.get_enum(&base) {
-                    return enum_llvm_type(context, enum_def, Some(module_env)).into();
-                }
-                if let Some(struct_def) = module_env.get_struct(&base) {
-                    return struct_llvm_type(context, struct_def, module_env).into();
-                }
-                context.i64_type().into()
-            }
-        }
+        resolve_param_type(context, Some(ret_type), module_env)
     } else if let Some(ref ret_type) = signature.inferred_return_type {
         resolve_param_type(context, Some(ret_type), module_env)
     } else {
-        context.i64_type().into()
+        Ok(context.i64_type().into())
     }
 }
