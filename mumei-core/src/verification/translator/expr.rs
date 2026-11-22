@@ -60,6 +60,117 @@ fn field_access_chain_text(expr: &Expr) -> Option<String> {
     }
 }
 
+fn array_value_tail_expr(stmt: &Stmt) -> Option<&Expr> {
+    match stmt {
+        Stmt::Expr(expr, _) => Some(expr),
+        Stmt::Block(stmts, _) => stmts.last().and_then(array_value_tail_expr),
+        _ => None,
+    }
+}
+
+fn collect_array_value_sources(expr: &Expr, sources: &mut std::collections::HashSet<String>) {
+    match expr {
+        Expr::Variable(name) => {
+            sources.insert(name.clone());
+        }
+        Expr::FieldAccess(_, _) => {
+            if let Some(path) = field_access_chain_text(expr) {
+                sources.insert(path);
+            }
+        }
+        Expr::Block(stmt) => {
+            if let Some(tail) = array_value_tail_expr(stmt) {
+                collect_array_value_sources(tail, sources);
+            }
+        }
+        Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            for branch in [then_branch, else_branch] {
+                if let Some(tail) = array_value_tail_expr(branch) {
+                    collect_array_value_sources(tail, sources);
+                }
+            }
+        }
+        Expr::Match { arms, .. } => {
+            for arm in arms {
+                if let Some(tail) = array_value_tail_expr(&arm.body) {
+                    collect_array_value_sources(tail, sources);
+                }
+            }
+        }
+        Expr::Call(_, args) | Expr::CallRef { args, .. } => {
+            for arg in args {
+                collect_array_value_sources(arg, sources);
+            }
+        }
+        Expr::Await { expr } => collect_array_value_sources(expr, sources),
+        _ => {}
+    }
+}
+
+fn array_argument_aliases<'a>(
+    arg: &Expr,
+    value: &Dynamic<'a>,
+    env: &Env<'a>,
+) -> std::collections::HashSet<String> {
+    let mut sources = std::collections::HashSet::new();
+    collect_array_value_sources(arg, &mut sources);
+
+    let mut roots = std::collections::HashSet::new();
+    if let Some(array) = value.as_array() {
+        roots.insert(super::z3_types::array_root_ast(&array) as usize);
+    }
+    sources.retain(|name| {
+        let tracked_key = format!("__z3_arr_{name}");
+        let array = env
+            .get(&tracked_key)
+            .and_then(|tracked| tracked.as_array())
+            .or_else(|| env.get(name).and_then(|tracked| tracked.as_array()));
+        if let Some(array) = array {
+            roots.insert(super::z3_types::array_root_ast(&array) as usize);
+            true
+        } else {
+            false
+        }
+    });
+
+    for (key, tracked) in env {
+        let Some(name) = key.strip_prefix("__z3_arr_") else {
+            continue;
+        };
+        if tracked.as_array().is_some_and(|array| {
+            roots.contains(&(super::z3_types::array_root_ast(&array) as usize))
+        }) {
+            sources.insert(name.to_string());
+        }
+    }
+
+    sources
+}
+
+fn reject_later_array_argument_mutation<'a>(
+    vc: &VCtx<'a>,
+    arg: &Expr,
+    earlier_array_aliases: &[std::collections::HashSet<String>],
+) -> Result<(), MumeiError> {
+    for aliases in earlier_array_aliases {
+        let mut names = aliases.iter().collect::<Vec<_>>();
+        names.sort();
+        if let Some(name) = names
+            .into_iter()
+            .find(|name| super::z3_types::expr_stores_to_var(vc.module_env, arg, name.as_str()))
+        {
+            return Err(MumeiError::type_error(format!(
+                "later call argument may mutate array root '{name}' passed by an earlier argument"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn reject_shared_array_mutating_call_args<'a>(
     vc: &VCtx<'a>,
     callee: CalleeRef<'_>,
@@ -3248,8 +3359,16 @@ pub(crate) fn expr_to_z3<'a>(
                         // 引数を評価
                         let mut arg_vals = Vec::new();
                         let mut arg_leaf_snapshots = Vec::new();
+                        let mut earlier_array_aliases = Vec::new();
                         for (index, arg) in args.iter().enumerate() {
+                            reject_later_array_argument_mutation(vc, arg, &earlier_array_aliases)?;
                             let value = expr_to_z3(vc, arg, env, solver_opt)?;
+                            if value.as_array().is_some() {
+                                let aliases = array_argument_aliases(arg, &value, env);
+                                if !aliases.is_empty() {
+                                    earlier_array_aliases.push(aliases);
+                                }
+                            }
                             let param_type = callee
                                 .params
                                 .get(index)
@@ -6191,8 +6310,16 @@ pub(crate) fn expr_to_z3<'a>(
                     // 引数を Z3 で評価
                     let mut arg_vals = Vec::new();
                     let mut arg_leaf_snapshots = Vec::new();
+                    let mut earlier_array_aliases = Vec::new();
                     for (index, arg) in args.iter().enumerate() {
+                        reject_later_array_argument_mutation(vc, arg, &earlier_array_aliases)?;
                         let value = expr_to_z3(vc, arg, env, solver_opt)?;
+                        if value.as_array().is_some() {
+                            let aliases = array_argument_aliases(arg, &value, env);
+                            if !aliases.is_empty() {
+                                earlier_array_aliases.push(aliases);
+                            }
+                        }
                         let param_type = callee_atom
                             .params
                             .get(index)
@@ -7291,8 +7418,16 @@ fn apply_local_lambda<'a>(
     // param bindings overwrite anything.
     let mut arg_vals = Vec::with_capacity(args.len());
     let mut arg_leaf_snapshots = Vec::with_capacity(args.len());
+    let mut earlier_array_aliases = Vec::new();
     for (index, arg) in args.iter().enumerate() {
+        reject_later_array_argument_mutation(vc, arg, &earlier_array_aliases)?;
         let value = expr_to_z3(vc, arg, env, solver_opt)?;
+        if value.as_array().is_some() {
+            let aliases = array_argument_aliases(arg, &value, env);
+            if !aliases.is_empty() {
+                earlier_array_aliases.push(aliases);
+            }
+        }
         let param_type = params
             .get(index)
             .and_then(|param| param.type_ref.as_ref())

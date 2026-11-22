@@ -171,6 +171,58 @@ fn unsupported_or_unjustified_struct_array_uses_fail_closed_errors() {
 }
 
 #[test]
+fn later_argument_array_mutations_are_rejected_in_both_integer_modes() {
+    for bitvec_i64 in [false, true] {
+        let output = run_verify("test_array_argument_order_negative.mm", bitvec_i64);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "later arguments that mutate an earlier array root must fail (bitvec={bitvec_i64}):\n{stdout}\n{stderr}"
+        );
+        let payload = verify_json(&output);
+        let diagnostics = payload["diagnostics"]
+            .as_array()
+            .unwrap_or_else(|| panic!("verify JSON has no diagnostics array:\n{payload:#}"));
+        for atom in [
+            "direct_struct_call",
+            "atom_ref_struct_call",
+            "lambda_struct_call",
+            "scalar_call",
+        ] {
+            assert!(
+                diagnostics.iter().any(|entry| {
+                    entry["atom"] == atom
+                        && entry["message"].as_str().is_some_and(|message| {
+                            message.contains("Type Error")
+                                && message.contains("later call argument may mutate array root")
+                        })
+                }),
+                "missing fail-closed array argument-order error for {atom} (bitvec={bitvec_i64}):\n{payload:#}"
+            );
+        }
+    }
+}
+
+#[test]
+fn later_arguments_may_mutate_distinct_array_roots() {
+    for bitvec_i64 in [false, true] {
+        let output = run_verify("test_array_argument_order_positive.mm", bitvec_i64);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "mutation of a distinct later-argument root must remain supported (bitvec={bitvec_i64}):\n{stdout}\n{stderr}"
+        );
+        let payload = verify_json(&output);
+        assert_eq!(
+            payload["status"], "success",
+            "distinct-root array arguments did not verify (bitvec={bitvec_i64}):\n{payload:#}"
+        );
+    }
+}
+
+#[test]
 fn fixed_width_struct_array_overflow_is_rejected() {
     for bitvec_i64 in [false, true] {
         let output =

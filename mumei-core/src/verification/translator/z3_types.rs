@@ -2357,6 +2357,31 @@ pub(crate) fn stmt_stores_to_var(
     )
 }
 
+pub(crate) fn expr_stores_to_var(module_env: &ModuleEnv, expr: &Expr, name: &str) -> bool {
+    let mut aliases = std::collections::HashSet::new();
+    aliases.insert(name.to_string());
+    loop {
+        let mut additions = std::collections::HashSet::new();
+        collect_array_aliases_expr(expr, &aliases, &mut additions);
+        let previous_len = aliases.len();
+        aliases.extend(additions);
+        if aliases.len() == previous_len {
+            break;
+        }
+    }
+
+    let mut bound_names = std::collections::HashSet::new();
+    collect_bound_names_expr(expr, &mut bound_names);
+    expr_stores_to_array(
+        module_env,
+        expr,
+        &aliases,
+        &bound_names,
+        &mut std::collections::HashSet::new(),
+        0,
+    )
+}
+
 fn stmt_stores_to_array(
     module_env: &ModuleEnv,
     stmt: &Stmt,
