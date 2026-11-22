@@ -1817,7 +1817,12 @@ source reads from aligned, declared incoming slots are supported; other memory
 forms and invalid slots remain outside the profile. Loads from frame slots
 below the caller's argument area read back only values the function itself
 stored there on the same path (register spill and reload); unrecorded offsets
-stay closed. Writes to entry-relative offsets `>= 0` and tail calls
+stay closed. A 128-bit `movaps`/`movups`/`movdqa`/`movdqu`
+`N(%rsp)`↔xmm transfer moves two adjacent slots at once — the vectorized
+form LLVM uses to forward a pair of spilled arguments into a callee's
+outgoing area — with each qword half resolving like the scalar forms
+(either incoming-leaf class, or a recorded frame store; stores stay
+inside the frame). Writes to entry-relative offsets `>= 0` and tail calls
 with more than six arguments are outside the profile. Outgoing stack-argument
 slots are discarded after a call, so later memory reads from them fail closed.
 `%spl` byte writes are modeled, but make the stack pointer untrackable, so a

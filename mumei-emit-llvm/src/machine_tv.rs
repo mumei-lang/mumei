@@ -1421,6 +1421,20 @@ fn lift<'ctx>(
                     return Err(FunctionOutcome::OutsideProfile("frame_memory_bounds"));
                 }
                 lift_stack_store_sse(instruction, &mut state)?;
+            } else if matches!(
+                instruction.mnemonic.as_str(),
+                "movaps" | "movups" | "movdqa" | "movdqu"
+            ) && split_operands(&instruction.operands)
+                .iter()
+                .any(|operand| operand.contains('('))
+            {
+                lift_stack_wide_move(
+                    instruction,
+                    &mut state,
+                    &stack_argument_leaves,
+                    &arguments,
+                    allocated_frame_memory_mode,
+                )?;
             } else if matches!(instruction.mnemonic.as_str(), "addq" | "subq")
                 && split_operands(&instruction.operands)
                     .get(1)
@@ -2534,6 +2548,73 @@ fn lift_stack_store_sse<'ctx>(
     Ok(())
 }
 
+/// A 128-bit `movaps`/`movups`/`movdqa`/`movdqu` `N(%rsp)`↔xmm transfer:
+/// the vectorized form LLVM uses to copy two adjacent qword slots — e.g.
+/// forwarding a pair of spilled arguments into a callee's outgoing area
+/// in one load/store pair. Each half resolves like a scalar slot: an
+/// incoming argument leaf of either class or a recorded frame store on
+/// load (a packed copy moves raw bits, so no class check applies), and
+/// frame slots inside `[rsp, 0)` on store.
+fn lift_stack_wide_move<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    stack_argument_leaves: &[(usize, bool)],
+    arguments: &[BV<'ctx>],
+    allocated_frame_memory_mode: bool,
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let memory_is_source = source.contains('(');
+    let (memory, register) = if memory_is_source {
+        (source, destination)
+    } else {
+        (destination, source)
+    };
+    let Some(register_index) = parse_xmm_register(register) else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    if !state.rsp_is_known || state.rsp_offset % 8 != 0 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    if should_use_allocated_frame_memory(memory, state, allocated_frame_memory_mode)? {
+        // No modeled path for a 16-byte transfer inside the allocated
+        // frame region — the region's array model is qword-granular.
+        return Err(FunctionOutcome::OutsideProfile("frame_memory_bounds"));
+    }
+    let entry_offset = rsp_memory_entry_offset(memory, state.rsp_offset)?;
+    let high_offset = entry_offset
+        .checked_add(8)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    if memory_is_source {
+        let low = stack_qword_at(entry_offset, state, stack_argument_leaves, arguments)?;
+        let high = stack_qword_at(high_offset, state, stack_argument_leaves, arguments)?;
+        state.xmm_registers[register_index] = high.concat(&low);
+        return Ok(());
+    }
+    if high_offset >= 0 || entry_offset < state.rsp_offset {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let value = state.xmm_registers[register_index].clone();
+    for (offset, half) in [
+        (entry_offset, value.extract(63, 0)),
+        (high_offset, value.extract(127, 64)),
+    ] {
+        if let Some((_, stack_value)) = state
+            .stack
+            .iter_mut()
+            .find(|(stack_slot, _)| *stack_slot == offset)
+        {
+            *stack_value = half;
+        } else {
+            state.stack.push((offset, half));
+        }
+        state.outgoing_cleanup_slots.remove(&offset);
+    }
+    Ok(())
+}
+
 fn is_incoming_stack_argument_operand(operand: &str, rsp_offset: i64) -> bool {
     rsp_memory_entry_offset(operand, rsp_offset).is_ok_and(|entry_offset| entry_offset > 0)
 }
@@ -2865,6 +2946,42 @@ fn stack_memory_source<'ctx>(
     }
 }
 
+/// Resolves a qword at an explicit entry-relative offset: an incoming
+/// stack-argument leaf of either class when positive — a packed vector
+/// copy moves raw bits, so the source class check does not apply — else
+/// the value recorded into `stack` inside the frame this path stored.
+fn stack_qword_at<'ctx>(
+    entry_offset: i64,
+    state: &MachineState<'ctx>,
+    stack_argument_leaves: &[(usize, bool)],
+    arguments: &[BV<'ctx>],
+) -> Result<BV<'ctx>, FunctionOutcome> {
+    if entry_offset % 8 != 0 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    if entry_offset > 0 {
+        let slot_index = usize::try_from(entry_offset / 8)
+            .map_err(|_| FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+        if slot_index > stack_argument_leaves.len() {
+            return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+        }
+        let (input_index, _) = stack_argument_leaves[slot_index - 1];
+        return arguments
+            .get(input_index)
+            .cloned()
+            .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    if entry_offset < state.rsp_offset {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    state
+        .stack
+        .iter()
+        .find(|(stack_slot, _)| *stack_slot == entry_offset)
+        .map(|(_, value)| value.clone())
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))
+}
+
 fn lift_stack_argument_move<'ctx>(
     instruction: &Instruction,
     state: &mut MachineState<'ctx>,
@@ -2986,13 +3103,7 @@ fn lift_stack_argument_binary<'ctx>(
     } else {
         destination
     };
-    let slot = stack_memory_source(
-        slot_operand,
-        state,
-        stack_argument_leaves,
-        arguments,
-        false,
-    )?;
+    let slot = stack_memory_source(slot_operand, state, stack_argument_leaves, arguments, false)?;
     match instruction.mnemonic.as_str() {
         "cmpq" | "testq" => {
             let other_operand = if memory_is_source {
@@ -10377,6 +10488,86 @@ entry:
         ];
         assert_eq!(
             check_function(&unwritten, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+    }
+
+    #[test]
+    fn packed_stack_argument_forwarding_matches_and_validates() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // Eight INTEGER arguments put s and t on the incoming argument
+        // stack; LLVM forwards them to a callee's outgoing area with one
+        // `movaps`/`movups` pair — the real tailer codegen.
+        let source =
+            "atom callee(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64 \
+            requires: true; ensures: result == a + b + c + d + e + f + g + h; \
+            body: { a + b + c + d + e + f + g + h };\n\
+            atom tailer(x: i64, y: i64, z: i64, w: i64, v: i64, u: i64, s: i64, t: i64) -> i64 \
+            requires: true; ensures: true; body: { callee(x, y, z, w, v, u, s, t) };\n";
+        let call_targets = || {
+            BTreeMap::from([(
+                14,
+                CallTarget {
+                    name: "callee".into(),
+                    relocation_kind: CallRelocationKind::ElfX86_64Plt32,
+                    relocation_size: 32,
+                    addend: -4,
+                },
+            )])
+        };
+        // subq $0x18,%rsp; movaps 0x20(%rsp),%xmm0; movups %xmm0,(%rsp);
+        // callq callee; addq $0x18,%rsp; retq
+        let forward_bytes = [
+            0x48, 0x83, 0xec, 0x18, 0x0f, 0x28, 0x44, 0x24, 0x20, 0x0f, 0x11, 0x04, 0x24, 0xe8,
+            0x00, 0x00, 0x00, 0x00, 0x48, 0x83, 0xc4, 0x18, 0xc3,
+        ];
+        let model = source_model_named(source, "tailer", &context);
+        assert_eq!(
+            check_function(&forward_bytes, 0, &model, &call_targets(), &context),
+            FunctionOutcome::Equivalent
+        );
+
+        // Forwarding the spilled arguments swapped (the vector copy
+        // preserves slot order, so callee(u8=t, u9=s) cannot match).
+        let swapped_source =
+            "atom callee(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64 \
+            requires: true; ensures: true; body: { a + b + c + d + e + f + g + h };\n\
+            atom tailer(x: i64, y: i64, z: i64, w: i64, v: i64, u: i64, s: i64, t: i64) -> i64 \
+            requires: true; ensures: true; body: { callee(x, y, z, w, v, u, t, s) };\n";
+        let swapped_model = source_model_named(swapped_source, "tailer", &context);
+        assert_eq!(
+            check_function(&forward_bytes, 0, &swapped_model, &call_targets(), &context),
+            FunctionOutcome::Different
+        );
+
+        // A packed load whose high half is not a declared slot stays
+        // closed: seven arguments spill only s at 8(%rsp), so a
+        // movaps reading 8(%rsp)..0x18(%rsp) has nothing for its top
+        // qword.
+        let seven_source =
+            "atom seven(x: i64, y: i64, z: i64, w: i64, v: i64, u: i64, s: i64) -> i64 \
+            requires: true; ensures: true; body: { s };\n";
+        let seven_model = source_model_named(seven_source, "seven", &context);
+        let wide_load = [0x0f, 0x28, 0x44, 0x24, 0x08, 0xc3]; // movaps 8(%rsp),%xmm0; retq
+        assert_eq!(
+            check_function(&wide_load, 0, &seven_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+
+        // A packed store straddling the return-address slot is not a
+        // frame write.
+        let straddle = [
+            0x48, 0x83, 0xec, 0x10, // subq $0x10,%rsp
+            0x0f, 0x11, 0x44, 0x24,
+            0x08, // movups %xmm0,8(%rsp) — writes +0..+8 relative to entry
+            0x48, 0x83, 0xc4, 0x10, // addq $0x10,%rsp
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&straddle, 0, &seven_model, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("unsupported_instruction")
         );
     }
