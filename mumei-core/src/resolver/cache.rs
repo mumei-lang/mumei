@@ -866,39 +866,91 @@ fn compute_dependency_hashes_with_names(
     let mut type_names = BTreeSet::new();
     let mut struct_names = BTreeSet::new();
     let mut enum_names = BTreeSet::new();
-    for type_name in atom
-        .params
-        .iter()
-        .filter_map(|param| param.type_name.as_deref())
-        .chain(atom.return_type.as_deref())
-    {
-        let bare_name = type_name.split('<').next().unwrap_or(type_name).trim();
-        if module_env.get_type(bare_name).is_some() {
-            type_names.insert(bare_name.to_string());
-        }
-        if module_env.get_struct(bare_name).is_some() {
-            struct_names.insert(bare_name.to_string());
-        }
-        if module_env.enums.contains_key(bare_name) {
-            enum_names.insert(bare_name.to_string());
-        }
-    }
-    for param in &atom.params {
-        if let Some(type_ref) = &param.type_ref {
-            if module_env.get_type(&type_ref.name).is_some() {
-                type_names.insert(type_ref.name.clone());
+    if legacy_names {
+        for type_name in atom
+            .params
+            .iter()
+            .filter_map(|param| param.type_name.as_deref())
+            .chain(atom.return_type.as_deref())
+        {
+            let bare_name = type_name.split('<').next().unwrap_or(type_name).trim();
+            if module_env.get_type(bare_name).is_some() {
+                type_names.insert(bare_name.to_string());
             }
-            if module_env.get_struct(&type_ref.name).is_some() {
-                struct_names.insert(type_ref.name.clone());
+            if module_env.get_struct(bare_name).is_some() {
+                struct_names.insert(bare_name.to_string());
             }
-            let bare_name = type_ref
-                .name
-                .split('<')
-                .next()
-                .unwrap_or(&type_ref.name)
-                .trim();
             if module_env.enums.contains_key(bare_name) {
                 enum_names.insert(bare_name.to_string());
+            }
+        }
+        for param in &atom.params {
+            if let Some(type_ref) = &param.type_ref {
+                if module_env.get_type(&type_ref.name).is_some() {
+                    type_names.insert(type_ref.name.clone());
+                }
+                if module_env.get_struct(&type_ref.name).is_some() {
+                    struct_names.insert(type_ref.name.clone());
+                }
+                let bare_name = type_ref
+                    .name
+                    .split('<')
+                    .next()
+                    .unwrap_or(&type_ref.name)
+                    .trim();
+                if module_env.enums.contains_key(bare_name) {
+                    enum_names.insert(bare_name.to_string());
+                }
+            }
+        }
+    } else {
+        let mut pending_type_names = Vec::new();
+        for type_name in atom
+            .params
+            .iter()
+            .filter_map(|param| param.type_name.as_deref())
+            .chain(atom.return_type.as_deref())
+        {
+            collect_signature_type_names(type_name, &mut pending_type_names);
+        }
+        for param in &atom.params {
+            if let Some(type_ref) = &param.type_ref {
+                collect_signature_type_names(&type_ref.name, &mut pending_type_names);
+            }
+        }
+
+        let mut visited_type_names = HashSet::new();
+        while let Some(name) = pending_type_names.pop() {
+            if name == "Self" || !visited_type_names.insert(name.clone()) {
+                continue;
+            }
+            if let Some(refined) = module_env.get_type(&name) {
+                type_names.insert(name.clone());
+                let base_name = refined
+                    ._base_type
+                    .split('<')
+                    .next()
+                    .unwrap_or(&refined._base_type)
+                    .trim();
+                if module_env.get_struct(base_name).is_some()
+                    || module_env.enums.contains_key(base_name)
+                {
+                    collect_signature_type_names(&refined._base_type, &mut pending_type_names);
+                }
+            }
+            if let Some(struct_def) = module_env.get_struct(&name) {
+                struct_names.insert(name.clone());
+                for field in &struct_def.fields {
+                    collect_signature_type_names(&field.type_name, &mut pending_type_names);
+                }
+            }
+            if let Some(enum_def) = module_env.enums.get(&name) {
+                enum_names.insert(name.clone());
+                for variant in &enum_def.variants {
+                    for field_type in &variant.field_types {
+                        collect_signature_type_names(&field_type.name, &mut pending_type_names);
+                    }
+                }
             }
         }
     }
@@ -944,6 +996,44 @@ fn compute_dependency_hashes_with_names(
     }
 
     hashes
+}
+
+fn collect_signature_type_names(type_name: &str, names: &mut Vec<String>) {
+    let type_name = type_name.trim();
+    if type_name.is_empty() {
+        return;
+    }
+
+    let bare_name = type_name.split('<').next().unwrap_or(type_name).trim();
+    if !bare_name.is_empty() {
+        names.push(bare_name.to_string());
+    }
+
+    let Some(open) = type_name.find('<') else {
+        return;
+    };
+    let Some(close) = type_name.rfind('>') else {
+        return;
+    };
+    if close <= open {
+        return;
+    }
+
+    let arguments = &type_name[open + 1..close];
+    let mut argument_start = 0;
+    let mut nesting = 0usize;
+    for (index, ch) in arguments.char_indices() {
+        match ch {
+            '<' => nesting += 1,
+            '>' => nesting = nesting.saturating_sub(1),
+            ',' if nesting == 0 => {
+                collect_signature_type_names(&arguments[argument_start..index], names);
+                argument_start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    collect_signature_type_names(&arguments[argument_start..], names);
 }
 
 fn compute_dependency_hash_for_callee(atom: &Atom, module_env: &ModuleEnv) -> String {

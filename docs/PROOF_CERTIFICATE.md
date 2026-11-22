@@ -353,9 +353,11 @@ type, and raw predicate; struct values cover its fields, field constraints,
 and invariants.
 Enum keys pin variant names, payload field names and types for enums used
 directly in an atom's signature.
-Legacy certificates without an `enum:<name>` key for such a signature are
-reported as `dependency_unchecked`; enums reached only through struct fields or
-bodies are not keyed.
+The dependency-type closure starts from names in an atom's signature and
+follows struct fields, enum payloads, refined-type bases, and generic arguments.
+Types referenced only in bodies are not keyed. Legacy certificates missing a
+reachable `type:`, `struct:`, or `enum:` key are reported as
+`dependency_unchecked`.
 The dependency walk follows syntactic callees through atoms registered in the
 current `ModuleEnv`, independently of its dependency graph. Unresolved names
 are not recorded.
