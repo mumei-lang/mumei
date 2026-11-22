@@ -926,6 +926,11 @@ fn prove_enum_payload_domain<'a>(
     type_name: &str,
     domain: &Bool<'a>,
 ) -> MumeiResult<()> {
+    if let Some(obligations) = vc.cover_obligations.as_ref() {
+        let obligation = vc.path_cond_conj().implies(domain);
+        obligations.borrow_mut().push(obligation);
+        return Ok(());
+    }
     solver.push();
     solver.assert(&vc.path_cond_conj());
     solver.assert(&domain.not());
