@@ -224,7 +224,13 @@ pub(crate) fn cmd_verify_cert(
             }
         }
     }
-    println!("All verified: {}", cert.all_verified);
+    let all_verified_now = cert.all_verified
+        && !tampered
+        && results.iter().all(|check| {
+            check.status == proof_cert::status::CERTIFICATE_PROVEN
+                || check.status == proof_cert::status::CERTIFICATE_TRUSTED
+        });
+    println!("All verified: {}", all_verified_now);
     println!(
         "Results: {} proven, {} trusted (body not checked), {} changed, {} dependency_changed, {} dependency_unchecked, {} unproven, {} axiom_rejected, {} missing",
         proven, trusted, changed, dependency_changed, dependency_unchecked, unproven, axiom_rejected, missing

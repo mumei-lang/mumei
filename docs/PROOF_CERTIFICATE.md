@@ -90,6 +90,10 @@ A proof certificate (`.proof-cert.json`) is a JSON file containing cryptographic
 | `artifact_paths` | `Option<Vec<String>>` | Generated artifacts that a harness should collect or compare |
 | `budget_policy_fingerprint` | `Option<String>` | Fingerprint of the harness retry/budget policy used for this certificate |
 
+The `All verified:` line from `mumei verify-cert` reports whether the stored
+claim is supported by the current re-check and integrity result; it is not a
+direct echo of the certificate's `all_verified` field.
+
 ### IntentFidelityMetadata
 
 ```json
