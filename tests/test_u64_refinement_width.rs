@@ -204,3 +204,17 @@ fn refined_u8_predicate_with_operand_rebinding_remains_usable() {
         output_text(&output)
     );
 }
+
+#[test]
+fn branch_local_struct_field_comparison_preserves_u64_width() {
+    let output = run_verify("branch_struct_field");
+    let text = output_text(&output);
+    assert!(
+        !output.status.success(),
+        "a branch-local u64 struct field comparison must reject the signed reading: {text}"
+    );
+    assert!(
+        text.contains("Postcondition (ensures) is not satisfied"),
+        "{text}"
+    );
+}

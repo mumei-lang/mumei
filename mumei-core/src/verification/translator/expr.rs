@@ -1523,13 +1523,19 @@ fn expr_struct_type(vc: &VCtx, expr: &Expr) -> Option<String> {
 /// the parameter or local it reads. `None` when nothing declares one
 /// (literals, calls, lengths), which the overflow check treats as `i64`.
 pub(crate) fn fixed_width_int_type(vc: &VCtx, expr: &Expr) -> Option<&'static str> {
-    fixed_width_int_type_in_scope(vc, expr, &std::collections::HashMap::new())
+    fixed_width_int_type_in_scope(
+        vc,
+        expr,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
 }
 
 fn fixed_width_int_type_in_scope(
     vc: &VCtx,
     expr: &Expr,
     local_types: &std::collections::HashMap<String, Option<&'static str>>,
+    local_struct_types: &std::collections::HashMap<String, String>,
 ) -> Option<&'static str> {
     match expr {
         Expr::Variable(name) => {
@@ -1589,26 +1595,42 @@ fn fixed_width_int_type_in_scope(
             | Op::Shl
             | Op::Shr,
             r,
-        ) => fixed_width_int_type_in_scope(vc, l, local_types)
-            .or_else(|| fixed_width_int_type_in_scope(vc, r, local_types)),
+        ) => fixed_width_int_type_in_scope(vc, l, local_types, local_struct_types)
+            .or_else(|| fixed_width_int_type_in_scope(vc, r, local_types, local_struct_types)),
         Expr::IfThenElse {
             then_branch,
             else_branch,
             ..
-        } => stmt_tail_int_type(vc, then_branch, local_types)
-            .or_else(|| stmt_tail_int_type(vc, else_branch, local_types)),
-        Expr::Block(stmt) => stmt_tail_int_type(vc, stmt, local_types),
+        } => stmt_tail_int_type(vc, then_branch, local_types, local_struct_types)
+            .or_else(|| stmt_tail_int_type(vc, else_branch, local_types, local_struct_types)),
+        Expr::Block(stmt) => stmt_tail_int_type(vc, stmt, local_types, local_struct_types),
         Expr::FieldAccess(inner, field) => {
             // Preserve the declared width through nested structs and named
             // enum payloads, not only fields whose receiver is a struct.
-            let declared = datatype::declared_type_of_expr(vc, expr).or_else(|| {
-                let ty = expr_struct_type(vc, inner)?;
-                let sdef = vc.module_env.get_struct(&ty)?;
-                sdef.fields
-                    .iter()
-                    .find(|candidate| candidate.name == *field)
-                    .map(|candidate| candidate.type_name.clone())
-            })?;
+            let scoped_declared = match inner.as_ref() {
+                Expr::Variable(name) => local_struct_types.get(name).and_then(|type_name| {
+                    let resolved = vc.module_env.resolve_base_type(type_name);
+                    let sdef = vc.module_env.get_struct(&resolved).or_else(|| {
+                        vc.module_env
+                            .get_struct(datatype::type_name_base(&resolved))
+                    })?;
+                    sdef.fields
+                        .iter()
+                        .find(|candidate| candidate.name == *field)
+                        .map(|candidate| candidate.type_name.clone())
+                }),
+                _ => None,
+            };
+            let declared = scoped_declared
+                .or_else(|| datatype::declared_type_of_expr(vc, expr))
+                .or_else(|| {
+                    let ty = expr_struct_type(vc, inner)?;
+                    let sdef = vc.module_env.get_struct(&ty)?;
+                    sdef.fields
+                        .iter()
+                        .find(|candidate| candidate.name == *field)
+                        .map(|candidate| candidate.type_name.clone())
+                })?;
             let base = vc.module_env.resolve_base_type(&declared);
             fixed_width_int(&base).map(|(ty, _, _)| ty)
         }
@@ -1620,19 +1642,35 @@ fn stmt_tail_int_type(
     vc: &VCtx,
     stmt: &Stmt,
     local_types: &std::collections::HashMap<String, Option<&'static str>>,
+    local_struct_types: &std::collections::HashMap<String, String>,
 ) -> Option<&'static str> {
     match stmt {
-        Stmt::Expr(e, _) => fixed_width_int_type_in_scope(vc, e, local_types),
+        Stmt::Expr(e, _) => fixed_width_int_type_in_scope(vc, e, local_types, local_struct_types),
         Stmt::Block(stmts, _) => {
             let (tail, preceding) = stmts.split_last()?;
             let mut scoped_types = local_types.clone();
+            let mut scoped_struct_types = local_struct_types.clone();
             for stmt in preceding {
                 if let Stmt::Let { var, value, .. } = stmt {
-                    let ty = fixed_width_int_type_in_scope(vc, value, &scoped_types);
+                    let ty = fixed_width_int_type_in_scope(
+                        vc,
+                        value,
+                        &scoped_types,
+                        &scoped_struct_types,
+                    );
                     scoped_types.insert(var.clone(), ty);
+                    let struct_type = match value.as_ref() {
+                        Expr::StructInit { type_name, .. } => Some(type_name.clone()),
+                        _ => expr_struct_type(vc, value),
+                    };
+                    if let Some(struct_type) = struct_type {
+                        scoped_struct_types.insert(var.clone(), struct_type);
+                    } else {
+                        scoped_struct_types.remove(var);
+                    }
                 }
             }
-            stmt_tail_int_type(vc, tail, &scoped_types)
+            stmt_tail_int_type(vc, tail, &scoped_types, &scoped_struct_types)
         }
         _ => None,
     }
