@@ -3693,6 +3693,10 @@ atom return type only when compiler inference is exactly `i64`, and
 pins v24 only when the module relies on that inference. Other inferred
 types remain rejected; native-bundle profiles do not yet pin v24.
 
+`mumei build --semantic-contract` is an opt-in production sidecar. It binds the
+exact emitted `.ll` bytes by SHA-256 only; correspondence remains unchecked,
+no consumer accepts the sidecar yet (follow-up), and it is not default output.
+
 The Evidence v1 record now carries an optional `produced_at` field —
 slice 2 of the mumei-agent issue #894 design memo. `evidence
 verify-source --produced-at <RFC 3339>` stamps a caller-declared

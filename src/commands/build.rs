@@ -9,14 +9,17 @@ use mumei_core::parser::Item;
 use mumei_core::{
     emitter, manifest, mir, mir_analysis, parser, proof_cert, resolver, verification,
 };
+use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 pub(crate) fn cmd_build_command(command: Command) {
     let Command::Build {
         input,
         output,
         emit,
+        semantic_contract,
         strict_imports,
         allow_lean_verified,
         proof_store,
@@ -32,6 +35,7 @@ pub(crate) fn cmd_build_command(command: Command) {
         strict_imports,
         allow_lean_verified,
         proof_store,
+        semantic_contract,
     );
 }
 
@@ -40,6 +44,7 @@ pub(crate) fn cmd_build_default(input: &str, output: &str) {
         input,
         output,
         &emitter::EmitTarget::LlvmIr,
+        false,
         false,
         false,
         false,
@@ -167,7 +172,13 @@ pub(crate) fn cmd_build(
     strict_imports: bool,
     allow_lean_verified: bool,
     proof_store_flag: bool,
+    semantic_contract_sidecar: bool,
 ) {
+    if semantic_contract_sidecar && !matches!(emit_target, emitter::EmitTarget::LlvmIr) {
+        eprintln!("❌ --semantic-contract is supported only with --emit llvm-ir.");
+        std::process::exit(1);
+    }
+
     let external_emitter = match emit_target {
         emitter::EmitTarget::External(name) => match emitter::load_external_emitter(name) {
             Ok(emitter) => Some(emitter),
@@ -282,6 +293,7 @@ pub(crate) fn cmd_build(
 
     let mut atom_count = 0;
     let mut artifacts_journal = ArtifactJournal::default();
+    let mut emitted_llvm_paths = Vec::new();
     // Extern functions are emitted as trusted atoms by the runtime monitor; an
     // atom declared in the file already covers that name, and the same extern
     // block may be reachable more than once.
@@ -690,6 +702,15 @@ pub(crate) fn cmd_build(
                                         artifacts_journal.abort();
                                     }
                                 }
+                                if semantic_contract_sidecar
+                                    && artifact
+                                        .name
+                                        .extension()
+                                        .and_then(|extension| extension.to_str())
+                                        == Some("ll")
+                                {
+                                    emitted_llvm_paths.push(artifact.name.clone());
+                                }
                                 artifacts_journal.claim(&artifact.name);
                             }
                             if !matches!(emit_target, emitter::EmitTarget::DecidableMetrics) {
@@ -925,6 +946,15 @@ pub(crate) fn cmd_build(
                                     );
                                     artifacts_journal.abort();
                                 }
+                            }
+                            if semantic_contract_sidecar
+                                && artifact
+                                    .name
+                                    .extension()
+                                    .and_then(|extension| extension.to_str())
+                                    == Some("ll")
+                            {
+                                emitted_llvm_paths.push(artifact.name.clone());
                             }
                             artifacts_journal.claim(&artifact.name);
                         }
@@ -1206,6 +1236,102 @@ pub(crate) fn cmd_build(
             }
         }
     }
+
+    if semantic_contract_sidecar {
+        emit_semantic_contract_sidecars(input, &source, &emitted_llvm_paths);
+    }
+}
+
+fn emit_semantic_contract_sidecars(input: &str, source: &str, llvm_paths: &[PathBuf]) {
+    let sidecar_paths: Vec<PathBuf> = llvm_paths
+        .iter()
+        .map(|path| path.with_extension("semantic-contract.json"))
+        .collect();
+    let result = (|| -> Result<(), String> {
+        if llvm_paths.is_empty() {
+            return Err("no LLVM IR artifact was emitted".to_string());
+        }
+
+        let input_basename = Path::new(input)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "input path has no UTF-8 basename".to_string())?;
+        let contracts = mumei_core::semantic_contract::extract_pure_i64_module_contracts(
+            source,
+            input_basename,
+            None,
+            mumei_core::semantic_contract::RefinedAdmission::CompositeV24,
+        )
+        .map_err(|error| error.to_string())?;
+        let contracts = serde_json::to_value(contracts)
+            .map_err(|error| format!("failed to serialize contracts: {error}"))?;
+
+        let mut sidecars = Vec::with_capacity(llvm_paths.len());
+        for (llvm_path, sidecar_path) in llvm_paths.iter().zip(&sidecar_paths) {
+            let file_name = llvm_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| "LLVM IR path has no UTF-8 basename".to_string())?;
+            let llvm_bytes = fs::read(llvm_path)
+                .map_err(|error| format!("failed to read emitted LLVM IR: {error}"))?;
+            let sidecar = serde_json::json!({
+                "schema_version": "mumei.semantic-contract-sidecar/v1",
+                "semantic_contract_version":
+                    mumei_core::semantic_contract::SEMANTIC_CONTRACT_VERSION,
+                "artifact": {
+                    "kind": "llvm-ir",
+                    "file_name": file_name,
+                    "sha256": format!("{:x}", Sha256::digest(&llvm_bytes)),
+                },
+                "artifact_binding": "sha256_of_emitted_file_not_correspondence",
+                "correspondence": "unchecked",
+                "contracts": contracts.clone(),
+            });
+            let bytes = serde_json::to_vec_pretty(&sidecar)
+                .map_err(|error| format!("failed to serialize sidecar: {error}"))?;
+            sidecars.push((sidecar_path, bytes));
+        }
+
+        for (sidecar_path, bytes) in sidecars {
+            write_sidecar_atomically(sidecar_path, &bytes)
+                .map_err(|error| format!("failed to write sidecar: {error}"))?;
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        let cleanup_errors: Vec<String> = sidecar_paths
+            .iter()
+            .filter_map(|path| match fs::remove_file(path) {
+                Ok(()) => None,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => Some(error.to_string()),
+            })
+            .collect();
+        if cleanup_errors.is_empty() {
+            eprintln!("❌ semantic contract sidecar not emitted: {error}");
+        } else {
+            eprintln!(
+                "❌ semantic contract sidecar not emitted: {error}; failed to remove stale sidecar(s): {}",
+                cleanup_errors.join("; ")
+            );
+        }
+        std::process::exit(1);
+    }
+}
+
+fn write_sidecar_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(bytes)?;
+    temporary.flush()?;
+    temporary
+        .persist(path)
+        .map(|_| ())
+        .map_err(|error| error.error)
 }
 
 // =============================================================================

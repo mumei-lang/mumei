@@ -43,6 +43,9 @@ pub(crate) enum Command {
         /// Emit target: llvm-ir (default), c-header, verified-json, decidable-metrics, proof-book, proof-cert, escalation-bundle, rust-wrapper, python-wrapper, runtime-monitor
         #[arg(long, default_value = "llvm-ir")]
         emit: String,
+        /// Write a <stem>.semantic-contract.json sidecar (C03 pure-i64 profile; hash binding only, correspondence unchecked)
+        #[arg(long)]
+        semantic_contract: bool,
         /// P5-C: Strict import mode — missing/invalid certificates cause hard errors
         #[arg(long)]
         strict_imports: bool,
