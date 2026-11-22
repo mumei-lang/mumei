@@ -1,6 +1,6 @@
 use mumei_core::semantic_contract::{
     extract_pure_i64_contract, extract_pure_i64_module_contracts, RefinedAdmission,
-    PURE_I64_COMPOSITE_PROFILE_V24, PURE_I64_COMPOSITE_PROFILE_V25,
+    PURE_I64_COMPOSITE_PROFILE_V24, PURE_I64_COMPOSITE_PROFILE_V25, PURE_I64_COMPOSITE_PROFILE_V26,
 };
 use serde_json::Value;
 use std::path::Path;
@@ -278,6 +278,50 @@ fn effect_contract_matches_real_cli_certificate() {
     .unwrap()
     .remove(0);
     assert_eq!(contract.profile, PURE_I64_COMPOSITE_PROFILE_V25);
+
+    succeeds(
+        Command::new(env!("CARGO_BIN_EXE_mumei"))
+            .args(["verify", "--json", "--proof-cert", "--output"])
+            .arg(&certificate)
+            .arg(&source)
+            .current_dir(dir.path())
+            .output()
+            .unwrap(),
+    );
+    let cert: Value = serde_json::from_slice(&std::fs::read(&certificate).unwrap()).unwrap();
+    assert_eq!(cert["atoms"].as_array().unwrap().len(), 1);
+    assert_eq!(cert["atoms"][0]["z3_check_result"], "unsat");
+    assert_eq!(cert["atoms"][0]["content_hash"], contract.atom_content_hash);
+    assert_eq!(
+        cert["atoms"][0]["requires"],
+        contract.specification.requires
+    );
+    assert_eq!(cert["atoms"][0]["ensures"], contract.specification.ensures);
+    assert_eq!(
+        cert["atoms"][0]["translator_ir"]["theorem_goal"],
+        contract.translator_ir.theorem_goal
+    );
+}
+
+#[test]
+fn array_parameter_contract_matches_real_cli_certificate() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("array_parameter.mm");
+    let certificate = dir.path().join("array_parameter.proof.json");
+    let source_text = "atom get(arr: [i64], i: i64) -> i64\n\
+        requires: i >= 0 && i < len(arr);\n\
+        ensures: result == arr[i];\n\
+        body: arr[i];";
+    std::fs::write(&source, source_text).unwrap();
+    let contract = extract_pure_i64_module_contracts(
+        source_text,
+        "array_parameter.mm",
+        None,
+        RefinedAdmission::CompositeV26,
+    )
+    .unwrap()
+    .remove(0);
+    assert_eq!(contract.profile, PURE_I64_COMPOSITE_PROFILE_V26);
 
     succeeds(
         Command::new(env!("CARGO_BIN_EXE_mumei"))

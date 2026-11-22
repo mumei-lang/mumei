@@ -1641,6 +1641,25 @@ bundles retain their previous profile pins. Semantic-contract sidecar
 production, recheck and acceptance now use CompositeV25; effect-free
 sidecar bytes remain unchanged.
 
+The C03 `mumei.pure-i64-composite/v26` source admission extends V25
+only with exact plain owned `[i64]` parameters. Each parameter is modeled
+as an unconstrained BV64-to-BV64 store and a BV64 length; the source
+domain assumes the length is nonnegative. Elements remain unconstrained.
+`len(a)` and `a[i]` are admitted in the body and contract clauses as
+read-only operations. Every indexed read from a parameter adds a signed
+in-bounds obligation (`0 <= i && i < len(a)`), discharged separately
+under the same `requires` and call/loop assumptions as the postcondition;
+these checks do not narrow the source domain. Although out-of-bounds
+reads retain the existing zero-value encoding, a contract is not accepted
+unless every parameter-read obligation is proved.
+
+Array parameters cannot be mutated, aliased or used as whole values,
+passed to calls or `perform`, or returned. Local-array behavior is
+unchanged. Nonnegative lengths rely on the in-language producer
+invariant and are not checked at FFI boundaries. V26 is limited to the
+semantic-contract extractor in this change; native-bundle, sidecar and
+`record_profile` consumers remain on CompositeV25.
+
 Nothing deeper is claimed: the fragment admitted by the profile grew,
 the guarantees did not — the same identity-plus-recheck scopes apply,
 with no optimizer/object/linker/runtime/ABI/final-executable semantics

@@ -222,6 +222,9 @@ pub const PURE_I64_COMPOSITE_PROFILE_V24: &str = "mumei.pure-i64-composite/v24";
 /// Stateful effect declarations and their atom-level annotations
 /// (`pure-i64-composite/v25`).
 pub const PURE_I64_COMPOSITE_PROFILE_V25: &str = "mumei.pure-i64-composite/v25";
+/// Read-only `[i64]` array parameters with in-bounds read obligations
+/// (`pure-i64-composite/v26`).
+pub const PURE_I64_COMPOSITE_PROFILE_V26: &str = "mumei.pure-i64-composite/v26";
 
 /// Maximum byte length a `Str` literal may declare under
 /// `pure-i64-composite/v13`: one cell per byte under the
@@ -330,6 +333,10 @@ pub enum RefinedAdmission {
     /// declarations and their bounded atom-level use
     /// (`pure-i64-composite/v25`).
     CompositeV25,
+    /// `CompositeV26` additionally admits read-only `[i64]` parameters
+    /// whose reads carry in-bounds obligations
+    /// (`pure-i64-composite/v26`).
+    CompositeV26,
 }
 
 impl RefinedAdmission {
@@ -503,6 +510,12 @@ impl RefinedAdmission {
     /// annotations are admitted (`pure-i64-composite/v25`).
     pub fn admits_effects(self) -> bool {
         self >= Self::CompositeV25
+    }
+
+    /// Whether read-only `[i64]` array parameters are admitted
+    /// (`pure-i64-composite/v26`).
+    pub fn admits_array_params(self) -> bool {
+        self >= Self::CompositeV26
     }
 }
 
@@ -803,10 +816,12 @@ pub fn module_source_profile(
     ) = admit_pure_i64_atoms(source, true, admission)?;
     let inferred_i64_return_used = !inferred_i64_return_atoms(&items, admission).is_empty();
     let effect_features_used = uses_effect_features(&items);
+    let array_params_used = uses_array_params(&items);
     Ok(fragment_profile(
         true,
         inferred_i64_return_used,
         effect_features_used,
+        array_params_used,
         &refined,
         &structs,
         &enums,
@@ -1092,6 +1107,7 @@ fn admit_pure_i64_atoms(
             admission.admits_str_bound(),
             admission.admits_wide_leaves(),
             admission.admits_effects(),
+            admission.admits_array_params(),
         )?;
         // Every atom's contract is checked against the complete callee map,
         // not only the tail's: module validation compares each atom
@@ -1108,6 +1124,7 @@ fn admit_pure_i64_atoms(
             &enums,
             &effects,
             admission.admits_effects(),
+            admission.admits_array_params(),
             admission.admits_struct_values(),
             admission.admits_field_writes(),
             admission.admits_enum_values(),
@@ -1218,6 +1235,16 @@ fn uses_effect_features(items: &[Item]) -> bool {
     })
 }
 
+fn uses_array_params(items: &[Item]) -> bool {
+    items.iter().any(|item| match item {
+        Item::Atom(atom) => atom
+            .params
+            .iter()
+            .any(|param| param.type_name.as_deref() == Some("[i64]")),
+        _ => false,
+    })
+}
+
 /// Instantiate every generic `struct` declaration a module uses, as a
 /// fixpoint: a generated instantiation can itself name still-new
 /// instances (`struct Box<T> { p: Pair<T> }`). The instance bound keeps
@@ -1299,6 +1326,7 @@ pub fn monomorphize_generic_structs(items: Vec<Item>) -> Result<Vec<Item>, Seman
 /// non-admitted caller still gets the lowered default instead of a panic.
 fn binder_scalar_type(type_name: Option<&str>, refined: &RefinedEnv) -> &'static str {
     match type_name {
+        Some("[i64]") => "[i64]",
         Some("bool") => "bool",
         Some("i8") => "i8",
         Some("i16") => "i16",
@@ -1557,6 +1585,7 @@ fn fragment_profile(
     allow_wrapping_arithmetic: bool,
     inferred_i64_return_used: bool,
     effect_features_used: bool,
+    array_params_used: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
@@ -1578,6 +1607,8 @@ fn fragment_profile(
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if array_params_used {
+        PURE_I64_COMPOSITE_PROFILE_V26
     } else if effect_features_used {
         PURE_I64_COMPOSITE_PROFILE_V25
     } else if inferred_i64_return_used {
@@ -1783,10 +1814,15 @@ fn atom_contract(
     cert_env: &ModuleEnv,
 ) -> Result<SemanticContract, SemanticContractError> {
     atom.span.file = source_name.to_owned();
+    let array_param_len_nonnegative = atom
+        .params
+        .iter()
+        .any(|param| param.type_name.as_deref() == Some("[i64]"));
     let profile = fragment_profile(
         allow_wrapping_arithmetic,
         inferred_i64_return_used,
         effect_features_used,
+        array_param_len_nonnegative,
         refined,
         structs,
         enums,
@@ -2074,6 +2110,21 @@ fn atom_contract(
             "Effect declarations, effect sets and pre/post states are recorded but not modeled; perform is a value no-op. Effect containment, temporal pre/post conformance and transition order are separate verifier obligations outside this contract.",
         );
     }
+    if array_param_len_nonnegative {
+        exclusions.push(
+            "Array parameters are read-only with unconstrained elements; indexed reads require separate in-bounds obligations. The `array_param_len_nonnegative` assumption relies on in-language producers and is not checked at FFI boundaries. Aliasing, mutation, whole-value use, array call arguments, returns and perform arguments are outside this profile.",
+        );
+    }
+    let mut assumptions = vec![if u64_leaves {
+        "Inputs are representable signed 64-bit integers or declared unsigned 64-bit leaves; declared booleans carry 0/1."
+    } else if allow_wrapping_arithmetic {
+        "Inputs are representable signed 64-bit integers; declared booleans carry 0/1."
+    } else {
+        "Inputs are representable signed 64-bit integers."
+    }];
+    if array_param_len_nonnegative {
+        assumptions.push("array_param_len_nonnegative");
+    }
     Ok(SemanticContract {
         schema_version: SEMANTIC_CONTRACT_VERSION,
         profile,
@@ -2179,13 +2230,7 @@ fn atom_contract(
             "checked_parser_comparison_chains_to_conjunction_not_independently_validated",
         correspondence: LLVM_CORRESPONDENCE_STATUS,
         transformations,
-        assumptions: vec![if u64_leaves {
-            "Inputs are representable signed 64-bit integers or declared unsigned 64-bit leaves; declared booleans carry 0/1."
-        } else if allow_wrapping_arithmetic {
-            "Inputs are representable signed 64-bit integers; declared booleans carry 0/1."
-        } else {
-            "Inputs are representable signed 64-bit integers."
-        }],
+        assumptions,
         exclusions,
     })
 }
@@ -2230,6 +2275,8 @@ struct KindEnv<'a> {
     effects: &'a EffectEnv,
     atom_effects: BTreeSet<String>,
     admit_effects: bool,
+    admit_array_params: bool,
+    array_params: BTreeSet<String>,
     allow_perform_statements: bool,
     composites: BTreeMap<String, &'a str>,
     structs: &'a StructEnv,
@@ -2397,6 +2444,7 @@ fn declared_param_kind(
     admit_u64: bool,
     admit_f64: bool,
     admit_wide: bool,
+    admit_array_params: bool,
     refined: &RefinedEnv,
 ) -> Option<ScalarKind> {
     let name = param.type_name.as_deref()?;
@@ -2410,6 +2458,7 @@ fn declared_param_kind(
         "f64" if admit_f64 => ScalarKind::F64,
         "i128" if admit_wide => ScalarKind::I128,
         "u128" if admit_wide => ScalarKind::U128,
+        "[i64]" if admit_array_params => ScalarKind::ArrayI64,
         "bool" if admit_widened => ScalarKind::Bool,
         "i8" | "i16" | "i32" | "u8" | "u16" | "u32" if admit_widened => ScalarKind::I64,
         // A bool-leaf alias gives the parameter a boolean signature —
@@ -2459,6 +2508,7 @@ fn declared_param_shape(
     admit_u64: bool,
     admit_f64: bool,
     admit_wide: bool,
+    admit_array_params: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
@@ -2476,6 +2526,7 @@ fn declared_param_shape(
             admit_u64,
             admit_f64,
             admit_wide,
+            admit_array_params,
             refined,
         )
         .map(ValueKind::Scalar),
@@ -2525,6 +2576,7 @@ fn param_kind(param: &crate::parser::ast::Param, refined: &RefinedEnv) -> Scalar
         // admission (`validate_atom` gates the leaf below it).
         Some("i128") => ScalarKind::I128,
         Some("u128") => ScalarKind::U128,
+        Some("[i64]") => ScalarKind::ArrayI64,
         Some(name) => refined
             .get(name)
             .map(|alias| alias.kind)
@@ -2702,8 +2754,8 @@ struct CallShapes<'ctx> {
     /// shadowed: the flat `inner` map overwrites its entry, so name
     /// lookup alone can no longer carry the update.
     alloc_stores: std::cell::RefCell<HashMap<u64, Array<'ctx>>>,
-    /// Definedness checks from effect `perform` arguments, retained as
-    /// explicit module obligations as well as source-domain constraints.
+    /// Definedness checks from effect arguments and array-parameter
+    /// reads, retained as explicit module obligations.
     perform_definedness: std::cell::RefCell<Vec<Bool<'ctx>>>,
     /// The current atom's effective `Str` literal bound — set by
     /// `encode_atom_body` before each atom's body is encoded.
@@ -3165,6 +3217,7 @@ fn check_atom_contract(
     enums: &EnumEnv,
     effects: &EffectEnv,
     admit_effects: bool,
+    admit_array_params: bool,
     admit_struct_values: bool,
     admit_field_writes: bool,
     admit_enum_values: bool,
@@ -3192,8 +3245,12 @@ fn check_atom_contract(
     // consult.
     let mut scope: BTreeMap<String, ScalarKind> = BTreeMap::new();
     let mut composites: BTreeMap<String, &str> = BTreeMap::new();
+    let mut array_params = BTreeSet::new();
     for p in &atom.params {
         match param_shape(p, refined, structs, enums) {
+            ValueKind::Scalar(ScalarKind::ArrayI64) => {
+                array_params.insert(p.name.clone());
+            }
             ValueKind::Scalar(kind) => {
                 scope.insert(p.name.clone(), kind);
             }
@@ -3245,6 +3302,8 @@ fn check_atom_contract(
             .map(|effect| effect.name.clone())
             .collect(),
         admit_effects,
+        admit_array_params,
+        array_params,
         allow_perform_statements: false,
         composites,
         structs,
@@ -3426,6 +3485,7 @@ fn validate_atom(
     admit_str_bound: bool,
     admit_wide: bool,
     admit_effects: bool,
+    admit_array_params: bool,
 ) -> Result<(), SemanticContractError> {
     // A declared subrange integer result lowers to an i64 return like
     // the parameters — the emitter emits no truncation, so the checked
@@ -3462,6 +3522,7 @@ fn validate_atom(
                 admit_u64,
                 admit_f64,
                 admit_wide,
+                admit_array_params,
                 refined,
                 structs,
                 enums,
@@ -3526,8 +3587,8 @@ enum ScalarKind {
     /// Only `Expr::Number` produces it; no declared type ever carries
     /// it, and it never survives into a `ValueKind`.
     Num,
-    /// A `let`-bound fixed-size array of `i64` leaves
-    /// (`pure-i64-composite-bounded-memory/v1`).
+    /// A fixed-size local array or read-only array parameter with `i64`
+    /// leaves (`pure-i64-composite-bounded-memory/v1` / v26).
     ArrayI64,
     /// A `let`-bound fixed-size array of `u64` leaves.
     ArrayU64,
@@ -5275,6 +5336,8 @@ fn resolve_alias(
                     effects: &EffectEnv::new(),
                     atom_effects: BTreeSet::new(),
                     admit_effects: false,
+                    admit_array_params: false,
+                    array_params: BTreeSet::new(),
                     allow_perform_statements: false,
                     composites: BTreeMap::new(),
                     structs: &StructEnv::new(),
@@ -5404,6 +5467,11 @@ fn statement_kind(
             env,
         ),
         Stmt::Assign { var, value, .. } if allow_wrapping_arithmetic => {
+            if env.array_params.contains(var) && !scope.contains_key(var) {
+                return Err(SemanticContractError::Unsupported(
+                    "array parameter write outside profile",
+                ));
+            }
             // A field write in tail position yields the assigned
             // field's scalar value, same as a scalar rebind yields its
             // name's kind. A struct-typed field cannot yield a scalar
@@ -5609,6 +5677,11 @@ fn block_prefix_kinds<'a>(
                 inner_assignable.insert(var.clone());
             }
             Stmt::Assign { var, value, .. } => {
+                if inner_env.array_params.contains(var) && !inner.contains_key(var) {
+                    return Err(SemanticContractError::Unsupported(
+                        "array parameter write outside profile",
+                    ));
+                }
                 // A struct field write (`pure-i64-composite/v5`) is a
                 // rebind of the composite binding: the base stays
                 // bound, only the declared leaf field's kind must
@@ -5718,6 +5791,13 @@ fn block_prefix_kinds<'a>(
                 value,
                 ..
             } if inner_env.admit_bounded_memory => {
+                if !inner.contains_key(array.as_str())
+                    && inner_env.array_params.contains(array.as_str())
+                {
+                    return Err(SemanticContractError::Unsupported(
+                        "array parameter write outside profile",
+                    ));
+                }
                 let elem = match inner.get(array.as_str()) {
                     Some(ScalarKind::ArrayI64) => ScalarKind::I64,
                     Some(ScalarKind::ArrayU64) => ScalarKind::U64,
@@ -6550,6 +6630,18 @@ fn check_call<'a>(
             "call target outside module",
         ));
     }
+    if sig
+        .param_kinds
+        .iter()
+        .any(|kind| matches!(kind, ValueKind::Scalar(ScalarKind::ArrayI64)))
+        || args.iter().any(
+            |arg| matches!(arg, Expr::Variable(var) if env.array_params.contains(var) && !scope.contains_key(var)),
+        )
+    {
+        return Err(SemanticContractError::Unsupported(
+            "array argument outside profile",
+        ));
+    }
     for (arg, kind) in args.iter().zip(&sig.param_kinds) {
         match kind {
             ValueKind::Scalar(kind) => expect_kind(
@@ -6826,6 +6918,11 @@ fn expression_kind(
         // Lexical bindings (including a shadowing `let result`) win over
         // the implicit result name, so the kind checker and the BV encoder
         // see the same binding.
+        Expr::Variable(name) if env.array_params.contains(name) && !scope.contains_key(name) => {
+            Err(SemanticContractError::Unsupported(
+                "array parameter used as a whole value",
+            ))
+        }
         Expr::Variable(name) => scope
             .get(name.as_str())
             .copied()
@@ -7182,6 +7279,24 @@ fn expression_kind(
         // An indexed read `a[i]` (`bounded-memory`): the name must be a
         // `let`-bound array, the index an `i64` (literals adapt). The
         // read carries the array's element kind.
+        Expr::ArrayAccess(name, index)
+            if env.admit_array_params
+                && env.array_params.contains(name)
+                && !scope.contains_key(name) =>
+        {
+            expect_kind(
+                expression_kind(
+                    index,
+                    scope,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    &BTreeSet::new(),
+                    env,
+                )?,
+                ScalarKind::I64,
+            )?;
+            Ok(ScalarKind::I64)
+        }
         Expr::ArrayAccess(name, index) if allow_wrapping_arithmetic && env.admit_bounded_memory => {
             let elem = match scope.get(name.as_str()) {
                 Some(ScalarKind::ArrayI64) => ScalarKind::I64,
@@ -7208,6 +7323,18 @@ fn expression_kind(
             )?;
             env.arrays_used.set(true);
             Ok(elem)
+        }
+        Expr::Call(name, args)
+            if name == "len"
+                && args.len() == 1
+                && env.admit_array_params
+                && matches!(
+                    &args[0],
+                    Expr::Variable(var)
+                        if env.array_params.contains(var) && !scope.contains_key(var)
+                ) =>
+        {
+            Ok(ScalarKind::I64)
         }
         Expr::Call(name, args) if allow_wrapping_arithmetic => {
             // `len(a)` reads the stored element count as `i64` — the
@@ -7362,8 +7489,8 @@ pub struct PureI64Body<'ctx> {
     /// `--bitvec-i64` verification requires. Empty unless the caller admitted
     /// those operators; their conjunction is the domain the source binds.
     pub definedness: Vec<Bool<'ctx>>,
-    /// Definedness checks for effect `perform` arguments, which must be
-    /// established by the atom's `requires` rather than narrowing its domain.
+    /// Explicit definedness obligations for effect arguments and
+    /// array-parameter reads, established under the atom's assumptions.
     pub perform_definedness: Vec<Bool<'ctx>>,
     /// Domain the declared signature itself binds: an admitted `bool`
     /// parameter lowers to i64 carrying 0/1, so its entry is `input <=u 1`;
@@ -7720,8 +7847,16 @@ fn encode_atom_body<'ctx>(
     let inputs: Vec<_> = (0..input_slots)
         .map(|i| BV::new_const(context, format!("input_{i}"), 64))
         .collect();
-    let env: HashMap<String, SourceValue> =
-        param_env(&atom.params, &inputs, context, refined, structs, enums)?;
+    let env: HashMap<String, SourceValue> = param_env(
+        &atom.params,
+        &inputs,
+        &atom.name,
+        context,
+        refined,
+        structs,
+        enums,
+        call_returns,
+    )?;
     let top = Bool::from_bool(context, true);
     let mut definedness = Vec::new();
     let composite_signature = atom
@@ -7748,7 +7883,11 @@ fn encode_atom_body<'ctx>(
     let assignable: BTreeSet<String> = atom
         .params
         .iter()
-        .filter(|p| struct_fields(p, structs).is_none() && enum_variants(p, enums).is_none())
+        .filter(|p| {
+            struct_fields(p, structs).is_none()
+                && enum_variants(p, enums).is_none()
+                && p.type_name.as_deref() != Some("[i64]")
+        })
         .map(|p| p.name.clone())
         .collect();
     // A `-> bool` body lowers to i64 carrying 0/1 — the emitter zexts
@@ -7832,7 +7971,15 @@ fn encode_atom_body<'ctx>(
     } else {
         value
     };
-    let param_domain = signature_domain(&atom.params, &inputs, context, refined, structs, enums)?;
+    let param_domain = signature_domain(
+        &atom.name,
+        &atom.params,
+        &inputs,
+        context,
+        refined,
+        structs,
+        enums,
+    )?;
     let subrange_params = slots.iter().any(|slot| {
         matches!(
             slot,
@@ -8168,6 +8315,7 @@ fn signature_slots<'a>(
                     slots
                 }
                 None => match p.type_name.as_deref() {
+                    Some("[i64]") => Vec::new(),
                     Some("i128" | "u128") => {
                         vec![SignatureSlot::WideScalar(p.type_name.as_deref())]
                     }
@@ -8196,6 +8344,7 @@ fn signature_slots<'a>(
 /// in `[-2^31, 2^31)`. Shared between an atom's own body encoding (as
 /// `param_domain`) and a module call site's callee arguments.
 fn signature_domain<'ctx>(
+    atom_name: &str,
     params: &[crate::parser::ast::Param],
     inputs: &[BV<'ctx>],
     context: &'ctx Context,
@@ -8211,6 +8360,13 @@ fn signature_domain<'ctx>(
     // weighted arity `param_env` counts.
     if slots.iter().map(signature_slot_weight).sum::<usize>() != inputs.len() {
         return Err(SemanticContractError::Unsupported("source signature arity"));
+    }
+    for param in params
+        .iter()
+        .filter(|param| param.type_name.as_deref() == Some("[i64]"))
+    {
+        let len = array_param_len(context, atom_name, &param.name);
+        domain.push(len.bvsge(&BV::from_u64(context, 0, 64)));
     }
     // Tag-stack by nesting depth (`pure-i64-composite/v23`):
     // `enum_tags[d]` is the BV bound to the live enum tag at level `d`,
@@ -8384,6 +8540,10 @@ fn signature_domain<'ctx>(
         }
     }
     Ok(domain)
+}
+
+fn array_param_len<'ctx>(context: &'ctx Context, atom_name: &str, name: &str) -> BV<'ctx> {
+    BV::new_const(context, format!("array_param_{atom_name}_{name}_len"), 64)
 }
 
 /// The domain conjuncts a declared scalar type name contributes at one
@@ -8757,8 +8917,8 @@ pub struct ModuleAtomObligations<'ctx> {
 ///
 /// - entry 0: `requires ∧ assumptions ∧ ¬ensures` — the caller's own
 ///   postcondition under callee ensures, parameter bounds and loop exits;
-/// - additional entries replace `¬ensures` with each `perform`
-///   argument's `¬defined` check under the same assumptions.
+/// - additional entries replace `¬ensures` with each explicit
+///   definedness check under the same assumptions.
 ///
 /// The domain obligations deliberately exclude the other sites' ensures
 /// assumptions, so no circular justification is possible: a call whose
@@ -8793,8 +8953,17 @@ fn module_atom_obligations<'ctx>(
     if let Some(exits) = &body.loop_bound_exits {
         source_domain.push(exits.clone());
     }
-    let mut env: HashMap<String, SourceValue> =
-        param_env(&atom.params, &body.inputs, context, refined, structs, enums)?;
+    let mut env: HashMap<String, SourceValue> = param_env(
+        &atom.params,
+        &body.inputs,
+        &atom.name,
+        context,
+        refined,
+        structs,
+        enums,
+        call_returns,
+    )?;
+    call_returns.perform_definedness.borrow_mut().clear();
     let requires =
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
     let top = Bool::from_bool(context, true);
@@ -8848,6 +9017,7 @@ fn module_atom_obligations<'ctx>(
         &EnumEnv::new(),
     )?
     .boolean()?;
+    let clause_definedness = std::mem::take(&mut *call_returns.perform_definedness.borrow_mut());
     // A refined result type adds its declaration conjuncts to the
     // postcondition the atom must satisfy — `-> Port` guarantees
     // `ensures` AND `v >= 1 && v <= 65535` at the encoded result.
@@ -8874,7 +9044,16 @@ fn module_atom_obligations<'ctx>(
                 "call target outside module",
             ));
         };
-        let site_env = param_env(&callee.params, &site.args, context, refined, structs, enums)?;
+        let site_env = param_env(
+            &callee.params,
+            &site.args,
+            &callee.name,
+            context,
+            refined,
+            structs,
+            enums,
+            call_returns,
+        )?;
         let callee_requires =
             parse_expression_checked(&callee.requires).map_err(|_| SemanticContractError::Parse)?;
         // The clause belongs to the callee — its declared bound, not
@@ -8917,6 +9096,7 @@ fn module_atom_obligations<'ctx>(
             callee_body.inputs.iter().zip(site.args.iter()).collect();
         let mut callee_precondition = vec![callee_requires];
         callee_precondition.extend(signature_domain(
+            &callee.name,
             &callee.params,
             &site.args,
             context,
@@ -9016,7 +9196,11 @@ fn module_atom_obligations<'ctx>(
     assumptions.extend(source_domain.iter().cloned());
     let assumption = Bool::and(context, &assumptions.iter().collect::<Vec<_>>());
     let mut obligations = vec![Bool::and(context, &[&requires, &assumption, &post.not()])];
-    for defined in &body.perform_definedness {
+    for defined in body
+        .perform_definedness
+        .iter()
+        .chain(clause_definedness.iter())
+    {
         obligations.push(Bool::and(
             context,
             &[&requires, &assumption, &defined.not()],
@@ -9043,10 +9227,12 @@ fn atom_obligation<'ctx>(
     let mut env: HashMap<String, SourceValue> = param_env(
         &atom.params,
         &body.inputs,
+        &atom.name,
         context,
         refined,
         &StructEnv::new(),
         &EnumEnv::new(),
+        call_returns,
     )?;
     let requires =
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
@@ -9159,6 +9345,7 @@ enum SourceValue<'ctx> {
         store: Array<'ctx>,
         len: BV<'ctx>,
         elem: ScalarKind,
+        parameter: bool,
         /// Which array literal this binding's backing store descends
         /// from: `let b = a` shares `a`'s identity (the emitted code
         /// shares the data pointer), so an indexed write through one
@@ -9272,11 +9459,13 @@ fn substitute_source_value<'ctx>(
             store,
             len,
             elem,
+            parameter,
             alloc,
         } => SourceValue::Array {
             store: store.substitute(substitutions),
             len: len.substitute(substitutions),
             elem: *elem,
+            parameter: *parameter,
             alloc: *alloc,
         },
     }
@@ -9287,13 +9476,16 @@ fn substitute_source_value<'ctx>(
 /// (the emitter lowers `bool` to an i64 carrying 0/1, matching its
 /// `icmp ne` condition). A struct parameter consumes one input per
 /// field, each bound by its field's kind the same way.
+#[allow(clippy::too_many_arguments)]
 fn param_env<'ctx>(
     params: &[crate::parser::ast::Param],
     inputs: &[BV<'ctx>],
+    atom_name: &str,
     ctx: &'ctx Context,
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
+    call_returns: &CallShapes<'ctx>,
 ) -> BodyResult<HashMap<String, SourceValue<'ctx>>> {
     let arity: usize = signature_slots(params, refined, structs, enums)
         .iter()
@@ -9311,45 +9503,68 @@ fn param_env<'ctx>(
     let mut slots = inputs.iter();
     let mut env = HashMap::new();
     for p in params {
-        let value = match struct_fields(p, structs) {
-            Some(fields) => seed_struct_composite(structs, enums, fields, &mut slots, ctx)?,
-            None => match enum_variants(p, enums) {
-                Some(variants) => {
-                    let Some(tag) = slots.next() else {
-                        return Err(SemanticContractError::Unsupported("source signature arity"));
-                    };
-                    SourceValue::Enum {
-                        name: p.type_name.clone().unwrap_or_default(),
-                        tag: tag.clone(),
-                        slots: seed_enum_payload(variants, structs, enums, &mut slots, ctx)?,
-                    }
-                }
-                None => {
-                    let kind = param_kind(p, refined);
-                    if matches!(kind, ScalarKind::I128 | ScalarKind::U128) {
-                        let lo = slots.next();
-                        let hi = slots.next();
-                        let (Some(lo), Some(hi)) = (lo, hi) else {
+        let value = if p.type_name.as_deref() == Some("[i64]") {
+            let store = Array::new_const(
+                ctx,
+                format!("array_param_{atom_name}_{}_store", p.name),
+                &Sort::bitvector(ctx, 64),
+                &Sort::bitvector(ctx, 64),
+            );
+            let alloc = call_returns.fresh_array_alloc();
+            call_returns
+                .alloc_stores
+                .borrow_mut()
+                .insert(alloc, store.clone());
+            SourceValue::Array {
+                store,
+                len: array_param_len(ctx, atom_name, &p.name),
+                elem: ScalarKind::I64,
+                parameter: true,
+                alloc,
+            }
+        } else {
+            match struct_fields(p, structs) {
+                Some(fields) => seed_struct_composite(structs, enums, fields, &mut slots, ctx)?,
+                None => match enum_variants(p, enums) {
+                    Some(variants) => {
+                        let Some(tag) = slots.next() else {
                             return Err(SemanticContractError::Unsupported(
                                 "source signature arity",
                             ));
                         };
-                        let agg = hi.concat(lo);
-                        if kind == ScalarKind::U128 {
-                            SourceValue::UWide(agg)
-                        } else {
-                            SourceValue::Wide(agg)
+                        SourceValue::Enum {
+                            name: p.type_name.clone().unwrap_or_default(),
+                            tag: tag.clone(),
+                            slots: seed_enum_payload(variants, structs, enums, &mut slots, ctx)?,
                         }
-                    } else {
-                        let Some(v) = slots.next() else {
-                            return Err(SemanticContractError::Unsupported(
-                                "source signature arity",
-                            ));
-                        };
-                        scalar(kind, v)
                     }
-                }
-            },
+                    None => {
+                        let kind = param_kind(p, refined);
+                        if matches!(kind, ScalarKind::I128 | ScalarKind::U128) {
+                            let lo = slots.next();
+                            let hi = slots.next();
+                            let (Some(lo), Some(hi)) = (lo, hi) else {
+                                return Err(SemanticContractError::Unsupported(
+                                    "source signature arity",
+                                ));
+                            };
+                            let agg = hi.concat(lo);
+                            if kind == ScalarKind::U128 {
+                                SourceValue::UWide(agg)
+                            } else {
+                                SourceValue::Wide(agg)
+                            }
+                        } else {
+                            let Some(v) = slots.next() else {
+                                return Err(SemanticContractError::Unsupported(
+                                    "source signature arity",
+                                ));
+                            };
+                            scalar(kind, v)
+                        }
+                    }
+                },
+            }
         };
         env.insert(p.name.clone(), value);
     }
@@ -9695,18 +9910,21 @@ fn merge_source_values<'ctx>(
                 store: as_,
                 len: al,
                 elem: ae,
+                parameter: ap,
                 alloc: aa,
             },
             SourceValue::Array {
                 store: bs,
                 len: bl,
                 elem: be,
+                parameter: bp,
                 alloc: ba,
             },
-        ) if ae == be => Ok(SourceValue::Array {
+        ) if ae == be && ap == bp => Ok(SourceValue::Array {
             store: cond.ite(&as_, &bs),
             len: cond.ite(&al, &bl),
             elem: ae,
+            parameter: ap,
             alloc: if aa == ba {
                 aa
             } else {
@@ -9755,6 +9973,17 @@ fn source_stmt<'ctx>(
             enums,
         ),
         Stmt::Assign { var, value, .. } => {
+            if matches!(
+                env.get(var),
+                Some(SourceValue::Array {
+                    parameter: true,
+                    ..
+                })
+            ) {
+                return Err(SemanticContractError::Unsupported(
+                    "array parameter write outside profile",
+                ));
+            }
             if let Some((base, updated, bound)) = source_field_write(
                 var,
                 value,
@@ -9867,6 +10096,17 @@ fn source_stmt<'ctx>(
                         escapable.remove(var);
                     }
                     Stmt::Assign { var, value, .. } => {
+                        if matches!(
+                            inner.get(var),
+                            Some(SourceValue::Array {
+                                parameter: true,
+                                ..
+                            })
+                        ) {
+                            return Err(SemanticContractError::Unsupported(
+                                "array parameter write outside profile",
+                            ));
+                        }
                         if let Some((base, updated, _bound)) = source_field_write(
                             var,
                             value,
@@ -9924,13 +10164,22 @@ fn source_stmt<'ctx>(
                         ..
                     } => {
                         let Some(SourceValue::Array {
-                            store, len, alloc, ..
+                            store,
+                            len,
+                            parameter,
+                            alloc,
+                            ..
                         }) = inner.get(array)
                         else {
                             return Err(SemanticContractError::Unsupported(
                                 "array write on a non-array binding",
                             ));
                         };
+                        if *parameter {
+                            return Err(SemanticContractError::Unsupported(
+                                "array parameter write outside profile",
+                            ));
+                        }
                         if !inner_assignable.contains(array.as_str()) {
                             return Err(SemanticContractError::Unsupported(
                                 "array write to a name not bound on the linear path",
@@ -10209,15 +10458,17 @@ fn source_while<'ctx>(
                         store: os,
                         len: ol,
                         elem: oe,
+                        parameter: op,
                         alloc: oa,
                     }),
                     SourceValue::Array {
                         store: ns,
                         len: nl,
                         elem: ne,
+                        parameter: np,
                         alloc: na,
                     },
-                ) if oe == ne => {
+                ) if oe == ne && op == np => {
                     let alloc = if oa == na {
                         *oa
                     } else {
@@ -10243,6 +10494,7 @@ fn source_while<'ctx>(
                         store: body_guard.ite(ns, os),
                         len: body_guard.ite(nl, ol),
                         elem: *oe,
+                        parameter: *op,
                         alloc,
                     }
                 }
@@ -10677,7 +10929,7 @@ fn source_expr<'ctx>(
         Expr::Perform { args, .. } => {
             let mut perform_definedness = Vec::new();
             for arg in args {
-                source_expr(
+                let value = source_expr(
                     arg,
                     ctx,
                     env,
@@ -10691,6 +10943,11 @@ fn source_expr<'ctx>(
                     call_returns,
                     enums,
                 )?;
+                if matches!(value, SourceValue::Array { .. }) {
+                    return Err(SemanticContractError::Unsupported(
+                        "array argument outside profile",
+                    ));
+                }
             }
             call_returns
                 .perform_definedness
@@ -10700,10 +10957,24 @@ fn source_expr<'ctx>(
         }
         Expr::Number(n) => N(BV::from_i64(ctx, *n, 64)),
         Expr::Variable(n) if n == "true" || n == "false" => B(Bool::from_bool(ctx, n == "true")),
-        Expr::Variable(n) => env
-            .get(n.as_str())
-            .cloned()
-            .ok_or(SemanticContractError::Unsupported("source binding"))?,
+        Expr::Variable(n) => {
+            let value = env
+                .get(n.as_str())
+                .cloned()
+                .ok_or(SemanticContractError::Unsupported("source binding"))?;
+            if matches!(
+                value,
+                SourceValue::Array {
+                    parameter: true,
+                    ..
+                }
+            ) {
+                return Err(SemanticContractError::Unsupported(
+                    "array parameter used as a whole value",
+                ));
+            }
+            value
+        }
         Expr::FieldAccess(target, field) => {
             // A nullary `E::V` — parsed as field access on the enum
             // name — constructs the variant directly; `match` reads
@@ -11574,6 +11845,7 @@ fn source_expr<'ctx>(
                 } else {
                     ScalarKind::I64
                 },
+                parameter: false,
                 alloc,
             }
         }
@@ -11603,17 +11875,19 @@ fn source_expr<'ctx>(
                 store,
                 len: BV::from_u64(ctx, s.len() as u64, 64),
                 elem: ScalarKind::Str,
+                parameter: false,
                 alloc,
             }
         }
         // An indexed read `a[i]`: the in-bounds `select` or the merged
-        // `0` an out-of-bounds read yields — no definedness obligation,
-        // matching the emitted bounds-check + `phi(loaded, 0)`.
+        // `0` an out-of-bounds read yields, matching the emitted
+        // bounds-check + `phi(loaded, 0)`.
         Expr::ArrayAccess(name, index) => {
             let Some(SourceValue::Array {
                 store,
                 len,
                 elem,
+                parameter,
                 alloc,
             }) = env.get(name.as_str())
             else {
@@ -11636,6 +11910,12 @@ fn source_expr<'ctx>(
                 enums,
             )?
             .integer()?;
+            if *parameter {
+                call_returns
+                    .perform_definedness
+                    .borrow_mut()
+                    .push(guard.implies(&array_in_bounds(ctx, &index, len)));
+            }
             // The canonical store carries every indexed write to this
             // backing — including ones a shadowed sibling wrote.
             let read = array_read(
@@ -16697,6 +16977,205 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
                 .all(|result| *result == z3::SatResult::Unsat),
             "{outcomes:?}"
         );
+    }
+
+    #[test]
+    fn composite_v26_models_read_only_array_parameters_and_bounds() {
+        let source = "atom get(arr: [i64], i: i64) -> i64\n\
+            requires: i >= 0 && i < len(arr);\n\
+            ensures: result == arr[i];\n\
+            body: arr[i];";
+        let contracts =
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV26)
+                .unwrap();
+        assert_eq!(contracts[0].profile, PURE_I64_COMPOSITE_PROFILE_V26);
+        assert!(contracts[0]
+            .assumptions
+            .contains(&"array_param_len_nonnegative"));
+        assert!(contracts[0]
+            .exclusions
+            .iter()
+            .any(|entry| entry.contains("Array parameters are read-only")));
+        assert_eq!(
+            module_source_profile(source, RefinedAdmission::CompositeV26).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V26
+        );
+        let outcomes = refined_module_outcomes_admission(source, RefinedAdmission::CompositeV26);
+        assert!(
+            outcomes
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat),
+            "{outcomes:?}"
+        );
+
+        let mixed = "atom get(arr: [i64], i: i64) -> i64\n\
+            requires: i >= 0 && i < len(arr);\n\
+            ensures: result == arr[i];\n\
+            body: arr[i];\n\
+            atom inc(x: i64) -> i64 requires: true; ensures: result == x + 1; body: x + 1;";
+        let mixed_contracts =
+            extract_pure_i64_module_contracts(mixed, "m.mm", None, RefinedAdmission::CompositeV26)
+                .unwrap();
+        assert_eq!(mixed_contracts[0].profile, PURE_I64_COMPOSITE_PROFILE_V26);
+        let scalar_only =
+            "atom inc(x: i64) -> i64 requires: true; ensures: result == x + 1; body: x + 1;";
+        let scalar_profile = extract_pure_i64_module_contracts(
+            scalar_only,
+            "m.mm",
+            None,
+            RefinedAdmission::CompositeV25,
+        )
+        .unwrap()[0]
+            .profile;
+        assert_eq!(mixed_contracts[1].profile, scalar_profile);
+        assert!(!mixed_contracts[1]
+            .assumptions
+            .contains(&"array_param_len_nonnegative"));
+
+        let config = z3::Config::new();
+        let context = z3::Context::new(&config);
+        let encoded =
+            encode_pure_i64_module_obligations(source, &context, RefinedAdmission::CompositeV26)
+                .unwrap();
+        let len = BV::new_const(&context, "array_param_get_arr_len", 64);
+        let solver = z3::Solver::new(&context);
+        solver.assert(&encoded[0].domain);
+        solver.assert(&len.bvslt(&BV::from_i64(&context, 0, 64)));
+        assert_eq!(solver.check(), z3::SatResult::Unsat);
+
+        let two_reads = "atom sum(arr: [i64], i: i64, j: i64) -> i64\n\
+            requires: i >= 0 && i < len(arr) && j >= 0 && j < len(arr);\n\
+            ensures: result == len(arr) + arr[i] + arr[j];\n\
+            body: len(arr) + arr[i] + arr[j];";
+        let outcomes = refined_module_outcomes_admission(two_reads, RefinedAdmission::CompositeV26);
+        assert!(
+            outcomes
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat),
+            "{outcomes:?}"
+        );
+
+        let off_by_one = include_str!("../../benchmarks/arithmetic/off_by_one_index_fail.mm");
+        let outcomes =
+            refined_module_outcomes_admission(off_by_one, RefinedAdmission::CompositeV26);
+        assert_eq!(outcomes[0], z3::SatResult::Unsat, "{outcomes:?}");
+        assert!(outcomes[1..].contains(&z3::SatResult::Sat), "{outcomes:?}");
+
+        let in_bounds = include_str!("../../benchmarks/svcomp_style/array_bounds.mm");
+        let outcomes = refined_module_outcomes_admission(in_bounds, RefinedAdmission::CompositeV26);
+        assert!(
+            outcomes
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat),
+            "{outcomes:?}"
+        );
+
+        let negative = include_str!("../../tests/negative/builtin_not_spurious.mm");
+        let outcomes = refined_module_outcomes_admission(negative, RefinedAdmission::CompositeV26);
+        assert_eq!(outcomes[0], z3::SatResult::Sat, "{outcomes:?}");
+        assert!(
+            outcomes[1..]
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat),
+            "{outcomes:?}"
+        );
+
+        let local_array = "atom get(i: i64) -> i64 requires: true; ensures: true; \
+            body: { let local = [7]; local[i] };";
+        let outcomes =
+            refined_module_outcomes_admission(local_array, RefinedAdmission::CompositeV24);
+        assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+    }
+
+    #[test]
+    fn composite_v26_keeps_array_free_v25_contract_bytes() {
+        let sources = [
+            "atom inc(x: i64) -> i64 requires: x >= 0; ensures: result == x + 1; body: x + 1;",
+            "struct Point { x: i64, y: i64 }\n\
+                atom shift(p: Point, d: i64) -> i64 requires: true; \
+                ensures: result == p.x + d; body: p.x + d;",
+            "effect Audit states: [Open, Closed]; initial: Open;\n\
+                atom record(x: i64) -> i64 effects: [Audit]; \
+                effect_pre: { Audit: Open }; effect_post: { Audit: Closed }; \
+                requires: true; ensures: result == x; \
+                body: { perform Audit.record(x); x };",
+        ];
+        for source in sources {
+            let v25 = extract_pure_i64_module_contracts(
+                source,
+                "m.mm",
+                None,
+                RefinedAdmission::CompositeV25,
+            )
+            .unwrap();
+            let v26 = extract_pure_i64_module_contracts(
+                source,
+                "m.mm",
+                None,
+                RefinedAdmission::CompositeV26,
+            )
+            .unwrap();
+            assert!(v25
+                .iter()
+                .all(|contract| contract.profile != PURE_I64_COMPOSITE_PROFILE_V26));
+            assert_eq!(
+                serde_json::to_vec(&v25).unwrap(),
+                serde_json::to_vec(&v26).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn composite_v26_rejects_non_profile_array_parameters_and_uses() {
+        let v26 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV26)
+        };
+        for source in [
+            "atom f(arr: [u32]) -> i64 requires: true; ensures: true; body: 0;",
+            "atom f(arr: [Str]) -> i64 requires: true; ensures: true; body: 0;",
+            "atom f(arr: [[i64]]) -> i64 requires: true; ensures: true; body: 0;",
+            "atom f(arr: [i64]) -> [i64] requires: true; ensures: true; body: arr;",
+            "atom f(arr: [i64]) -> i64 requires: true; ensures: true; body: { arr[0] = 1; 0 };",
+            "atom f(arr: [i64]) -> i64 requires: true; ensures: true; body: { arr = [1]; 0 };",
+            "atom f(arr: [i64]) -> i64 requires: true; ensures: true; \
+                body: { let alias = arr; alias[0] = 1; 0 };",
+            "atom id(x: i64) -> i64 requires: true; ensures: result == x; body: x;\n\
+                atom f(arr: [i64]) -> i64 requires: true; ensures: true; body: id(arr);",
+            "effect Door;\n\
+                atom f(arr: [i64]) -> i64 effects: [Door]; requires: true; ensures: true; \
+                body: { perform Door.apply(arr); 0 };",
+            "atom f(arr: [i64]) -> i64 requires: true; ensures: true; body: arr;",
+            "atom f(consume arr: [i64]) -> i64 requires: true; ensures: true; body: 0;",
+            "atom f(ref arr: [i64]) -> i64 requires: true; ensures: true; body: 0;",
+            "atom f(arr: [i64]) -> i64 requires: forall(i, 0, len(arr), i >= 0); \
+                ensures: true; body: 0;",
+        ] {
+            assert!(
+                v26(source).is_err(),
+                "accepted out-of-profile source: {source}"
+            );
+        }
+
+        let array_param = "atom f(arr: [i64]) -> i64 requires: true; ensures: true; body: 0;";
+        assert!(matches!(
+            extract_pure_i64_module_contracts(
+                array_param,
+                "m.mm",
+                None,
+                RefinedAdmission::CompositeV25
+            ),
+            Err(SemanticContractError::Unsupported(
+                "explicit owned scalar i64 signature required"
+            ))
+        ));
+        let array_call = "atom id(x: i64) -> i64 requires: true; ensures: result == x; body: x;\n\
+            atom f(arr: [i64]) -> i64 requires: true; ensures: true; body: id(arr);";
+        assert!(matches!(
+            v26(array_call),
+            Err(SemanticContractError::Unsupported(
+                "array argument outside profile"
+            ))
+        ));
     }
 }
 
