@@ -5522,8 +5522,6 @@ fn validate_perform_statement(
                 | ScalarKind::Bool
                 | ScalarKind::Num
                 | ScalarKind::F64
-                | ScalarKind::I128
-                | ScalarKind::U128
         ) {
             return Err(SemanticContractError::Unsupported(
                 "perform argument outside scalar profile",
@@ -16470,6 +16468,94 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
                 matches!(v25(source), Err(SemanticContractError::Unsupported(actual)) if actual == reason),
                 "unexpected result for {source}"
             );
+        }
+    }
+
+    #[test]
+    fn composite_v25_rejects_wide_perform_arguments_in_extractor_and_encoder() {
+        for kind in ["i128", "u128"] {
+            let source = format!(
+                "effect Door;\n\
+                 atom value() -> {kind} requires: true; ensures: result == 1; body: 1;\n\
+                 atom f() -> i64 effects: [Door]; requires: true; ensures: result == 0; \
+                 body: {{ perform Door.apply(value()); 0 }};"
+            );
+            assert!(matches!(
+                extract_pure_i64_module_contracts(
+                    &source,
+                    "m.mm",
+                    None,
+                    RefinedAdmission::CompositeV25
+                ),
+                Err(SemanticContractError::Unsupported(
+                    "perform argument outside scalar profile"
+                ))
+            ));
+
+            let config = z3::Config::new();
+            let context = z3::Context::new(&config);
+            assert!(matches!(
+                encode_pure_i64_module_obligations(
+                    &source,
+                    &context,
+                    RefinedAdmission::CompositeV25
+                ),
+                Err(SemanticContractError::Unsupported(
+                    "perform argument outside scalar profile"
+                ))
+            ));
+        }
+    }
+
+    #[test]
+    fn composite_v25_admits_codegen_compatible_perform_argument_kinds() {
+        let sources = [
+            "effect Door;\n\
+             atom value() -> i64 requires: true; ensures: result == 1; body: 1;\n\
+             atom f() -> i64 effects: [Door]; requires: true; ensures: result == 0; \
+             body: { perform Door.apply(value()); 0 };",
+            "effect Door;\n\
+             atom value() -> u64 requires: true; ensures: result == 1; body: 1;\n\
+             atom f() -> i64 effects: [Door]; requires: true; ensures: result == 0; \
+             body: { perform Door.apply(value()); 0 };",
+            "effect Door;\n\
+             atom value() -> bool requires: true; ensures: result == true; body: true;\n\
+             atom f() -> i64 effects: [Door]; requires: true; ensures: result == 0; \
+             body: { perform Door.apply(value()); 0 };",
+            "effect Door;\n\
+             atom f() -> i64 effects: [Door]; requires: true; ensures: result == 0; \
+             body: { perform Door.apply(7); 0 };",
+            "effect Door;\n\
+             atom f(value: f64) -> i64 effects: [Door]; requires: true; ensures: result == 0; \
+             body: { perform Door.apply(value); 0 };",
+            "type Narrow = i64 where v >= 0 && v <= 10;\n\
+             effect Door;\n\
+             atom value() -> Narrow requires: true; ensures: result == 1; body: 1;\n\
+             atom f() -> i64 effects: [Door]; requires: true; ensures: result == 0; \
+             body: { perform Door.apply(value()); 0 };",
+        ];
+        for source in sources {
+            let extracted = extract_pure_i64_module_contracts(
+                source,
+                "m.mm",
+                None,
+                RefinedAdmission::CompositeV25,
+            );
+            assert!(
+                extracted.is_ok(),
+                "extractor rejected {source}: {extracted:?}"
+            );
+
+            let config = z3::Config::new();
+            let context = z3::Context::new(&config);
+            let encoded = encode_pure_i64_module_obligations(
+                source,
+                &context,
+                RefinedAdmission::CompositeV25,
+            );
+            if let Err(error) = encoded {
+                panic!("bounded encoder rejected {source}: {error:?}");
+            }
         }
     }
 
