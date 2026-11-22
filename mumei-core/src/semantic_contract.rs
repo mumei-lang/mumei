@@ -1142,10 +1142,19 @@ fn binder_scalar_type(type_name: Option<&str>, refined: &RefinedEnv) -> &'static
 /// Whether the admitted module declares a `u64`-family leaf anywhere —
 /// `u64` itself, `usize` or `isize`, as a parameter, a result, a struct
 /// field (instantiated decls included, since monomorphization leaves
-/// the field name behind) or an enum payload slot. Only `CompositeV10`
-/// admission ever produces one.
+/// the field name behind), an enum payload slot, or a refined-alias
+/// declaration chain's literal base (`type Big = u64 where ..` can only
+/// exist under `CompositeV10`, so its presence alone already pins it).
+/// Only `CompositeV10` admission ever produces one.
 fn uses_u64_leaves(items: &[Item]) -> bool {
     let target_width = |name: Option<&str>| matches!(name, Some("u64" | "usize" | "isize"));
+    let typedefs: BTreeMap<&str, &crate::parser::ast::RefinedType> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::TypeDef(def) => Some((def.name.as_str(), def)),
+            _ => None,
+        })
+        .collect();
     items.iter().any(|item| match item {
         Item::Atom(atom) => {
             atom.params
@@ -1162,6 +1171,23 @@ fn uses_u64_leaves(items: &[Item]) -> bool {
             .iter()
             .flat_map(|v| v.field_types.iter())
             .any(|ty| target_width(Some(ty.display_name().as_str()))),
+        Item::TypeDef(def) => {
+            // Walk the declaration chain to the literal base — an
+            // alias that ends in a u64-family leaf needed v10 to be
+            // admitted, so the module must pin it even when the alias
+            // name is the only place the width appears.
+            let mut current = def;
+            let mut seen = BTreeSet::new();
+            loop {
+                if !seen.insert(current.name.as_str()) {
+                    break false;
+                }
+                match typedefs.get(current._base_type.as_str()) {
+                    Some(next) => current = next,
+                    None => break target_width(Some(current._base_type.as_str())),
+                }
+            }
+        }
         _ => false,
     })
 }
@@ -13584,6 +13610,17 @@ atom add(b: B, e: u64) -> B requires: true; ensures: result.t == b.t + e; body: 
         assert!(outcomes(&positive)
             .iter()
             .all(|r| *r == z3::SatResult::Unsat));
+        // A module whose only u64-family leaf hides inside an alias
+        // declaration still pins v10 — a lower pin would reject the
+        // same source on recheck.
+        let alias_only = module(
+            "type Big = u64 where v <= 10;\n\
+             atom f(a: Big) -> i64 requires: true; ensures: result == 0; body: { 0 };",
+        );
+        assert_eq!(
+            module_source_profile(&alias_only, RefinedAdmission::CompositeV10).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V10
+        );
         let wrapped = module(
             "type Big = u64 where v <= 10;\n\
              atom f(a: Big) -> u64 requires: true; ensures: result < 10; body: { a - 1 };",
