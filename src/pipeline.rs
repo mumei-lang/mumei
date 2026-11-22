@@ -183,26 +183,28 @@ pub(crate) fn try_load_and_prepare_with_full_options_and_persistence(
     }
 
     if strict_imports || allow_lean_verified {
-        if let Err(e) = resolver::resolve_imports_with_full_options_and_persistence(
+        if let Err(e) = resolver::resolve_imports_with_full_options_persistence_and_source(
             &items,
             base_dir,
             &mut module_env,
             strict_imports,
             allow_lean_verified,
             persist_cache,
+            Some(input),
         ) {
             if strict_imports {
                 return Err(format!("Import resolution failed (strict mode): {}", e));
             }
             return Err(format!("Import resolution failed: {}", e));
         }
-    } else if let Err(e) = resolver::resolve_imports_with_full_options_and_persistence(
+    } else if let Err(e) = resolver::resolve_imports_with_full_options_persistence_and_source(
         &items,
         base_dir,
         &mut module_env,
         false,
         false,
         persist_cache,
+        Some(input),
     ) {
         return Err(format!("Import resolution failed: {}", e));
     }
@@ -234,7 +236,9 @@ pub(crate) fn try_load_and_prepare_with_full_options_and_persistence(
         match item {
             Item::Atom(a) if !a.type_params.is_empty() => module_env.register_atom(a),
             Item::EnumDef(e) if !e.type_params.is_empty() => module_env.register_enum(e),
-            Item::StructDef(s) if !s.type_params.is_empty() => module_env.register_struct(s),
+            Item::StructDef(s) if !s.type_params.is_empty() => {
+                module_env.register_struct_with_origin(s, Some(input))
+            }
             _ => {}
         }
     }
@@ -254,13 +258,19 @@ pub(crate) fn try_load_and_prepare_with_full_options_and_persistence(
     for item in &items {
         match item {
             Item::Import(decl) => imports.push(decl.clone()),
-            Item::TypeDef(refined_type) => module_env.register_type(refined_type),
-            Item::StructDef(struct_def) => module_env.register_struct(struct_def),
+            Item::TypeDef(refined_type) => {
+                module_env.register_type_with_origin(refined_type, Some(input))
+            }
+            Item::StructDef(struct_def) => {
+                module_env.register_struct_with_origin(struct_def, Some(input))
+            }
             Item::EnumDef(enum_def) => module_env.register_enum(enum_def),
             Item::Atom(atom) => module_env.register_atom(atom),
             Item::TraitDef(_) => {}
             Item::ImplDef(_) => {}
-            Item::ResourceDef(resource_def) => module_env.register_resource(resource_def),
+            Item::ResourceDef(resource_def) => {
+                module_env.register_resource_with_origin(resource_def, Some(input))
+            }
             Item::EffectDef(_) => {}
             Item::CapabilityDef(_) => {}
             Item::ImplBlock(impl_block) => {
@@ -412,6 +422,8 @@ pub(crate) fn merge_module_env(
     target.verified_cache.extend(source.verified_cache);
     target.resources.extend(source.resources);
     target.resource_origins.extend(source.resource_origins);
+    target.type_origins.extend(source.type_origins);
+    target.struct_origins.extend(source.struct_origins);
     for (file, imports) in source.import_closure {
         target
             .import_closure

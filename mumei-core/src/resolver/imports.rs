@@ -81,12 +81,42 @@ pub fn resolve_imports_with_full_options_and_persistence(
     allow_lean_verified: bool,
     persist_cache: bool,
 ) -> MumeiResult<()> {
+    resolve_imports_with_full_options_persistence_and_source(
+        items,
+        base_dir,
+        module_env,
+        strict_imports,
+        allow_lean_verified,
+        persist_cache,
+        None,
+    )
+}
+
+/// Same as [`resolve_imports_with_full_options_and_persistence`] but records
+/// `source_file` as the root entry of [`ModuleEnv::import_closure`] so atoms
+/// parsed from this file get a tracked (possibly empty) import closure.
+pub fn resolve_imports_with_full_options_persistence_and_source(
+    items: &[Item],
+    base_dir: &Path,
+    module_env: &mut ModuleEnv,
+    strict_imports: bool,
+    allow_lean_verified: bool,
+    persist_cache: bool,
+    source_file: Option<&str>,
+) -> MumeiResult<()> {
     let cache_path = base_dir.join(".mumei_cache");
     let mut cache = load_cache(&cache_path);
     let mut ctx = ResolverContext::new();
     ctx.strict_imports = strict_imports;
     ctx.allow_lean_verified = allow_lean_verified;
-    resolve_imports_recursive(items, base_dir, &mut ctx, &mut cache, module_env, None)?;
+    resolve_imports_recursive(
+        items,
+        base_dir,
+        &mut ctx,
+        &mut cache,
+        module_env,
+        source_file,
+    )?;
     if persist_cache {
         save_cache(&cache_path, &cache);
     }
@@ -935,8 +965,12 @@ pub(crate) fn register_imported_items_with_source(
 
     for item in items {
         match item {
-            Item::TypeDef(refined_type) => module_env.register_type(refined_type),
-            Item::StructDef(struct_def) => module_env.register_struct(struct_def),
+            Item::TypeDef(refined_type) => {
+                module_env.register_type_with_origin(refined_type, source_file)
+            }
+            Item::StructDef(struct_def) => {
+                module_env.register_struct_with_origin(struct_def, source_file)
+            }
             Item::Atom(atom) => register_atom(module_env, atom),
             Item::EnumDef(enum_def) => module_env.register_enum(enum_def),
             Item::TraitDef(trait_def) => {
@@ -1001,12 +1035,12 @@ pub(crate) fn register_imported_alias_names(
             Item::TypeDef(refined_type) => {
                 let mut fqn_type = refined_type.clone();
                 fqn_type.name = format!("{}::{}", alias, refined_type.name);
-                module_env.register_type(&fqn_type);
+                module_env.register_type_with_origin(&fqn_type, None);
             }
             Item::StructDef(struct_def) => {
                 let mut fqn_struct = struct_def.clone();
                 fqn_struct.name = format!("{}::{}", alias, struct_def.name);
-                module_env.register_struct(&fqn_struct);
+                module_env.register_struct_with_origin(&fqn_struct, None);
             }
             Item::Atom(atom) => {
                 register_aliased_atom(module_env, atom, format!("{}::{}", alias, atom.name));

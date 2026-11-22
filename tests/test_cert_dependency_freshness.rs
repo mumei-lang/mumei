@@ -2192,7 +2192,7 @@ fn strict_import_tracks_resources_from_nested_import_closure() {
     std::fs::write(
         &b_source,
         "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;\n\
-         trusted atom b_fn(x: i64) -> i64\n\
+         atom b_fn(x: i64) -> i64\n\
          requires: true;\n\
          ensures: result == x;\n\
          body: x;\n",
@@ -2239,7 +2239,7 @@ fn strict_import_tracks_resources_from_nested_import_closure() {
     std::fs::write(
         &b_source,
         "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 5;\n\
-         trusted atom b_fn(x: i64) -> i64\n\
+         atom b_fn(x: i64) -> i64\n\
          requires: true;\n\
          ensures: result == x;\n\
          body: x;\n",
@@ -2256,4 +2256,181 @@ fn strict_import_tracks_resources_from_nested_import_closure() {
         "{changed_text}"
     );
     assert!(changed_text.contains("resource:counter"), "{changed_text}");
+}
+
+#[test]
+fn strict_import_tracks_unrefined_type_definitions() {
+    // An unreferenced refined type still gates every atom's verification: the
+    // spec sanity phase SAT-checks every type in the module environment, so a
+    // predicate change can flip b_fn's verdict and must surface as a dependency
+    // change even though nothing references the type.
+    let fixture = Fixture::new();
+    let b_dir = fixture.root.join("b");
+    let a_dir = fixture.root.join("a");
+    for dir in [&a_dir, &b_dir] {
+        std::fs::create_dir(dir).expect("create module directory");
+    }
+    let b_source = b_dir.join("b.mm");
+    let a_source = a_dir.join("a.mm");
+    let b_certificate = b_dir.join(".proof-cert.json");
+
+    let b_source_text = |predicate: &str| {
+        format!(
+            "type Positive = i64 where v >= 0;\n\
+             type Limit = i64 where {predicate};\n\
+             atom b_fn(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n"
+        )
+    };
+    std::fs::write(&b_source, b_source_text("v < 100")).expect("write B with refined types");
+    assert_success(
+        &fixture.certify(&b_source, &b_certificate),
+        "certify B with an unreferenced refined type",
+    );
+    let certificate: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&b_certificate).unwrap())
+            .expect("parse B certificate");
+    let b_fn = certificate
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "b_fn")
+        .expect("b_fn certificate");
+    let dependency_hashes = b_fn
+        .dependency_hashes
+        .as_ref()
+        .expect("generated dependency hashes");
+    assert!(dependency_hashes.contains_key("type:Limit"));
+    assert!(dependency_hashes.contains_key("type:Positive"));
+
+    std::fs::write(
+        &a_source,
+        "import \"../b/b.mm\";\n\
+         atom main(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("write importer");
+    let unchanged = fixture.verify(&a_source, &["--strict-imports"]);
+    let unchanged_text = output_text(&unchanged);
+    assert_success(
+        &unchanged,
+        "strictly import B holding an unreferenced refined type",
+    );
+    assert!(
+        !unchanged_text.contains("dependency_unchecked"),
+        "{unchanged_text}"
+    );
+
+    // Change the unreferenced predicate: the certificate must report the type
+    // as a changed dependency instead of staying stale-proven.
+    std::fs::write(&b_source, b_source_text("v <= 50")).expect("change the unreferenced predicate");
+    let changed = verify_cert(&fixture, &b_certificate, &b_source, false);
+    let changed_text = output_text(&changed);
+    assert_eq!(changed.status.code(), Some(0), "{changed_text}");
+    assert!(
+        changed_text.contains("dependency_changed"),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("type:Limit"), "{changed_text}");
+
+    // Make it contradictory: every atom's verification now fails the all-types
+    // SAT check, including the importer's.
+    std::fs::write(&b_source, b_source_text("v < 0 && v > 0"))
+        .expect("make the unreferenced predicate contradictory");
+    let unsat = fixture.verify(&a_source, &["--strict-imports"]);
+    let unsat_text = output_text(&unsat);
+    assert!(
+        !unsat.status.success(),
+        "importing B with an unsatisfiable refined type must fail\n{unsat_text}"
+    );
+}
+
+#[test]
+fn strict_import_tracks_unrefined_struct_and_enum_definitions() {
+    // An unreferenced struct still gates every atom's verification: the
+    // projection-collision rejection scans every struct in the module
+    // environment, and a nested enum participates in the same flattened paths.
+    let fixture = Fixture::new();
+    let b_dir = fixture.root.join("b");
+    let a_dir = fixture.root.join("a");
+    for dir in [&a_dir, &b_dir] {
+        std::fs::create_dir(dir).expect("create module directory");
+    }
+    let b_source = b_dir.join("b.mm");
+    let a_source = a_dir.join("a.mm");
+    let b_certificate = b_dir.join(".proof-cert.json");
+
+    let b_source_text = |struct_field: &str, enum_payload: &str| {
+        format!(
+            "struct Inner {{ x: i64 }}\n\
+             enum Step {{ A({enum_payload}: i64), B }}\n\
+             struct Pair {{ inner: Inner, step: Step, other: {struct_field} }}\n\
+             atom b_fn(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n"
+        )
+    };
+    std::fs::write(&b_source, b_source_text("i64", "v")).expect("write B with struct and enum");
+    assert_success(
+        &fixture.certify(&b_source, &b_certificate),
+        "certify B with unreferenced struct and enum",
+    );
+    let certificate: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&b_certificate).unwrap())
+            .expect("parse B certificate");
+    let b_fn = certificate
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "b_fn")
+        .expect("b_fn certificate");
+    let dependency_hashes = b_fn
+        .dependency_hashes
+        .as_ref()
+        .expect("generated dependency hashes");
+    assert!(dependency_hashes.contains_key("struct:Pair"));
+    assert!(dependency_hashes.contains_key("struct:Inner"));
+    assert!(dependency_hashes.contains_key("enum:Step"));
+
+    std::fs::write(
+        &a_source,
+        "import \"../b/b.mm\";\n\
+         atom main(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("write importer");
+    let unchanged = fixture.verify(&a_source, &["--strict-imports"]);
+    let unchanged_text = output_text(&unchanged);
+    assert_success(
+        &unchanged,
+        "strictly import B holding unreferenced struct and enum definitions",
+    );
+    assert!(
+        !unchanged_text.contains("dependency_unchecked"),
+        "{unchanged_text}"
+    );
+
+    // Rename the field so 'inner_x' collides with Inner's flattened 'inner_x'
+    // projection — the module-level gate now rejects every atom in B.
+    std::fs::write(
+        &b_source,
+        b_source_text("i64", "v").replace("other: i64", "inner_x: i64"),
+    )
+    .expect("rename the struct field into a projection collision");
+    let changed = fixture.verify(&a_source, &["--strict-imports"]);
+    let changed_text = output_text(&changed);
+    assert!(
+        !changed.status.success(),
+        "importing B with a colliding projection must fail\n{changed_text}"
+    );
+    assert!(
+        changed_text.contains("projection paths collide")
+            || changed_text.contains("dependency_changed"),
+        "{changed_text}"
+    );
 }

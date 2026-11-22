@@ -1088,7 +1088,11 @@ mod tests {
             .as_ref()
             .expect("generated dependency hashes");
         assert!(struct_hashes.contains_key("struct:Box"));
-        assert!(!struct_hashes.contains_key("struct:T"));
+        // 'T' is also a real struct definition, and every struct gates every
+        // atom's verification through the module-wide projection-collision
+        // check, so it is keyed as a module definition — not because the
+        // generic parameter name leaked into the dependency set.
+        assert!(struct_hashes.contains_key("struct:T"));
 
         let changed_struct = generic_struct.replace("T { field: i64 }", "T { field: bool }");
         let (_, _, changed_struct_env) = signature_type_dependency_fixture(&changed_struct, "read");
@@ -1098,7 +1102,10 @@ mod tests {
             false,
             Some(&changed_struct_env),
         );
-        assert_eq!(struct_check[0].status, status::CERTIFICATE_PROVEN);
+        assert_eq!(
+            struct_check[0].status,
+            status::CERTIFICATE_DEPENDENCY_CHANGED
+        );
 
         let generic_atom = "struct T { field: i64 }\n\
                             atom read<T>(value: T) -> i64\n\
@@ -1110,13 +1117,14 @@ mod tests {
             .dependency_hashes
             .as_ref()
             .expect("generated dependency hashes");
-        assert!(!atom_hashes.contains_key("struct:T"));
+        // Same module-definition keying: 'T' is a real struct in the env.
+        assert!(atom_hashes.contains_key("struct:T"));
 
         let changed_atom = generic_atom.replace("T { field: i64 }", "T { field: bool }");
         let (_, _, changed_atom_env) = signature_type_dependency_fixture(&changed_atom, "read");
         let atom_check =
             verify_certificate_in_env(&atom_cert, &[&atom_root], false, Some(&changed_atom_env));
-        assert_eq!(atom_check[0].status, status::CERTIFICATE_PROVEN);
+        assert_eq!(atom_check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
     }
 
     #[test]
