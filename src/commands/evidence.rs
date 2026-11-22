@@ -19,7 +19,7 @@ const TEXT: &str = "Evidence v1 representation valid.\n\
 Scope: representation only; no claim truth, file identity, freshness, producer authenticity, semantic correspondence or artifact semantics checked.\n\
 Evidence acceptance: not evaluated.\n\
 No verifier or artifact executed; no grade promotion or final-executable assurance.\n";
-const MAX_SEMANTIC_CONTRACT_SIDECAR_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_SEMANTIC_CONTRACT_SIDECAR_BYTES: u64 = producer_signature::MAX_SUBJECT_BYTES;
 const MAX_SEMANTIC_CONTRACT_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 
 pub(crate) fn run(command: EvidenceCommand) {
@@ -863,8 +863,10 @@ fn sign(
     output: &mut impl Write,
 ) -> Result<(), &'static str> {
     let record = match (input, stdin) {
-        (Some(path), false) => super::input::read_regular(path, MAX_INPUT_BYTES as u64)?,
-        (None, true) => super::input::read_stdin(MAX_INPUT_BYTES as u64)?,
+        (Some(path), false) => {
+            super::input::read_regular(path, producer_signature::MAX_SUBJECT_BYTES)?
+        }
+        (None, true) => super::input::read_stdin(producer_signature::MAX_SUBJECT_BYTES)?,
         _ => return Err("choose exactly one evidence input"),
     };
     let key_bytes = super::input::read_regular(key_file, 64)?;

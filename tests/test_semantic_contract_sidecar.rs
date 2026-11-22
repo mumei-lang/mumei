@@ -870,3 +870,77 @@ fn accept_sidecar_rejects_invalid_signature_options_before_source_work() {
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid producer public key"));
 }
+
+#[test]
+fn accept_sidecar_signs_a_real_sidecar_larger_than_the_old_subject_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let binder = "x".repeat(1_400);
+    let mut source = String::new();
+    for index in 0..9 {
+        source.push_str(&format!(
+            "atom f{index}({binder}: i64) -> i64 requires: {binder} == {binder}; ensures: result == {binder}; body: {binder};\n"
+        ));
+    }
+    source.push_str("atom main() -> i64 requires: true; ensures: result == 0; body: 0;\n");
+    assert!(source.len() <= 65_536);
+
+    let input = write_input(dir.path(), "large-contracts.mm", &source);
+    let output_base = dir.path().join("large-contracts");
+    succeeds(run_build(&input, &output_base, true));
+
+    let artifact = dir.path().join("large-contracts_main.ll");
+    assert!(artifact.is_file());
+    let sidecar = artifact.with_extension("semantic-contract.json");
+    let sidecar_bytes = fs::read(&sidecar).unwrap();
+    assert!(
+        sidecar_bytes.len() > 65_536,
+        "generated sidecar size: {} bytes",
+        sidecar_bytes.len()
+    );
+    println!(
+        "generated semantic-contract sidecar: {} bytes",
+        sidecar_bytes.len()
+    );
+
+    let (secret, public) = generate_producer_key(dir.path());
+    let sign_output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args(["evidence", "sign"])
+        .arg(&sidecar)
+        .args(["--key-file"])
+        .arg(&secret)
+        .args(["--producer-key-id", PRODUCER_KEY_ID, "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        sign_output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&sign_output.stdout),
+        String::from_utf8_lossy(&sign_output.stderr)
+    );
+    assert!(sign_output.stderr.is_empty());
+    let secret_text = fs::read_to_string(&secret).unwrap();
+    assert!(!String::from_utf8_lossy(&sign_output.stdout).contains(&secret_text));
+    assert!(!String::from_utf8_lossy(&sign_output.stderr).contains(&secret_text));
+    let signature = dir.path().join("large-sidecar.signature.json");
+    fs::write(&signature, &sign_output.stdout).unwrap();
+
+    let mut command = sidecar_accept_command(&sidecar, &input, &artifact, true);
+    command
+        .args(["--signature"])
+        .arg(&signature)
+        .args(["--producer-key", &public])
+        .args(["--expected-producer-key", PRODUCER_KEY_ID]);
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let descriptor: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(descriptor["accepted"], true);
+    assert!(descriptor["checks_performed"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("producer_signature_binding".to_owned())));
+}

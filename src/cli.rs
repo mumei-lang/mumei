@@ -536,10 +536,10 @@ pub(crate) enum EvidenceCommand {
     },
     /// Detachably sign a bounded record's raw bytes with a declared ed25519 key into a producer-signature envelope; binds the declared key id only
     Sign {
-        /// Regular file (at most 65,536 bytes) whose raw bytes become the signed subject; never parsed or canonicalized
+        /// Regular file (at most 4 MiB (4,194,304 bytes)) whose raw bytes become the signed subject; never parsed or canonicalized
         #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
         input: Option<String>,
-        /// Read the record bytes from standard input (at most 65,536 bytes); never infer stdin from a missing file
+        /// Read the record bytes from standard input (at most 4 MiB (4,194,304 bytes)); never infer stdin from a missing file
         #[arg(long)]
         stdin: bool,
         /// Emit the detached mumei.producer-signature/v1 envelope, not a verification or acceptance result
