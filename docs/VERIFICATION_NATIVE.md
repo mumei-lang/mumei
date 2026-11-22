@@ -2046,7 +2046,10 @@ argument sequence, so integer leaves without a free GPR spill onto the
 argument stack exactly like scalar stack arguments. f64 leaves without a
 free XMM register fail closed — across the whole argument list SSE leaves
 are bounded by eight — and aggregates with seventeen or more leaves fail
-closed as `unsupported_signature`.
+closed (`argument_count` for function parameters, `call_arguments` for
+direct-call arguments). The source admission fragment already rejects
+struct declarations wider than sixteen leaves, so these checks fire only
+on hand-written object inputs, not compiler output.
 
 Aggregate results are admitted only with at most four leaves overall, at
 most three INTEGER leaves, and at most two SSE leaves. The `llc-17 -O2`
