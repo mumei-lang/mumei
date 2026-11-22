@@ -2309,12 +2309,12 @@ pub(crate) fn stmt_to_z3<'a>(
             if super::z3_types::is_array_shared(env, array) {
                 return Err(super::z3_types::shared_array_mutation_error(array));
             }
+            let val = expr_to_z3(vc, value, env, solver_opt)?;
             // Indices stay `Int`-sorted under `--bitvec-i64`; bridge a `BV(64)`
             // index through the signed bit-vector/integer conversion.
             let idx_value = expr_to_z3(vc, index, env, solver_opt)?;
             let idx = as_int_like(&idx_value)
                 .ok_or(MumeiError::type_error("Array index must be integer"))?;
-            let val = expr_to_z3(vc, value, env, solver_opt)?;
             let element_type = super::z3_types::array_element_type_name(array, vc);
             super::z3_types::validate_array_element_type(vc, &element_type)?;
             let element_sort = super::z3_types::array_element_sort_from_type(
