@@ -1731,7 +1731,7 @@ pub fn recheck_multifile_source(
 
 /// The per-atom obligation sweep shared by the module and multifile
 /// source rechecks.
-fn solve_module_obligations(
+pub fn solve_module_obligations(
     atoms: &[semantic_contract::ModuleAtomObligations<'_>],
     solver: &z3::Solver,
 ) -> Result<SourceRecheck, BundleError> {

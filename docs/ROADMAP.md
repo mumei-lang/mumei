@@ -3695,7 +3695,9 @@ types remain rejected; native-bundle profiles do not yet pin v24.
 
 `mumei build --semantic-contract` is an opt-in production sidecar. It binds the
 exact emitted `.ll` bytes by SHA-256 only; correspondence remains unchecked,
-no consumer accepts the sidecar yet (follow-up), and it is not default output.
+and it is not default output. `mumei evidence recheck-sidecar` now rechecks the
+caller-supplied source extraction and module obligations as a diagnostic only,
+not acceptance; source-to-LLVM correspondence remains unchecked.
 
 The Evidence v1 record now carries an optional `produced_at` field —
 slice 2 of the mumei-agent issue #894 design memo. `evidence

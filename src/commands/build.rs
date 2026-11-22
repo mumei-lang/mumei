@@ -1275,7 +1275,7 @@ fn emit_semantic_contract_sidecars(input: &str, source: &str, llvm_paths: &[Path
             let llvm_bytes = fs::read(llvm_path)
                 .map_err(|error| format!("failed to read emitted LLVM IR: {error}"))?;
             let sidecar = serde_json::json!({
-                "schema_version": "mumei.semantic-contract-sidecar/v1",
+                "schema_version": super::SEMANTIC_CONTRACT_SIDECAR_SCHEMA_VERSION,
                 "semantic_contract_version":
                     mumei_core::semantic_contract::SEMANTIC_CONTRACT_VERSION,
                 "artifact": {

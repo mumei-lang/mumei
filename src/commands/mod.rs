@@ -22,3 +22,6 @@ pub(crate) mod run;
 pub(crate) mod verify;
 pub(crate) mod verify_cert;
 pub(crate) mod verify_sarif;
+
+pub(crate) const SEMANTIC_CONTRACT_SIDECAR_SCHEMA_VERSION: &str =
+    "mumei.semantic-contract-sidecar/v1";
