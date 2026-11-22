@@ -352,11 +352,14 @@ block. Effect values use the same field hashing as the proof hash's
 type, and raw predicate; struct values cover its fields, field constraints,
 and invariants.
 Enum keys pin variant names, payload field names and types for enums used
-directly in an atom's signature.
-The dependency-type closure starts from names in an atom's signature and
-follows struct fields, enum payloads, refined-type bases, and generic arguments.
-Types referenced only in bodies are not keyed. Legacy certificates missing a
-reachable `type:`, `struct:`, or `enum:` key are reported as
+directly in an atom's signature. The proof hash covers every refined-type
+definition in the module.
+The dependency-type closure starts from names in an atom's signature, struct
+literals, enum variant patterns and constructors in its body, and the
+signatures of every keyed callee. It follows struct fields, enum payloads,
+refined-type bases, and generic arguments; other types referenced only in
+bodies are not keyed. Legacy certificates missing a reachable `type:`,
+`struct:`, or `enum:` key are reported as
 `dependency_unchecked`.
 The dependency walk follows syntactic callees through atoms registered in the
 current `ModuleEnv`, independently of its dependency graph. Unresolved names
