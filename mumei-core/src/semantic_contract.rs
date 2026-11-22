@@ -8757,12 +8757,10 @@ pub struct ModuleAtomObligations<'ctx> {
 
 /// The module-atom obligation family — every entry must be `unsat`:
 ///
-/// - entry 0: `requires ∧ call_assumptions ∧ ¬ensures ∧ exits` — the
-///   caller's own postcondition, assuming each callee honoured its
-///   `ensures`;
-/// - additional entries check each `perform` argument's definedness
-///   under `requires`, then each call site establishes the callee's
-///   precondition *and* stays inside its verified domain.
+/// - entry 0: `requires ∧ assumptions ∧ ¬ensures` — the caller's own
+///   postcondition under callee ensures, parameter bounds and loop exits;
+/// - additional entries replace `¬ensures` with each `perform`
+///   argument's `¬defined` check under the same assumptions.
 ///
 /// The domain obligations deliberately exclude the other sites' ensures
 /// assumptions, so no circular justification is possible: a call whose
@@ -9016,23 +9014,15 @@ fn module_atom_obligations<'ctx>(
         let site_domain = Bool::and(context, &[&site.guard, &exits_domain]);
         assumptions.push(site_domain.implies(&callee_post));
     }
+    assumptions.extend(requires_exits.iter().chain(ensures_exits.iter()).cloned());
+    assumptions.extend(source_domain.iter().cloned());
     let assumption = Bool::and(context, &assumptions.iter().collect::<Vec<_>>());
-    let mut terms = vec![
-        requires.clone(),
-        Bool::and(context, &[&assumption, &post.not()]),
-    ];
-    for exits in requires_exits.iter().chain(ensures_exits.iter()) {
-        terms.push(exits.clone());
-    }
-    terms.extend(source_domain.iter().cloned());
-    let mut obligations = vec![Bool::and(context, &terms.iter().collect::<Vec<_>>())];
+    let mut obligations = vec![Bool::and(context, &[&requires, &assumption, &post.not()])];
     for defined in &body.perform_definedness {
-        let mut terms = vec![requires.clone(), defined.not()];
-        terms.extend(body.param_domain.iter().cloned());
-        if let Some(exits) = &body.loop_bound_exits {
-            terms.push(exits.clone());
-        }
-        obligations.push(Bool::and(context, &terms.iter().collect::<Vec<_>>()));
+        obligations.push(Bool::and(
+            context,
+            &[&requires, &assumption, &defined.not()],
+        ));
     }
     obligations.extend(domain_obligations);
     Ok(ModuleAtomObligations {
@@ -10687,14 +10677,14 @@ fn source_expr<'ctx>(
     }
     Ok(match expr {
         Expr::Perform { args, .. } => {
-            let definedness_start = definedness.len();
+            let mut perform_definedness = Vec::new();
             for arg in args {
                 source_expr(
                     arg,
                     ctx,
                     env,
                     guard,
-                    definedness,
+                    &mut perform_definedness,
                     depth + 1,
                     &BTreeSet::new(),
                     written,
@@ -10707,7 +10697,7 @@ fn source_expr<'ctx>(
             call_returns
                 .perform_definedness
                 .borrow_mut()
-                .extend(definedness[definedness_start..].iter().cloned());
+                .extend(perform_definedness);
             N(BV::from_u64(ctx, 0, 64))
         }
         Expr::Number(n) => N(BV::from_i64(ctx, *n, 64)),
@@ -16574,6 +16564,52 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
         assert!(
             met.iter().all(|result| *result == z3::SatResult::Unsat),
             "{met:?}"
+        );
+    }
+
+    #[test]
+    fn composite_v25_perform_definedness_uses_postcondition_hypotheses() {
+        let callee_ensures = "effect Vault;\n\
+            atom one() -> i64 requires: true; ensures: result == 1; body: 1;\n\
+            atom caller(x: i64) -> i64 effects: [Vault];\n\
+                requires: true;\n\
+                ensures: result == 0;\n\
+                body: { perform Vault.apply(x / one()); 0 };";
+        let outcomes =
+            refined_module_outcomes_admission(callee_ensures, RefinedAdmission::CompositeV25);
+        assert!(
+            outcomes
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat),
+            "{outcomes:?}"
+        );
+
+        let requires_loop = "effect Vault;\n\
+            atom f(y: i64) -> i64 effects: [Vault];\n\
+                requires: { let i = 0; while y == 0 invariant: i >= 0 decreases: 4 { i = i + 1 }; true };\n\
+                ensures: result == 0;\n\
+                body: { let x = 1; perform Vault.apply(x / y); 0 };";
+        let outcomes =
+            refined_module_outcomes_admission(requires_loop, RefinedAdmission::CompositeV25);
+        assert!(
+            outcomes
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat),
+            "{outcomes:?}"
+        );
+
+        let guarded_branch = "effect Vault;\n\
+            atom f(y: i64) -> i64 effects: [Vault];\n\
+                requires: true;\n\
+                ensures: result == 0;\n\
+                body: { let x = 1; if y != 0 { perform Vault.apply(x / y); 0 } else { 0 } };";
+        let outcomes =
+            refined_module_outcomes_admission(guarded_branch, RefinedAdmission::CompositeV25);
+        assert!(
+            outcomes
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat),
+            "{outcomes:?}"
         );
     }
 }
