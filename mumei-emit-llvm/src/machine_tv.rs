@@ -3884,7 +3884,19 @@ fn lift_call<'ctx>(
         call_state.used_call_targets.insert(field_offset);
         return Ok(());
     }
-    if let Some(operation) = ti3_libcall_operation(&target.name) {
+    // A callee named `__*ti3` that a remaining source call site
+    // resolves to is a user function, not compiler-rt — name matching
+    // alone cannot tell them apart, so the normal call path wins.
+    let target_is_source_callee = model
+        .call_sites
+        .iter()
+        .skip(call_state.call_index)
+        .any(|site| {
+            crate::translation_validation::native_function_name(&site.callee) == target.name
+        });
+    if let Some(operation) =
+        ti3_libcall_operation(&target.name).filter(|_| !target_is_source_callee)
+    {
         // compiler-rt `__*ti3` helpers implement an i128/u128
         // operation that the source model keeps as an expression, so
         // no call site is consumed: apply the SysV pair convention
@@ -12972,6 +12984,37 @@ entry:
         assert_eq!(
             check_function(&call_ret, 0, &narrow, &libcall("__udivti3"), &context),
             FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+    }
+
+    #[test]
+    fn ti3_name_colliding_with_a_source_callee_uses_call_site_semantics() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "atom __udivti3(a: i64, b: i64) -> i64 requires: true; ensures: true; body: { 0 };\n\
+            atom caller(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { __udivti3(x, y) };";
+        let model = source_model_named(source, "caller", &context);
+        assert_eq!(model.call_sites.len(), 1);
+        // The object calls the user-defined `__udivti3`, not the
+        // compiler-rt helper: the call must consume the source call
+        // site instead of applying 128-bit division register-pair
+        // semantics, otherwise the lifted state would diverge from
+        // the site's result and reject a correct function.
+        let call_ret = [0xe8, 0x00, 0x00, 0x00, 0x00, 0xc3];
+        let target = BTreeMap::from([(
+            1u64,
+            CallTarget {
+                name: "__udivti3".to_owned(),
+                relocation_kind: CallRelocationKind::ElfX86_64Plt32,
+                relocation_size: 32,
+                addend: -4,
+            },
+        )]);
+        assert_eq!(
+            check_function(&call_ret, 0, &model, &target, &context),
+            FunctionOutcome::Equivalent
         );
     }
 }
