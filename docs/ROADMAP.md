@@ -3201,10 +3201,10 @@ outside the profile. Agent consumers must adopt these names.
 The same bounded profile admits one- through eight-leaf struct parameters and
 direct-call arguments whose leaves are INTEGER (`i64`) and/or SSE (`f64`).
 INTEGER leaves use the next GPR from `rdi`–`r9`; SSE leaves use the next XMM
-register from `xmm0`–`xmm7`, independently. Aggregates are preflighted per
-class and must fit wholly in the remaining registers; they are never split
-or passed on the stack, so all-INTEGER aggregates are still bounded by six
-GPRs in practice.
+register from `xmm0`–`xmm7`, independently. LLVM `expand` lowering flattens
+aggregates leaf-by-leaf into the scalar argument sequence, so INTEGER leaves
+that do not fit spill to the argument stack exactly like scalar arguments.
+SSE leaves without a free XMM register fail closed.
 
 Aggregate results have at most four leaves overall, at most three INTEGER
 leaves, and at most two SSE leaves. Real `llc-17 -O2` output returned three
