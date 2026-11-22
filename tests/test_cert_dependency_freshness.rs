@@ -294,6 +294,65 @@ fn imported_enum_signature_change_is_a_dependency_change() {
 }
 
 #[test]
+fn imported_struct_enum_field_change_is_a_dependency_change() {
+    let fixture = Fixture::new();
+    let source = fixture.root.join("a.mm");
+    let imported = fixture.root.join("b.mm");
+    let certificate = fixture.root.join("a.proof.json");
+    std::fs::write(
+        &imported,
+        "enum E { A(v: i64), B }\nstruct Wrapper { value: E }\n",
+    )
+    .expect("write enum and struct module");
+    std::fs::write(
+        &source,
+        "import \"./b.mm\";\n\
+         atom read(value: Wrapper) -> i64\n\
+         requires: true;\n\
+         ensures: result == 0;\n\
+         body: 0;\n",
+    )
+    .expect("write importing module");
+    assert_success(
+        &fixture.certify(&source, &certificate),
+        "certify imported struct signature",
+    );
+
+    let cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&certificate).unwrap()).expect("parse certificate");
+    let read = cert
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "read")
+        .expect("read certificate");
+    let dependency_hashes = read
+        .dependency_hashes
+        .as_ref()
+        .expect("generated dependency hashes");
+    assert!(dependency_hashes.contains_key("struct:Wrapper"));
+    assert!(dependency_hashes.contains_key("enum:E"));
+
+    let unchanged = verify_cert(&fixture, &certificate, &source, false);
+    let unchanged_text = output_text(&unchanged);
+    assert_eq!(unchanged.status.code(), Some(0), "{unchanged_text}");
+    assert!(unchanged_text.contains("read: proven"), "{unchanged_text}");
+
+    std::fs::write(
+        &imported,
+        "enum E { A(v: i64), B, C }\nstruct Wrapper { value: E }\n",
+    )
+    .expect("add enum variant in imported module");
+    let changed = verify_cert(&fixture, &certificate, &source, false);
+    let changed_text = output_text(&changed);
+    assert_eq!(changed.status.code(), Some(0), "{changed_text}");
+    assert!(
+        changed_text.contains("read: dependency_changed"),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("enum:E"), "{changed_text}");
+}
+
+#[test]
 fn stale_transitive_contract_is_rejected_and_claimbook_marks_drift() {
     let fixture = Fixture::new();
     let (a_source, b_source, c_source, a_cert, b_cert) = setup_modules(&fixture);
