@@ -25,6 +25,7 @@ struct LoadedDep {
     entry_path: PathBuf,
     module_dir: PathBuf,
     spec: crate::manifest::Dependency,
+    dependency_name: String,
     package_name: Option<String>,
 }
 
@@ -449,6 +450,7 @@ pub fn resolve_manifest_dependencies_with_full_options_persistence_and_source(
                 entry_path: deferred.entry_path.clone(),
                 module_dir: deferred.module_dir.clone(),
                 spec: deferred.spec.clone(),
+                dependency_name: deferred.dependency_name.clone(),
                 package_name,
             }
         })
@@ -461,7 +463,17 @@ pub fn resolve_manifest_dependencies_with_full_options_persistence_and_source(
                 } else if spec.as_git().is_some() {
                     loaded.spec.as_git() == spec.as_git()
                 } else {
-                    loaded.package_name.as_deref() == Some(dep_name)
+                    // Registry specs resolve by name, so the manifest key is
+                    // itself the package name; use it as the fallback when the
+                    // fetched package carries no manifest (remote fetch does
+                    // not require one).
+                    let registry_name = loaded.package_name.as_deref().or_else(|| {
+                        loaded
+                            .spec
+                            .version()
+                            .map(|_| loaded.dependency_name.as_str())
+                    });
+                    registry_name == Some(dep_name)
                 };
                 matched.then(|| loaded.entry_path.clone())
             })
