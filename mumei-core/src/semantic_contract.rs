@@ -904,10 +904,14 @@ fn admit_pure_i64_atoms(
             }
         }
     }
+    // The arithmetic-used flag is shared with alias resolution below:
+    // an `f64` predicate inside a `type` declaration needs the v19
+    // profile pin exactly like `f64` arithmetic inside an atom body.
+    let f64_arithmetic_used = std::cell::Cell::new(false);
     // Refined declarations share the module's name space with atoms: a
     // type named like an atom would make `T(` ambiguous between a type
     // position and a call, so the admission is closed over both maps.
-    let refined = build_refined_env(&items, admission)?;
+    let refined = build_refined_env(&items, admission, &f64_arithmetic_used)?;
     let structs = build_struct_env(&items, &refined, admission)?;
     let enums = build_enum_env(&items, &refined, &structs, admission)?;
     if refined
@@ -951,7 +955,6 @@ fn admit_pure_i64_atoms(
     let enum_scalar_ops_used = std::cell::Cell::new(false);
     let nested_writes_used = std::cell::Cell::new(false);
     let enum_writes_used = std::cell::Cell::new(false);
-    let f64_arithmetic_used = std::cell::Cell::new(false);
     for item in &items {
         let Item::Atom(sibling) = item else {
             continue;
@@ -1211,6 +1214,22 @@ fn is_wide_leaf_name(name: Option<&str>, refined: &RefinedEnv) -> bool {
     }
 }
 
+/// Whether a declared leaf type name resolves to `f64` — the literal,
+/// or a refined alias whose base does (`pure-i64-composite/v12`).
+/// Sites that pick ABI register classes (leaf doubles) must use this
+/// rather than a literal name match so alias-typed `f64` leaves take
+/// the same XMM slot shape as the literal leaf.
+fn is_f64_leaf_name(name: Option<&str>, refined: &RefinedEnv) -> bool {
+    match name {
+        Some("f64") => true,
+        Some(n) => refined
+            .get(n)
+            .map(|alias| alias.kind == ScalarKind::F64)
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
 /// Whether the admitted module declares a 128-bit leaf anywhere — a
 /// parameter, a result, a struct field or an enum payload slot. Only
 /// `CompositeV21` admission ever produces one.
@@ -1258,19 +1277,61 @@ fn uses_wide_leaves(items: &[Item]) -> bool {
 /// parameter, a result, a struct field or an enum payload slot. Only
 /// `CompositeV12` admission ever produces one.
 fn uses_f64_leaves(items: &[Item]) -> bool {
+    // A declared type name counts when its chain ends in `f64` — an
+    // alias-typed `f64` leaf needs the same v12 gate the literal
+    // leaf carries (the walk mirrors `uses_wide_leaves`).
+    let typedefs: BTreeMap<&str, &crate::parser::ast::RefinedType> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::TypeDef(def) => Some((def.name.as_str(), def)),
+            _ => None,
+        })
+        .collect();
+    let f64 = |name: Option<&str>| {
+        let Some(mut current) = name else {
+            return false;
+        };
+        let mut seen = BTreeSet::new();
+        loop {
+            if current == "f64" {
+                break true;
+            }
+            if !seen.insert(current) {
+                break false;
+            }
+            match typedefs.get(current) {
+                Some(next) => current = next._base_type.as_str(),
+                None => break false,
+            }
+        }
+    };
     items.iter().any(|item| match item {
         Item::Atom(atom) => {
-            atom.params
-                .iter()
-                .any(|p| p.type_name.as_deref() == Some("f64"))
-                || atom.return_type.as_deref() == Some("f64")
+            atom.params.iter().any(|p| f64(p.type_name.as_deref()))
+                || f64(atom.return_type.as_deref())
         }
-        Item::StructDef(def) => def.fields.iter().any(|f| f.type_name == "f64"),
+        Item::StructDef(def) => def.fields.iter().any(|f| f64(Some(f.type_name.as_str()))),
         Item::EnumDef(def) => def
             .variants
             .iter()
             .flat_map(|v| v.field_types.iter())
-            .any(|ty| ty.display_name() == "f64"),
+            .any(|ty| f64(Some(ty.display_name().as_str()))),
+        Item::TypeDef(def) => {
+            // Declaration-presence convention, same as the wide
+            // walk: an alias ending in `f64` needs v12 even when no
+            // signature names it.
+            let mut current = def;
+            let mut seen = BTreeSet::new();
+            loop {
+                if !seen.insert(current.name.as_str()) {
+                    break false;
+                }
+                match typedefs.get(current._base_type.as_str()) {
+                    Some(next) => current = next,
+                    None => break current._base_type.as_str() == "f64",
+                }
+            }
+        }
         _ => false,
     })
 }
@@ -2027,6 +2088,7 @@ fn declared_param_kind(
                 ScalarKind::Bool if !admit_widened => return None,
                 ScalarKind::U64 if !admit_u64 => return None,
                 ScalarKind::I128 | ScalarKind::U128 if !admit_wide => return None,
+                ScalarKind::F64 if !admit_f64 => return None,
                 kind => kind,
             },
             _ => return None,
@@ -3025,6 +3087,7 @@ fn validate_atom(
             ScalarKind::Bool => admit_widened,
             ScalarKind::U64 => admit_u64,
             ScalarKind::I128 | ScalarKind::U128 => admit_wide,
+            ScalarKind::F64 => admit_f64,
             _ => true,
         }),
         None => false,
@@ -4238,10 +4301,10 @@ fn build_enum_env(
                 "empty enum declarations",
             ));
         }
-        if scalar_base(&def.name, false, false).is_some()
+        if scalar_base(&def.name, false, false, false).is_some()
             || matches!(
                 def.name.as_str(),
-                "u64" | "usize" | "isize" | "i128" | "u128"
+                "u64" | "usize" | "isize" | "i128" | "u128" | "f64" | "Str"
             )
         {
             return Err(SemanticContractError::Unsupported(
@@ -4308,6 +4371,7 @@ fn build_enum_env(
                         .filter(|alias| {
                             matches!(alias.base, "i64" | "bool")
                                 || (admission.admits_u64_leaves() && alias.base == "u64")
+                                || (admission.admits_f64_leaves() && alias.base == "f64")
                                 || (admission.admits_wide_payloads()
                                     && matches!(alias.base, "i128" | "u128"))
                         })
@@ -4533,10 +4597,10 @@ fn build_struct_env(
                 "empty struct declarations",
             ));
         }
-        if scalar_base(&def.name, false, false).is_some()
+        if scalar_base(&def.name, false, false, false).is_some()
             || matches!(
                 def.name.as_str(),
-                "u64" | "usize" | "isize" | "i128" | "u128"
+                "u64" | "usize" | "isize" | "i128" | "u128" | "f64" | "Str"
             )
         {
             return Err(SemanticContractError::Unsupported(
@@ -4598,6 +4662,7 @@ fn build_struct_env(
                     .filter(|alias| {
                         matches!(alias.base, "i64" | "bool")
                             || (admission.admits_u64_leaves() && alias.base == "u64")
+                            || (admission.admits_f64_leaves() && alias.base == "f64")
                             || (admission.admits_wide_leaves()
                                 && matches!(alias.base, "i128" | "u128"))
                     })
@@ -4686,6 +4751,7 @@ fn scalar_base(
     name: &str,
     admit_u64: bool,
     admit_wide: bool,
+    admit_f64: bool,
 ) -> Option<(ScalarKind, &'static str)> {
     match name {
         "bool" => Some((ScalarKind::Bool, "bool")),
@@ -4709,6 +4775,12 @@ fn scalar_base(
         // literal `i128`/`u128` signature leaf's clauses.
         "i128" if admit_wide => Some((ScalarKind::I128, "i128")),
         "u128" if admit_wide => Some((ScalarKind::U128, "u128")),
+        // An `f64`-leaf alias folds exactly like a literal `f64`
+        // leaf (`pure-i64-composite/v12`): the same one-slot leaf
+        // kind, the same pass-through boundary. Its predicates use
+        // the v19 `f64` vocabulary — `==` on `f64` values — so an
+        // ordering predicate stays out with ordering itself.
+        "f64" if admit_f64 => Some((ScalarKind::F64, "f64")),
         _ => None,
     }
 }
@@ -4726,6 +4798,7 @@ fn scalar_base(
 fn build_refined_env(
     items: &[Item],
     admission: RefinedAdmission,
+    f64_arithmetic_used: &std::cell::Cell<bool>,
 ) -> Result<RefinedEnv, SemanticContractError> {
     let mut defs = BTreeMap::new();
     for item in items {
@@ -4752,6 +4825,8 @@ fn build_refined_env(
                 | "isize"
                 | "i128"
                 | "u128"
+                | "f64"
+                | "Str"
         ) {
             return Err(SemanticContractError::Unsupported(
                 "type name shadows a scalar profile name",
@@ -4763,7 +4838,10 @@ fn build_refined_env(
     }
     let mut env = RefinedEnv::new();
     for (name, def) in &defs {
-        env.insert(name.to_string(), resolve_alias(def, &defs, admission)?);
+        env.insert(
+            name.to_string(),
+            resolve_alias(def, &defs, admission, f64_arithmetic_used)?,
+        );
     }
     Ok(env)
 }
@@ -4772,6 +4850,7 @@ fn resolve_alias(
     def: &crate::parser::ast::RefinedType,
     defs: &BTreeMap<&str, &crate::parser::ast::RefinedType>,
     admission: RefinedAdmission,
+    f64_arithmetic_used: &std::cell::Cell<bool>,
 ) -> Result<ResolvedAlias, SemanticContractError> {
     // Walk the declaration chain to the literal base, accumulating each
     // declaration's own (operand, predicate) conjunct — the same
@@ -4806,6 +4885,7 @@ fn resolve_alias(
         &leaf,
         admission.admits_u64_leaves(),
         admission.admits_wide_leaves(),
+        admission.admits_f64_leaves(),
     )
     .ok_or(SemanticContractError::Unsupported(
         "type outside the scalar profile",
@@ -4853,8 +4933,8 @@ fn resolve_alias(
                     nested_writes_used: &std::cell::Cell::new(false),
                     admit_enum_writes: false,
                     enum_writes_used: &std::cell::Cell::new(false),
-                    admit_f64_arithmetic: false,
-                    f64_arithmetic_used: &std::cell::Cell::new(false),
+                    admit_f64_arithmetic: admission.admits_f64_arithmetic(),
+                    f64_arithmetic_used,
                     str_bound: STR_BOUND,
                 },
             )?,
@@ -7426,7 +7506,7 @@ fn encode_atom_body<'ctx>(
                                 match slot {
                                     SignatureSlot::WideScalar(_)
                                     | SignatureSlot::EnumWideField { .. } => vec![false, false],
-                                    _ => vec![slot_type_name(slot) == Some("f64")],
+                                    _ => vec![is_f64_leaf_name(slot_type_name(slot), refined)],
                                 }
                             })
                             .collect()
@@ -7445,7 +7525,7 @@ fn encode_atom_body<'ctx>(
                                         if is_wide_leaf_name(type_name, refined) {
                                             vec![false, false]
                                         } else {
-                                            vec![type_name == Some("f64")]
+                                            vec![is_f64_leaf_name(type_name, refined)]
                                         }
                                     }),
                             );
@@ -7458,7 +7538,7 @@ fn encode_atom_body<'ctx>(
                         if is_wide_leaf_name(p.type_name.as_deref(), refined) {
                             vec![false, false]
                         } else {
-                            vec![p.type_name.as_deref() == Some("f64")]
+                            vec![is_f64_leaf_name(p.type_name.as_deref(), refined)]
                         }
                     })
             })
@@ -7475,7 +7555,7 @@ fn encode_atom_body<'ctx>(
                             .flat_map(|(_, slot)| match slot {
                                 SignatureSlot::WideScalar(_)
                                 | SignatureSlot::EnumWideField { .. } => vec![false, false],
-                                _ => vec![slot_type_name(slot) == Some("f64")],
+                                _ => vec![is_f64_leaf_name(slot_type_name(slot), refined)],
                             })
                             .collect()
                     })
@@ -7489,7 +7569,7 @@ fn encode_atom_body<'ctx>(
                                         if is_wide_leaf_name(type_name, refined) {
                                             vec![false, false]
                                         } else {
-                                            vec![type_name == Some("f64")]
+                                            vec![is_f64_leaf_name(type_name, refined)]
                                         }
                                     }),
                             );
@@ -7500,7 +7580,7 @@ fn encode_atom_body<'ctx>(
                         if is_wide_leaf_name(Some(name), refined) {
                             vec![false, false]
                         } else {
-                            vec![name == "f64"]
+                            vec![is_f64_leaf_name(Some(name), refined)]
                         }
                     })
             })
@@ -7990,7 +8070,10 @@ fn result_conjuncts_at<'ctx>(
                 SourceValue::Wide(_) | SourceValue::UWide(_) => {
                     refined_conjuncts_at(type_name, slot_value.clone(), refined, context)?
                 }
-                SourceValue::Boolean(_) => {
+                // `bool`/`f64` payload leaves carry their alias
+                // conjuncts on the decoded operand — the enum tag
+                // already gates when the slot is live.
+                SourceValue::Boolean(_) | SourceValue::Float64(_) => {
                     refined_conjuncts_at(type_name, slot_value.clone(), refined, context)?
                 }
                 // A composite or nested-enum payload slot carries its
@@ -14787,6 +14870,139 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
                 extract_pure_i64_module_contracts(&source, "m.mm", None, admission).is_err(),
                 "{admission:?}"
             );
+        }
+    }
+
+    #[test]
+    fn composite_v19_admits_f64_refined_aliases() {
+        let v19 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV19)
+        };
+        let outcomes = |source: &str| {
+            refined_module_outcomes_admission(source, RefinedAdmission::CompositeV19)
+        };
+        let module = |piece: &str| format!("{piece}\n{MAIN0}");
+        // An `f64`-leaf alias folds like a literal `f64` leaf: its
+        // conjunct binds through the same IEEE `fcmp oeq` equality
+        // the v19 vocabulary admits. (Float literals stay rejected
+        // at the token level for every admission — `v == v` is the
+        // literal-free non-NaN bound.)
+        let source = module(
+            "type NonNaN = f64 where v == v;\n\
+             atom get(x: NonNaN) -> f64 requires: true; ensures: x == x; body: { x };",
+        );
+        assert!(v19(&source).is_ok(), "{:?}", v19(&source).err());
+        assert_eq!(
+            outcomes(&source).iter().all(|r| *r == z3::SatResult::Unsat),
+            true
+        );
+        // An `==` predicate inside the declaration needs the v19 pin
+        // even though no atom body performs `f64` arithmetic — the
+        // arithmetic-used flag set inside `resolve_alias` must reach
+        // the module's profile selection.
+        let decl_only = module(
+            "type NonNaN = f64 where v == v;\n\
+             atom copy(x: NonNaN) -> NonNaN requires: true; ensures: true; body: { x };",
+        );
+        assert_eq!(
+            module_source_profile(&decl_only, RefinedAdmission::CompositeV19).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V19
+        );
+        // The alias records `f64` ABI slots, not integer ones.
+        let context = z3::Context::new(&z3::Config::new());
+        let models =
+            encode_pure_i64_module(&source, &context, true, RefinedAdmission::CompositeV19)
+                .expect("module models");
+        let get = models
+            .iter()
+            .find(|m| m.function_name == "get")
+            .expect("get model");
+        assert_eq!(get.param_leaf_doubles, vec![vec![true]]);
+        assert_eq!(get.result_leaf_doubles, vec![true]);
+        // The conjunct is real: a plain `f64` parameter can be NaN,
+        // so the same atom without the alias is refutable.
+        let bad = module("atom bad(x: f64) -> f64 requires: true; ensures: x == x; body: { x };");
+        assert!(outcomes(&bad).contains(&z3::SatResult::Sat));
+        // An `f64`-alias enum payload keeps its declared bound on the
+        // result side too: wrapping an unconstrained `f64` violates the
+        // alias while an aliased parameter guarantees it.
+        let enum_source = module(
+            "type NonNaN = f64 where v == v;\n\
+             enum Opt { Just(x: NonNaN), Void }\n\
+             atom wrap(x: f64) -> Opt requires: true; ensures: true; body: { Opt::Just(x) };\n\
+             atom wrap_ok(x: NonNaN) -> Opt requires: true; ensures: true; body: { Opt::Just(x) };",
+        );
+        assert!(v19(&enum_source).is_ok(), "{:?}", v19(&enum_source).err());
+        let enum_outcomes = outcomes(&enum_source);
+        assert!(
+            enum_outcomes.contains(&z3::SatResult::Sat),
+            "{enum_outcomes:?}"
+        );
+        assert!(
+            enum_outcomes.contains(&z3::SatResult::Unsat),
+            "{enum_outcomes:?}"
+        );
+        // Ordering predicates stay out — the v19 `f64` vocabulary
+        // never admits them, matching literal `f64` leaves.
+        let ordering = module(
+            "type Bound = f64 where v <= v;\n\
+             atom get(x: Bound) -> f64 requires: true; ensures: true; body: { x };",
+        );
+        assert!(v19(&ordering).is_err());
+        // A predicate-free `f64` alias needs only the v12 leaf
+        // gate (`==` on `f64` leaves would need v19, so the v12
+        // atom keeps `ensures: true`).
+        let plain = module(
+            "type F = f64 where true;\n\
+             atom copy(x: F) -> F requires: true; ensures: true; body: { x };",
+        );
+        for admission in [
+            RefinedAdmission::CompositeV12,
+            RefinedAdmission::CompositeV18,
+        ] {
+            assert!(
+                extract_pure_i64_module_contracts(&plain, "m.mm", None, admission).is_ok(),
+                "{admission:?}"
+            );
+        }
+        // A predicate-free alias pins only the `f64`-leaf profile.
+        assert_eq!(
+            module_source_profile(&plain, RefinedAdmission::CompositeV18).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V11
+        );
+        // Below the v12 leaf gate the alias stays out entirely, and
+        // an `==` predicate still needs the v19 arithmetic surface.
+        for admission in [RefinedAdmission::Reject, RefinedAdmission::CompositeV11] {
+            assert!(
+                extract_pure_i64_module_contracts(&plain, "m.mm", None, admission).is_err(),
+                "{admission:?}"
+            );
+            assert!(
+                extract_pure_i64_module_contracts(&source, "m.mm", None, admission).is_err(),
+                "{admission:?}"
+            );
+        }
+        assert!(extract_pure_i64_module_contracts(
+            &module(
+                "type F = f64 where v == v;\n\
+                     atom copy(x: F) -> F requires: true; ensures: true; body: { x };"
+            ),
+            "m.mm",
+            None,
+            RefinedAdmission::CompositeV18,
+        )
+        .is_err());
+        // `f64` and `Str` are scalar profile names — declarations
+        // may not shadow them in any vocabulary.
+        for piece in [
+            "type f64 = i64 where v > 0;",
+            "type Str = i64 where v > 0;",
+            "struct f64 { a: i64 }",
+            "struct Str { a: i64 }",
+            "enum f64 { A(i64) }",
+            "enum Str { A(i64) }",
+        ] {
+            assert!(v19(&module(piece)).is_err(), "{piece}");
         }
     }
 

@@ -3551,7 +3551,12 @@ rejected. `u64`/`usize`/`isize` leaves additionally require
 `mumei.pure-i64-composite/v10` — the same gate the literal signature
 leaves carry — and fold like them (`usize`→`u64`, `isize`→`i64`); their
 predicates compare unsigned exactly as a literal `u64` parameter's
-clauses do. `i128`/`u128` leaves require
+clauses do. An `f64` leaf requires
+`mumei.pure-i64-composite/v12` — again the literal leaf's own gate —
+with predicates limited to the `f64` vocabulary (`==` needs the v19
+arithmetic surface, ordering predicates stay out, and float literals
+remain rejected at the token level); a `Str` leaf stays rejected for
+lack of a String sort. `i128`/`u128` leaves require
 `mumei.pure-i64-composite/v21` (`v22` inside enum payloads): the alias
 flattens to the literal leaf's two-slot shape and its predicates apply
 to the combined 128-bit operand under the same signedness and the same

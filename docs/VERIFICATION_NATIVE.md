@@ -1509,8 +1509,15 @@ admission (`mumei.pure-i64-refined-scalar/v2`, bundles pinned
 `bool` — the verifier binds the operand as `Bool` — or another declared
 type name, composing every ancestor conjunct exactly the way the
 verifier's chain enforcement does. Cyclic chains stay rejected in both.
-`f64`/`Str` leaves stay rejected in both — the
-obligation vocabulary has no Real/String sorts. `u64`/`usize`/`isize`
+`f64`/`Str` leaves stay rejected in those refined-scalar
+admissions — the obligation vocabulary has no Real/String sorts.
+An `f64` alias base does join at `mumei.pure-i64-composite/v12`, the
+same gate literal `f64` leaves carry: the alias parameter binds its
+predicates through `fp.eq` exactly like a literal `f64` parameter,
+an `==` predicate needs the v19 arithmetic surface, ordering
+predicates stay out for good, and float literals remain rejected at
+the token level in every admission. `Str` bases stay rejected —
+there is still no String sort. `u64`/`usize`/`isize`
 leaves join at `mumei.pure-i64-composite/v10` (the same admission the
 literal signature leaves need): `usize` folds to the `u64` domain,
 `isize` to `i64`, and alias predicates on a `u64` base compare
