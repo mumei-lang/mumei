@@ -3702,6 +3702,11 @@ conformance remaining separate verifier obligations. Native module and
 multifile bundles pin v25 sources at profile v28, and semantic-contract
 sidecars now produce, recheck and accept under CompositeV25.
 
+The C03 `mumei.pure-i64-composite/v26` extractor profile adds read-only
+owned `[i64]` parameters with explicit in-bounds proof obligations and a
+disclosed nonnegative-length assumption. Native-bundle and sidecar
+consumers remain on CompositeV25.
+
 `mumei build --semantic-contract` is an opt-in production sidecar. It binds the
 exact emitted `.ll` bytes by SHA-256 only; correspondence remains unchecked,
 and it is not default output. `mumei evidence recheck-sidecar` freshly checks
