@@ -72,7 +72,7 @@ fn emit_deep_aggregate_field_write<'ctx>(
     for (level, segment) in segments[..segments.len() - 1].iter().enumerate() {
         let aggregate = ancestors[level];
         let index = index_path[level];
-        let expected_type = resolve_param_type(context, Some(&declared_types[level]), module_env);
+        let expected_type = resolve_param_type(context, Some(&declared_types[level]), module_env)?;
         let slot_type = aggregate
             .get_type()
             .get_field_type_at_index(index)
@@ -108,7 +108,7 @@ fn emit_deep_aggregate_field_write<'ctx>(
 
     let leaf_level = segments.len() - 1;
     let leaf_index = index_path[leaf_level];
-    let expected_type = resolve_param_type(context, Some(&declared_types[leaf_level]), module_env);
+    let expected_type = resolve_param_type(context, Some(&declared_types[leaf_level]), module_env)?;
     let slot_type = ancestors[leaf_level]
         .get_type()
         .get_field_type_at_index(leaf_index)
@@ -837,7 +837,7 @@ pub(crate) fn compile_hir_stmt<'a>(
                                             ))
                                         })?;
                                     let declared_payload_ty: inkwell::types::BasicTypeEnum =
-                                        struct_llvm_type(context, payload_sdef, module_env).into();
+                                        struct_llvm_type(context, payload_sdef, module_env)?.into();
                                     if slot_ty != declared_payload_ty {
                                         return Err(MumeiError::codegen(format!(
                                             "enum '{struct_ty}' payload slot {fidx} does not match its declared struct type"
@@ -879,7 +879,7 @@ pub(crate) fn compile_hir_stmt<'a>(
                                         var_types, array_ptrs, module_env,
                                     )?;
                                     let expected_ty =
-                                        resolve_param_type(context, Some(level_type), module_env);
+                                        resolve_param_type(context, Some(level_type), module_env)?;
                                     let leaf_type = module_env.resolve_base_type(level_type);
                                     let val = if leaf_type == "i128" || leaf_type == "u128" {
                                         wide_int_cast(

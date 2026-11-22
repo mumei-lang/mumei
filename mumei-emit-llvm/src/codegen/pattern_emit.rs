@@ -75,7 +75,9 @@ fn variant_field_type<'a>(
     let variant_name = variant_leaf(variant_name);
     let variant = enum_def.variants.iter().find(|v| v.name == variant_name);
     let field_type = variant.and_then(|v| v.field_types.get(field_idx));
-    Ok(field_type.map(|ft| resolve_param_type(context, Some(ft.name.as_str()), module_env)))
+    field_type
+        .map(|ft| resolve_param_type(context, Some(ft.name.as_str()), module_env))
+        .transpose()
 }
 
 fn extract_variant_field_value<'a>(

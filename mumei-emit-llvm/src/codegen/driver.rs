@@ -43,16 +43,16 @@ pub fn compile_atom_into_module<'ctx>(
     }
 
     // Declare all extern functions before compiling the atom body
-    declare_extern_functions(context, module, extern_blocks, module_env);
+    declare_extern_functions(context, module, extern_blocks, module_env)?;
 
     // パラメータ型を精緻型から解決
     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = signature
         .params
         .iter()
-        .map(|p| resolve_param_type(context, p.ty.as_deref(), module_env).into())
-        .collect();
+        .map(|p| resolve_param_type(context, p.ty.as_deref(), module_env).map(Into::into))
+        .collect::<MumeiResult<_>>()?;
     // Plan 18: Use resolved return type instead of hardcoded i64
-    let ret_type = resolve_return_type(context, signature, module_env);
+    let ret_type = resolve_return_type(context, signature, module_env)?;
     let fn_type = ret_type.fn_type(&param_types, false);
     let function = if let Some(existing) = module.get_function(&signature.name) {
         if existing.get_first_basic_block().is_some() {
