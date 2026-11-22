@@ -115,6 +115,19 @@ body: {
     0
 };
 
+atom shared_array_mutating_lambda_argument(s: S) -> i64
+requires: len(s.xs) > 0;
+ensures: true;
+body: {
+    let ys = [0];
+    let v = s.xs;
+    let f = |ys: [i64]| {
+        ys[0] = 1;
+        0
+    };
+    f(v)
+};
+
 atom write_array(xs: [i64]) -> i64
 requires: len(xs) > 0;
 ensures: result == 0;

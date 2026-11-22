@@ -41,7 +41,7 @@ fn verify_json(output: &Output) -> Value {
 
 #[test]
 fn shared_composite_array_mutations_are_rejected_in_both_integer_modes() {
-    const EXPECTED_FAILURES: [(&str, &str); 14] = [
+    const EXPECTED_FAILURES: [(&str, &str); 15] = [
         ("struct_field_local_alias", "v"),
         ("struct_parameter_field_alias", "v"),
         ("enum_pattern_then_field_read", "ys"),
@@ -50,6 +50,7 @@ fn shared_composite_array_mutations_are_rejected_in_both_integer_modes() {
         ("struct_constructor_source_alias", "a"),
         ("spec_marker_does_not_hide_body_constructor", "xs"),
         ("shared_alias_chain", "w"),
+        ("shared_array_mutating_lambda_argument", "v"),
         ("shared_mutating_call", "v"),
         ("shared_field_write_source", "ys"),
         ("branch_shared_marker_survives_merge", "v"),

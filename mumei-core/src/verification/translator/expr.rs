@@ -6580,6 +6580,7 @@ pub(crate) fn expr_to_z3<'a>(
             // Register parameter names in a sub-environment for body verification
             let mut lambda_env = env.clone();
             for p in params {
+                super::z3_types::clear_array_shared(ctx, &mut lambda_env, &p.name);
                 let p_sym = Int::new_const(ctx, p.name.as_str());
                 lambda_env.insert(p.name.clone(), p_sym.into());
             }
@@ -6743,6 +6744,7 @@ fn apply_local_lambda<'a>(
 
     let mut call_env = env.clone();
     for (i, param) in params.iter().enumerate() {
+        super::z3_types::clear_array_shared(vc.ctx, &mut call_env, &param.name);
         call_env.insert(param.name.clone(), arg_vals[i].clone());
         alias_struct_fields(&mut call_env, &param.name, &arg_vals[i]);
         wire_array_slots(

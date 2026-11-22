@@ -43,6 +43,18 @@ body: {
     length_only(v)
 };
 
+atom lambda_parameter_shadows_shared_marker(s: S, b: [i64]) -> i64
+requires: len(s.xs) > 0 && len(b) > 0;
+ensures: result == 9;
+body: {
+    let xs = s.xs;
+    let f = |xs: [i64]| {
+        xs[0] = 9;
+        xs[0]
+    };
+    f(b)
+};
+
 atom struct_field_length_remains_precise(s: S) -> i64
 requires: len(s.xs) == 2;
 ensures: result == 2;
