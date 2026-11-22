@@ -3927,9 +3927,6 @@ fn lift_call<'ctx>(
     {
         return Err(FunctionOutcome::OutsideProfile("call_arguments"));
     }
-    if model.has_f64_features && matches!(call_site.result_shape, CallValueShape::Enum { .. }) {
-        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
-    }
     if tail_call && has_composite_shape {
         return Err(FunctionOutcome::OutsideProfile("call_arguments"));
     }
@@ -8212,9 +8209,13 @@ entry:
             atom discard(v: f64) -> i64 requires: true; ensures: true; body: { let value = make(v); 0 };";
         let enum_float_model = model(enum_float_source, "discard");
         assert!(enum_float_model.has_f64_features);
+        // The tag leaf is INTEGER and the `f64` payload leaf reports
+        // its SSE class — the two-leaf result fits the per-class
+        // register budgets, so the call is admitted: `Different`
+        // against this toy `call`/`ret` fixture, not fail-closed.
         assert_eq!(
             enum_float_model.call_sites[0].result_leaf_doubles,
-            vec![false, false]
+            vec![false, true]
         );
         let mut enum_float_targets = targets.clone();
         enum_float_targets.get_mut(&1).unwrap().name = "make".to_owned();
@@ -8226,7 +8227,7 @@ entry:
                 &enum_float_targets,
                 &context,
             ),
-            FunctionOutcome::OutsideProfile("call_arguments")
+            FunctionOutcome::Different
         );
 
         let result_source = "struct T { x: i64, y: i64, z: i64 }\n\
@@ -12752,6 +12753,93 @@ entry:
             .join("\n");
         println!("enum sret forwarding disassembly:\n{wrap_disassembly}");
         assert!(wrap_disassembly.contains("callq"), "{wrap_disassembly}");
+        assert_eq!(
+            check_function(
+                &wrap_bytes,
+                wrap_address,
+                &wrap_model,
+                &wrap_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn enum_sret_f64_leaf_matches_real_llvm_codegen() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // Four INTEGER leaves overflow the budget even though only one
+        // SSE leaf is present, so the mixed-class enum result goes
+        // through `sret` — the `f64` payload as a `movsd` bit pattern.
+        let source = "enum EW { V(a: i64, b: i64, c: i64, x: f64), N }\n\
+            atom mk5(x: i64, v: f64) -> EW requires: true; ensures: true; body: {\n\
+              EW::V(x, x + 1, x + 2, v)\n\
+            };\n\
+            atom wrap5(x: i64, v: f64) -> EW requires: true; ensures: true; body: { mk5(x, v) };";
+        let callee_model = source_model_named_with_admission(
+            source,
+            "mk5",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let wrap_model = source_model_named_with_admission(
+            source,
+            "wrap5",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(callee_model.has_f64_features && wrap_model.has_f64_features);
+        assert!(supports_signature(&callee_model));
+        assert!(supports_signature(&wrap_model));
+
+        // The callee's buffer writes: three `movq`, one `movsd`, and
+        // the `movq $0` tag — real LLVM's layout for the shape.
+        let callee_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define void @__mumei_user_main(ptr sret({ i64, i64, i64, i64, double }) %out, i64 %x, double %v) {
+entry:
+  %p1 = add i64 %x, 1
+  %p2 = add i64 %x, 2
+  %s0 = insertvalue { i64, i64, i64, i64, double } undef, i64 0, 0
+  %s1 = insertvalue { i64, i64, i64, i64, double } %s0, i64 %x, 1
+  %s2 = insertvalue { i64, i64, i64, i64, double } %s1, i64 %p1, 2
+  %s3 = insertvalue { i64, i64, i64, i64, double } %s2, i64 %p2, 3
+  %s4 = insertvalue { i64, i64, i64, i64, double } %s3, double %v, 4
+  store { i64, i64, i64, i64, double } %s4, ptr %out
+  ret void
+}
+"#;
+        let (address, bytes, targets) =
+            compiled_function_with_targets(callee_ir, "__mumei_user_main");
+        assert_eq!(
+            check_function(&bytes, address, &callee_model, &targets, &context),
+            FunctionOutcome::Equivalent
+        );
+
+        // The caller forwards via `movups` pairs plus `movsd` for the
+        // `f64` leaf, through its register-held `sret` pointer.
+        let wrap_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+declare void @mk5(ptr sret({ i64, i64, i64, i64, double }), i64, double)
+define void @__mumei_user_main(ptr sret({ i64, i64, i64, i64, double }) %out, i64 %x, double %v) {
+entry:
+  %buf = alloca { i64, i64, i64, i64, double }
+  call void @mk5(ptr %buf, i64 %x, double %v)
+  %r = load { i64, i64, i64, i64, double }, ptr %buf
+  store { i64, i64, i64, i64, double } %r, ptr %out
+  ret void
+}
+"#;
+        let (wrap_address, wrap_bytes, wrap_targets) =
+            compiled_function_with_targets(wrap_ir, "__mumei_user_main");
+        let wrap_disassembly = disassemble(&wrap_bytes, wrap_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("enum f64 sret forwarding disassembly:\n{wrap_disassembly}");
         assert_eq!(
             check_function(
                 &wrap_bytes,
