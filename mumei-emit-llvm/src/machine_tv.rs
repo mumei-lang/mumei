@@ -643,7 +643,10 @@ fn call_site_shapes_are_consistent(site: &CallSite<'_>) -> bool {
                 return false;
             }
         } else if let CallValueShape::Enum { leaf_count } = shape {
-            if !(1..=MAX_AGGREGATE_LEAF_COUNT).contains(leaf_count)
+            // Enum arguments flatten leaf-by-leaf into the scalar argument
+            // sequence exactly like struct arguments — the shared bound is
+            // sixteen leaves, matching the parameter side.
+            if !(1..=MAX_AGGREGATE_ARGUMENT_LEAF_COUNT).contains(leaf_count)
                 || leaf_doubles.first().copied().unwrap_or(true)
             {
                 return false;
@@ -3529,9 +3532,7 @@ fn call_value_shape_supported_with_leaf_bound(
             has_enum: false,
             ..
         } => (1..=aggregate_leaf_bound).contains(&leaf_count),
-        CallValueShape::Enum { leaf_count, .. } => {
-            (1..=MAX_AGGREGATE_LEAF_COUNT).contains(&leaf_count)
-        }
+        CallValueShape::Enum { leaf_count, .. } => (1..=aggregate_leaf_bound).contains(&leaf_count),
         CallValueShape::Struct { .. } => false,
     }
 }
@@ -5832,6 +5833,56 @@ merge:
         assert_eq!(
             check_function(&[0xc3], 0, &wide_enum_model, &BTreeMap::new(), &context),
             FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn enum_call_arguments_match_codegen_past_four_leaves() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // Seven leaves — the tag plus six `i64` payloads — overflow the six
+        // argument registers, so the last leaf spills to the argument stack
+        // exactly like a struct of the same width.
+        let source = "enum F { A(a: i64, b: i64, c: i64, d: i64, e: i64, g: i64), B }\n\
+            atom take(f: F) -> i64 requires: true; ensures: true; body: { match f { F::A(a, b, c, d, e, g) => a + g, _ => 0 } };\n\
+            atom main(x: i64) -> i64 requires: true; ensures: true; body: { take(F::A(x, x, x, x, x, x)) };";
+        let main_model = source_model_named_with_admission(
+            source,
+            "main",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(matches!(
+            main_model.call_sites[0].argument_shapes.as_slice(),
+            [CallValueShape::Enum { leaf_count: 7 }]
+        ));
+        let main_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+declare i64 @take({ i64, i64, i64, i64, i64, i64, i64 })
+define i64 @__mumei_user_main(i64 %0) {
+entry:
+  %e = insertvalue { i64, i64, i64, i64, i64, i64, i64 } zeroinitializer, i64 %0, 1
+  %e1 = insertvalue { i64, i64, i64, i64, i64, i64, i64 } %e, i64 %0, 2
+  %e2 = insertvalue { i64, i64, i64, i64, i64, i64, i64 } %e1, i64 %0, 3
+  %e3 = insertvalue { i64, i64, i64, i64, i64, i64, i64 } %e2, i64 %0, 4
+  %e4 = insertvalue { i64, i64, i64, i64, i64, i64, i64 } %e3, i64 %0, 5
+  %e5 = insertvalue { i64, i64, i64, i64, i64, i64, i64 } %e4, i64 %0, 6
+  %r = call i64 @take({ i64, i64, i64, i64, i64, i64, i64 } %e5)
+  ret i64 %r
+}
+"#;
+        let (main_address, main_bytes, main_targets) =
+            compiled_function_with_targets(main_ir, "__mumei_user_main");
+        assert_eq!(
+            check_function(
+                &main_bytes,
+                main_address,
+                &main_model,
+                &main_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
         );
     }
 
