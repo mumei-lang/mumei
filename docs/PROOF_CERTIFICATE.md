@@ -362,6 +362,15 @@ imported atoms key every resource defined in their source module and its
 transitive imports, excluding unrelated sibling imports. Every module resource
 definition is part of the proof hash because initial-state and state-shadowing
 checks run for every atom.
+Refined-type and struct definitions widen the same way: unattributed
+environments key every type and struct, and attributed atoms key every type
+and struct defined in their source module and its transitive imports, because
+the spec-sanity phase SAT-checks every refined type and the
+projection-collision rejection scans every struct — so an unreferenced
+definition's change can flip the verdict. Seeded definitions pull their
+transitively referenced definitions (e.g. enums nested in a struct's fields)
+into the key set too; monomorphized instance names (which never appear in a
+module's raw items) are excluded.
 Enum keys pin variant names, payload field names and types for enums used
 directly in an atom's signature. The proof hash covers every refined-type
 definition in the module.

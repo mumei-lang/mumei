@@ -170,6 +170,10 @@ pub struct ModuleEnv {
     pub resources: HashMap<String, ResourceDef>,
     /// Registered resource name → source file that defined it.
     pub resource_origins: HashMap<String, Option<String>>,
+    /// Registered refined type name → source file that defined it.
+    pub type_origins: HashMap<String, Option<String>>,
+    /// Registered struct name → source file that defined it.
+    pub struct_origins: HashMap<String, Option<String>>,
     /// Source file → transitive imported source files.
     pub import_closure: HashMap<String, std::collections::BTreeSet<String>>,
     /// エフェクト定義（副作用検証用）
@@ -212,13 +216,25 @@ impl ModuleEnv {
     }
 
     pub fn register_type(&mut self, refined_type: &RefinedType) {
+        self.register_type_with_origin(refined_type, None);
+    }
+
+    pub fn register_type_with_origin(&mut self, refined_type: &RefinedType, origin: Option<&str>) {
         self.types
             .insert(refined_type.name.clone(), refined_type.clone());
+        self.type_origins
+            .insert(refined_type.name.clone(), origin.map(str::to_string));
     }
 
     pub fn register_struct(&mut self, struct_def: &StructDef) {
+        self.register_struct_with_origin(struct_def, None);
+    }
+
+    pub fn register_struct_with_origin(&mut self, struct_def: &StructDef, origin: Option<&str>) {
         self.structs
             .insert(struct_def.name.clone(), struct_def.clone());
+        self.struct_origins
+            .insert(struct_def.name.clone(), origin.map(str::to_string));
     }
 
     pub fn register_atom(&mut self, atom: &Atom) {

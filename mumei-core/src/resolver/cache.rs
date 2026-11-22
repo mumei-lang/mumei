@@ -1008,6 +1008,63 @@ fn compute_dependency_hashes_with_names(
             }
         }
     } else {
+        // Same origin widening as resources: module-env-wide checks run for
+        // every atom — every refined type's constraint is SAT-checked and every
+        // struct's flattened projection paths are collision-checked — so an
+        // unreferenced definition's change can flip this atom's verdict. Seed
+        // the type-name walk with definitions whose origin is the atom's own
+        // file or a transitively imported file; unattributed environments stay
+        // conservative and seed every definition. The walk then pulls in the
+        // definitions these reach transitively (e.g. enums nested in a
+        // struct's fields).
+        let source_file = atom.spec_metadata.get("source_file");
+        let imported_files =
+            source_file.and_then(|source_file| module_env.import_closure.get(source_file));
+        // Monomorphized instance names ('Opt<i64>') never appear in a module's
+        // raw items, so an importing environment cannot recompute their keys;
+        // raw declarations never contain '<'.
+        let is_monomorphized_instance = |name: &String| name.contains('<');
+        if let (Some(source_file), Some(imported_files)) = (source_file, imported_files) {
+            let within_closure = |origin: &Option<String>| {
+                origin
+                    .as_deref()
+                    .is_some_and(|origin| origin == source_file || imported_files.contains(origin))
+            };
+            pending_type_names.extend(
+                module_env
+                    .type_origins
+                    .iter()
+                    .filter(|(name, origin)| {
+                        within_closure(origin) && !is_monomorphized_instance(name)
+                    })
+                    .map(|(name, _)| name.clone()),
+            );
+            pending_type_names.extend(
+                module_env
+                    .struct_origins
+                    .iter()
+                    .filter(|(name, origin)| {
+                        within_closure(origin) && !is_monomorphized_instance(name)
+                    })
+                    .map(|(name, _)| name.clone()),
+            );
+        } else {
+            pending_type_names.extend(
+                module_env
+                    .types
+                    .keys()
+                    .filter(|name| !is_monomorphized_instance(name))
+                    .cloned(),
+            );
+            pending_type_names.extend(
+                module_env
+                    .structs
+                    .keys()
+                    .filter(|name| !is_monomorphized_instance(name))
+                    .cloned(),
+            );
+        }
+
         let empty_bound_params = HashSet::new();
         let mut visited_type_names = HashSet::new();
         while let Some(name) = pending_type_names.pop() {
