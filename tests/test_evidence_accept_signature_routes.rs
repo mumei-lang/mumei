@@ -624,6 +624,53 @@ fn accept_source_no_flags_full_chain_and_signed_time_mismatch() {
 }
 
 #[test]
+fn accept_source_rejects_a_root_signed_revocation_list_below_the_minimum() {
+    let fixture = fixture(Some(RECORD_TIME));
+    write_signature(&fixture, &fixture.record, Some(RECORD_TIME));
+    let mut revocation: Value =
+        serde_json::from_slice(&fs::read(&fixture.revocation_list).unwrap()).unwrap();
+    revocation["schema_version"] = json!("mumei.key-revocation-list/v2");
+    revocation["list_version"] = json!(1);
+    revocation["issued_at"] = json!("2024-02-01T00:00:00Z");
+    revocation["not_after"] = json!("2024-03-01T00:00:00Z");
+    fs::write(
+        &fixture.revocation_list,
+        serde_json::to_vec_pretty(&revocation).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        &fixture.revocation_signature,
+        serde_json::to_vec_pretty(&sign_file(
+            &fixture.revocation_list,
+            &fixture.root_secret,
+            "root-key",
+            None,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut command = full_chain(
+        accept_source_command(&fixture, true, Some(RECORD_TIME)),
+        &fixture,
+        &fixture.producer_public,
+    );
+    command.args(["--min-revocation-version", "2"]);
+    let output = run(command);
+    assert_eq!(output.status.code(), Some(1));
+    let descriptor: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(descriptor["accepted"], false);
+    assert_eq!(
+        descriptor["producer_signature"]["revocation_list_current"],
+        false
+    );
+    assert!(contains_check(
+        &descriptor["checks_performed"],
+        "fresh_same_profile_source_query"
+    ));
+}
+
+#[test]
 fn accept_source_wrong_key_rejected_and_inconclusive_paths_do_not_emit_descriptors() {
     let fixture = fixture(Some(RECORD_TIME));
     write_signature(&fixture, &fixture.record, Some(RECORD_TIME));
