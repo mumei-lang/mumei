@@ -12394,6 +12394,37 @@ entry:
             check_function(&bytes, address, &model, &targets, &context),
             FunctionOutcome::Equivalent
         );
+
+        // The caller binds all five result leaves back out of the
+        // per-class registers — the fifth INTEGER leaf lands in `rcx`.
+        let caller_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+declare { i64, double, i64, double, i64 } @mk_reg(i64, double)
+define i64 @__mumei_user_main(i64 %x, double %v) {
+entry:
+  %call = call { i64, double, i64, double, i64 } @mk_reg(i64 %x, double %v)
+  %leaf = extractvalue { i64, double, i64, double, i64 } %call, 4
+  ret i64 %leaf
+}
+"#;
+        let (caller_address, caller_bytes, caller_targets) =
+            compiled_function_with_targets(caller_ir, "__mumei_user_main");
+        let caller_disassembly = disassemble(&caller_bytes, caller_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(caller_disassembly.contains("callq"), "{caller_disassembly}");
+        assert_eq!(
+            check_function(
+                &caller_bytes,
+                caller_address,
+                &main_model,
+                &caller_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
     }
 
     #[test]
