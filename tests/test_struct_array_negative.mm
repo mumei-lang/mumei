@@ -25,6 +25,10 @@ struct GenericField<T> {
     value: T
 }
 
+struct U64Value {
+    value: u64
+}
+
 struct S {
     values: [P]
 }
@@ -46,6 +50,19 @@ atom independent_fields(ps: [P]) -> i64
 requires: len(ps) > 0 && ps[0].x > 5;
 ensures: result > 5;
 body: ps[0].y;
+
+atom u64_array_wrap(values: [U64Value]) -> i64
+requires: len(values) > 0;
+ensures: result == 1;
+body: if values[0].value + 1 > values[0].value { 1 } else { 0 };
+
+atom u64_array_binding_wrap(values: [U64Value]) -> i64
+requires: len(values) > 0;
+ensures: result == 1;
+body: {
+    let value = values[0];
+    if value.value + 1 > value.value { 1 } else { 0 }
+};
 
 atom bare_element_equality(ps: [P]) -> bool
 requires: len(ps) > 1;

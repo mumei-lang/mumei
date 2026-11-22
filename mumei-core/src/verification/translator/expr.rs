@@ -1369,6 +1369,13 @@ fn expr_struct_type(vc: &VCtx, expr: &Expr) -> Option<String> {
             let base = vc.module_env.resolve_base_type(f.type_name.trim());
             vc.module_env.get_struct(&base).map(|_| base)
         }
+        Expr::ArrayAccess(name, _) => {
+            let element_type = super::z3_types::array_element_type_name(name, vc);
+            let resolved = vc.module_env.resolve_base_type(&element_type);
+            vc.module_env
+                .get_struct(datatype::type_name_base(&resolved))
+                .map(|_| resolved)
+        }
         _ => None,
     }
 }
@@ -4816,6 +4823,8 @@ pub(crate) fn expr_to_z3<'a>(
             if !has_fp_operand
                 && (is_bv_i64(&l)
                     || is_bv_i64(&r)
+                    || lt == Some("u64")
+                    || rt == Some("u64")
                     || (vc.bitvec_i64 && (bitwise_op || both_literals)))
             {
                 let ty = lt.or(rt).unwrap_or(if unsigned { "u64" } else { "i64" });

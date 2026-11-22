@@ -33,6 +33,24 @@ fn run_verify(name: &str, bitvec_i64: bool) -> Output {
         .expect("run struct-array verifier fixture")
 }
 
+fn run_verify_with_overflow_check(name: &str, bitvec_i64: bool) -> Output {
+    let (dir, copied) = copy_fixture(name);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));
+    command
+        .arg("verify")
+        .arg("--json")
+        .arg("--disable-spurious-detection")
+        .arg("--check-i64-overflow");
+    if bitvec_i64 {
+        command.arg("--bitvec-i64");
+    }
+    command
+        .arg(copied)
+        .current_dir(dir.path())
+        .output()
+        .expect("run fixed-width struct-array verifier fixture")
+}
+
 fn verify_json(output: &Output) -> Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -90,6 +108,8 @@ fn unsupported_or_unjustified_struct_array_uses_fail_closed_errors() {
             "unconstrained_field",
             "independent_fields",
             "shadowed_fresh_array_bindings",
+            "u64_array_wrap",
+            "u64_array_binding_wrap",
         ] {
             assert!(
                 diagnostics.iter().any(|entry| {
@@ -128,6 +148,35 @@ fn unsupported_or_unjustified_struct_array_uses_fail_closed_errors() {
             }),
             "shared struct-field array mutation must be rejected:\n{payload:#}"
         );
+    }
+}
+
+#[test]
+fn fixed_width_struct_array_overflow_is_rejected() {
+    for bitvec_i64 in [false, true] {
+        let output =
+            run_verify_with_overflow_check("test_struct_array_fixed_width_negative.mm", bitvec_i64);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "fixed-width struct-array overflow claims must fail (bitvec={bitvec_i64}):\n{stdout}\n{stderr}"
+        );
+        let payload = verify_json(&output);
+        let diagnostics = payload["diagnostics"]
+            .as_array()
+            .unwrap_or_else(|| panic!("verify JSON has no diagnostics array:\n{payload:#}"));
+        for atom in ["i32_array_wrap", "u32_array_wrap"] {
+            assert!(
+                diagnostics.iter().any(|entry| {
+                    entry["atom"] == atom
+                        && entry["message"]
+                            .as_str()
+                            .is_some_and(|message| message.contains("overflow"))
+                }),
+                "missing fixed-width overflow rejection for {atom} (bitvec={bitvec_i64}):\n{payload:#}"
+            );
+        }
     }
 }
 

@@ -16,6 +16,10 @@ struct U {
     value: u32
 }
 
+struct U64Value {
+    value: u64
+}
+
 struct ScalarLeaves {
     real: f64,
     flag: bool,
@@ -98,6 +102,24 @@ atom u32_leaf(ps: [U]) -> u32
 requires: len(ps) > 0;
 ensures: result >= 0;
 body: ps[0].value;
+
+atom u64_struct_param_non_overflow(p: U64Value) -> bool
+requires: p.value < 100;
+ensures: result == true;
+body: p.value + 1 > p.value;
+
+atom u64_array_param_non_overflow(ps: [U64Value]) -> bool
+requires: len(ps) > 0 && ps[0].value < 100;
+ensures: result == true;
+body: ps[0].value + 1 > ps[0].value;
+
+atom u64_array_binding_non_overflow(ps: [U64Value]) -> bool
+requires: len(ps) > 0 && ps[0].value < 100;
+ensures: result == true;
+body: {
+    let p = ps[0];
+    p.value + 1 > p.value
+};
 
 atom scalar_leaf_sorts() -> bool
 requires: true;
