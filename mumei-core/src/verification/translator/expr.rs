@@ -3283,6 +3283,189 @@ fn stmt_contains_shadowing_binder(stmt: &Stmt, operand: &str) -> bool {
     }
 }
 
+fn collect_refinement_free_identifiers(
+    expr: &Expr,
+    bound: &std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    fn add_identifier(
+        name: &str,
+        bound: &std::collections::HashSet<String>,
+        out: &mut Vec<String>,
+    ) {
+        if name.contains("::") || matches!(name, "true" | "false") || bound.contains(name) {
+            return;
+        }
+        if !out.iter().any(|existing| existing == name) {
+            out.push(name.to_string());
+        }
+    }
+
+    fn add_pattern_bindings(pattern: &Pattern, bound: &mut std::collections::HashSet<String>) {
+        match pattern {
+            Pattern::Variable(name) => {
+                bound.insert(name.clone());
+            }
+            Pattern::Variant { fields, .. } => {
+                for field in fields {
+                    add_pattern_bindings(field, bound);
+                }
+            }
+            Pattern::Wildcard | Pattern::Literal(_) => {}
+        }
+    }
+
+    fn visit_stmt(stmt: &Stmt, bound: &std::collections::HashSet<String>, out: &mut Vec<String>) {
+        match stmt {
+            Stmt::Let { value, .. } => collect_refinement_free_identifiers(value, bound, out),
+            Stmt::Assign { var, value, .. } => {
+                add_identifier(var.split('.').next().unwrap_or(var), bound, out);
+                collect_refinement_free_identifiers(value, bound, out);
+            }
+            Stmt::ArrayStore {
+                array,
+                index,
+                value,
+                ..
+            } => {
+                add_identifier(array.split('.').next().unwrap_or(array), bound, out);
+                collect_refinement_free_identifiers(index, bound, out);
+                collect_refinement_free_identifiers(value, bound, out);
+            }
+            Stmt::Block(stmts, _) => {
+                let mut local = bound.clone();
+                for stmt in stmts {
+                    if let Stmt::Let { var, value, .. } = stmt {
+                        collect_refinement_free_identifiers(value, &local, out);
+                        local.insert(var.clone());
+                    } else {
+                        visit_stmt(stmt, &local, out);
+                    }
+                }
+            }
+            Stmt::While {
+                cond,
+                invariant,
+                decreases,
+                body,
+                ..
+            } => {
+                collect_refinement_free_identifiers(cond, bound, out);
+                collect_refinement_free_identifiers(invariant, bound, out);
+                if let Some(decreases) = decreases {
+                    collect_refinement_free_identifiers(decreases, bound, out);
+                }
+                visit_stmt(body, bound, out);
+            }
+            Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+                visit_stmt(body, bound, out);
+            }
+            Stmt::TaskGroup { children, .. } => {
+                for child in children {
+                    visit_stmt(child, bound, out);
+                }
+            }
+            Stmt::Cancel { target, .. } => add_identifier(target, bound, out),
+            Stmt::Expr(expr, _) => collect_refinement_free_identifiers(expr, bound, out),
+        }
+    }
+
+    match expr {
+        Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::AtomRef { .. } => {}
+        Expr::Variable(name) => add_identifier(name, bound, out),
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                collect_refinement_free_identifiers(element, bound, out);
+            }
+        }
+        Expr::ArrayAccess(array, index) => {
+            add_identifier(array.split('.').next().unwrap_or(array), bound, out);
+            collect_refinement_free_identifiers(index, bound, out);
+        }
+        Expr::BinaryOp(left, _, right) => {
+            collect_refinement_free_identifiers(left, bound, out);
+            collect_refinement_free_identifiers(right, bound, out);
+        }
+        Expr::Block(stmt) => visit_stmt(stmt, bound, out),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_refinement_free_identifiers(cond, bound, out);
+            visit_stmt(then_branch, bound, out);
+            visit_stmt(else_branch, bound, out);
+        }
+        Expr::Call(name, args)
+            if matches!(name.as_str(), "forall" | "exists") && args.len() == 4 =>
+        {
+            collect_refinement_free_identifiers(&args[1], bound, out);
+            collect_refinement_free_identifiers(&args[2], bound, out);
+            if let Expr::Variable(var) = &args[0] {
+                let mut local = bound.clone();
+                local.insert(var.clone());
+                collect_refinement_free_identifiers(&args[3], &local, out);
+            } else {
+                collect_refinement_free_identifiers(&args[0], bound, out);
+                collect_refinement_free_identifiers(&args[3], bound, out);
+            }
+        }
+        Expr::Call(name, args) => {
+            let skip_callback = name == "call";
+            for (index, arg) in args.iter().enumerate() {
+                if skip_callback && index == 0 && matches!(arg, Expr::Variable(_)) {
+                    continue;
+                }
+                collect_refinement_free_identifiers(arg, bound, out);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_refinement_free_identifiers(value, bound, out);
+            }
+        }
+        Expr::FieldAccess(inner, _) => {
+            collect_refinement_free_identifiers(inner, bound, out);
+        }
+        Expr::Match { target, arms } => {
+            collect_refinement_free_identifiers(target, bound, out);
+            for arm in arms {
+                let mut local = bound.clone();
+                add_pattern_bindings(&arm.pattern, &mut local);
+                if let Some(guard) = &arm.guard {
+                    collect_refinement_free_identifiers(guard, &local, out);
+                }
+                visit_stmt(&arm.body, &local, out);
+            }
+        }
+        Expr::Async { body } => visit_stmt(body, bound, out),
+        Expr::Await { expr } => collect_refinement_free_identifiers(expr, bound, out),
+        Expr::CallRef { callee, args } => {
+            if !matches!(callee.as_ref(), Expr::Variable(_) | Expr::AtomRef { .. }) {
+                collect_refinement_free_identifiers(callee, bound, out);
+            }
+            for arg in args {
+                collect_refinement_free_identifiers(arg, bound, out);
+            }
+        }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                collect_refinement_free_identifiers(arg, bound, out);
+            }
+        }
+        Expr::Lambda { params, body, .. } => {
+            let mut local = bound.clone();
+            local.extend(params.iter().map(|param| param.name.clone()));
+            visit_stmt(body, &local, out);
+        }
+        Expr::ChanSend { channel, value } => {
+            collect_refinement_free_identifiers(channel, bound, out);
+            collect_refinement_free_identifiers(value, bound, out);
+        }
+        Expr::ChanRecv { channel } => collect_refinement_free_identifiers(channel, bound, out),
+    }
+}
+
 pub(crate) fn refined_predicate_to_z3<'a>(
     vc: &VCtx<'a>,
     decl: &crate::parser::ast::RefinedType,
@@ -3290,6 +3473,20 @@ pub(crate) fn refined_predicate_to_z3<'a>(
     env: &mut Env<'a>,
     solver_opt: Option<&Solver<'a>>,
 ) -> DynResult<'a> {
+    let mut free_identifiers = Vec::new();
+    collect_refinement_free_identifiers(
+        expr,
+        &std::collections::HashSet::new(),
+        &mut free_identifiers,
+    );
+    if let Some(identifier) = free_identifiers.into_iter().find(|identifier| {
+        identifier != &decl.operand && !vc.module_env.enums.contains_key(identifier)
+    }) {
+        return Err(MumeiError::type_error(format!(
+            "Refinement predicate of type '{}' references free identifier '{}'; only the operand '{}' may appear",
+            decl.name, identifier, decl.operand
+        )));
+    }
     let base = vc.module_env.resolve_base_type(&decl._base_type);
     if fixed_width_int(&base).is_some_and(|ty| ty.0 == "u64")
         && refined_predicate_rebinds_operand(expr, &decl.operand)
@@ -3309,8 +3506,26 @@ pub(crate) fn refined_predicate_to_z3<'a>(
 
 #[cfg(test)]
 mod refined_predicate_rebinding_tests {
-    use super::refined_predicate_rebinds_operand;
+    use super::{collect_refinement_free_identifiers, refined_predicate_rebinds_operand};
     use crate::parser::ast::{Expr, MatchArm, Pattern, Span, Stmt};
+    use crate::parser::parse_expression;
+    use std::collections::HashSet;
+
+    fn free_identifiers(source: &str) -> Vec<String> {
+        let expr = parse_expression(source);
+        let mut free = Vec::new();
+        collect_refinement_free_identifiers(&expr, &HashSet::new(), &mut free);
+        free
+    }
+
+    #[test]
+    fn free_identifier_collection_respects_quantifier_lambda_and_let_binders() {
+        assert_eq!(free_identifiers("forall(i, 0, 1, i >= 0 && v > 0)"), ["v"]);
+        assert!(free_identifiers("|i: i64| i >= 0").is_empty());
+        assert_eq!(free_identifiers("{ let i = v; i >= 0 }"), ["v"]);
+        assert_eq!(free_identifiers("len(v) <= 10"), ["v"]);
+        assert!(free_identifiers("Enum::Variant() == Enum::Variant()").is_empty());
+    }
 
     #[test]
     fn finds_local_quantifier_and_match_bindings() {

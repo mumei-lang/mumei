@@ -1034,8 +1034,26 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                 let (predicate_raw, operand) = if ctx.peek() == &Token::Where {
                     ctx.advance();
                     let predicate_raw = collect_until_semicolon(ctx);
-                    let tokens = super::lexer::legacy_tokenize(&predicate_raw);
-                    let operand = tokens.first().cloned().unwrap_or_else(|| "v".to_string());
+                    let tokens = super::lexer::Lexer::new(&predicate_raw).tokenize();
+                    let operand = tokens
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, token)| {
+                            let Token::Ident(name) = &token.token else {
+                                return None;
+                            };
+                            if matches!(
+                                tokens.get(index.wrapping_sub(1)).map(|t| &t.token),
+                                Some(Token::ColonColon)
+                            ) || matches!(
+                                tokens.get(index + 1).map(|t| &t.token),
+                                Some(Token::LParen | Token::ColonColon)
+                            ) {
+                                return None;
+                            }
+                            Some(name.clone())
+                        })
+                        .unwrap_or_else(|| "v".to_string());
                     (predicate_raw, operand)
                 } else {
                     ("true".to_string(), "v".to_string())
