@@ -4195,8 +4195,11 @@ fn apply_call_result_and_clobbers<'ctx>(
                 }
             }
         }
+        // The class budgets (≤3 INTEGER + ≤2 SSE leaves) admit a
+        // five-leaf enum — e.g. `{tag, a, b, x: f64, y: f64}` — as
+        // register-resident, so the cap matches the Struct arm.
         CallValueShape::Enum { leaf_count }
-            if (1..=MAX_AGGREGATE_LEAF_COUNT).contains(&leaf_count) =>
+            if leaf_count <= INTEGER_RESULT_REGISTERS.len() + FLOAT_RESULT_REGISTER_COUNT =>
         {
             if result_leaf_doubles.len() != leaf_count
                 || result_leaf_doubles.first().copied().unwrap_or(true)
