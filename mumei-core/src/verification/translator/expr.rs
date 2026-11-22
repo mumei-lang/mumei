@@ -470,7 +470,13 @@ fn constant_call_antecedent<'a>(
         // antecedent — a chained alias like `Small = Pos where v < 10`
         // must carry `Pos`'s `v > 0` into the constant-call guard too.
         let chain = vc.module_env.refined_chain(type_name).ok()?;
-        let leaf_base = chain.last().map_or("", |decl| decl._base_type.as_str());
+        // `usize` folds to the `u64` leaf — `resolve_base_type` makes
+        // the same fold — so a usize-based alias needs the unsigned
+        // nonneg bound too.
+        let leaf_base = match chain.last().map_or("", |decl| decl._base_type.as_str()) {
+            "usize" => "u64",
+            other => other,
+        };
         if leaf_base == "u64" && arg.as_bv().is_none() {
             // `v >= 0` bounds an `Int` argument to the unsigned leaf; a
             // `BV(64)` argument is already a machine word, where the signed
