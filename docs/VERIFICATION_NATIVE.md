@@ -1620,6 +1620,23 @@ inferred `i64`; earlier bundle versions keep their original admission.
 The `main` atom still requires an explicit `-> i64`, and the single-atom
 producer remains unchanged.
 
+The C03 `mumei.pure-i64-composite/v25` source admission adds simple
+in-module stateful effect declarations and atom `effects`, `effect_pre`
+and `effect_post` annotations. Declarations must have no parameters,
+constraints/refinements, includes or parents; atom annotations must
+refer to those declarations and their declared states. A `perform`
+operation is admitted only as a discarded non-final block statement;
+its arguments use the existing scalar checker, and its value is a no-op
+in this contract. Effect names are recorded in declaration order,
+pre/post maps are sorted, and the whole-source digest binds declarations.
+The declarations, sets and pre/post states are recorded but not modeled.
+Effect containment, temporal pre/post conformance and transition order
+remain separate verifier obligations outside this contract; none of
+these features is marked validated. Modules without effect features keep
+their existing profile pin and serialized contract bytes. Native-bundle
+and semantic-contract sidecar paths remain on their existing
+CompositeV24 source admission.
+
 Nothing deeper is claimed: the fragment admitted by the profile grew,
 the guarantees did not — the same identity-plus-recheck scopes apply,
 with no optimizer/object/linker/runtime/ABI/final-executable semantics

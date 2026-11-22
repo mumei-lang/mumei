@@ -1,6 +1,6 @@
 use mumei_core::semantic_contract::{
     extract_pure_i64_contract, extract_pure_i64_module_contracts, RefinedAdmission,
-    PURE_I64_COMPOSITE_PROFILE_V24,
+    PURE_I64_COMPOSITE_PROFILE_V24, PURE_I64_COMPOSITE_PROFILE_V25,
 };
 use serde_json::Value;
 use std::path::Path;
@@ -228,6 +228,56 @@ fn inferred_i64_return_contract_matches_real_cli_certificate() {
     .unwrap()
     .remove(0);
     assert_eq!(contract.profile, PURE_I64_COMPOSITE_PROFILE_V24);
+
+    succeeds(
+        Command::new(env!("CARGO_BIN_EXE_mumei"))
+            .args(["verify", "--json", "--proof-cert", "--output"])
+            .arg(&certificate)
+            .arg(&source)
+            .current_dir(dir.path())
+            .output()
+            .unwrap(),
+    );
+    let cert: Value = serde_json::from_slice(&std::fs::read(&certificate).unwrap()).unwrap();
+    assert_eq!(cert["atoms"].as_array().unwrap().len(), 1);
+    assert_eq!(cert["atoms"][0]["z3_check_result"], "unsat");
+    assert_eq!(cert["atoms"][0]["content_hash"], contract.atom_content_hash);
+    assert_eq!(
+        cert["atoms"][0]["requires"],
+        contract.specification.requires
+    );
+    assert_eq!(cert["atoms"][0]["ensures"], contract.specification.ensures);
+    assert_eq!(
+        cert["atoms"][0]["translator_ir"]["theorem_goal"],
+        contract.translator_ir.theorem_goal
+    );
+}
+
+#[test]
+fn effect_contract_matches_real_cli_certificate() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("effect_contract.mm");
+    let certificate = dir.path().join("effect_contract.proof.json");
+    let source_text = "effect Vault\n\
+        states: [Idle];\n\
+        initial: Idle;\n\
+        atom settle(amount: i64) -> i64\n\
+            effects: [Vault];\n\
+            effect_pre: { Vault: Idle };\n\
+            effect_post: { Vault: Idle };\n\
+            requires: amount >= 0 && amount <= 100;\n\
+            ensures: result == amount + 1;\n\
+            body: amount + 1;";
+    std::fs::write(&source, source_text).unwrap();
+    let contract = extract_pure_i64_module_contracts(
+        source_text,
+        "effect_contract.mm",
+        None,
+        RefinedAdmission::CompositeV25,
+    )
+    .unwrap()
+    .remove(0);
+    assert_eq!(contract.profile, PURE_I64_COMPOSITE_PROFILE_V25);
 
     succeeds(
         Command::new(env!("CARGO_BIN_EXE_mumei"))
