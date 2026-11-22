@@ -347,7 +347,8 @@ or recompute `proof_hash` to decide whether dependencies are current. Its
 ordered keys use `atom:<name>`, `effect:<name>`, `type:<name>`, `struct:<name>`,
 and `enum:<name>`. Atom values
 hash the same contract bytes used by the corresponding `|dep:` proof-hash
-block. Effect values use the same field hashing as the proof hash's
+block and the parameter constraints of the trait method a call resolves to.
+Effect values use the same field hashing as the proof hash's
 `|effect_def:` block. Type values cover the named refined type's operand, base
 type, and raw predicate; struct values cover its fields, field constraints,
 and invariants.

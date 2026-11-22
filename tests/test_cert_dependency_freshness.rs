@@ -1659,3 +1659,120 @@ fn imported_refined_field_body_reference_invalidates_certificate_and_cache() {
         "{changed_verify_text}"
     );
 }
+
+#[test]
+fn imported_trait_method_constraint_change_invalidates_certificate_and_cache() {
+    let fixture = Fixture::new();
+    let a_source = fixture.root.join("a.mm");
+    let b_source = fixture.root.join("b.mm");
+    let certificate = fixture.root.join("a.proof.json");
+    std::fs::write(
+        &b_source,
+        "trait Picker {\n\
+         fn pick(a: Self where v >= 0) -> Self;\n\
+         }\n\
+         impl Picker for i64 {\n\
+         fn pick(a: i64) -> i64 { a }\n\
+         }\n\
+         atom pick(a: i64) -> i64\n\
+         requires: true;\n\
+         ensures: true;\n\
+         body: a;\n",
+    )
+    .expect("write trait method and implementation");
+    std::fs::write(
+        &a_source,
+        "import \"./b.mm\";\n\
+         atom g(x: i64) -> i64\n\
+         requires: x >= 0;\n\
+         ensures: true;\n\
+         body: pick(x);\n",
+    )
+    .expect("write trait method caller");
+
+    assert_success(
+        &fixture.certify(&a_source, &certificate),
+        "certify trait method caller",
+    );
+    let cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&certificate).unwrap()).expect("parse certificate");
+    let g = cert
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "g")
+        .expect("g certificate");
+    let dependency_hashes = g
+        .dependency_hashes
+        .as_ref()
+        .expect("generated dependency hashes");
+    assert!(dependency_hashes.contains_key("atom:pick"));
+
+    let unchanged_certificate = verify_cert(&fixture, &certificate, &a_source, false);
+    let unchanged_certificate_text = output_text(&unchanged_certificate);
+    assert_eq!(
+        unchanged_certificate.status.code(),
+        Some(0),
+        "{unchanged_certificate_text}"
+    );
+    assert!(
+        unchanged_certificate_text.contains("g: proven"),
+        "{unchanged_certificate_text}"
+    );
+
+    let initial_verify = fixture.verify(&a_source, &[]);
+    assert_success(&initial_verify, "verify unchanged trait method caller");
+    let cached_verify = fixture.verify(&a_source, &[]);
+    let cached_verify_text = output_text(&cached_verify);
+    assert_success(&cached_verify, "verify cached trait method caller");
+    assert!(
+        cached_verify_text.contains("skipped (unchanged)"),
+        "{cached_verify_text}"
+    );
+
+    std::fs::write(
+        &b_source,
+        "trait Picker {\n\
+         fn pick(a: Self where v >= 5) -> Self;\n\
+         }\n\
+         impl Picker for i64 {\n\
+         fn pick(a: i64) -> i64 { a }\n\
+         }\n\
+         atom pick(a: i64) -> i64\n\
+         requires: true;\n\
+         ensures: true;\n\
+         body: a;\n",
+    )
+    .expect("strengthen trait method parameter constraint");
+
+    let changed_certificate = verify_cert(&fixture, &certificate, &a_source, false);
+    let changed_certificate_text = output_text(&changed_certificate);
+    assert_eq!(
+        changed_certificate.status.code(),
+        Some(0),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("g: dependency_changed"),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("atom:pick"),
+        "{changed_certificate_text}"
+    );
+
+    let changed_verify = fixture.verify(&a_source, &[]);
+    let changed_verify_text = output_text(&changed_verify);
+    assert!(
+        !changed_verify.status.success(),
+        "changed trait constraint unexpectedly verified\n{changed_verify_text}"
+    );
+    assert!(
+        !changed_verify_text.contains("skipped (unchanged)"),
+        "{changed_verify_text}"
+    );
+    assert!(
+        changed_verify_text
+            .contains("Call to 'pick': trait method parameter constraint 'v >= 5' not satisfied"),
+        "{changed_verify_text}"
+    );
+}
