@@ -216,6 +216,10 @@ pub const PURE_I64_COMPOSITE_PROFILE_V22: &str = "mumei.pure-i64-composite/v22";
 /// positional slot expansion is unbounded past one level.
 pub const PURE_I64_COMPOSITE_PROFILE_V23: &str = "mumei.pure-i64-composite/v23";
 
+/// An omitted atom return type inferred as `i64` by the compiler
+/// (`pure-i64-composite/v24`).
+pub const PURE_I64_COMPOSITE_PROFILE_V24: &str = "mumei.pure-i64-composite/v24";
+
 /// Maximum byte length a `Str` literal may declare under
 /// `pure-i64-composite/v13`: one cell per byte under the
 /// bounded-memory model.
@@ -315,6 +319,10 @@ pub enum RefinedAdmission {
     /// non-recursive enum whose payload leaves are scalar or composite
     /// (`pure-i64-composite/v23`).
     CompositeV23,
+    /// `CompositeV24` additionally admits an omitted atom return type
+    /// when compiler inference resolves it to `i64`
+    /// (`pure-i64-composite/v24`).
+    CompositeV24,
 }
 
 impl RefinedAdmission {
@@ -477,6 +485,12 @@ impl RefinedAdmission {
     pub fn admits_nested_enum_payloads(self) -> bool {
         self >= Self::CompositeV23
     }
+
+    /// Whether an atom with no declared return type may use the
+    /// compiler-inferred `i64` result (`pure-i64-composite/v24`).
+    pub fn admits_inferred_i64_returns(self) -> bool {
+        self >= Self::CompositeV24
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -610,6 +624,8 @@ pub fn extract_pure_i64_contract(
         source_name,
         target_triple,
         allow_wrapping_arithmetic,
+        false,
+        false,
         &refined,
         &structs,
         &EnumEnv::new(),
@@ -691,35 +707,42 @@ pub fn extract_pure_i64_module_contracts(
             "expected at least one atom",
         ));
     }
+    let inferred_i64_returns = inferred_i64_return_atoms(&items, admission);
+    let inferred_i64_return_used = !inferred_i64_returns.is_empty();
     items
         .into_iter()
         .filter_map(|item| match item {
-            Item::Atom(atom) => Some(atom_contract(
-                atom,
-                source,
-                source_name,
-                target_triple,
-                true,
-                &refined,
-                &structs,
-                &enums,
-                struct_values,
-                field_writes,
-                enum_values,
-                merged,
-                generic,
-                u64_leaves,
-                f64_leaves,
-                arrays,
-                strs,
-                enum_scalar_ops,
-                nested_writes,
-                enum_writes,
-                f64_arith,
-                str_bound_declared,
-                wide_leaves,
-                &cert_env,
-            )),
+            Item::Atom(atom) => {
+                let inferred_i64_return = inferred_i64_returns.contains(&atom.name);
+                Some(atom_contract(
+                    atom,
+                    source,
+                    source_name,
+                    target_triple,
+                    true,
+                    inferred_i64_return,
+                    inferred_i64_return_used,
+                    &refined,
+                    &structs,
+                    &enums,
+                    struct_values,
+                    field_writes,
+                    enum_values,
+                    merged,
+                    generic,
+                    u64_leaves,
+                    f64_leaves,
+                    arrays,
+                    strs,
+                    enum_scalar_ops,
+                    nested_writes,
+                    enum_writes,
+                    f64_arith,
+                    str_bound_declared,
+                    wide_leaves,
+                    &cert_env,
+                ))
+            }
             // Type and struct declarations carry no per-atom contract;
             // their admission was the gate above.
             _ => None,
@@ -736,7 +759,7 @@ pub fn module_source_profile(
     admission: RefinedAdmission,
 ) -> Result<&'static str, SemanticContractError> {
     let (
-        _items,
+        items,
         refined,
         structs,
         enums,
@@ -756,8 +779,10 @@ pub fn module_source_profile(
         str_bound_declared,
         wide_leaves,
     ) = admit_pure_i64_atoms(source, true, admission)?;
+    let inferred_i64_return_used = !inferred_i64_return_atoms(&items, admission).is_empty();
     Ok(fragment_profile(
         true,
+        inferred_i64_return_used,
         &refined,
         &structs,
         &enums,
@@ -935,6 +960,7 @@ fn admit_pure_i64_atoms(
             "type name collides with an atom name",
         ));
     }
+    let inferred_i64_returns = inferred_i64_return_atoms(&items, admission);
     let callees: BTreeMap<String, CalleeSig> = items
         .iter()
         .filter_map(|item| {
@@ -949,7 +975,13 @@ fn admit_pure_i64_atoms(
                         .iter()
                         .map(|p| param_shape(p, &refined, &structs, &enums))
                         .collect(),
-                    return_kind: return_shape(sibling, &refined, &structs, &enums),
+                    return_kind: return_shape(
+                        sibling,
+                        inferred_i64_returns.contains(&sibling.name),
+                        &refined,
+                        &structs,
+                        &enums,
+                    ),
                 },
             ))
         })
@@ -972,6 +1004,7 @@ fn admit_pure_i64_atoms(
         };
         validate_atom(
             sibling,
+            inferred_i64_returns.contains(&sibling.name),
             allow_wrapping_arithmetic,
             admission.admits_u64_leaves(),
             admission.admits_f64_leaves(),
@@ -990,6 +1023,7 @@ fn admit_pure_i64_atoms(
         // application that trivially agrees with an external IR member.
         check_atom_contract(
             sibling,
+            inferred_i64_returns.contains(&sibling.name),
             &callees,
             allow_wrapping_arithmetic,
             &refined,
@@ -1017,9 +1051,9 @@ fn admit_pure_i64_atoms(
             &f64_arithmetic_used,
         )?;
     }
-    let u64_leaves = uses_u64_leaves(&items);
-    let wide_leaves = uses_wide_leaves(&items);
-    let f64_leaves = uses_f64_leaves(&items);
+    let u64_leaves = uses_u64_leaves(&items, &inferred_i64_returns);
+    let wide_leaves = uses_wide_leaves(&items, &inferred_i64_returns);
+    let f64_leaves = uses_f64_leaves(&items, &inferred_i64_returns);
     // A declared `str_bound` pins v20 module-wide, the same
     // declaration-presence convention `has_composite_payloads`
     // follows: consumers read the bound from the atom clause.
@@ -1155,6 +1189,31 @@ fn binder_scalar_type(type_name: Option<&str>, refined: &RefinedEnv) -> &'static
 /// its v3 name only when some atom uses a struct value (a struct
 /// result, literal, `let` or call-result read).
 #[allow(clippy::too_many_arguments)]
+fn inferred_i64_return_atoms(items: &[Item], admission: RefinedAdmission) -> BTreeSet<String> {
+    if !admission.admits_inferred_i64_returns() {
+        return BTreeSet::new();
+    }
+    items
+        .iter()
+        .filter_map(|item| {
+            let Item::Atom(atom) = item else {
+                return None;
+            };
+            (atom.return_type.is_none()
+                && crate::mir::infer_atom_return_type(atom).as_deref() == Some("i64"))
+            .then(|| atom.name.clone())
+        })
+        .collect()
+}
+
+fn effective_return_type(atom: &Atom, inferred_i64_return: bool) -> Option<&str> {
+    if inferred_i64_return {
+        Some("i64")
+    } else {
+        atom.return_type.as_deref()
+    }
+}
+
 /// Whether the admitted module declares a `u64`-family leaf anywhere —
 /// `u64` itself, `usize` or `isize`, as a parameter, a result, a struct
 /// field (instantiated decls included, since monomorphization leaves
@@ -1162,7 +1221,7 @@ fn binder_scalar_type(type_name: Option<&str>, refined: &RefinedEnv) -> &'static
 /// declaration chain's literal base (`type Big = u64 where ..` can only
 /// exist under `CompositeV10`, so its presence alone already pins it).
 /// Only `CompositeV10` admission ever produces one.
-fn uses_u64_leaves(items: &[Item]) -> bool {
+fn uses_u64_leaves(items: &[Item], inferred_i64_returns: &BTreeSet<String>) -> bool {
     let target_width = |name: Option<&str>| matches!(name, Some("u64" | "usize" | "isize"));
     let typedefs: BTreeMap<&str, &crate::parser::ast::RefinedType> = items
         .iter()
@@ -1176,7 +1235,10 @@ fn uses_u64_leaves(items: &[Item]) -> bool {
             atom.params
                 .iter()
                 .any(|p| target_width(p.type_name.as_deref()))
-                || target_width(atom.return_type.as_deref())
+                || target_width(effective_return_type(
+                    atom,
+                    inferred_i64_returns.contains(&atom.name),
+                ))
         }
         Item::StructDef(def) => def
             .fields
@@ -1244,7 +1306,7 @@ fn is_f64_leaf_name(name: Option<&str>, refined: &RefinedEnv) -> bool {
 /// Whether the admitted module declares a 128-bit leaf anywhere — a
 /// parameter, a result, a struct field or an enum payload slot. Only
 /// `CompositeV21` admission ever produces one.
-fn uses_wide_leaves(items: &[Item]) -> bool {
+fn uses_wide_leaves(items: &[Item], inferred_i64_returns: &BTreeSet<String>) -> bool {
     let wide = |name: Option<&str>| matches!(name, Some("i128" | "u128"));
     let typedefs: BTreeMap<&str, &crate::parser::ast::RefinedType> = items
         .iter()
@@ -1256,7 +1318,10 @@ fn uses_wide_leaves(items: &[Item]) -> bool {
     items.iter().any(|item| match item {
         Item::Atom(atom) => {
             atom.params.iter().any(|p| wide(p.type_name.as_deref()))
-                || wide(atom.return_type.as_deref())
+                || wide(effective_return_type(
+                    atom,
+                    inferred_i64_returns.contains(&atom.name),
+                ))
         }
         Item::StructDef(def) => def.fields.iter().any(|f| wide(Some(f.type_name.as_str()))),
         Item::EnumDef(def) => def
@@ -1287,7 +1352,7 @@ fn uses_wide_leaves(items: &[Item]) -> bool {
 /// Whether the admitted module declares an `f64` leaf anywhere — a
 /// parameter, a result, a struct field or an enum payload slot. Only
 /// `CompositeV12` admission ever produces one.
-fn uses_f64_leaves(items: &[Item]) -> bool {
+fn uses_f64_leaves(items: &[Item], inferred_i64_returns: &BTreeSet<String>) -> bool {
     // A declared type name counts when its chain ends in `f64` — an
     // alias-typed `f64` leaf needs the same v12 gate the literal
     // leaf carries (the walk mirrors `uses_wide_leaves`).
@@ -1319,7 +1384,10 @@ fn uses_f64_leaves(items: &[Item]) -> bool {
     items.iter().any(|item| match item {
         Item::Atom(atom) => {
             atom.params.iter().any(|p| f64(p.type_name.as_deref()))
-                || f64(atom.return_type.as_deref())
+                || f64(effective_return_type(
+                    atom,
+                    inferred_i64_returns.contains(&atom.name),
+                ))
         }
         Item::StructDef(def) => def.fields.iter().any(|f| f64(Some(f.type_name.as_str()))),
         Item::EnumDef(def) => def
@@ -1350,6 +1418,7 @@ fn uses_f64_leaves(items: &[Item]) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn fragment_profile(
     allow_wrapping_arithmetic: bool,
+    inferred_i64_return_used: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
@@ -1371,9 +1440,10 @@ fn fragment_profile(
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if inferred_i64_return_used {
+        PURE_I64_COMPOSITE_PROFILE_V24
     } else if has_nested_enum_payloads(enums) {
-        // A nested enum payload is only ever admitted under v23 — the
-        // strongest claim the ladder makes.
+        // Nested enum payloads pin v23 unless v24 return inference is used.
         PURE_I64_COMPOSITE_PROFILE_V23
     } else if has_wide_payload_leaves(enums, structs) {
         // A 128-bit leaf inside an enum payload is only ever admitted
@@ -1549,6 +1619,8 @@ fn atom_contract(
     source_name: &str,
     target_triple: Option<&str>,
     allow_wrapping_arithmetic: bool,
+    inferred_i64_return: bool,
+    inferred_i64_return_used: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
@@ -1572,6 +1644,7 @@ fn atom_contract(
     atom.span.file = source_name.to_owned();
     let profile = fragment_profile(
         allow_wrapping_arithmetic,
+        inferred_i64_return_used,
         refined,
         structs,
         enums,
@@ -1591,10 +1664,8 @@ fn atom_contract(
         str_bound_declared,
         wide_leaves,
     );
-    let result_fields = atom
-        .return_type
-        .as_deref()
-        .and_then(|name| structs.get(name));
+    let result_type = effective_return_type(&atom, inferred_i64_return);
+    let result_fields = result_type.and_then(|name| structs.get(name));
 
     // A struct parameter reports one scalar binder per field (`p.x`),
     // an enum parameter a tag binder (`p.tag`) plus one per payload
@@ -1637,7 +1708,7 @@ fn atom_contract(
             .iter()
             .map(|(path, slot)| (format!("result.{}", path), slot_type_name(slot)))
             .collect(),
-        None => match atom.return_type.as_deref().and_then(|name| enums.get(name)) {
+        None => match result_type.and_then(|name| enums.get(name)) {
             Some(variants) => {
                 let mut names = vec![("result.tag".to_owned(), None)];
                 names.extend(
@@ -1647,7 +1718,7 @@ fn atom_contract(
                 );
                 names
             }
-            None => vec![("result".to_owned(), atom.return_type.as_deref())],
+            None => vec![("result".to_owned(), result_type)],
         },
     };
     binders.extend(
@@ -1711,6 +1782,9 @@ fn atom_contract(
         "return_type": atom.return_type,
         "requires": atom.requires, "ensures": atom.ensures,
     });
+    if inferred_i64_return {
+        specification_identity["inferred_return_type"] = serde_json::json!("i64");
+    }
     // A struct result's identity includes the returned field layout the
     // same way a struct parameter's does; scalar results keep their
     // original shape so existing specification hashes are unchanged.
@@ -2262,11 +2336,11 @@ fn param_kind(param: &crate::parser::ast::Param, refined: &RefinedEnv) -> Scalar
     }
 }
 
-/// The kind the declared return type gives in this profile — `i64`,
+/// The kind the effective return type gives in this profile — `i64`,
 /// `bool` when the widened profile admitted the declaration, or a refined
 /// alias's resolved base kind.
-fn return_kind(atom: &Atom, refined: &RefinedEnv) -> ScalarKind {
-    match atom.return_type.as_deref() {
+fn return_kind(return_type: Option<&str>, refined: &RefinedEnv) -> ScalarKind {
+    match return_type {
         Some("bool") => ScalarKind::Bool,
         Some("u64" | "usize") => ScalarKind::U64,
         Some("isize") => ScalarKind::I64,
@@ -2285,14 +2359,16 @@ fn return_kind(atom: &Atom, refined: &RefinedEnv) -> ScalarKind {
 /// an admitted struct produces that struct's shape.
 fn return_shape(
     atom: &Atom,
+    inferred_i64_return: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
 ) -> ValueKind {
-    match atom.return_type.as_deref() {
+    let return_type = effective_return_type(atom, inferred_i64_return);
+    match return_type {
         Some(name) if structs.contains_key(name) => ValueKind::Struct(name.to_owned()),
         Some(name) if enums.contains_key(name) => ValueKind::Enum(name.to_owned()),
-        _ => ValueKind::Scalar(return_kind(atom, refined)),
+        _ => ValueKind::Scalar(return_kind(return_type, refined)),
     }
 }
 
@@ -2308,6 +2384,7 @@ fn call_return_kinds<'ctx>(
     enums: &EnumEnv,
     admission: RefinedAdmission,
 ) -> CallShapes<'ctx> {
+    let inferred_i64_returns = inferred_i64_return_atoms(items, admission);
     CallShapes {
         returns: items
             .iter()
@@ -2317,10 +2394,17 @@ fn call_return_kinds<'ctx>(
                 };
                 Some((
                     atom.name.clone(),
-                    return_shape(atom, refined, structs, enums),
+                    return_shape(
+                        atom,
+                        inferred_i64_returns.contains(&atom.name),
+                        refined,
+                        structs,
+                        enums,
+                    ),
                 ))
             })
             .collect(),
+        inferred_i64_returns,
         structs: structs
             .iter()
             .map(|(name, fields)| {
@@ -2393,6 +2477,7 @@ type EnumVariantLayout = Vec<EnumVariant>;
 #[derive(Default)]
 struct CallShapes<'ctx> {
     returns: BTreeMap<String, ValueKind>,
+    inferred_i64_returns: BTreeSet<String>,
     /// Each admitted struct's declared fields in declaration order —
     /// `(name, shape)` pairs where a `Struct` shape names a nested
     /// struct (`pure-i64-composite/v8`) whose fields this same map
@@ -2871,6 +2956,7 @@ fn enum_slot_value<'ctx>(kind: ScalarKind, v: &BV<'ctx>, ctx: &'ctx Context) -> 
 #[allow(clippy::too_many_arguments)]
 fn check_atom_contract(
     atom: &Atom,
+    inferred_i64_return: bool,
     callees: &BTreeMap<String, CalleeSig>,
     allow_wrapping_arithmetic: bool,
     refined: &RefinedEnv,
@@ -2958,7 +3044,7 @@ fn check_atom_contract(
         admit_field_writes,
         admit_enum_values,
         admit_merged_composites,
-        result_kind: match return_shape(atom, refined, structs, enums) {
+        result_kind: match return_shape(atom, inferred_i64_return, refined, structs, enums) {
             ValueKind::Scalar(kind) => kind,
             // A composite `result` resolves through `composites`, not
             // the scalar scope — the scalar fallback never sees it.
@@ -3002,7 +3088,7 @@ fn check_atom_contract(
         )?,
         ScalarKind::Bool,
     )?;
-    let result_kind = match return_shape(atom, refined, structs, enums) {
+    let result_kind = match return_shape(atom, inferred_i64_return, refined, structs, enums) {
         ValueKind::Scalar(kind) => kind,
         // An enum result is never a scalar either: `ensures` sees
         // `result` as the enum-typed composite (read via `match`), and
@@ -3115,6 +3201,7 @@ fn check_atom_contract(
 #[allow(clippy::too_many_arguments)]
 fn validate_atom(
     atom: &Atom,
+    inferred_i64_return: bool,
     admit_widened: bool,
     admit_u64: bool,
     admit_f64: bool,
@@ -3133,7 +3220,7 @@ fn validate_atom(
     // is likewise widened-profile only. A declared refined alias admits
     // its resolved scalar base — which is never `u64`-sized by
     // construction (`build_refined_env` rejects non-scalar bases).
-    let return_ok = match atom.return_type.as_deref() {
+    let return_ok = match effective_return_type(atom, inferred_i64_return) {
         Some("i64") => true,
         Some("u64" | "usize" | "isize") => admit_u64,
         Some("f64") => admit_f64,
@@ -7324,6 +7411,8 @@ fn encode_atom_body<'ctx>(
     has_non_i64_scalar_features: bool,
     has_wide_scalar_features: bool,
 ) -> BodyResult<PureI64Body<'ctx>> {
+    let result_type =
+        effective_return_type(atom, call_returns.inferred_i64_returns.contains(&atom.name));
     // A struct parameter contributes one input per field, so the limit
     // bounds the flattened signature.
     let slots = signature_slots(&atom.params, refined, structs, enums);
@@ -7355,7 +7444,7 @@ fn encode_atom_body<'ctx>(
         )
     };
     let has_enum_signature = slots.iter().any(enum_slot)
-        || atom.return_type.as_deref().is_some_and(|name| {
+        || result_type.is_some_and(|name| {
             enums.contains_key(name)
                 || structs.get(name).is_some_and(|fields| {
                     flattened_struct_fields(structs, enums, fields)
@@ -7563,7 +7652,7 @@ fn encode_atom_body<'ctx>(
                     })
             })
             .collect(),
-        result_shape: atom.return_type.as_deref().and_then(|name| {
+        result_shape: result_type.and_then(|name| {
             structs
                 .get(name)
                 .map(|fields| {
@@ -8478,7 +8567,7 @@ fn module_atom_obligations<'ctx>(
     let result_operand = env["result"].clone();
     let mut post = vec![ensures];
     post.extend(result_conjuncts_at(
-        atom.return_type.as_deref(),
+        effective_return_type(atom, call_returns.inferred_i64_returns.contains(&atom.name)),
         result_operand,
         refined,
         structs,
@@ -8610,7 +8699,10 @@ fn module_atom_obligations<'ctx>(
         // conjuncts at the call's actual result value.
         let mut callee_post = vec![callee_ensures];
         callee_post.extend(result_conjuncts_at(
-            callee.return_type.as_deref(),
+            effective_return_type(
+                callee,
+                call_returns.inferred_i64_returns.contains(&callee.name),
+            ),
             ensures_env["result"].clone(),
             refined,
             structs,
@@ -15720,6 +15812,133 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
         // bits each, outer tag first.
         let widths = module_leaf_widths(&decl, RefinedAdmission::CompositeV23).unwrap();
         assert_eq!(widths["pick"], vec![64, 64, 64]);
+    }
+
+    #[test]
+    fn composite_v24_admits_only_compiler_inferred_i64_returns() {
+        let source =
+            "atom add(a: i64, b: i64) requires: true; ensures: result == a + b; body: a + b;";
+        let contract =
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV24)
+                .unwrap()
+                .remove(0);
+        assert_eq!(contract.profile, PURE_I64_COMPOSITE_PROFILE_V24);
+
+        let original_atom = parse_module_checked(source)
+            .unwrap()
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) => Some(atom),
+                _ => None,
+            })
+            .unwrap();
+        assert!(original_atom.return_type.is_none());
+        let identity = serde_json::json!({
+            "profile": PURE_I64_COMPOSITE_PROFILE_V24,
+            "params": [
+                {"name": "a", "type": "i64"},
+                {"name": "b", "type": "i64"},
+            ],
+            "return_type": null,
+            "requires": "true",
+            "ensures": "result == a + b",
+            "inferred_return_type": "i64",
+        });
+        assert!(identity["return_type"].is_null());
+        assert_eq!(identity["inferred_return_type"], "i64");
+        assert_eq!(
+            contract.specification_sha256,
+            json_digest(&identity).unwrap()
+        );
+        assert_eq!(contract.source_sha256, digest(source.as_bytes()),);
+        assert_eq!(
+            contract.implementation_sha256,
+            digest(original_atom.body_expr.as_bytes()),
+        );
+        let mut original_atom = original_atom;
+        original_atom.span.file = "m.mm".to_owned();
+        let hir = crate::hir::lower_atom_to_hir(&original_atom);
+        let mir = crate::mir::lower_hir_to_mir(&hir);
+        assert_eq!(
+            contract.hir.sha256,
+            digest(format!("{:?}", hir.body).as_bytes()),
+        );
+        assert_eq!(contract.mir.sha256, json_digest(&mir).unwrap());
+
+        assert!(matches!(
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV23),
+            Err(SemanticContractError::Unsupported(
+                "explicit owned scalar i64 signature required"
+            ))
+        ));
+    }
+
+    #[test]
+    fn composite_v24_rejects_non_i64_and_uninferred_returns() {
+        let bool_source = "atom less(a: i64, b: i64) requires: true; ensures: true; body: a > b;";
+        let bool_atom = parse_module_checked(bool_source)
+            .unwrap()
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) => Some(atom),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            crate::mir::infer_atom_return_type(&bool_atom).as_deref(),
+            Some("bool")
+        );
+        assert!(matches!(
+            extract_pure_i64_module_contracts(
+                bool_source,
+                "m.mm",
+                None,
+                RefinedAdmission::CompositeV24
+            ),
+            Err(SemanticContractError::Unsupported(
+                "explicit owned scalar i64 signature required"
+            ))
+        ));
+
+        let no_tail_source =
+            "atom no_tail(a: i64) requires: true; ensures: true; body: { let unused = a; };";
+        let no_tail_atom = parse_module_checked(no_tail_source)
+            .unwrap()
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) => Some(atom),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(crate::mir::infer_atom_return_type(&no_tail_atom), None);
+        assert!(matches!(
+            extract_pure_i64_module_contracts(
+                no_tail_source,
+                "m.mm",
+                None,
+                RefinedAdmission::CompositeV24
+            ),
+            Err(SemanticContractError::Unsupported(
+                "explicit owned scalar i64 signature required"
+            ))
+        ));
+    }
+
+    #[test]
+    fn composite_v24_keeps_explicit_i64_contract_bytes_unchanged() {
+        let source =
+            "atom add(a: i64, b: i64) -> i64 requires: true; ensures: result == a + b; body: a + b;";
+        let v23 =
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV23)
+                .unwrap();
+        let v24 =
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV24)
+                .unwrap();
+        assert_eq!(v23[0].profile, v24[0].profile);
+        assert_eq!(
+            serde_json::to_vec(&v23).unwrap(),
+            serde_json::to_vec(&v24).unwrap()
+        );
     }
 }
 

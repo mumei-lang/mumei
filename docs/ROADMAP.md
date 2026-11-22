@@ -3688,6 +3688,11 @@ out. This is a wider admitted fragment, not deeper
 assurance: the same identity-plus-recheck scopes apply. See the
 [composite member profile](VERIFICATION_NATIVE.md#composite-struct-member-profile-v4).
 
+The C03 `mumei.pure-i64-composite/v24` source profile admits an omitted
+atom return type only when compiler inference is exactly `i64`, and
+pins v24 only when the module relies on that inference. Other inferred
+types remain rejected; native-bundle profiles do not yet pin v24.
+
 The Evidence v1 record now carries an optional `produced_at` field —
 slice 2 of the mumei-agent issue #894 design memo. `evidence
 verify-source --produced-at <RFC 3339>` stamps a caller-declared
