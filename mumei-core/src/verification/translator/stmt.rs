@@ -1324,6 +1324,62 @@ fn record_binding_lambda<'a>(
     };
 }
 
+fn struct_array_element_handle_from_leaves<'a>(
+    vc: &VCtx<'a>,
+    array: &str,
+    index: &Int<'a>,
+    type_name: &str,
+    prefix: &str,
+    env: &mut Env<'a>,
+    depth: usize,
+) -> Result<Dynamic<'a>, MumeiError> {
+    if depth > 16 {
+        return Err(MumeiError::type_error(
+            "nested struct-array element exceeds the supported depth",
+        ));
+    }
+    let resolved = vc.module_env.resolve_base_type(type_name);
+    let base = crate::verification::support::datatype::type_name_base(&resolved);
+    let sdef = vc
+        .module_env
+        .get_struct(&resolved)
+        .or_else(|| vc.module_env.get_struct(base))
+        .ok_or_else(|| MumeiError::type_error(format!("'{type_name}' is not a struct")))?;
+    let handle = fresh_struct_handle(vc.ctx, base);
+    let handle_name = handle.decl().name().to_string();
+    let mut fields = Vec::with_capacity(sdef.fields.len());
+    for field in &sdef.fields {
+        let path = if prefix.is_empty() {
+            field.name.clone()
+        } else {
+            format!("{prefix}_{}", field.name)
+        };
+        let field_type = vc.module_env.resolve_base_type(&field.type_name);
+        let field_base = crate::verification::support::datatype::type_name_base(&field_type);
+        let nested = vc
+            .module_env
+            .get_struct(&field_type)
+            .or_else(|| vc.module_env.get_struct(field_base));
+        let value = if let Some(nested) = nested {
+            struct_array_element_handle_from_leaves(
+                vc,
+                array,
+                index,
+                &nested.name,
+                &path,
+                env,
+                depth + 1,
+            )?
+        } else {
+            let leaf = super::z3_types::struct_array_leaf_array(vc, array, &path, &field_type, env);
+            leaf.select(index)
+        };
+        fields.push((field.name.clone(), value));
+    }
+    bind_struct_fields(env, &handle_name, &fields);
+    Ok(handle)
+}
+
 /// `q.f = v` on a declared struct binding: re-check the written field's
 /// refined-type predicates and `where` constraint and the struct's
 /// invariants against the merged field set, then re-home `q` on a fresh
@@ -2349,8 +2405,73 @@ pub(crate) fn stmt_to_z3<'a>(
                     vc.module_env,
                     vc.ieee754_f64,
                 );
-                let value = super::z3_types::coerce_to_array_elem_sort(vc, sort, &val)?;
-                Some(vec![(path, value)])
+                let field_value = super::z3_types::coerce_to_array_elem_sort(vc, sort, &val)?;
+                let prior_env_keys: std::collections::HashSet<String> =
+                    env.keys().cloned().collect();
+                let prior_struct_types: std::collections::HashSet<String> =
+                    vc.local_struct_types.borrow().keys().cloned().collect();
+                let prior_enum_types: std::collections::HashSet<String> =
+                    vc.local_enum_types.borrow().keys().cloned().collect();
+                let element = struct_array_element_handle_from_leaves(
+                    vc,
+                    array,
+                    &idx,
+                    &element_type,
+                    "",
+                    env,
+                    0,
+                )?;
+                let element_name = element.decl().name().to_string();
+                vc.local_struct_types
+                    .borrow_mut()
+                    .insert(element_name.clone(), element_type.clone());
+                env.insert(element_name.clone(), element);
+                let rhs_name = enum_slot_temp_name(vc, env);
+                env.insert(rhs_name.clone(), field_value);
+                let validation = (|| {
+                    let field = format!("{element_name}.{}", field_path.join("."));
+                    struct_field_assign(
+                        vc,
+                        &field,
+                        &Expr::Variable(rhs_name.clone()),
+                        env,
+                        solver_opt,
+                    )?
+                    .ok_or_else(|| {
+                        MumeiError::type_error(format!(
+                            "array element struct '{element_type}' has no field '{}'",
+                            field_path.join(".")
+                        ))
+                    })?;
+                    let updated = env.get(&element_name).cloned().ok_or_else(|| {
+                        MumeiError::type_error("failed to rebuild struct-array element")
+                    })?;
+                    super::expr::struct_array_leaf_values_from_value(
+                        vc,
+                        env,
+                        &updated,
+                        &element_type,
+                    )
+                    .map(|values| {
+                        values
+                            .into_iter()
+                            .map(|(path, _, value)| (path, value))
+                            .collect::<Vec<_>>()
+                    })
+                })();
+                env.retain(|key, _| {
+                    prior_env_keys.contains(key)
+                        || (!key.starts_with("__mumei_struct_") && !key.starts_with("__struct_"))
+                });
+                vc.local_struct_types.borrow_mut().remove(&element_name);
+                vc.local_struct_types
+                    .borrow_mut()
+                    .retain(|name, _| prior_struct_types.contains(name));
+                vc.local_enum_types
+                    .borrow_mut()
+                    .retain(|name, _| prior_enum_types.contains(name));
+                env.remove(&rhs_name);
+                Some(validation?)
             } else if element_sort == super::z3_types::ArrayElementSort::Struct {
                 let value_type =
                     super::expr::struct_array_expr_type(vc, value).ok_or_else(|| {
