@@ -7673,6 +7673,13 @@ entry:
                 "after_five" => {
                     "atom after_five(a: i64, b: i64, c: i64, d: i64, e: i64, x: i128) -> i64 requires: true; ensures: true; body: { 0 };"
                 }
+                "ret_hi_wide" => {
+                    "atom ret_hi_wide(a: i64, b: i64, c: i64, d: i64, e: i64, x: u128) -> u128 requires: true; ensures: true; body: { x >> 64 };"
+                }
+                "wide_call" => {
+                    "atom wide_callee(x: u128, a: i64, b: i64, c: i64, y: u128) -> i64 requires: true; ensures: result == a + b + c; body: { a + b + c };\n\
+                     atom wide_call(z: u128) -> i64 requires: true; ensures: true; body: { wide_callee(z, 1, 2, 3, z) };"
+                }
                 _ => unreachable!(),
             };
             source_model_named_with_admission(
@@ -7802,6 +7809,90 @@ define i64 @after_five(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i128 %x) {
                 address,
                 &model("after_five"),
                 &targets,
+                &context
+            ),
+            FunctionOutcome::Different
+        );
+        // `x / 2^64` reads `x.hi` back out of the spilled slot: returning it
+        // (low half in `rax`, zeroed high half in `rdx`) is Equivalent, and
+        // returning the registered `x.lo` from `r9` instead is Different —
+        // together these pin the slot to `x.hi` specifically.
+        let ret_spilled_hi = [
+            0x48, 0x8b, 0x44, 0x24, 0x08, // movq 8(%rsp), %rax
+            0x31, 0xd2, // xorl %edx, %edx
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(
+                &ret_spilled_hi,
+                address,
+                &model("ret_hi_wide"),
+                &targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+        let ret_registered_lo = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax  -- returns `a`, not `x.hi`
+            0x31, 0xd2, // xorl %edx, %edx
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(
+                &ret_registered_lo,
+                address,
+                &model("ret_hi_wide"),
+                &targets,
+                &context
+            ),
+            FunctionOutcome::Different
+        );
+
+        // Outgoing side, matching real LLVM codegen for `wide_call`:
+        // `y.lo` keeps `r9` while only `y.hi` is stored into the outgoing
+        // stack slot.
+        let wide_call_bytes = [
+            0x50, // pushq %rax
+            0x48, 0x89, 0x34, 0x24, // movq %rsi, (%rsp)   -- y.hi = z.hi
+            0xba, 0x01, 0x00, 0x00, 0x00, // movl $1, %edx
+            0xb9, 0x02, 0x00, 0x00, 0x00, // movl $2, %ecx
+            0x41, 0xb8, 0x03, 0x00, 0x00, 0x00, // movl $3, %r8d
+            0x49, 0x89, 0xf9, // movq %rdi, %r9          -- y.lo = z.lo
+            0xe8, 0x00, 0x00, 0x00, 0x00, // callq wide_callee
+            0x59, // popq %rcx
+            0xc3,
+        ];
+        let wide_call_targets: BTreeMap<u64, CallTarget> = [(
+            25u64,
+            CallTarget {
+                name: "wide_callee".to_owned(),
+                relocation_kind: CallRelocationKind::ElfX86_64Plt32,
+                relocation_size: 32,
+                addend: -4,
+            },
+        )]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            check_function(
+                &wide_call_bytes,
+                address,
+                &model("wide_call"),
+                &wide_call_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+        // Storing the registered low half into the slot feeds `y.hi` the
+        // wrong half of `z`.
+        let mut wrong_half = wide_call_bytes;
+        wrong_half[3] = 0x3c; // movq %rdi, (%rsp)
+        assert_eq!(
+            check_function(
+                &wrong_half,
+                address,
+                &model("wide_call"),
+                &wide_call_targets,
                 &context
             ),
             FunctionOutcome::Different
