@@ -7417,35 +7417,61 @@ fn encode_atom_body<'ctx>(
         .flat_map(|site| {
             // A struct-valued call result carries the 0/1 convention on
             // each of its `bool` field slots.
-            let slots: Vec<(BV, bool)> = match call_returns.result_fields(&site.callee) {
+            fn bool_slot_bounds<'ctx>(
+                slots: Vec<(BV<'ctx>, bool)>,
+                context: &'ctx Context,
+            ) -> Vec<Bool<'ctx>> {
+                slots
+                    .into_iter()
+                    .filter(|(_, bool_slot)| *bool_slot)
+                    .map(|(slot, _)| slot.bvule(&BV::from_u64(context, 1, 64)))
+                    .collect()
+            }
+            match call_returns.result_fields(&site.callee) {
                 Some(fields) => {
                     let leaf_kinds = call_returns.flattened_kinds(fields);
-                    split_slots(&site.result, leaf_kinds.len())
-                        .into_iter()
-                        .zip(leaf_kinds)
-                        .map(|(slot, kind)| (slot, kind == ScalarKind::Bool))
-                        .collect()
+                    bool_slot_bounds(
+                        split_slots(&site.result, leaf_kinds.len())
+                            .into_iter()
+                            .zip(leaf_kinds)
+                            .map(|(slot, kind)| (slot, kind == ScalarKind::Bool))
+                            .collect(),
+                        context,
+                    )
                 }
                 None => match call_returns.result_enum(&site.callee) {
                     // An enum-valued call result carries the 0/1
-                    // convention on each `bool` payload slot — the tag
-                    // is always an i64 ordinal.
+                    // convention on each `bool` payload slot, and the
+                    // layout invariant on the tag: every constructed
+                    // enum carries an in-range variant ordinal.
                     Some((_, variants)) => {
                         let kinds = call_returns.enum_layout_leaf_kinds(variants);
-                        split_slots(&site.result, 1 + kinds.len())
-                            .into_iter()
-                            .zip(std::iter::once(&ScalarKind::I64).chain(kinds.iter()))
-                            .map(|(slot, kind)| (slot, *kind == ScalarKind::Bool))
-                            .collect()
+                        let leaves = split_slots(&site.result, 1 + kinds.len());
+                        let mut bounds = Vec::new();
+                        if let Some(tag) = leaves.first() {
+                            bounds.push(tag.bvult(&BV::from_u64(
+                                context,
+                                variants.len() as u64,
+                                64,
+                            )));
+                        }
+                        bounds.extend(bool_slot_bounds(
+                            leaves
+                                .into_iter()
+                                .skip(1)
+                                .zip(kinds.iter())
+                                .map(|(slot, kind)| (slot, *kind == ScalarKind::Bool))
+                                .collect(),
+                            context,
+                        ));
+                        bounds
                     }
-                    None => vec![(site.result.clone(), call_returns.returns_bool(&site.callee))],
+                    None => bool_slot_bounds(
+                        vec![(site.result.clone(), call_returns.returns_bool(&site.callee))],
+                        context,
+                    ),
                 },
-            };
-            slots
-                .into_iter()
-                .filter(|(_, bool_slot)| *bool_slot)
-                .map(|(slot, _)| slot.bvule(&BV::from_u64(context, 1, 64)))
-                .collect::<Vec<_>>()
+            }
         })
         .collect();
     Ok(PureI64Body {
@@ -8473,6 +8499,12 @@ fn module_atom_obligations<'ctx>(
             site.guard.clone(),
             callee_precondition.not(),
         ];
+        // Type-level invariants on earlier call results — a bool
+        // carrier's 0/1 and an enum tag's ordinal bound — are not
+        // callee-contract assumptions: every produced value carries
+        // them, so the domain check may rely on them the way the
+        // machine side does.
+        domain_terms.extend(body.call_result_bounds.iter().cloned());
         domain_terms.extend(site_exits);
         domain_terms.extend(source_domain.iter().cloned());
         domain_obligations.push(Bool::and(context, &domain_terms.iter().collect::<Vec<_>>()));

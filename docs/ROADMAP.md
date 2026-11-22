@@ -3261,21 +3261,28 @@ exact-bit Query B obligation, whose failure is `call_arguments`, never
 match-merged struct values are admitted when their source values flatten to
 the modeled register leaves. These are local value updates, not memory
 modeling; LLVM stack-memory lowering remains outside the profile. Enum
-signatures, enum values, enum scalar operations and enum payload writes stay
-fail-closed; enum `match` paths without an enum-use flag remain closed by the
-separate enum-signature gate. F64 tail calls remain fail-closed. Function-signature and direct-call
+signatures and values, including branch-built results, `match` projections,
+scalar equality and payload writes, are admitted when their flattened tag and
+payload leaves fit the existing register classes and aggregate limits,
+including the existing 3–4-leaf first-class lowering preflights. Every modeled
+leaf is compared exactly; LLVM's first-class aggregate lowering
+zero-initializes inactive payload slots. This assumes that LLVM lowering and
+does not validate an ABI. F64 tail calls remain fail-closed. Function-signature and direct-call
 aggregates used as parameters or call arguments with seventeen or more
 leaves remain fail-closed. Result aggregates outside the admitted
 shapes — register-resident results of at most four leaves, at most three
 INTEGER and two SSE, or all-INTEGER sret results of four to sixteen
 leaves — remain fail-closed. Local struct values inside a body are not subject to this
 aggregate limit because the source model flattens them. i128/u128 leaves inside
-aggregate parameters, call arguments and aggregate results follow the same
+aggregate parameters, call arguments, aggregate results and enum payloads
+follow the same
 flattening — each wide leaf is two consecutive INTEGER slots, and LLVM emits
 its low half first, matching the source model's `[lo, hi]` slot order. The
 halves are independent scalars: when registers run out mid-pair the low half
 keeps the last register and only the high half spills to the argument stack.
-Leaf-function bounded arrays admit qword `%rsp`-relative
+Enum-valued direct-call results in modules with f64 features remain
+fail-closed as `call_arguments` because their source call model does not
+retain per-leaf SSE classes. Leaf-function bounded arrays admit qword `%rsp`-relative
 red-zone accesses with proven `-128..=-8` offsets; red-zone non-clobbering is
 assumed, not validated. Red-zone accesses in functions with calls
 (`frame_memory_call`) or stack adjustments (`frame_memory_stack_adjust`) remain
@@ -3637,8 +3644,10 @@ chains, folded constant aggregates, aggregate call results and returned
 aggregates with the field slots. Undefined slots, merged or nested
 aggregates, branch-merged struct values and field assignment still fail
 closed in that source-profile slice. The later C10 machine-TV profile admits
-register-only struct field writes, nested writes and merged struct values;
-enum behavior remains outside that machine-TV profile. Composite slice 4
+register-only struct field writes, nested writes and merged struct values,
+plus bounded enum signatures and values through flattened LLVM aggregate
+leaves. The enum lowering is assumed, not ABI-validated, and these machine-TV
+admissions do not expand the preceding source-profile slice. Composite slice 4
 admits enum members under `mumei.pure-i64-composite/v4` and the `/v7`
 profiles: non-generic,
 non-recursive enums with scalar or refined-alias payloads uniform at
