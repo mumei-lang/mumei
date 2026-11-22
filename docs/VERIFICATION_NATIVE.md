@@ -2102,8 +2102,14 @@ stores through a register still holding that pointer write the buffer
 leaves, and `rax` must return the pointer. Unwritten buffer slots compare
 against fresh constants, so a dropped leaf store is `different`, and a
 callee that does not return the pointer fails its own obligation. sret
-results carrying `f64` leaves and sret call results on the caller side
-remain fail-closed. This is LLVM first-class aggregate lowering plus the
+results carrying `f64` leaves remain fail-closed. The caller side is
+modeled too: a call whose result needs `sret` reads `rdi` as the
+caller-allocated buffer pointer (declared INTEGER arguments begin at
+`rsi`), recovers the buffer's frame offset from `rdi - rsp`, records
+each result leaf in the frame slot map, and returns the pointer in
+`rax`, so `N(%rsp)` reads and reads through a register still holding
+the pointer both resolve to the same leaf slots. This is LLVM
+first-class aggregate lowering plus the
 modeled sret store convention, not general SysV C-ABI aggregate
 classification. Function-result f64 leaves use NaN-aware matching, integer
 leaves compare exactly, and supported struct call results bind the leaves
@@ -2139,9 +2145,10 @@ Aggregates wider than two leaves use the convention suffix
 `_llvm_first_class_aggregates_split_into_registers_result_rax_rdx_rcx_xmm0_xmm1`
 on the active integer or f64 `register_convention_assumed` string.
 Aggregate uses that still stand for an assumed SysV memory-class ABI —
-wide aggregate parameters and aggregate call arguments or results — add
+wide aggregate parameters and aggregate call arguments — add
 `machine_code_tv_sysv_memory_class_aggregate_abi` to checks not performed;
-an all-INTEGER sret result the lifter validates does not.
+an all-INTEGER sret result the lifter validates, on either side of the
+call, does not.
 This is bounded evidence for the observed LLVM lowering, not SysV C-ABI
 classification or general ABI validation.
 

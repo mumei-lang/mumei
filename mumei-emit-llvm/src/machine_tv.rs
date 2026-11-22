@@ -560,6 +560,32 @@ const MAX_AGGREGATE_ARGUMENT_LEAF_COUNT: usize = 16;
 // argument one: a bounded solver term per leaf.
 const MAX_SRET_RESULT_LEAF_COUNT: usize = MAX_AGGREGATE_ARGUMENT_LEAF_COUNT;
 
+/// Whether a call site's result comes back through an `sret` buffer the
+/// caller allocated: an all-INTEGER struct of four to sixteen leaves —
+/// the same admission as the callee side (`sret_result_leaf_count`),
+/// keyed on the call site's `CallValueShape` instead of the function's
+/// own result shape. Mixed-class call results and enum results stay
+/// fail-closed.
+fn sret_call_result_leaf_count(site: &CallSite<'_>) -> Option<usize> {
+    let CallValueShape::Struct {
+        leaf_count,
+        has_enum: false,
+        has_f64: false,
+    } = site.result_shape
+    else {
+        return None;
+    };
+    (MAX_AGGREGATE_LEAF_COUNT..=MAX_SRET_RESULT_LEAF_COUNT)
+        .contains(&leaf_count)
+        .then_some(())
+        .filter(|_| {
+            site.result_leaf_doubles.len() == leaf_count
+                && site.result_leaf_doubles.iter().all(|is_double| !*is_double)
+                && site.result.get_size() == (64 * leaf_count) as u32
+        })
+        .map(|_| leaf_count)
+}
+
 /// Whether this function's result comes back through a hidden `sret`
 /// pointer: an all-INTEGER aggregate of four or more leaves — real LLVM
 // lowers a four-`i64` result this way too. Mixed-class sret aggregates
@@ -633,6 +659,7 @@ fn call_site_shapes_are_consistent(site: &CallSite<'_>) -> bool {
     }
     if matches!(site.result_shape, CallValueShape::Struct { .. })
         && !aggregate_result_register_classes_supported(&site.result_leaf_doubles)
+        && sret_call_result_leaf_count(site).is_none()
     {
         return false;
     }
@@ -975,6 +1002,24 @@ struct MachineState<'ctx> {
     /// `(byte offset inside the result buffer, value)` — the last
     /// store to an offset wins.
     sret_stores: Vec<(i64, BV<'ctx>)>,
+    /// Caller-side `sret` result buffers recorded on this path: one entry
+    /// per call whose result shape needs the memory-class convention,
+    /// holding the pointer BV the call was made with and the buffer's
+    /// entry-relative base offset so reads through a register still
+    /// carrying the pointer (`(%rax)` right after the call) resolve to
+    /// the recorded leaf slots.
+    sret_call_buffers: Vec<SretCallBuffer<'ctx>>,
+}
+
+/// One caller-allocated `sret` result buffer: `pointer` is the BV the
+/// call left in `rdi` (later also in `rax`); `base_offset` is the
+/// entry-relative stack address leaf 0 occupies, so buffer leaf `i`
+/// lives at `base_offset + 8 * i` in the `stack` slot map.
+#[derive(Clone)]
+struct SretCallBuffer<'ctx> {
+    pointer: BV<'ctx>,
+    base_offset: i64,
+    leaf_count: usize,
 }
 
 const MAX_COMPLETED_PATHS: usize = 64;
@@ -1087,6 +1132,7 @@ fn lift<'ctx>(
         path_conditions: Vec::new(),
         sret_pointer,
         sret_stores: Vec::new(),
+        sret_call_buffers: Vec::new(),
     }];
     let mut paths = Vec::new();
     while let Some(mut state) = pending.pop() {
@@ -1150,6 +1196,7 @@ fn lift<'ctx>(
                         &mut state.stack,
                         state.rsp_offset,
                         &mut state.outgoing_cleanup_slots,
+                        &mut state.sret_call_buffers,
                         state.rsp_is_known,
                         &state.path_conditions,
                         &arguments,
@@ -1220,6 +1267,7 @@ fn lift<'ctx>(
                     &mut state.stack,
                     state.rsp_offset,
                     &mut state.outgoing_cleanup_slots,
+                    &mut state.sret_call_buffers,
                     state.rsp_is_known,
                     &state.path_conditions,
                     &arguments,
@@ -1346,6 +1394,8 @@ fn lift<'ctx>(
                     sret_leaf_count.is_some_and(|leaf_count| offset < 8 * leaf_count as i64)
                 }) {
                     lift_sret_store(instruction, &mut state, context)?;
+                } else if sret_call_memory_offset(destination, &state).is_some() {
+                    lift_sret_call_store(instruction, &mut state, context)?;
                 } else if is_incoming_stack_argument_operand(destination, state.rsp_offset) {
                     lift_stack_store(instruction, &mut state, context)?;
                 } else if should_use_allocated_frame_memory(
@@ -1386,6 +1436,8 @@ fn lift<'ctx>(
                     sret_leaf_count.is_some_and(|leaf_count| offset < 8 * leaf_count as i64)
                 }) {
                     lift_sret_load(instruction, &mut state, context)?;
+                } else if sret_call_memory_offset(source, &state).is_some() {
+                    lift_sret_call_load(instruction, &mut state, context)?;
                 } else if is_incoming_stack_argument_operand(source, state.rsp_offset) {
                     lift_stack_argument_move(
                         instruction,
@@ -2600,6 +2652,113 @@ fn lift_sret_load<'ctx>(
     Ok(())
 }
 
+/// Resolves an `N(%reg)` operand whose base register still carries the
+/// pointer an `sret` call was made with — the identical BV AST, so
+/// `mov %rsp,%rdi` before the call and `rax` right after it both
+/// qualify — to `(buffer index, byte offset inside the buffer)`. The
+/// buffer's leaf slots live in the `stack` map at
+/// `base_offset + offset`.
+fn sret_call_memory_offset<'ctx>(
+    operand: &str,
+    state: &MachineState<'ctx>,
+) -> Option<(usize, i64)> {
+    if state.sret_call_buffers.is_empty() {
+        return None;
+    }
+    let open = operand.find('(')?;
+    let close = operand.rfind(')')?;
+    if close + 1 != operand.len() {
+        return None;
+    }
+    let (register_index, width) = parse_register(operand[open + 1..close].trim())?;
+    if width != 64 || register_index == 4 {
+        return None;
+    }
+    let displacement = operand[..open].trim();
+    let offset = if displacement.is_empty() {
+        0
+    } else {
+        parse_integer(displacement)? as i64
+    };
+    if offset % 8 != 0 || offset < 0 {
+        return None;
+    }
+    let ast = state.registers[register_index].get_z3_ast();
+    state
+        .sret_call_buffers
+        .iter()
+        .position(|buffer| buffer.pointer.get_z3_ast() == ast)
+        .map(|index| (index, offset))
+}
+
+/// A `movq %r, N(%reg)` store through a caller-side `sret` buffer
+/// pointer: writes into the recorded `stack` slot so both pointer- and
+/// `rsp`-relative reads agree — a caller scribbling on its own buffer
+/// overwrites the leaf the callee left.
+fn lift_sret_call_store<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let (buffer_index, offset) = sret_call_memory_offset(destination, state)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let buffer = &state.sret_call_buffers[buffer_index];
+    if offset >= 8 * buffer.leaf_count as i64 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let entry_offset = buffer.base_offset + offset;
+    let value = operand_value(source, &state.registers, context, 64)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    if let Some((_, stored)) = state
+        .stack
+        .iter_mut()
+        .find(|(stack_slot, _)| *stack_slot == entry_offset)
+    {
+        *stored = value;
+    } else {
+        state.stack.push((entry_offset, value));
+    }
+    Ok(())
+}
+
+/// Loads a `movq N(%reg), %r` read through a caller-side `sret` buffer
+/// pointer: the recorded `stack` slot — a leaf the callee wrote, or a
+/// caller overwrite — else a fresh constant when the frame slot is
+/// already unreachable (e.g. after `rsp` was restored).
+fn lift_sret_call_load<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let (buffer_index, offset) = sret_call_memory_offset(source, state)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let buffer = &state.sret_call_buffers[buffer_index];
+    if offset >= 8 * buffer.leaf_count as i64 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let entry_offset = buffer.base_offset + offset;
+    let value = state
+        .stack
+        .iter()
+        .find(|(stack_slot, _)| *stack_slot == entry_offset)
+        .map(|(_, value)| value.clone())
+        .unwrap_or_else(|| BV::fresh_const(context, "machine_sret_call_unwritten_slot", 64));
+    let (register_index, width) = parse_register(destination)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    if !write_register(&mut state.registers, register_index, value, width) {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    Ok(())
+}
+
 /// Resolves an `N(%rsp)` operand above the current frame to the input
 /// BV of the N-th spilled argument leaf. `want_double` is the class of
 /// the instruction doing the access — an INTEGER load of a spilled
@@ -3368,14 +3527,14 @@ fn call_site_has_unsupported_composite_shape(site: &CallSite<'_>) -> bool {
             shape,
             CallValueShape::Struct { .. } | CallValueShape::Enum { .. }
         ) && !call_value_shape_supported_with_leaf_bound(shape, MAX_AGGREGATE_ARGUMENT_LEAF_COUNT)
-    }) || (matches!(
-        site.result_shape,
-        CallValueShape::Struct { .. } | CallValueShape::Enum { .. }
-    ) && (!call_value_shape_supported_with_leaf_bound(
-        site.result_shape,
-        MAX_AGGREGATE_LEAF_COUNT,
-    ) || (matches!(site.result_shape, CallValueShape::Struct { .. })
-        && !aggregate_result_register_classes_supported(&site.result_leaf_doubles))))
+    }) || (matches!(site.result_shape, CallValueShape::Struct { .. }) && {
+        sret_call_result_leaf_count(site).is_none()
+            && (!call_value_shape_supported_with_leaf_bound(
+                site.result_shape,
+                MAX_AGGREGATE_LEAF_COUNT,
+            ) || !aggregate_result_register_classes_supported(&site.result_leaf_doubles))
+    }) || (matches!(site.result_shape, CallValueShape::Enum { .. })
+        && !call_value_shape_supported_with_leaf_bound(site.result_shape, MAX_AGGREGATE_LEAF_COUNT))
 }
 
 // Resolves a call-argument leaf of either class that spilled to the
@@ -3426,6 +3585,7 @@ fn lift_call<'ctx>(
     stack: &mut Vec<(i64, BV<'ctx>)>,
     rsp_offset: i64,
     outgoing_cleanup_slots: &mut BTreeSet<i64>,
+    sret_call_buffers: &mut Vec<SretCallBuffer<'ctx>>,
     rsp_is_known: bool,
     path_conditions: &[Bool<'ctx>],
     arguments: &[BV<'ctx>],
@@ -3499,7 +3659,7 @@ fn lift_call<'ctx>(
         || !call_value_shape_supported_with_leaf_bound(
             call_site.result_shape,
             MAX_AGGREGATE_LEAF_COUNT,
-        )
+        ) && sret_call_result_leaf_count(call_site).is_none()
     {
         return Err(FunctionOutcome::OutsideProfile("call_arguments"));
     }
@@ -3521,8 +3681,12 @@ fn lift_call<'ctx>(
     if tail_call && integer_argument_count > ARGUMENT_REGISTERS.len() {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
+    // A call whose all-INTEGER result needs the `sret` convention
+    // carries the caller-allocated result-buffer pointer in `rdi`, so
+    // declared INTEGER arguments begin one register right at `rsi`.
+    let sret_call_leaf_count = sret_call_result_leaf_count(call_site);
     let mut outgoing_slots = BTreeSet::new();
-    let mut integer_argument_index = 0usize;
+    let mut integer_argument_index = usize::from(sret_call_leaf_count.is_some());
     let mut float_argument_index = 0usize;
     let mut stack_argument_index = 0usize;
     let mut leaf_index = 0usize;
@@ -3689,15 +3853,29 @@ fn lift_call<'ctx>(
         stack.retain(|(stack_slot, _)| !outgoing_slots.contains(stack_slot));
         outgoing_cleanup_slots.extend(outgoing_slots);
     }
-    apply_call_result_and_clobbers(
-        registers,
-        xmm_registers,
-        call_site.result.clone(),
-        call_site.result_is_double,
-        call_site.result_shape,
-        &call_site.result_leaf_doubles,
-        context,
-    )?;
+    if let Some(leaf_count) = sret_call_leaf_count {
+        apply_sret_call_result_and_clobbers(
+            registers,
+            xmm_registers,
+            stack,
+            rsp_offset,
+            rsp_is_known,
+            leaf_count,
+            &call_site.result,
+            sret_call_buffers,
+            context,
+        )?;
+    } else {
+        apply_call_result_and_clobbers(
+            registers,
+            xmm_registers,
+            call_site.result.clone(),
+            call_site.result_is_double,
+            call_site.result_shape,
+            &call_site.result_leaf_doubles,
+            context,
+        )?;
+    }
     call_state.used_call_targets.insert(field_offset);
     call_state.call_index += 1;
     Ok(())
@@ -3755,6 +3933,79 @@ fn apply_call_result_and_clobbers<'ctx>(
         }
         _ => return Err(FunctionOutcome::OutsideProfile("call_arguments")),
     }
+    Ok(())
+}
+
+/// Applies an `sret` call result: the callee wrote each result leaf
+/// into the caller's buffer through the pointer it received in `rdi`
+/// and returned that same pointer in `rax`. The buffer's entry-relative
+/// base is recovered by subtracting the current `rsp` value — real LLVM
+/// materializes the pointer with `mov %rsp,%rdi` or `lea N(%rsp),%rdi`,
+/// so the difference simplifies to a constant — and every leaf slot
+/// goes into the `stack` map, so later `N(%rsp)` reads resolve through
+/// the ordinary slot lookup and `add $0x28,%rsp`-style restores prune
+/// the buffer with the rest of the frame. A pointer that does not
+/// reduce to an `rsp`-relative constant is not a stack buffer the model
+/// can place and stays fail-closed.
+#[allow(clippy::too_many_arguments)]
+fn apply_sret_call_result_and_clobbers<'ctx>(
+    registers: &mut [BV<'ctx>],
+    xmm_registers: &mut [BV<'ctx>],
+    stack: &mut Vec<(i64, BV<'ctx>)>,
+    rsp_offset: i64,
+    rsp_is_known: bool,
+    leaf_count: usize,
+    result: &BV<'ctx>,
+    sret_call_buffers: &mut Vec<SretCallBuffer<'ctx>>,
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    if !rsp_is_known {
+        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+    }
+    let pointer = registers[7].clone();
+    let Some(buffer_delta) = pointer.bvsub(&registers[4]).simplify().as_i64() else {
+        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+    };
+    if buffer_delta < 0 || buffer_delta % 8 != 0 {
+        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+    }
+    let Some(base_offset) = rsp_offset.checked_add(buffer_delta) else {
+        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+    };
+    for xmm_register in xmm_registers.iter_mut() {
+        *xmm_register = BV::fresh_const(context, "machine_call_xmm_clobber", 128);
+    }
+    for register_index in [0, 1, 2, 6, 7, 8, 9, 10, 11] {
+        registers[register_index] = BV::fresh_const(context, "machine_call_clobber", 64);
+    }
+    // `rax` returns the buffer pointer — `mov (%rax),...` and
+    // `mov (%rsp),...` reads both resolve to the leaf slots.
+    registers[0] = pointer.clone();
+    for leaf_index in 0..leaf_count {
+        let Ok(slot_index) = i64::try_from(leaf_index) else {
+            return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+        };
+        let Some(entry_offset) = slot_index
+            .checked_mul(8)
+            .and_then(|offset| base_offset.checked_add(offset))
+        else {
+            return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+        };
+        let leaf = aggregate_leaf(result, leaf_count, leaf_index);
+        if let Some((_, stored)) = stack
+            .iter_mut()
+            .find(|(stack_slot, _)| *stack_slot == entry_offset)
+        {
+            *stored = leaf;
+        } else {
+            stack.push((entry_offset, leaf));
+        }
+    }
+    sret_call_buffers.push(SretCallBuffer {
+        pointer,
+        base_offset,
+        leaf_count,
+    });
     Ok(())
 }
 
@@ -11436,5 +11687,148 @@ entry:
         );
         assert_eq!(model.result_shape, Some(5));
         assert!(!supports_signature(&model));
+    }
+
+    #[test]
+    fn memory_class_call_result_matches_real_llvm_sret_codegen() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "struct Big { a: i64, b: i64, c: i64, d: i64, e: i64 }\n\
+            atom mk_big(x: i64) -> Big requires: true; ensures: true; body: {\n\
+              Big { a: x + 1, b: x + 2, c: x + 3, d: x + 4, e: x + 5 }\n\
+            };\n\
+            atom main() -> i64 requires: true; ensures: true; body: { mk_big(5).a };\n\
+            atom main_b() -> i64 requires: true; ensures: true; body: { mk_big(5).b };";
+        let main_model = source_model_named_with_admission(
+            source,
+            "main",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let main_b_model = source_model_named_with_admission(
+            source,
+            "main_b",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(matches!(
+            main_model.call_sites[0].result_shape,
+            CallValueShape::Struct { leaf_count: 5, .. }
+        ));
+        // The caller allocates the result buffer on its own stack,
+        // hands the pointer to `rdi`, reads the leaves back through
+        // `(%rsp)` or `(%rax)`.
+        let main_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+declare { i64, i64, i64, i64, i64 } @mk_big(i64)
+define i64 @__mumei_user_main() {
+entry:
+  %call = call { i64, i64, i64, i64, i64 } @mk_big(i64 5)
+  %leaf = extractvalue { i64, i64, i64, i64, i64 } %call, 0
+  ret i64 %leaf
+}
+"#;
+        let (main_address, main_bytes, main_targets) =
+            compiled_function_with_targets(main_ir, "__mumei_user_main");
+        let main_disassembly = disassemble(&main_bytes, main_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("sret caller disassembly:\n{main_disassembly}");
+        assert_eq!(
+            check_function(
+                &main_bytes,
+                main_address,
+                &main_model,
+                &main_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+        // The same machine code returning leaf `a` cannot stand in for
+        // a caller that needed leaf `b` — the buffer slot binds the
+        // exact leaf.
+        assert_eq!(
+            check_function(
+                &main_bytes,
+                main_address,
+                &main_b_model,
+                &main_targets,
+                &context
+            ),
+            FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn memory_class_call_result_with_f64_leaf_stays_fail_closed() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "struct BigF { a: i64, b: i64, c: i64, d: i64, e: f64 }\n\
+            atom mk_mixed(x: i64, v: f64) -> BigF requires: true; ensures: true; body: {\n\
+              BigF { a: x, b: x, c: x, d: x, e: v }\n\
+            };\n\
+            atom main(v: f64) -> i64 requires: true; ensures: true; body: { mk_mixed(5, v).a };";
+        let main_model = source_model_named_with_admission(
+            source,
+            "main",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        // A mixed-class call result still needs memory-class handling
+        // this slice does not model — the honest failure is
+        // `call_arguments`, so the signature stays fail-closed.
+        assert!(!supports_signature(&main_model));
+    }
+
+    #[test]
+    fn memory_class_call_result_requires_stack_relative_pointer() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "struct Big { a: i64, b: i64, c: i64, d: i64, e: i64 }\n\
+            atom mk_big(x: i64) -> Big requires: true; ensures: true; body: {\n\
+              Big { a: x + 1, b: x + 2, c: x + 3, d: x + 4, e: x + 5 }\n\
+            };\n\
+            atom main() -> i64 requires: true; ensures: true; body: { mk_big(5).a };";
+        let main_model = source_model_named_with_admission(
+            source,
+            "main",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        // `rdi` pointing somewhere that does not reduce to a constant
+        // `rsp` offset is not a stack buffer the model can place.
+        let heap_pointer_caller = [
+            0x48, 0xbf, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, // movabsq $0x1000,%rdi
+            0xbe, 0x05, 0x00, 0x00, 0x00, // movl $5,%esi
+            0xe8, 0x00, 0x00, 0x00, 0x00, // callq mk_big
+        ];
+        let call_targets = BTreeMap::from([(
+            16u64,
+            CallTarget {
+                name: "mk_big".to_owned(),
+                relocation_kind: CallRelocationKind::ElfX86_64Plt32,
+                relocation_size: 32,
+                addend: -4,
+            },
+        )]);
+        assert_eq!(
+            check_function(
+                &heap_pointer_caller,
+                0,
+                &main_model,
+                &call_targets,
+                &context
+            ),
+            FunctionOutcome::OutsideProfile("call_arguments")
+        );
     }
 }
