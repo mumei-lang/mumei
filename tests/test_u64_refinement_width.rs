@@ -132,3 +132,17 @@ fn shift_result_preserves_left_u64_width() {
         "{text}"
     );
 }
+
+#[test]
+fn shift_width_uses_right_u64_operand() {
+    let output = run_verify("shift_right");
+    let text = output_text(&output);
+    assert!(
+        !output.status.success(),
+        "a shift using a right u64 operand must retain its unsigned width: {text}"
+    );
+    assert!(
+        text.contains("Postcondition (ensures) is not satisfied"),
+        "{text}"
+    );
+}
