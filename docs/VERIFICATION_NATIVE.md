@@ -617,8 +617,15 @@ fail closed, and no edge is labeled lossy.
 
 The opt-in `mumei build --semantic-contract` path writes a sidecar beside
 emitted LLVM IR, using the CompositeV24 module profile. Its SHA-256 binds the
-exact `.ll` bytes only; correspondence remains unchecked, no consumer accepts
-the sidecar yet, and it is not emitted by default.
+exact `.ll` bytes only; correspondence remains unchecked, and it is not emitted
+by default. The consumer recheck below is diagnostic only, not acceptance.
+
+`mumei evidence recheck-sidecar <SIDECAR> --source <SRC> --artifact <LL>`
+checks the sidecar shape and artifact hash, freshly extracts the CompositeV24
+contracts from caller-supplied source, and rechecks their module obligations.
+This diagnostic does not establish producer authenticity, source-to-LLVM
+correspondence, artifact semantics or acceptance; correspondence remains
+unchecked.
 
 An optional `requested_target_triple` is a caller request, never a binding to
 emitted code or a capability/availability claim. `None` serializes as null. The

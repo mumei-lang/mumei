@@ -13,6 +13,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei` | 1 | Formally verified language: parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) |
 | `mumei evidence` | 0 | Check common Evidence representation or produce fresh scoped source Evidence; no proof acceptance |
 | `mumei evidence recheck-source` | 5 | Freshly recheck saved source Evidence with linked Z3 and caller-supplied source/budgets; not proof acceptance |
+| `mumei evidence recheck-sidecar` | 5 | Freshly recheck a semantic-contract sidecar against caller-supplied source and LLVM IR bytes; hash binding and source-model obligations only, not LLVM correspondence or acceptance |
 | `mumei evidence accept-source` | 17 | Evaluate representation plus fresh same-profile source consistency into a bounded acceptance descriptor |
 | `mumei evidence verify-source` | 4 | Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance |
 | `mumei evidence sign` | 5 | Detachably sign a bounded record's raw bytes with a declared ed25519 key into a producer-signature envelope; binds the declared key id only |
@@ -130,6 +131,32 @@ Usage: mumei evidence recheck-source [OPTIONS] --source <SOURCE> <INPUT>
 | `--solver-timeout <SOLVER_TIMEOUT>` | 10000 | — | Solver timeout in milliseconds (1..=10000); must match the producer's explicit budget |
 | `--solver-resource-limit <SOLVER_RESOURCE_LIMIT>` | 1000000 | — | Solver resource units (1..=1000000); no saved/ambient policy is loaded |
 | `--produced-at <PRODUCED_AT>` | — | — | Declared RFC 3339 timestamp the producer stamped; must equal the saved record's produced_at |
+
+## `mumei evidence recheck-sidecar`
+
+Freshly recheck a semantic-contract sidecar against caller-supplied source and LLVM IR bytes; hash binding and source-model obligations only, not LLVM correspondence or acceptance
+
+Usage:
+
+```text
+Usage: mumei evidence recheck-sidecar [OPTIONS] --source <SOURCE> --artifact <ARTIFACT> <SIDECAR>
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `SIDECAR` | Yes | Regular semantic-contract sidecar JSON (at most 4 MiB) |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--source <SOURCE>` | — | — | Separate regular source file (at most 65,536 bytes); the saved label is never opened |
+| `--artifact <ARTIFACT>` | — | — | Separate regular LLVM IR artifact (at most 16 MiB); hash-bound only |
+| `--json` | false | — | Emit a static diagnostic, not evidence or an acceptance receipt |
+| `--solver-timeout <SOLVER_TIMEOUT>` | 10000 | — | Solver timeout in milliseconds (1..=10000) |
+| `--solver-resource-limit <SOLVER_RESOURCE_LIMIT>` | 1000000 | — | Solver resource units (1..=1000000); zero/unlimited is rejected |
 
 ## `mumei evidence accept-source`
 

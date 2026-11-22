@@ -3,16 +3,24 @@ use mumei_core::adapter_manifest;
 use mumei_core::attempt_schedule;
 use mumei_core::evidence_acceptance::{self, Verdict};
 use mumei_core::evidence_check_acceptance;
+use mumei_core::native_bundle::{self, SourceRecheck};
 use mumei_core::producer_signature::{self, PRODUCER_SIGNATURE_SCHEMA};
-use mumei_core::source_evidence::{self, AcceptOutcome, Options, Outcome, RecheckOutcome};
+use mumei_core::semantic_contract::{self, RefinedAdmission, SEMANTIC_CONTRACT_VERSION};
+use mumei_core::source_evidence::{
+    self, AcceptOutcome, Options, Outcome, RecheckOutcome, MAX_RESOURCE_LIMIT, MAX_TIMEOUT_MS,
+};
 use mumei_core::verification_evidence::{self, MAX_INPUT_BYTES, SCHEMA_VERSION};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{io::Write, path::Path};
+use z3::{Config, Context, Solver};
 
 const TEXT: &str = "Evidence v1 representation valid.\n\
 Scope: representation only; no claim truth, file identity, freshness, producer authenticity, semantic correspondence or artifact semantics checked.\n\
 Evidence acceptance: not evaluated.\n\
 No verifier or artifact executed; no grade promotion or final-executable assurance.\n";
+const MAX_SEMANTIC_CONTRACT_SIDECAR_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_SEMANTIC_CONTRACT_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 
 pub(crate) fn run(command: EvidenceCommand) {
     let mut output = std::io::stdout().lock();
@@ -37,6 +45,26 @@ pub(crate) fn run(command: EvidenceCommand) {
                 },
             ),
             "Source evidence recheck failed",
+        ),
+        EvidenceCommand::RecheckSidecar {
+            sidecar,
+            source,
+            artifact,
+            json,
+            solver_timeout,
+            solver_resource_limit,
+        } => (
+            source_options(&solver_timeout, &solver_resource_limit, None).and_then(|options| {
+                recheck_semantic_contract_sidecar(
+                    Path::new(&sidecar),
+                    Path::new(&source),
+                    Path::new(&artifact),
+                    json,
+                    options,
+                    &mut output,
+                )
+            }),
+            "Semantic-contract sidecar recheck failed",
         ),
         EvidenceCommand::AcceptSource {
             input,
@@ -226,6 +254,12 @@ pub(crate) fn run(command: EvidenceCommand) {
                 ("Evidence requirement list acceptance evaluation failed", _) => {
                     "Evidence requirement list rejected; a declared requirement was rejected"
                 }
+                ("Semantic-contract sidecar recheck failed", 3) => {
+                    "Semantic-contract sidecar obligation inconclusive within profile; no recheck diagnostic emitted"
+                }
+                ("Semantic-contract sidecar recheck failed", _) => {
+                    "Semantic-contract sidecar obligation refuted within profile; no recheck diagnostic emitted"
+                }
                 (_, 3) => {
                     "Source query inconclusive within bounded profile; no Evidence emitted"
                 }
@@ -267,6 +301,204 @@ fn recheck_source(
             _ => "source outside restricted profile or cannot encode evidence",
         })?;
     write_recheck(outcome, json, &saved, output)
+}
+
+fn recheck_semantic_contract_sidecar(
+    sidecar_path: &Path,
+    source_path: &Path,
+    artifact_path: &Path,
+    json: bool,
+    options: Options,
+    output: &mut impl Write,
+) -> Result<i32, &'static str> {
+    if !(1..=MAX_TIMEOUT_MS).contains(&options.timeout_ms)
+        || !(1..=MAX_RESOURCE_LIMIT).contains(&options.resource_limit)
+    {
+        return Err("invalid bounded source-query budget");
+    }
+
+    let sidecar_bytes =
+        super::input::read_regular(sidecar_path, MAX_SEMANTIC_CONTRACT_SIDECAR_BYTES)?;
+    let sidecar: Value =
+        serde_json::from_slice(&sidecar_bytes).map_err(|_| "invalid semantic-contract sidecar")?;
+    let (saved_contracts, label, expected_artifact_sha256) =
+        validate_semantic_contract_sidecar(&sidecar)?;
+
+    let artifact_bytes =
+        super::input::read_regular(artifact_path, MAX_SEMANTIC_CONTRACT_ARTIFACT_BYTES)?;
+    let artifact_sha256 = format!("{:x}", Sha256::digest(&artifact_bytes));
+    if artifact_sha256 != expected_artifact_sha256 {
+        return Err("artifact differs from sidecar hash binding");
+    }
+
+    let source_bytes = super::input::read_regular(source_path, MAX_INPUT_BYTES as u64)?;
+    let source = String::from_utf8(source_bytes).map_err(|_| "source is not UTF-8")?;
+    let mut config = Config::new();
+    config.set_timeout_msec(u64::from(options.timeout_ms));
+    config.set_param_value("rlimit", &options.resource_limit.to_string());
+    let context = Context::new(&config);
+    // The bounded encoder must run first to guard the extractor's recursive parser.
+    let atoms = semantic_contract::encode_pure_i64_module_obligations(
+        &source,
+        &context,
+        RefinedAdmission::CompositeV24,
+    )
+    .map_err(|_| "source outside semantic-contract sidecar profile")?;
+    let contracts = semantic_contract::extract_pure_i64_module_contracts(
+        &source,
+        label,
+        None,
+        RefinedAdmission::CompositeV24,
+    )
+    .map_err(|_| "source outside semantic-contract sidecar profile")?;
+    let fresh_contracts =
+        serde_json::to_value(&contracts).map_err(|_| "cannot encode fresh semantic contracts")?;
+    if fresh_contracts != *saved_contracts {
+        return Err("sidecar contracts differ from fresh extraction");
+    }
+
+    let solver = Solver::new(&context);
+    let outcome =
+        native_bundle::solve_module_obligations(&atoms, &solver).map_err(|error| error.0)?;
+    match outcome {
+        SourceRecheck::Refuted => return Ok(1),
+        SourceRecheck::Inconclusive => return Ok(3),
+        SourceRecheck::RecheckedWithinProfile => (),
+    }
+
+    let bytes = write_semantic_contract_sidecar_recheck(
+        json,
+        &sidecar_bytes,
+        &artifact_sha256,
+        &contracts,
+    )?;
+    output
+        .write_all(&bytes)
+        .map_err(|_| "cannot write semantic-contract sidecar recheck diagnostic")?;
+    Ok(0)
+}
+
+fn validate_semantic_contract_sidecar(
+    sidecar: &Value,
+) -> Result<(&Value, &str, &str), &'static str> {
+    if !has_exact_keys(
+        sidecar,
+        &[
+            "schema_version",
+            "semantic_contract_version",
+            "artifact",
+            "artifact_binding",
+            "correspondence",
+            "contracts",
+        ],
+    ) || sidecar["schema_version"] != super::SEMANTIC_CONTRACT_SIDECAR_SCHEMA_VERSION
+        || sidecar["semantic_contract_version"] != SEMANTIC_CONTRACT_VERSION
+        || sidecar["artifact_binding"] != "sha256_of_emitted_file_not_correspondence"
+        || sidecar["correspondence"] != "unchecked"
+    {
+        return Err("invalid semantic-contract sidecar");
+    }
+
+    let artifact = &sidecar["artifact"];
+    if !has_exact_keys(artifact, &["kind", "file_name", "sha256"]) || artifact["kind"] != "llvm-ir"
+    {
+        return Err("invalid semantic-contract sidecar");
+    }
+    let file_name = artifact["file_name"]
+        .as_str()
+        .ok_or("invalid semantic-contract sidecar")?;
+    let expected_sha256 = artifact["sha256"]
+        .as_str()
+        .ok_or("invalid semantic-contract sidecar")?;
+    if file_name.is_empty()
+        || file_name.contains('/')
+        || file_name.contains('\\')
+        || !is_lowercase_sha256(expected_sha256)
+    {
+        return Err("invalid semantic-contract sidecar");
+    }
+
+    let contracts = sidecar["contracts"]
+        .as_array()
+        .filter(|contracts| !contracts.is_empty())
+        .ok_or("invalid semantic-contract sidecar")?;
+    let mut label = None;
+    for contract in contracts {
+        let contract_label = contract
+            .get("source_span")
+            .and_then(|span| span.get("file"))
+            .and_then(Value::as_str)
+            .ok_or("invalid semantic-contract sidecar")?;
+        if contract_label.is_empty()
+            || contract_label.contains('/')
+            || contract_label.contains('\\')
+            || label.is_some_and(|existing| existing != contract_label)
+        {
+            return Err("invalid semantic-contract sidecar");
+        }
+        label = Some(contract_label);
+    }
+
+    Ok((
+        &sidecar["contracts"],
+        label.ok_or("invalid semantic-contract sidecar")?,
+        expected_sha256,
+    ))
+}
+
+fn has_exact_keys(value: &Value, expected: &[&str]) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key))
+    })
+}
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn write_semantic_contract_sidecar_recheck(
+    json: bool,
+    sidecar_bytes: &[u8],
+    artifact_sha256: &str,
+    contracts: &[semantic_contract::SemanticContract],
+) -> Result<Vec<u8>, &'static str> {
+    if json {
+        let atoms: Vec<&str> = contracts
+            .iter()
+            .map(|contract| contract.atom.as_str())
+            .collect();
+        let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "mumei.semantic-contract-sidecar-recheck/v1",
+            "sidecar_schema_version": super::SEMANTIC_CONTRACT_SIDECAR_SCHEMA_VERSION,
+            "sidecar_fingerprint": format!("{:x}", Sha256::digest(sidecar_bytes)),
+            "artifact_sha256": artifact_sha256,
+            "atoms": atoms,
+            "recheck": "consistent",
+            "checks_performed": [
+                "sidecar_shape",
+                "artifact_hash_binding",
+                "contract_fresh_extraction",
+                "module_obligations_unsat"
+            ],
+            "checks_not_performed": [
+                "producer_authenticity",
+                "source_to_llvm_correspondence",
+                "artifact_semantics",
+                "parser_encoder_solver_correctness",
+                "grade_promotion",
+                "lean_kernel_checks"
+            ],
+            "acceptance": "not_evaluated"
+        }))
+        .map_err(|_| "cannot encode semantic-contract sidecar recheck diagnostic")?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    } else {
+        Ok(b"Semantic-contract sidecar consistent with fresh source extraction, module obligations and artifact hash.\nNo producer authenticity, LLVM correspondence, artifact semantics or acceptance.\n".to_vec())
+    }
 }
 
 fn write_recheck(
