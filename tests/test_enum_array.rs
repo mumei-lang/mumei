@@ -130,6 +130,44 @@ fn false_enum_claims_fail_and_unsupported_element_enums_are_type_errors() {
 }
 
 #[test]
+fn enum_array_payload_ranges_are_enforced_without_overconstraining_i64() {
+    let positive = run_verify("test_enum_array_ranges_positive.mm", false);
+    let positive_stdout = String::from_utf8_lossy(&positive.stdout);
+    let positive_stderr = String::from_utf8_lossy(&positive.stderr);
+    assert!(
+        positive.status.success(),
+        "u32 enum-array payload should satisfy nonnegativity in Int mode:\n{positive_stdout}\n{positive_stderr}"
+    );
+    assert_eq!(
+        verify_json(&positive)["status"],
+        "success",
+        "u32 enum-array payload range was not applied"
+    );
+
+    for bitvec_i64 in [false, true] {
+        let negative = run_verify("test_enum_array_ranges_negative.mm", bitvec_i64);
+        let negative_stdout = String::from_utf8_lossy(&negative.stdout);
+        let negative_stderr = String::from_utf8_lossy(&negative.stderr);
+        assert!(
+            !negative.status.success(),
+            "i64 enum-array payload must remain unconstrained (bitvec={bitvec_i64}):\n{negative_stdout}\n{negative_stderr}"
+        );
+        let payload = verify_json(&negative);
+        assert!(
+            payload["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| diagnostics.iter().any(|entry| {
+                    entry["atom"] == "unbounded_i64_payload"
+                        && entry["message"]
+                            .as_str()
+                            .is_some_and(|message| message.contains("Postcondition"))
+                })),
+            "expected unconstrained i64 payload failure (bitvec={bitvec_i64}):\n{payload:#}"
+        );
+    }
+}
+
+#[test]
 fn enum_array_reads_load_the_aggregate_llvm_element_type() {
     let (dir, copied) = copy_fixture("test_enum_array_codegen.mm");
     let output = Command::new(env!("CARGO_BIN_EXE_mumei"))

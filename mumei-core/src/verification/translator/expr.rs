@@ -4230,7 +4230,13 @@ pub(crate) fn expr_to_z3<'a>(
                 }
                 solver.pop(1);
             }
-            Ok(array.select(&idx))
+            let selected = array.select(&idx);
+            if let (Some(solver), Some(bound)) =
+                (solver_opt, datatype::enum_value_leaf_domain(vc, &selected))
+            {
+                solver.assert(&bound);
+            }
+            Ok(selected)
         }
         Expr::BinaryOp(left, op, right) => {
             if matches!(op, Op::Pow) {
