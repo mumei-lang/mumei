@@ -1,5 +1,5 @@
 use crate::ast::TypeRef;
-use crate::parser::ast::Atom;
+use crate::parser::{parse_body_expr, Atom, Expr, Pattern, Stmt};
 use crate::verification::ModuleEnv;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -503,6 +503,18 @@ pub fn compute_proof_hash_with_flags(
     for name in enum_names {
         hash_enum_contract(&mut hasher, name, module_env);
     }
+    let mut refined_type_names: Vec<&String> = module_env.types.keys().collect();
+    refined_type_names.sort();
+    for name in refined_type_names {
+        if let Some(refined) = module_env.types.get(name) {
+            hasher.update(b"|type_def:");
+            hasher.update(name.as_bytes());
+            hasher.update(b"|");
+            hash_field(&mut hasher, "type_def.operand", &refined.operand);
+            hash_field(&mut hasher, "type_def.base", &refined._base_type);
+            hash_field(&mut hasher, "type_def.predicate", &refined.predicate_raw);
+        }
+    }
 
     // 3. Include callee signatures (transitive dependencies)
     let mut visited = HashSet::new();
@@ -827,6 +839,18 @@ fn compute_dependency_hashes_with_names(
     } else {
         atom_effect_names(atom)
     };
+    let atom_type_params = atom.type_params.iter().cloned().collect::<HashSet<_>>();
+    let mut pending_type_names = Vec::new();
+    if !legacy_names {
+        collect_atom_signature_type_names(atom, &mut pending_type_names);
+        let body = parse_body_expr(&atom.body_expr);
+        collect_body_type_names_stmt(
+            &body,
+            module_env,
+            &atom_type_params,
+            &mut pending_type_names,
+        );
+    }
     let mut pending = dependency_callees(atom, module_env, legacy_names)
         .into_iter()
         .collect::<BTreeSet<_>>();
@@ -846,6 +870,7 @@ fn compute_dependency_hashes_with_names(
         );
         if !legacy_names {
             effect_names.extend(atom_effect_names(callee_atom));
+            collect_atom_signature_type_names(callee_atom, &mut pending_type_names);
         }
         pending.extend(
             dependency_callees(callee_atom, module_env, legacy_names)
@@ -905,27 +930,7 @@ fn compute_dependency_hashes_with_names(
             }
         }
     } else {
-        let atom_type_params = atom.type_params.iter().cloned().collect::<HashSet<_>>();
         let empty_bound_params = HashSet::new();
-        let mut pending_type_names = Vec::new();
-        for type_name in atom
-            .params
-            .iter()
-            .filter_map(|param| param.type_name.as_deref())
-            .chain(atom.return_type.as_deref())
-        {
-            collect_signature_type_names(type_name, &mut pending_type_names, &atom_type_params);
-        }
-        for param in &atom.params {
-            if let Some(type_ref) = &param.type_ref {
-                collect_signature_type_ref_names(
-                    type_ref,
-                    &mut pending_type_names,
-                    &atom_type_params,
-                );
-            }
-        }
-
         let mut visited_type_names = HashSet::new();
         while let Some(name) = pending_type_names.pop() {
             if name == "Self" || !visited_type_names.insert(name.clone()) {
@@ -1082,6 +1087,202 @@ fn collect_signature_type_ref_names(
     collect_signature_type_names(&type_ref.name, names, bound_params);
     for type_arg in &type_ref.type_args {
         collect_signature_type_ref_names(type_arg, names, bound_params);
+    }
+}
+
+fn collect_atom_signature_type_names(atom: &Atom, names: &mut Vec<String>) {
+    let bound_params = atom.type_params.iter().cloned().collect::<HashSet<_>>();
+    for type_name in atom
+        .params
+        .iter()
+        .filter_map(|param| param.type_name.as_deref())
+        .chain(atom.return_type.as_deref())
+    {
+        collect_signature_type_names(type_name, names, &bound_params);
+    }
+    for param in &atom.params {
+        if let Some(type_ref) = &param.type_ref {
+            collect_signature_type_ref_names(type_ref, names, &bound_params);
+        }
+    }
+}
+
+fn collect_body_type_names_stmt(
+    stmt: &Stmt,
+    module_env: &ModuleEnv,
+    bound_params: &HashSet<String>,
+    names: &mut Vec<String>,
+) {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            collect_body_type_names_expr(value, module_env, bound_params, names);
+        }
+        Stmt::ArrayStore { index, value, .. } => {
+            collect_body_type_names_expr(index, module_env, bound_params, names);
+            collect_body_type_names_expr(value, module_env, bound_params, names);
+        }
+        Stmt::Block(stmts, _) => {
+            for stmt in stmts {
+                collect_body_type_names_stmt(stmt, module_env, bound_params, names);
+            }
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            collect_body_type_names_expr(cond, module_env, bound_params, names);
+            collect_body_type_names_expr(invariant, module_env, bound_params, names);
+            if let Some(decreases) = decreases {
+                collect_body_type_names_expr(decreases, module_env, bound_params, names);
+            }
+            collect_body_type_names_stmt(body, module_env, bound_params, names);
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            collect_body_type_names_stmt(body, module_env, bound_params, names);
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                collect_body_type_names_stmt(child, module_env, bound_params, names);
+            }
+        }
+        Stmt::Cancel { .. } => {}
+        Stmt::Expr(expr, _) => {
+            collect_body_type_names_expr(expr, module_env, bound_params, names);
+        }
+    }
+}
+
+fn collect_body_type_names_expr(
+    expr: &Expr,
+    module_env: &ModuleEnv,
+    bound_params: &HashSet<String>,
+    names: &mut Vec<String>,
+) {
+    match expr {
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => {}
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                collect_body_type_names_expr(element, module_env, bound_params, names);
+            }
+        }
+        Expr::ArrayAccess(_, index) => {
+            collect_body_type_names_expr(index, module_env, bound_params, names);
+        }
+        Expr::BinaryOp(left, _, right) => {
+            collect_body_type_names_expr(left, module_env, bound_params, names);
+            collect_body_type_names_expr(right, module_env, bound_params, names);
+        }
+        Expr::Block(stmt) => collect_body_type_names_stmt(stmt, module_env, bound_params, names),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_body_type_names_expr(cond, module_env, bound_params, names);
+            collect_body_type_names_stmt(then_branch, module_env, bound_params, names);
+            collect_body_type_names_stmt(else_branch, module_env, bound_params, names);
+        }
+        Expr::Call(name, args) => {
+            collect_enum_variant_owner_names(name, module_env, names);
+            for arg in args {
+                collect_body_type_names_expr(arg, module_env, bound_params, names);
+            }
+        }
+        Expr::StructInit { type_name, fields } => {
+            collect_signature_type_names(type_name, names, bound_params);
+            for (_, value) in fields {
+                collect_body_type_names_expr(value, module_env, bound_params, names);
+            }
+        }
+        Expr::FieldAccess(inner, _) => {
+            collect_body_type_names_expr(inner, module_env, bound_params, names);
+        }
+        Expr::Match { target, arms } => {
+            collect_body_type_names_expr(target, module_env, bound_params, names);
+            for arm in arms {
+                collect_body_type_names_pattern(&arm.pattern, module_env, names);
+                if let Some(guard) = &arm.guard {
+                    collect_body_type_names_expr(guard, module_env, bound_params, names);
+                }
+                collect_body_type_names_stmt(&arm.body, module_env, bound_params, names);
+            }
+        }
+        Expr::Async { body } => collect_body_type_names_stmt(body, module_env, bound_params, names),
+        Expr::Await { expr } => {
+            collect_body_type_names_expr(expr, module_env, bound_params, names);
+        }
+        Expr::CallRef { callee, args } => {
+            collect_body_type_names_expr(callee, module_env, bound_params, names);
+            for arg in args {
+                collect_body_type_names_expr(arg, module_env, bound_params, names);
+            }
+        }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                collect_body_type_names_expr(arg, module_env, bound_params, names);
+            }
+        }
+        Expr::Lambda { body, .. } => {
+            collect_body_type_names_stmt(body, module_env, bound_params, names);
+        }
+        Expr::ChanSend { channel, value } => {
+            collect_body_type_names_expr(channel, module_env, bound_params, names);
+            collect_body_type_names_expr(value, module_env, bound_params, names);
+        }
+        Expr::ChanRecv { channel } => {
+            collect_body_type_names_expr(channel, module_env, bound_params, names);
+        }
+    }
+}
+
+fn collect_body_type_names_pattern(
+    pattern: &Pattern,
+    module_env: &ModuleEnv,
+    names: &mut Vec<String>,
+) {
+    match pattern {
+        Pattern::Variant {
+            variant_name,
+            fields,
+        } => {
+            collect_enum_variant_owner_names(variant_name, module_env, names);
+            for field in fields {
+                collect_body_type_names_pattern(field, module_env, names);
+            }
+        }
+        Pattern::Wildcard | Pattern::Literal(_) | Pattern::Variable(_) => {}
+    }
+}
+
+fn collect_enum_variant_owner_names(
+    variant_name: &str,
+    module_env: &ModuleEnv,
+    names: &mut Vec<String>,
+) {
+    if let Some((enum_name, _)) = variant_name.rsplit_once("::") {
+        let enum_name = enum_name.split('<').next().unwrap_or(enum_name).trim();
+        if module_env.enums.contains_key(enum_name) {
+            names.push(enum_name.to_string());
+        }
+        return;
+    }
+
+    let bare_variant = variant_name.rsplit("::").next().unwrap_or(variant_name);
+    for (enum_name, enum_def) in &module_env.enums {
+        if enum_def
+            .variants
+            .iter()
+            .any(|variant| variant.name == bare_variant)
+        {
+            names.push(enum_name.clone());
+        }
     }
 }
 

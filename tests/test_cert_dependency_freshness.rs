@@ -1576,3 +1576,86 @@ fn standard_library_bundle_imports_are_dependency_fresh() {
         "{imported_text}"
     );
 }
+
+#[test]
+fn imported_refined_field_body_reference_invalidates_certificate_and_cache() {
+    let fixture = Fixture::new();
+    let a_source = fixture.root.join("a.mm");
+    let b_source = fixture.root.join("b.mm");
+    let certificate = fixture.root.join("a.proof.json");
+    std::fs::write(
+        &b_source,
+        "type Pos = i64 where v >= 1;\nstruct P { x: Pos }\n",
+    )
+    .expect("write refined field module");
+    std::fs::write(
+        &a_source,
+        "import \"./b.mm\";\n\
+         atom g(a: i64) -> i64\n\
+         requires: a >= 1;\n\
+         ensures: result >= 1;\n\
+         body: {\n\
+           let p = P { x: a };\n\
+           p.x\n\
+         };\n",
+    )
+    .expect("write struct-literal consumer");
+
+    assert_success(
+        &fixture.certify(&a_source, &certificate),
+        "certify struct-literal consumer",
+    );
+    let unchanged_certificate = verify_cert(&fixture, &certificate, &a_source, false);
+    let unchanged_certificate_text = output_text(&unchanged_certificate);
+    assert_eq!(
+        unchanged_certificate.status.code(),
+        Some(0),
+        "{unchanged_certificate_text}"
+    );
+    assert!(
+        unchanged_certificate_text.contains("g: proven"),
+        "{unchanged_certificate_text}"
+    );
+
+    let initial_verify = fixture.verify(&a_source, &[]);
+    assert_success(&initial_verify, "verify unchanged consumer");
+    let cached_verify = fixture.verify(&a_source, &[]);
+    let cached_verify_text = output_text(&cached_verify);
+    assert_success(&cached_verify, "verify cached unchanged consumer");
+    assert!(
+        cached_verify_text.contains("skipped (unchanged)"),
+        "{cached_verify_text}"
+    );
+
+    std::fs::write(
+        &b_source,
+        "type Pos = i64 where v >= 2;\nstruct P { x: Pos }\n",
+    )
+    .expect("strengthen imported refined type");
+    let changed_certificate = verify_cert(&fixture, &certificate, &a_source, false);
+    let changed_certificate_text = output_text(&changed_certificate);
+    assert_eq!(
+        changed_certificate.status.code(),
+        Some(0),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("g: dependency_changed"),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("type:Pos"),
+        "{changed_certificate_text}"
+    );
+
+    let changed_verify = fixture.verify(&a_source, &[]);
+    let changed_verify_text = output_text(&changed_verify);
+    assert!(
+        !changed_verify.status.success(),
+        "changed refined type unexpectedly verified\n{changed_verify_text}"
+    );
+    assert!(
+        !changed_verify_text.contains("skipped (unchanged)"),
+        "{changed_verify_text}"
+    );
+}
