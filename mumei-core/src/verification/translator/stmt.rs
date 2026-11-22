@@ -8,7 +8,9 @@ use crate::verification::invariant_inference::{
     expr_to_string, generate_candidates, InferredInvariant,
 };
 use crate::verification::translator::may_write::{callee_may_write_args, CalleeRef};
-use crate::verification::translator::z3_types::array_root_ast;
+use crate::verification::translator::z3_types::{
+    array_root_ast, with_array_shared_markers_restored,
+};
 use serde_json::json;
 
 const ENUM_STRUCT_ARRAY_REBUILD_KEY: &str = "__enum_struct_array_rebuild";
@@ -405,9 +407,10 @@ fn check_while_invariant<'a>(
     };
     let mut loop_shared_markers = std::collections::HashMap::new();
     let result = (|| -> MumeiResult<bool> {
-        let inv = expr_to_z3(vc, invariant, env, None)?
-            .as_bool()
-            .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+        let inv =
+            with_array_shared_markers_restored(env, |env| expr_to_z3(vc, invariant, env, None))?
+                .as_bool()
+                .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
         solver.push();
         solver.assert(&Bool::and(ctx, &[&path_cond, &inv.not()]));
         let base = crate::verification::phase_artifacts::check(solver);
@@ -420,9 +423,11 @@ fn check_while_invariant<'a>(
         let modified_set: std::collections::HashSet<String> = modified.iter().cloned().collect();
         havoc_vars(vc, &mut step_env, &modified_set, Some(solver));
         let step = (|| -> MumeiResult<SatResult> {
-            let inv_h = expr_to_z3(vc, invariant, &mut step_env, None)?
-                .as_bool()
-                .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+            let inv_h = with_array_shared_markers_restored(&mut step_env, |env| {
+                expr_to_z3(vc, invariant, env, None)
+            })?
+            .as_bool()
+            .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
             let c_h = expr_to_z3(vc, cond, &mut step_env, None)?
                 .as_bool()
                 .ok_or(MumeiError::type_error("While condition must be boolean"))?;
@@ -432,9 +437,11 @@ fn check_while_invariant<'a>(
                 solver.assert(&c_h);
                 stmt_to_z3(vc, body, &mut step_env, Some(solver))?;
                 loop_shared_markers.extend(collect_array_shared_markers(&step_env));
-                let inv_after = expr_to_z3(vc, invariant, &mut step_env, None)?
-                    .as_bool()
-                    .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+                let inv_after = with_array_shared_markers_restored(&mut step_env, |env| {
+                    expr_to_z3(vc, invariant, env, None)
+                })?
+                .as_bool()
+                .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
                 solver.assert(&inv_after.not());
                 Ok(crate::verification::phase_artifacts::check(solver))
             })();
@@ -2460,9 +2467,11 @@ pub(crate) fn stmt_to_z3<'a>(
                 }
 
                 let marks = obligation_marks(vc);
-                let inv = expr_to_z3(vc, &effective_invariant, env, None)?
-                    .as_bool()
-                    .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+                let inv = with_array_shared_markers_restored(env, |env| {
+                    expr_to_z3(vc, &effective_invariant, env, None)
+                })?
+                .as_bool()
+                .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
                 rebind_deferred_obligations(vc, marks, &inv);
                 let path_cond = vc.path_cond_conj();
                 solver.push();
@@ -2485,9 +2494,11 @@ pub(crate) fn stmt_to_z3<'a>(
                     let mut step_env = env.clone();
                     havoc_vars(vc, &mut step_env, &modified, Some(solver));
                     let marks = obligation_marks(vc);
-                    let inv_h = expr_to_z3(vc, &effective_invariant, &mut step_env, None)?
-                        .as_bool()
-                        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+                    let inv_h = with_array_shared_markers_restored(&mut step_env, |env| {
+                        expr_to_z3(vc, &effective_invariant, env, None)
+                    })?
+                    .as_bool()
+                    .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
                     rebind_deferred_obligations(vc, marks, &inv_h);
                     let marks = obligation_marks(vc);
                     let c_h = expr_to_z3(vc, cond, &mut step_env, None)?
@@ -2499,9 +2510,11 @@ pub(crate) fn stmt_to_z3<'a>(
                     solver.assert(&c_h);
                     stmt_to_z3(vc, body, &mut step_env, Some(solver))?;
                     loop_shared_markers.extend(collect_array_shared_markers(&step_env));
-                    let inv_after = expr_to_z3(vc, &effective_invariant, &mut step_env, None)?
-                        .as_bool()
-                        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+                    let inv_after = with_array_shared_markers_restored(&mut step_env, |env| {
+                        expr_to_z3(vc, &effective_invariant, env, None)
+                    })?
+                    .as_bool()
+                    .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
                     solver.assert(&inv_after.not());
                     if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
                         solver.pop(1);
@@ -2525,9 +2538,11 @@ pub(crate) fn stmt_to_z3<'a>(
                     let mut term_env = env.clone();
                     havoc_vars(vc, &mut term_env, &modified, Some(solver));
                     let marks = obligation_marks(vc);
-                    let inv_h = expr_to_z3(vc, invariant, &mut term_env, None)?
-                        .as_bool()
-                        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+                    let inv_h = with_array_shared_markers_restored(&mut term_env, |env| {
+                        expr_to_z3(vc, invariant, env, None)
+                    })?
+                    .as_bool()
+                    .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
                     rebind_deferred_obligations(vc, marks, &inv_h);
                     let marks = obligation_marks(vc);
                     let c_h = expr_to_z3(vc, cond, &mut term_env, None)?
@@ -2535,7 +2550,10 @@ pub(crate) fn stmt_to_z3<'a>(
                         .ok_or(MumeiError::type_error("While condition must be boolean"))?;
                     rebind_deferred_obligations(vc, marks, &inv_h);
                     let marks = obligation_marks(vc);
-                    let v_before = as_int_like(&expr_to_z3(vc, dec_expr, &mut term_env, None)?)
+                    let v_before =
+                        as_int_like(&with_array_shared_markers_restored(&mut term_env, |env| {
+                            expr_to_z3(vc, dec_expr, env, None)
+                        })?)
                         .ok_or(MumeiError::type_error(
                             "decreases expression must be integer",
                         ))?;
@@ -2561,7 +2579,10 @@ pub(crate) fn stmt_to_z3<'a>(
                     solver.assert(&c_h);
                     stmt_to_z3(vc, body, &mut term_env, Some(solver))?;
                     loop_shared_markers.extend(collect_array_shared_markers(&term_env));
-                    let v_after = as_int_like(&expr_to_z3(vc, dec_expr, &mut term_env, None)?)
+                    let v_after =
+                        as_int_like(&with_array_shared_markers_restored(&mut term_env, |env| {
+                            expr_to_z3(vc, dec_expr, env, None)
+                        })?)
                         .ok_or(MumeiError::type_error(
                             "decreases expression must be integer",
                         ))?;
@@ -2591,9 +2612,11 @@ pub(crate) fn stmt_to_z3<'a>(
                 let mut post_env = env.clone();
                 havoc_vars(vc, &mut post_env, &modified, Some(solver));
                 let marks = obligation_marks(vc);
-                let inv_post = expr_to_z3(vc, invariant, &mut post_env, None)?
-                    .as_bool()
-                    .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+                let inv_post = with_array_shared_markers_restored(&mut post_env, |env| {
+                    expr_to_z3(vc, invariant, env, None)
+                })?
+                .as_bool()
+                .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
                 rebind_deferred_obligations(vc, marks, &inv_post);
                 let marks = obligation_marks(vc);
                 let c_not_post = expr_to_z3(vc, cond, &mut post_env, None)?
@@ -2607,9 +2630,11 @@ pub(crate) fn stmt_to_z3<'a>(
                 return Ok(Bool::and(ctx, &[&inv_post, &c_not_post]).into());
             }
 
-            let inv = expr_to_z3(vc, invariant, env, None)?
-                .as_bool()
-                .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+            let inv = with_array_shared_markers_restored(env, |env| {
+                expr_to_z3(vc, invariant, env, None)
+            })?
+            .as_bool()
+            .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
             let c_not = expr_to_z3(vc, cond, env, None)?
                 .as_bool()
                 .ok_or(MumeiError::type_error("While condition must be boolean"))?
@@ -2649,9 +2674,11 @@ pub(crate) fn stmt_to_z3<'a>(
                     if let (Some(invariant), Some(solver)) =
                         (resource_def.invariant.as_ref(), solver_opt)
                     {
-                        let inv = expr_to_z3(vc, invariant, env, Some(solver))?
-                            .as_bool()
-                            .ok_or(MumeiError::type_error("resource invariant must be boolean"))?;
+                        let inv = with_array_shared_markers_restored(env, |env| {
+                            expr_to_z3(vc, invariant, env, Some(solver))
+                        })?
+                        .as_bool()
+                        .ok_or(MumeiError::type_error("resource invariant must be boolean"))?;
                         solver.assert(&inv);
                     }
                 }
@@ -2666,9 +2693,11 @@ pub(crate) fn stmt_to_z3<'a>(
                     (vc.module_env.get_resource(resource), solver_opt)
                 {
                     if let Some(invariant) = resource_def.invariant.as_ref() {
-                        let inv_after = expr_to_z3(vc, invariant, env, Some(solver))?
-                            .as_bool()
-                            .ok_or(MumeiError::type_error("resource invariant must be boolean"))?;
+                        let inv_after = with_array_shared_markers_restored(env, |env| {
+                            expr_to_z3(vc, invariant, env, Some(solver))
+                        })?
+                        .as_bool()
+                        .ok_or(MumeiError::type_error("resource invariant must be boolean"))?;
                         solver.push();
                         solver.assert(&inv_after.not());
                         let result = crate::verification::phase_artifacts::check(solver);

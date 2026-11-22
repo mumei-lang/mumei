@@ -90,6 +90,21 @@ body: {
     w[0]
 };
 
+atom spec_marker_does_not_hide_body_constructor(xs: [i64]) -> i64
+requires:
+    len(xs) > 0
+    && match E::D(xs) {
+        E::D(_) => true,
+        E::SD(_) => false,
+        E::N => false
+    };
+ensures: true;
+body: {
+    let e = E::D(xs);
+    xs[0] = 9;
+    0
+};
+
 atom shared_alias_chain(s: S) -> i64
 requires: len(s.xs) > 0;
 ensures: true;

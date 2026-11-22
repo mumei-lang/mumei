@@ -636,6 +636,21 @@ pub(crate) fn is_array_shared(env: &Env<'_>, name: &str) -> bool {
         .is_some_and(is_shared_marker_value)
 }
 
+pub(crate) fn with_array_shared_markers_restored<'a, T>(
+    env: &mut Env<'a>,
+    f: impl FnOnce(&mut Env<'a>) -> T,
+) -> T {
+    let saved = env
+        .iter()
+        .filter(|(key, _)| key.starts_with(ARRAY_SHARED_PREFIX))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    let result = f(env);
+    env.retain(|key, _| !key.starts_with(ARRAY_SHARED_PREFIX));
+    env.extend(saved);
+    result
+}
+
 pub(crate) fn mark_array_shared<'a>(ctx: &'a Context, env: &mut Env<'a>, name: &str) {
     env.insert(array_shared_key(name), Bool::from_bool(ctx, true).into());
 }

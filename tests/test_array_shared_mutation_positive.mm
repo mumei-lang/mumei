@@ -7,6 +7,19 @@ enum E {
     N
 }
 
+atom specification_construction_does_not_share_runtime_array(xs: [i64]) -> i64
+requires:
+    len(xs) > 0
+    && match E::D(xs) {
+        E::D(_) => true,
+        E::N => false
+    };
+ensures: result == 9;
+body: {
+    xs[0] = 9;
+    xs[0]
+};
+
 atom first(xs: [i64]) -> i64
 requires: len(xs) > 0;
 ensures: result == xs[0];

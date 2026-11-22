@@ -610,38 +610,42 @@ fn lower_clause_with_skip<'a>(
     }
     let clause_ast = parse_expression(trimmed);
     let marks = super::translator::obligation_marks(vc);
-    let clause_z3 = match expr_to_z3(vc, &clause_ast, env, solver_opt) {
-        Ok(value) => value,
-        // Dropping a requires would quietly weaken the assumptions and could
-        // turn into a plain failure; keep the atom unverifiable instead.
-        Err(err)
-            if label == "requires"
-                && err
-                    .to_string()
-                    .contains(QUANTIFIER_DEPENDENT_CALL_UNSUPPORTED) =>
-        {
-            return Err(err);
-        }
-        Err(err) if is_unsupported_clause_error(&err) => {
-            push_skip_warning(
-                diagnostics,
-                unsupported_clause_warning(label, trimmed, &err),
-            );
-            super::translator::discard_obligations_since(vc, marks);
-            return Ok(ClauseLoweringOutcome::Skipped);
-        }
-        // Termination errors carry a counterexample that the generic
-        // rewrap below would drop; propagate them unchanged.
-        Err(err) if format!("{err}").contains("Termination measure violation") => {
-            return Err(err);
-        }
-        Err(err) => {
-            return Err(MumeiError::verification_at(
-                format!("failed to lower {} clause '{}': {}", label, trimmed, err),
-                atom.atom.span.clone(),
-            ));
-        }
-    };
+    let clause_z3 =
+        match crate::verification::translator::z3_types::with_array_shared_markers_restored(
+            env,
+            |env| expr_to_z3(vc, &clause_ast, env, solver_opt),
+        ) {
+            Ok(value) => value,
+            // Dropping a requires would quietly weaken the assumptions and could
+            // turn into a plain failure; keep the atom unverifiable instead.
+            Err(err)
+                if label == "requires"
+                    && err
+                        .to_string()
+                        .contains(QUANTIFIER_DEPENDENT_CALL_UNSUPPORTED) =>
+            {
+                return Err(err);
+            }
+            Err(err) if is_unsupported_clause_error(&err) => {
+                push_skip_warning(
+                    diagnostics,
+                    unsupported_clause_warning(label, trimmed, &err),
+                );
+                super::translator::discard_obligations_since(vc, marks);
+                return Ok(ClauseLoweringOutcome::Skipped);
+            }
+            // Termination errors carry a counterexample that the generic
+            // rewrap below would drop; propagate them unchanged.
+            Err(err) if format!("{err}").contains("Termination measure violation") => {
+                return Err(err);
+            }
+            Err(err) => {
+                return Err(MumeiError::verification_at(
+                    format!("failed to lower {} clause '{}': {}", label, trimmed, err),
+                    atom.atom.span.clone(),
+                ));
+            }
+        };
     let Some(clause_bool) = clause_z3.as_bool() else {
         return Err(MumeiError::verification_at(
             format!("{} clause '{}' must lower to boolean", label, trimmed),
@@ -1775,7 +1779,11 @@ fn verify_inner_impl(
                 let mut measures = Vec::new();
                 for component in measure_components(atom.decreases.as_deref().unwrap_or("0")) {
                     let measure_ast = parse_expression(&component);
-                    let measure = expr_to_z3(&vc, &measure_ast, &mut env, None)?;
+                    let measure =
+                        crate::verification::translator::z3_types::with_array_shared_markers_restored(
+                            &mut env,
+                            |env| expr_to_z3(&vc, &measure_ast, env, None),
+                        )?;
                     if measure.as_int().is_none() && measure.as_bv().is_none() {
                         return Err(MumeiError::verification_at(
                             format!(
@@ -1851,16 +1859,26 @@ fn verify_inner_impl(
             Int::from_i64(&ctx, val)
         } else {
             let ast = parse_expression(&q.start);
-            as_int_like(&expr_to_z3(&vc, &ast, &mut env, None)?)
-                .unwrap_or(Int::new_const(&ctx, q.start.as_str()))
+            as_int_like(
+                &crate::verification::translator::z3_types::with_array_shared_markers_restored(
+                    &mut env,
+                    |env| expr_to_z3(&vc, &ast, env, None),
+                )?,
+            )
+            .unwrap_or(Int::new_const(&ctx, q.start.as_str()))
         };
         let end = if let Ok(val) = q.end.parse::<i64>() {
             Int::from_i64(&ctx, val)
         } else {
             // Parse end as expression to support `n - 1` etc.
             let ast = parse_expression(&q.end);
-            as_int_like(&expr_to_z3(&vc, &ast, &mut env, None)?)
-                .unwrap_or(Int::new_const(&ctx, q.end.as_str()))
+            as_int_like(
+                &crate::verification::translator::z3_types::with_array_shared_markers_restored(
+                    &mut env,
+                    |env| expr_to_z3(&vc, &ast, env, None),
+                )?,
+            )
+            .unwrap_or(Int::new_const(&ctx, q.end.as_str()))
         };
 
         let range_cond = Bool::and(&ctx, &[&i.ge(&start), &i.lt(&end)]);
@@ -1869,7 +1887,11 @@ fn verify_inner_impl(
         vc.quantifier_binders
             .borrow_mut()
             .push((q.var.clone(), i.clone().into()));
-        let condition_res = expr_to_z3(&vc, &expr_ast, &mut env, None);
+        let condition_res =
+            crate::verification::translator::z3_types::with_array_shared_markers_restored(
+                &mut env,
+                |env| expr_to_z3(&vc, &expr_ast, env, None),
+            );
         vc.quantifier_binders.borrow_mut().pop();
         let condition_z3 = condition_res?.as_bool().ok_or(MumeiError::verification_at(
             "Condition must be boolean",
@@ -1897,7 +1919,12 @@ fn verify_inner_impl(
             QuantifierType::ForAll => {
                 let mut pattern_asts: Vec<Dynamic> = Vec::new();
                 for (arr_name, idx_expr) in &arr_accesses {
-                    if let Ok(idx_z3) = expr_to_z3(&vc, idx_expr, &mut env, None) {
+                    if let Ok(idx_z3) =
+                        crate::verification::translator::z3_types::with_array_shared_markers_restored(
+                            &mut env,
+                            |env| expr_to_z3(&vc, idx_expr, env, None),
+                        )
+                    {
                         if let Some(idx_int) = as_int_like(&idx_z3) {
                             pattern_asts
                                 .push(z3_dynamic_array(&vc, arr_name, &env).select(&idx_int));
@@ -1944,7 +1971,12 @@ fn verify_inner_impl(
                 // mis-bind bounds once another array (e.g. `data`, `aux`) is
                 // used in a forall condition.
                 let len_var = array_len_value(&ctx, &mut env, arr_name, bitvec_i64, Some(&solver));
-                if let Ok(idx_z3) = expr_to_z3(&vc, idx_expr, &mut env, None) {
+                if let Ok(idx_z3) =
+                    crate::verification::translator::z3_types::with_array_shared_markers_restored(
+                        &mut env,
+                        |env| expr_to_z3(&vc, idx_expr, env, None),
+                    )
+                {
                     if let (Some(idx_int), Some(in_bounds)) = (
                         as_int_like(&idx_z3),
                         index_in_bounds(&ctx, &idx_z3, &len_var),
@@ -3691,7 +3723,11 @@ fn check_resource_initial_state<'a>(
             env.insert(format!("{resource_name}.{}", field.name), value);
         }
         let check = (|| {
-            let inv = expr_to_z3(vc, invariant, env, Some(solver))?
+            let inv =
+                crate::verification::translator::z3_types::with_array_shared_markers_restored(
+                    env,
+                    |env| expr_to_z3(vc, invariant, env, Some(solver)),
+                )?
                 .as_bool()
                 .ok_or_else(|| MumeiError::type_error("resource invariant must be boolean"))?;
             solver.push();
