@@ -1952,6 +1952,142 @@ fn record_cover_obligation<'a>(vc: &VCtx<'a>, obligation: Bool<'a>) {
     obligations.borrow_mut().push(obligation);
 }
 
+fn check_call_argument_domain<'a>(
+    vc: &VCtx<'a>,
+    solver_opt: Option<&Solver<'a>>,
+    callee_name: &str,
+    param_name: &str,
+    type_name: &str,
+    value: &Dynamic<'a>,
+    call_env: &mut Env<'a>,
+) -> MumeiResult<()> {
+    let Some(solver) = solver_opt else {
+        return Ok(());
+    };
+    let resolved_type = vc.module_env.resolve_base_type(type_name);
+    let mut domains = Vec::new();
+
+    if let Some(domain) = datatype::scalar_int_leaf_domain(vc, &resolved_type, value) {
+        domains.push((resolved_type.clone(), domain));
+    } else if let Some(element_type) = array_element_type_name(&resolved_type) {
+        if let Some(length) = call_env.get(&array_len_key(param_name)) {
+            if let Some(domain) = datatype::array_int_leaf_domain(vc, value, length, element_type) {
+                domains.push((element_type.to_string(), domain));
+            }
+        } else if matches!(
+            vc.module_env.resolve_base_type(element_type).as_str(),
+            "u64" | "u32" | "i32"
+        ) {
+            return Err(MumeiError::verification(format!(
+                "Call to '{callee_name}' argument '{param_name}' may be outside the '{}' domain",
+                vc.module_env.resolve_base_type(element_type)
+            ))
+            .with_verdict(crate::verification::VerdictKind::Rejected));
+        }
+    } else if let Some(enum_def) = vc.module_env.get_enum(&resolved_type) {
+        if let Some(domain) = datatype::enum_value_leaf_domain(vc, value) {
+            domains.push((enum_def.name.clone(), domain));
+        }
+    } else if vc.module_env.get_struct(&resolved_type).is_some() {
+        let values = super::struct_invariants::nested_field_bindings(call_env, value);
+        for (_, leaf_value) in &values {
+            if let Some(domain) = datatype::enum_value_leaf_domain(vc, leaf_value) {
+                let domain_type = vc
+                    .module_env
+                    .enums
+                    .values()
+                    .find(|enum_def| {
+                        datatype::enum_datatype_sort(vc, enum_def)
+                            .is_some_and(|sort| sort.sort == leaf_value.get_sort())
+                    })
+                    .map(|enum_def| enum_def.name.clone())
+                    .unwrap_or_else(|| resolved_type.clone());
+                domains.push((domain_type, domain));
+            }
+        }
+        if let Some(leaves) = datatype::field_leaf_types(&resolved_type, vc.module_env) {
+            for (leaf_name, leaf_type) in leaves {
+                if leaf_type == "array_len" {
+                    continue;
+                }
+                let Some(leaf_value) = values
+                    .iter()
+                    .find(|(name, _)| name == &leaf_name)
+                    .map(|(_, value)| value)
+                else {
+                    let domain_type = leaf_type
+                        .strip_prefix("array:")
+                        .or_else(|| leaf_type.strip_prefix("enum:"))
+                        .unwrap_or(&leaf_type);
+                    return Err(MumeiError::verification(format!(
+                        "Call to '{callee_name}' argument '{param_name}' may be outside the '{domain_type}' domain"
+                    ))
+                    .with_verdict(crate::verification::VerdictKind::Rejected));
+                };
+                let domain = if let Some(element_type) = leaf_type.strip_prefix("array:") {
+                    let Some(array) = leaf_value.as_array() else {
+                        continue;
+                    };
+                    let length =
+                        super::z3_types::array_len_for_value(vc, call_env, &array, solver_opt);
+                    datatype::array_int_leaf_domain(vc, leaf_value, &length, element_type)
+                        .map(|domain| (element_type.to_string(), domain))
+                } else {
+                    datatype::scalar_int_leaf_domain(vc, &leaf_type, leaf_value)
+                        .map(|domain| (leaf_type.clone(), domain))
+                };
+                if let Some(domain) = domain {
+                    domains.push(domain);
+                }
+            }
+        }
+    }
+
+    for (domain_type, domain) in domains {
+        if vc.cover_obligations.is_some() {
+            record_cover_obligation(vc, domain);
+            continue;
+        }
+        solver.push();
+        solver.assert(&vc.path_cond_conj());
+        solver.assert(&domain.not());
+        let result = crate::verification::phase_artifacts::check(solver);
+        solver.pop(1);
+        if result != SatResult::Unsat {
+            return Err(MumeiError::verification(format!(
+                "Call to '{callee_name}' argument '{param_name}' may be outside the '{domain_type}' domain"
+            ))
+            .with_verdict(crate::verification::VerdictKind::Rejected));
+        }
+    }
+    Ok(())
+}
+
+fn check_call_argument_domains<'a>(
+    vc: &VCtx<'a>,
+    solver_opt: Option<&Solver<'a>>,
+    callee_name: &str,
+    params: &[crate::parser::Param],
+    values: &[Dynamic<'a>],
+    call_env: &mut Env<'a>,
+) -> MumeiResult<()> {
+    for (param, value) in params.iter().zip(values) {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        check_call_argument_domain(
+            vc,
+            solver_opt,
+            callee_name,
+            &param.name,
+            type_name,
+            value,
+            call_env,
+        )?;
+    }
+    Ok(())
+}
+
 /// The contents array for one `==`/`!=` operand. A `Variable` resolves
 /// through `z3_dynamic_array` so the live `__z3_arr_<name>` chain (which
 /// `a[i] = v` stores rewrite) is compared, not the stale base const still
@@ -3468,6 +3604,15 @@ pub(crate) fn expr_to_z3<'a>(
                                 }
                             }
                         }
+
+                        check_call_argument_domains(
+                            vc,
+                            solver_opt,
+                            name,
+                            &callee.params,
+                            &arg_vals,
+                            &mut call_env,
+                        )?;
 
                         if cong {
                             if let Some(field_vals) =
@@ -6416,6 +6561,15 @@ pub(crate) fn expr_to_z3<'a>(
                         }
                     }
 
+                    check_call_argument_domains(
+                        vc,
+                        solver_opt,
+                        callee_name,
+                        &callee_atom.params,
+                        &arg_vals,
+                        &mut call_env,
+                    )?;
+
                     if cong {
                         if let Some(field_vals) = struct_field_values_for_call(
                             vc,
@@ -7521,6 +7675,19 @@ fn apply_local_lambda<'a>(
             solver_opt,
             arg_leaf_snapshots.get(i).and_then(Option::as_ref),
         )?;
+    }
+    for (i, param) in params.iter().enumerate() {
+        if let Some(type_name) = param.type_ref.as_ref().map(|ty| ty.display_name()) {
+            check_call_argument_domain(
+                vc,
+                solver_opt,
+                call_name,
+                &param.name,
+                &type_name,
+                &arg_vals[i],
+                &mut call_env,
+            )?;
+        }
     }
 
     let mut call_lambdas = captured.clone();
