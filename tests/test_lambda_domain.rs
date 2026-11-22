@@ -26,6 +26,7 @@ fn typed_lambda_domains_are_scoped_and_checked_at_invocation() {
             "tests/positive/test_lambda_domain_f5.mm",
             "tests/positive/test_lambda_array_domain.mm",
             "tests/positive/test_lambda_struct_domain.mm",
+            "tests/positive/test_lambda_struct_shadow.mm",
             "tests/positive/test_lambda_hof_domain.mm",
         ] {
             let (verified, output) = verify_fixture(fixture, bitvec_i64);

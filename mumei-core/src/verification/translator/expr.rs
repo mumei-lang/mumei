@@ -7970,12 +7970,26 @@ pub(crate) fn expr_to_z3<'a>(
                         .insert(p.name.clone(), element_type.display_name());
                 }
                 if let Some(struct_def) = vc.module_env.get_struct(&resolved_type) {
+                    let struct_field_prefix = format!("__struct_{}_", p.name);
+                    let stale_fields: Vec<String> = lambda_env
+                        .keys()
+                        .filter_map(|key| {
+                            key.strip_prefix(&struct_field_prefix).map(str::to_string)
+                        })
+                        .collect();
+                    for field in stale_fields {
+                        lambda_env.remove(&struct_field_key(&p.name, &field));
+                        lambda_env.remove(&format!("{}_{}", p.name, field));
+                    }
                     super::struct_invariants::seed_struct_fields(
                         vc,
                         &mut lambda_env,
                         &lambda_param_name,
                         struct_def,
                     );
+                    let fields =
+                        super::struct_invariants::nested_field_bindings(&lambda_env, &p_sym);
+                    super::struct_invariants::bind_struct_fields(&mut lambda_env, &p.name, &fields);
                     vc.local_struct_types
                         .borrow_mut()
                         .insert(p.name.clone(), resolved_type.clone());
