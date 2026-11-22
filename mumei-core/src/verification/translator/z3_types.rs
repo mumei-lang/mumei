@@ -1700,11 +1700,45 @@ fn stmt_stores_to_array(
     visited: &mut std::collections::HashSet<String>,
     depth: u8,
 ) -> bool {
+    let aliases = array_aliases_in_stmt(stmt, name);
+    stmt_stores_to_array_with_aliases(module_env, stmt, &aliases, bound_names, visited, depth)
+}
+
+fn array_aliases_in_stmt(stmt: &Stmt, name: &str) -> std::collections::HashSet<String> {
+    let mut aliases = std::collections::HashSet::new();
+    aliases.insert(name.to_string());
+    loop {
+        let mut additions = std::collections::HashSet::new();
+        collect_array_aliases_stmt(stmt, &aliases, &mut additions);
+        let previous_len = aliases.len();
+        aliases.extend(additions);
+        if aliases.len() == previous_len {
+            return aliases;
+        }
+    }
+}
+
+fn collect_array_aliases_stmt(
+    stmt: &Stmt,
+    aliases: &std::collections::HashSet<String>,
+    additions: &mut std::collections::HashSet<String>,
+) {
     match stmt {
-        Stmt::ArrayStore { array, .. } => array == name,
-        Stmt::Block(stmts, _) => stmts
-            .iter()
-            .any(|s| stmt_stores_to_array(module_env, s, name, bound_names, visited, depth)),
+        Stmt::Let { var, value, .. } | Stmt::Assign { var, value, .. } => {
+            if expr_mentions_alias(value, aliases) {
+                additions.insert(var.clone());
+            }
+            collect_array_aliases_expr(value, aliases, additions);
+        }
+        Stmt::ArrayStore { index, value, .. } => {
+            collect_array_aliases_expr(index, aliases, additions);
+            collect_array_aliases_expr(value, aliases, additions);
+        }
+        Stmt::Block(stmts, _) => {
+            for stmt in stmts {
+                collect_array_aliases_stmt(stmt, aliases, additions);
+            }
+        }
         Stmt::While {
             cond,
             invariant,
@@ -1712,23 +1746,263 @@ fn stmt_stores_to_array(
             body,
             ..
         } => {
-            expr_stores_to_array(module_env, cond, name, bound_names, visited, depth)
-                || expr_stores_to_array(module_env, invariant, name, bound_names, visited, depth)
-                || decreases.as_deref().is_some_and(|d| {
-                    expr_stores_to_array(module_env, d, name, bound_names, visited, depth)
-                })
-                || stmt_stores_to_array(module_env, body, name, bound_names, visited, depth)
+            collect_array_aliases_expr(cond, aliases, additions);
+            collect_array_aliases_expr(invariant, aliases, additions);
+            if let Some(decreases) = decreases {
+                collect_array_aliases_expr(decreases, aliases, additions);
+            }
+            collect_array_aliases_stmt(body, aliases, additions);
         }
         Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
-            stmt_stores_to_array(module_env, body, name, bound_names, visited, depth)
+            collect_array_aliases_stmt(body, aliases, additions);
         }
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                collect_array_aliases_stmt(child, aliases, additions);
+            }
+        }
+        Stmt::Expr(expr, _) => collect_array_aliases_expr(expr, aliases, additions),
+        Stmt::Cancel { .. } => {}
+    }
+}
+
+fn collect_array_aliases_expr(
+    expr: &Expr,
+    aliases: &std::collections::HashSet<String>,
+    additions: &mut std::collections::HashSet<String>,
+) {
+    match expr {
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                collect_array_aliases_expr(element, aliases, additions);
+            }
+        }
+        Expr::ArrayAccess(_, index) => collect_array_aliases_expr(index, aliases, additions),
+        Expr::BinaryOp(left, _, right) => {
+            collect_array_aliases_expr(left, aliases, additions);
+            collect_array_aliases_expr(right, aliases, additions);
+        }
+        Expr::Block(stmt) => collect_array_aliases_stmt(stmt, aliases, additions),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_array_aliases_expr(cond, aliases, additions);
+            collect_array_aliases_stmt(then_branch, aliases, additions);
+            collect_array_aliases_stmt(else_branch, aliases, additions);
+        }
+        Expr::Call(_, args) | Expr::Perform { args, .. } => {
+            for arg in args {
+                collect_array_aliases_expr(arg, aliases, additions);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_array_aliases_expr(value, aliases, additions);
+            }
+        }
+        Expr::FieldAccess(inner, _) => collect_array_aliases_expr(inner, aliases, additions),
+        Expr::Match { target, arms } => {
+            if expr_mentions_alias(target, aliases) {
+                for arm in arms {
+                    collect_pattern_bound_names(&arm.pattern, additions);
+                }
+            }
+            collect_array_aliases_expr(target, aliases, additions);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_array_aliases_expr(guard, aliases, additions);
+                }
+                collect_array_aliases_stmt(&arm.body, aliases, additions);
+            }
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => {
+            collect_array_aliases_stmt(body, aliases, additions);
+        }
+        Expr::Await { expr } => collect_array_aliases_expr(expr, aliases, additions),
+        Expr::CallRef { callee, args } => {
+            collect_array_aliases_expr(callee, aliases, additions);
+            for arg in args {
+                collect_array_aliases_expr(arg, aliases, additions);
+            }
+        }
+        Expr::ChanSend { channel, value } => {
+            collect_array_aliases_expr(channel, aliases, additions);
+            collect_array_aliases_expr(value, aliases, additions);
+        }
+        Expr::ChanRecv { channel } => collect_array_aliases_expr(channel, aliases, additions),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => {}
+    }
+}
+
+fn expr_mentions_alias(expr: &Expr, aliases: &std::collections::HashSet<String>) -> bool {
+    field_access_path(expr).is_some_and(|path| aliases.contains(&path))
+        || match expr {
+            Expr::Variable(name) => aliases.contains(name),
+            Expr::ArrayLit(elements) => elements
+                .iter()
+                .any(|element| expr_mentions_alias(element, aliases)),
+            Expr::ArrayAccess(array, index) => {
+                aliases.contains(array) || expr_mentions_alias(index, aliases)
+            }
+            Expr::BinaryOp(left, _, right) => {
+                expr_mentions_alias(left, aliases) || expr_mentions_alias(right, aliases)
+            }
+            Expr::Block(stmt) => stmt_mentions_alias(stmt, aliases),
+            Expr::IfThenElse {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                expr_mentions_alias(cond, aliases)
+                    || stmt_mentions_alias(then_branch, aliases)
+                    || stmt_mentions_alias(else_branch, aliases)
+            }
+            Expr::Call(_, args) | Expr::Perform { args, .. } => {
+                args.iter().any(|arg| expr_mentions_alias(arg, aliases))
+            }
+            Expr::StructInit { fields, .. } => fields
+                .iter()
+                .any(|(_, value)| expr_mentions_alias(value, aliases)),
+            Expr::FieldAccess(inner, _) => expr_mentions_alias(inner, aliases),
+            Expr::Match { target, arms } => {
+                expr_mentions_alias(target, aliases)
+                    || arms.iter().any(|arm| {
+                        arm.guard
+                            .as_deref()
+                            .is_some_and(|guard| expr_mentions_alias(guard, aliases))
+                            || stmt_mentions_alias(&arm.body, aliases)
+                    })
+            }
+            Expr::Async { body } | Expr::Lambda { body, .. } => stmt_mentions_alias(body, aliases),
+            Expr::Await { expr } => expr_mentions_alias(expr, aliases),
+            Expr::CallRef { callee, args } => {
+                expr_mentions_alias(callee, aliases)
+                    || args.iter().any(|arg| expr_mentions_alias(arg, aliases))
+            }
+            Expr::ChanSend { channel, value } => {
+                expr_mentions_alias(channel, aliases) || expr_mentions_alias(value, aliases)
+            }
+            Expr::ChanRecv { channel } => expr_mentions_alias(channel, aliases),
+            Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::AtomRef { .. } => false,
+        }
+}
+
+fn field_access_path(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Variable(name) => Some(name.clone()),
+        Expr::FieldAccess(inner, field) => Some(format!("{}.{}", field_access_path(inner)?, field)),
+        _ => None,
+    }
+}
+
+fn stmt_mentions_alias(stmt: &Stmt, aliases: &std::collections::HashSet<String>) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => expr_mentions_alias(value, aliases),
+        Stmt::ArrayStore {
+            array,
+            index,
+            value,
+            ..
+        } => {
+            aliases.contains(array)
+                || expr_mentions_alias(index, aliases)
+                || expr_mentions_alias(value, aliases)
+        }
+        Stmt::Block(stmts, _) => stmts.iter().any(|stmt| stmt_mentions_alias(stmt, aliases)),
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            expr_mentions_alias(cond, aliases)
+                || expr_mentions_alias(invariant, aliases)
+                || decreases
+                    .as_deref()
+                    .is_some_and(|decreases| expr_mentions_alias(decreases, aliases))
+                || stmt_mentions_alias(body, aliases)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => stmt_mentions_alias(body, aliases),
         Stmt::TaskGroup { children, .. } => children
             .iter()
-            .any(|s| stmt_stores_to_array(module_env, s, name, bound_names, visited, depth)),
-        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
-            expr_stores_to_array(module_env, value, name, bound_names, visited, depth)
+            .any(|child| stmt_mentions_alias(child, aliases)),
+        Stmt::Expr(expr, _) => expr_mentions_alias(expr, aliases),
+        Stmt::Cancel { .. } => false,
+    }
+}
+
+fn stmt_stores_to_array_with_aliases(
+    module_env: &ModuleEnv,
+    stmt: &Stmt,
+    aliases: &std::collections::HashSet<String>,
+    bound_names: &std::collections::HashSet<String>,
+    visited: &mut std::collections::HashSet<String>,
+    depth: u8,
+) -> bool {
+    match stmt {
+        Stmt::ArrayStore { array, .. } => aliases.contains(array),
+        Stmt::Block(stmts, _) => stmts.iter().any(|stmt| {
+            stmt_stores_to_array_with_aliases(
+                module_env,
+                stmt,
+                aliases,
+                bound_names,
+                visited,
+                depth,
+            )
+        }),
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            expr_stores_to_array(module_env, cond, aliases, bound_names, visited, depth)
+                || expr_stores_to_array(module_env, invariant, aliases, bound_names, visited, depth)
+                || decreases.as_deref().is_some_and(|d| {
+                    expr_stores_to_array(module_env, d, aliases, bound_names, visited, depth)
+                })
+                || stmt_stores_to_array_with_aliases(
+                    module_env,
+                    body,
+                    aliases,
+                    bound_names,
+                    visited,
+                    depth,
+                )
         }
-        Stmt::Expr(e, _) => expr_stores_to_array(module_env, e, name, bound_names, visited, depth),
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => stmt_stores_to_array_with_aliases(
+            module_env,
+            body,
+            aliases,
+            bound_names,
+            visited,
+            depth,
+        ),
+        Stmt::TaskGroup { children, .. } => children.iter().any(|stmt| {
+            stmt_stores_to_array_with_aliases(
+                module_env,
+                stmt,
+                aliases,
+                bound_names,
+                visited,
+                depth,
+            )
+        }),
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            expr_stores_to_array(module_env, value, aliases, bound_names, visited, depth)
+        }
+        Stmt::Expr(expr, _) => {
+            expr_stores_to_array(module_env, expr, aliases, bound_names, visited, depth)
+        }
         Stmt::Cancel { .. } => false,
     }
 }
@@ -1765,7 +2039,7 @@ fn call_may_store_arg(
 fn expr_stores_to_array(
     module_env: &ModuleEnv,
     expr: &Expr,
-    name: &str,
+    aliases: &std::collections::HashSet<String>,
     bound_names: &std::collections::HashSet<String>,
     visited: &mut std::collections::HashSet<String>,
     depth: u8,
@@ -1776,84 +2050,101 @@ fn expr_stores_to_array(
             then_branch,
             else_branch,
         } => {
-            expr_stores_to_array(module_env, cond, name, bound_names, visited, depth)
-                || stmt_stores_to_array(module_env, then_branch, name, bound_names, visited, depth)
-                || stmt_stores_to_array(module_env, else_branch, name, bound_names, visited, depth)
+            expr_stores_to_array(module_env, cond, aliases, bound_names, visited, depth)
+                || stmt_stores_to_array_with_aliases(
+                    module_env,
+                    then_branch,
+                    aliases,
+                    bound_names,
+                    visited,
+                    depth,
+                )
+                || stmt_stores_to_array_with_aliases(
+                    module_env,
+                    else_branch,
+                    aliases,
+                    bound_names,
+                    visited,
+                    depth,
+                )
         }
-        Expr::Block(stmt) => {
-            stmt_stores_to_array(module_env, stmt, name, bound_names, visited, depth)
-        }
+        Expr::Block(stmt) => stmt_stores_to_array_with_aliases(
+            module_env,
+            stmt,
+            aliases,
+            bound_names,
+            visited,
+            depth,
+        ),
         Expr::Match { target, arms } => {
-            expr_stores_to_array(module_env, target, name, bound_names, visited, depth)
+            expr_stores_to_array(module_env, target, aliases, bound_names, visited, depth)
                 || arms.iter().any(|arm| {
                     arm.guard.as_deref().is_some_and(|g| {
-                        expr_stores_to_array(module_env, g, name, bound_names, visited, depth)
-                    }) || stmt_stores_to_array(
+                        expr_stores_to_array(module_env, g, aliases, bound_names, visited, depth)
+                    }) || stmt_stores_to_array_with_aliases(
                         module_env,
                         &arm.body,
-                        name,
+                        aliases,
                         bound_names,
                         visited,
                         depth,
                     )
                 })
         }
-        Expr::Async { body } | Expr::Lambda { body, .. } => {
-            stmt_stores_to_array(module_env, body, name, bound_names, visited, depth)
-        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => stmt_stores_to_array_with_aliases(
+            module_env,
+            body,
+            aliases,
+            bound_names,
+            visited,
+            depth,
+        ),
         Expr::Call(callee_name, args)
         | Expr::Perform {
             operation: callee_name,
             args,
             ..
         } => {
-            args.iter()
-                .any(|a| expr_stores_to_array(module_env, a, name, bound_names, visited, depth))
-                || args.iter().enumerate().any(|(i, a)| {
-                    matches!(a, Expr::Variable(v) if v == name)
-                        && call_may_store_arg(
-                            module_env,
-                            callee_name,
-                            i,
-                            bound_names,
-                            visited,
-                            depth,
-                        )
-                })
+            args.iter().any(|arg| {
+                expr_stores_to_array(module_env, arg, aliases, bound_names, visited, depth)
+            }) || args.iter().enumerate().any(|(i, a)| {
+                expr_mentions_alias(a, aliases)
+                    && call_may_store_arg(module_env, callee_name, i, bound_names, visited, depth)
+            })
         }
         Expr::CallRef { callee, args } => {
-            expr_stores_to_array(module_env, callee, name, bound_names, visited, depth)
+            expr_stores_to_array(module_env, callee, aliases, bound_names, visited, depth)
                 || args.iter().any(|a| {
-                    expr_stores_to_array(module_env, a, name, bound_names, visited, depth)
+                    expr_stores_to_array(module_env, a, aliases, bound_names, visited, depth)
                 })
                 // indirect calls are opaque — passing the array is assumed mutating
-                || args.iter().any(|a| matches!(a, Expr::Variable(v) if v == name))
+                || args.iter().any(|arg| expr_mentions_alias(arg, aliases))
         }
-        Expr::ArrayLit(elems) => elems
-            .iter()
-            .any(|e| expr_stores_to_array(module_env, e, name, bound_names, visited, depth)),
+        Expr::ArrayLit(elems) => elems.iter().any(|element| {
+            expr_stores_to_array(module_env, element, aliases, bound_names, visited, depth)
+        }),
         Expr::ArrayAccess(_, idx) => {
-            expr_stores_to_array(module_env, idx, name, bound_names, visited, depth)
+            expr_stores_to_array(module_env, idx, aliases, bound_names, visited, depth)
         }
         Expr::BinaryOp(l, _, r) => {
-            expr_stores_to_array(module_env, l, name, bound_names, visited, depth)
-                || expr_stores_to_array(module_env, r, name, bound_names, visited, depth)
+            expr_stores_to_array(module_env, l, aliases, bound_names, visited, depth)
+                || expr_stores_to_array(module_env, r, aliases, bound_names, visited, depth)
         }
-        Expr::StructInit { fields, .. } => fields
-            .iter()
-            .any(|(_, e)| expr_stores_to_array(module_env, e, name, bound_names, visited, depth)),
+        Expr::StructInit { fields, .. } => fields.iter().any(|(_, value)| {
+            expr_stores_to_array(module_env, value, aliases, bound_names, visited, depth)
+        }),
         Expr::FieldAccess(e, _) => {
-            expr_stores_to_array(module_env, e, name, bound_names, visited, depth)
+            expr_stores_to_array(module_env, e, aliases, bound_names, visited, depth)
         }
         Expr::Await { expr } => {
-            expr_stores_to_array(module_env, expr, name, bound_names, visited, depth)
+            expr_stores_to_array(module_env, expr, aliases, bound_names, visited, depth)
         }
         Expr::ChanSend { channel, value } => {
-            expr_stores_to_array(module_env, channel, name, bound_names, visited, depth)
-                || expr_stores_to_array(module_env, value, name, bound_names, visited, depth)
+            expr_stores_to_array(module_env, channel, aliases, bound_names, visited, depth)
+                || expr_stores_to_array(module_env, value, aliases, bound_names, visited, depth)
         }
         Expr::ChanRecv { channel } => {
-            expr_stores_to_array(module_env, channel, name, bound_names, visited, depth)
+            expr_stores_to_array(module_env, channel, aliases, bound_names, visited, depth)
         }
         _ => false,
     }

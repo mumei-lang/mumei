@@ -232,3 +232,38 @@ body: {
     let w = s.xs;
     w[0]
 };
+
+atom mutates_through_alias(xs: [i64]) -> i64
+requires: len(xs) > 0;
+ensures: result == 0;
+body: {
+    let ys = xs;
+    ys[0] = 9;
+    0
+};
+
+atom lambda_alias_write_is_rejected(a: [i64]) -> i64
+requires: len(a) == 1 && a[0] == 1;
+ensures: result == 1;
+body: {
+    let s = S { xs: a };
+    let xs = s.xs;
+    let f = |xs: [i64]| {
+        let ys = xs;
+        ys[0] = 9;
+        0
+    };
+    f(xs);
+    let w = s.xs;
+    w[0]
+};
+
+atom atom_alias_write_is_rejected(a: [i64]) -> i64
+requires: len(a) == 1 && a[0] == 1;
+ensures: result == 1;
+body: {
+    let s = S { xs: a };
+    mutates_through_alias(s.xs);
+    let w = s.xs;
+    w[0]
+};
