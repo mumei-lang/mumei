@@ -468,6 +468,15 @@ pub fn run_property_based_test_with_mode(
             vec!["property-based validation skipped for generic atom".to_string()],
         );
     }
+    if has_enum_array_type(atom, module_env) {
+        return PropertyBasedTestResult::passed(
+            0,
+            vec![
+                "property-based validation skipped because enum-array values are not generated"
+                    .to_string(),
+            ],
+        );
+    }
 
     let ctx = GenerationContext { module_env, config };
     let generators = build_generators(atom, module_env, &ctx);
@@ -795,6 +804,11 @@ fn check_assignment(
     assignment: &HashMap<String, GeneratedValue>,
     bitvec_i64: bool,
 ) -> CaseOutcome {
+    if has_enum_array_type(atom, module_env) {
+        return CaseOutcome::Inconclusive(
+            "property-based validation does not generate enum-array values".to_string(),
+        );
+    }
     if !assignment_satisfies_preconditions(atom, module_env, assignment, bitvec_i64) {
         return CaseOutcome::Skipped;
     }
@@ -1300,6 +1314,22 @@ fn is_array_type(type_name: &str) -> bool {
     type_name.starts_with('[') && type_name.ends_with(']')
 }
 
+fn has_enum_array_type(atom: &Atom, module_env: &ModuleEnv) -> bool {
+    let is_enum_array = |type_name: &str| {
+        let resolved = module_env.resolve_base_type(type_name);
+        if !is_array_type(&resolved) {
+            return false;
+        }
+        let element_type = module_env.resolve_base_type(array_element_type(&resolved));
+        module_env.get_enum(&element_type).is_some()
+    };
+    atom.params
+        .iter()
+        .filter_map(|param| param.type_name.as_deref())
+        .any(is_enum_array)
+        || atom.return_type.as_deref().is_some_and(is_enum_array)
+}
+
 fn array_element_type(type_name: &str) -> &str {
     type_name
         .strip_prefix('[')
@@ -1377,7 +1407,7 @@ mod replay_binding_tests {
 #[cfg(test)]
 mod refinement_generator_tests {
     use super::*;
-    use crate::parser::{RefinedType, Span};
+    use crate::parser::{parse_module, Item, RefinedType, Span};
 
     fn env_with(types: &[(&str, &str, &str)]) -> ModuleEnv {
         let mut module_env = ModuleEnv::new();
@@ -1438,5 +1468,34 @@ mod refinement_generator_tests {
             values.iter().any(|v| *v <= 0),
             "cyclic aliases must not apply partial bounds: {values:?}"
         );
+    }
+
+    #[test]
+    fn enum_array_property_testing_skips_unmodeled_values() {
+        let source = "enum C { R(v: i64), G }\n\
+                      atom inspect(xs: [C]) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: { 0 };\n";
+        let mut module_env = ModuleEnv::new();
+        let mut atom = None;
+        for item in parse_module(source) {
+            match item {
+                Item::EnumDef(def) => module_env.register_enum(&def),
+                Item::Atom(def) => atom = Some(def),
+                _ => {}
+            }
+        }
+        let result = run_property_based_test_with_mode(
+            &atom.expect("enum-array atom"),
+            &module_env,
+            &PropertyBasedTestConfig::default(),
+            false,
+        );
+        assert_eq!(result.tests_run, 0);
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("enum-array values are not generated")));
     }
 }

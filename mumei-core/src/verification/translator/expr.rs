@@ -2956,7 +2956,7 @@ pub(crate) fn expr_to_z3<'a>(
                                     val,
                                     &mut call_env,
                                     solver_opt,
-                                );
+                                )?;
                             }
                         }
 
@@ -3369,6 +3369,9 @@ pub(crate) fn expr_to_z3<'a>(
                             .return_type
                             .as_deref()
                             .or(if has_float { Some("f64") } else { None });
+                        if let Some(type_name) = result_type {
+                            super::z3_types::validate_enum_array_type(vc, type_name)?;
+                        }
                         let rec_args = rec_fn_args(vc, &callee, &arg_vals, &call_env);
                         let use_rec_fn = cong
                             && callee_semantics_match_caller(vc, &callee)
@@ -4044,6 +4047,21 @@ pub(crate) fn expr_to_z3<'a>(
             }
         }
         Expr::ArrayLit(elements) => {
+            let mut literal_enum_type: Option<String> = None;
+            for element in elements {
+                if let Some(enum_name) = datatype::infer_expr_enum_name(vc, element) {
+                    super::z3_types::validate_enum_array_element_type(vc, &enum_name)?;
+                    if literal_enum_type
+                        .as_ref()
+                        .is_some_and(|known| known != &enum_name)
+                    {
+                        return Err(MumeiError::type_error(
+                            "array literal elements must have the same enum datatype",
+                        ));
+                    }
+                    literal_enum_type = Some(enum_name);
+                }
+            }
             // `[e0, e1, …]` lowers to an `Int -> Elem` Z3 array built by a
             // `store` chain over a fresh constant base. The literal has no
             // name of its own: the `let`/`assign` binding that receives it
@@ -4068,6 +4086,7 @@ pub(crate) fn expr_to_z3<'a>(
             let mut has_int = false;
             let mut has_bool = false;
             let mut has_str = false;
+            let mut enum_sort = None;
             for elem in &elem_dynamics {
                 match elem.get_sort().kind() {
                     z3::SortKind::Int | z3::SortKind::BV => has_int = true,
@@ -4075,6 +4094,15 @@ pub(crate) fn expr_to_z3<'a>(
                     z3::SortKind::FloatingPoint => has_float = true,
                     z3::SortKind::Bool => has_bool = true,
                     z3::SortKind::Seq => has_str = true,
+                    z3::SortKind::Datatype => {
+                        let sort = elem.get_sort();
+                        if enum_sort.as_ref().is_some_and(|known| known != &sort) {
+                            return Err(MumeiError::type_error(
+                                "array literal elements must have the same enum datatype",
+                            ));
+                        }
+                        enum_sort = Some(sort);
+                    }
                     other => {
                         return Err(MumeiError::type_error(format!(
                             "array literal element type {other:?} is unsupported \
@@ -4083,6 +4111,29 @@ pub(crate) fn expr_to_z3<'a>(
                         )))
                     }
                 }
+            }
+            if let Some(enum_sort) = enum_sort {
+                if has_float || has_real || has_int || has_bool || has_str {
+                    return Err(MumeiError::type_error(
+                        "array literal mixes enum and non-enum elements",
+                    ));
+                }
+                super::z3_types::validate_enum_array_element_type(vc, &enum_sort.to_string())?;
+                let mut arr = super::z3_types::z3_array_for_range(ctx, &name, &enum_sort);
+                for (i, elem) in elem_dynamics.iter().enumerate() {
+                    if elem.get_sort() != enum_sort {
+                        return Err(MumeiError::type_error(
+                            "array literal elements must have the same enum datatype",
+                        ));
+                    }
+                    arr = arr.store(&Int::from_i64(ctx, i as i64), elem);
+                }
+                return Ok(arr.into());
+            }
+            if literal_enum_type.is_some() {
+                return Err(MumeiError::type_error(
+                    "enum array literal elements did not resolve to one datatype sort",
+                ));
             }
             let range_sort = if has_str {
                 if has_float || has_real || has_int || has_bool {
@@ -4112,7 +4163,7 @@ pub(crate) fn expr_to_z3<'a>(
             } else {
                 unreachable!("non-empty array literal has an element sort")
             };
-            let mut arr = z3_array_for_sort(ctx, &name, range_sort);
+            let mut arr = z3_array_for_sort(ctx, &name, range_sort)?;
             for (i, elem) in elem_dynamics.iter().enumerate() {
                 let idx = Int::from_i64(ctx, i as i64);
                 let coerced = coerce_to_array_elem_sort(vc, range_sort, elem)?;
@@ -4152,6 +4203,8 @@ pub(crate) fn expr_to_z3<'a>(
             let idx =
                 as_int_like(&idx_value).ok_or(MumeiError::type_error("Index must be integer"))?;
 
+            let element_type = super::z3_types::array_element_type_name(name, vc);
+            super::z3_types::validate_enum_array_element_type(vc, &element_type)?;
             let array = z3_dynamic_array(vc, name, env);
 
             // 配列名に紐づく長さシンボルを使った境界チェック
@@ -5713,7 +5766,7 @@ pub(crate) fn expr_to_z3<'a>(
                                 arg_val,
                                 &mut call_env,
                                 solver_opt,
-                            );
+                            )?;
                         }
                     }
 
@@ -5832,6 +5885,9 @@ pub(crate) fn expr_to_z3<'a>(
                         CALL_REF_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let result_name = format!("call_ref_{}_{}", callee_name, call_id);
                     let result_type = callee_atom.return_type.as_deref();
+                    if let Some(type_name) = result_type {
+                        super::z3_types::validate_enum_array_type(vc, type_name)?;
+                    }
                     let rec_args = rec_fn_args(vc, &callee_atom, &arg_vals, &call_env);
                     let use_rec_fn = cong
                         && callee_semantics_match_caller(vc, &callee_atom)
@@ -6580,6 +6636,9 @@ pub(crate) fn expr_to_z3<'a>(
             // Register parameter names in a sub-environment for body verification
             let mut lambda_env = env.clone();
             for p in params {
+                if let Some(type_name) = p.type_ref.as_ref().map(|ty| ty.display_name()) {
+                    super::z3_types::validate_enum_array_type(vc, &type_name)?;
+                }
                 super::z3_types::clear_array_shared(ctx, &mut lambda_env, &p.name);
                 let p_sym = Int::new_const(ctx, p.name.as_str());
                 lambda_env.insert(p.name.clone(), p_sym.into());
@@ -6744,6 +6803,9 @@ fn apply_local_lambda<'a>(
 
     let mut call_env = env.clone();
     for (i, param) in params.iter().enumerate() {
+        if let Some(type_name) = param.type_ref.as_ref().map(|ty| ty.display_name()) {
+            super::z3_types::validate_enum_array_type(vc, &type_name)?;
+        }
         super::z3_types::clear_array_shared(vc.ctx, &mut call_env, &param.name);
         call_env.insert(param.name.clone(), arg_vals[i].clone());
         alias_struct_fields(&mut call_env, &param.name, &arg_vals[i]);
@@ -6754,7 +6816,7 @@ fn apply_local_lambda<'a>(
             &arg_vals[i],
             &mut call_env,
             solver_opt,
-        );
+        )?;
     }
 
     let mut call_lambdas = captured.clone();

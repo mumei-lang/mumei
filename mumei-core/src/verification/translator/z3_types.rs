@@ -31,32 +31,26 @@ pub(crate) fn tuple_result_arity_key(binding: &str) -> String {
 }
 
 pub(crate) fn seed_tuple_result_components<'a>(
-    ctx: &'a Context,
+    vc: &VCtx<'a>,
     env: &mut Env<'a>,
     binding: &str,
     return_type: Option<&str>,
-    module_env: &ModuleEnv,
-    ieee754_f64: bool,
-    bitvec_i64: bool,
 ) {
     let Some(components) = tuple_component_types(return_type) else {
         return;
     };
     env.insert(
         tuple_result_arity_key(binding),
-        Int::from_i64(ctx, components.len() as i64).into(),
+        Int::from_i64(vc.ctx, components.len() as i64).into(),
     );
     for (index, component_type) in components.iter().enumerate() {
         let key = tuple_result_component_key(binding, index);
         env.insert(
             key.clone(),
-            param_z3_value(
-                ctx,
+            crate::verification::support::datatype::param_z3_value_for_vc(
+                vc,
                 &key,
                 Some(component_type),
-                module_env,
-                ieee754_f64,
-                bitvec_i64,
             ),
         );
     }
@@ -195,6 +189,12 @@ pub(crate) enum ArrayElementSort {
     /// `Str` elements — encoded on Z3's `Seq`/`String` sort so `a[i] == "s"`
     /// and `a[i] = "s"` go through the same string theory as scalar `Str`.
     Str,
+    /// A finite algebraic datatype. The actual range sort is resolved from
+    /// the declared element type at array construction sites.
+    Enum,
+    /// An enum that cannot be represented as a finite scalar ADT array
+    /// element (recursive, unresolved generic, or array-bearing payload).
+    UnsupportedEnum,
     /// `[[T]]` — the element is itself an array, which no scalar element sort
     /// can represent. Arrays carrying this tag are built with the genuine
     /// nested range sort (see `z3_element_sort`), so `a[i]` yields an `Array`
@@ -227,8 +227,63 @@ pub(crate) fn array_element_type_name(name: &str, vc: &VCtx<'_>) -> String {
         .unwrap_or_else(|| "i64".to_string())
 }
 
-pub(crate) fn array_element_sort_from_type(type_name: &str, ieee754_f64: bool) -> ArrayElementSort {
-    match lower(type_name) {
+pub(crate) fn array_element_sort_from_type(
+    type_name: &str,
+    module_env: &ModuleEnv,
+    ieee754_f64: bool,
+) -> ArrayElementSort {
+    fn enum_supported(
+        enum_def: &crate::parser::EnumDef,
+        module_env: &ModuleEnv,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if !visited.insert(enum_def.name.clone())
+            || !crate::verification::support::datatype::is_finite_adt(enum_def, module_env)
+        {
+            return false;
+        }
+        for variant in &enum_def.variants {
+            for field in &variant.field_types {
+                let field_type =
+                    crate::verification::support::datatype::payload_field_type_name(field);
+                let Some(leaves) = crate::verification::support::datatype::field_leaf_types(
+                    &field_type,
+                    module_env,
+                ) else {
+                    return false;
+                };
+                for (_, leaf) in leaves {
+                    if leaf == "array_len" || leaf.starts_with("array:") {
+                        return false;
+                    }
+                    if let Some(inner) = leaf.strip_prefix("enum:") {
+                        let Some(inner_def) = module_env.get_enum(inner) else {
+                            return false;
+                        };
+                        if !enum_supported(inner_def, module_env, visited) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        visited.remove(&enum_def.name);
+        true
+    }
+
+    let resolved = module_env.resolve_base_type(type_name);
+    let enum_base = crate::verification::support::datatype::type_name_base(&resolved);
+    if let Some(enum_def) = module_env
+        .get_enum(&resolved)
+        .or_else(|| module_env.get_enum(enum_base))
+    {
+        return if enum_supported(enum_def, module_env, &mut Default::default()) {
+            ArrayElementSort::Enum
+        } else {
+            ArrayElementSort::UnsupportedEnum
+        };
+    }
+    match lower(&resolved) {
         LoweredType::F64 if ieee754_f64 => ArrayElementSort::Float,
         LoweredType::F64 => ArrayElementSort::Real,
         LoweredType::Bool => ArrayElementSort::Bool,
@@ -240,7 +295,90 @@ pub(crate) fn array_element_sort_from_type(type_name: &str, ieee754_f64: bool) -
 }
 
 pub(crate) fn array_element_sort(name: &str, vc: &VCtx<'_>) -> ArrayElementSort {
-    array_element_sort_from_type(&array_element_type_name(name, vc), vc.ieee754_f64)
+    let type_name = array_element_type_name(name, vc);
+    array_element_sort_from_type(&type_name, vc.module_env, vc.ieee754_f64)
+}
+
+pub(crate) fn validate_enum_array_element_type(
+    vc: &VCtx<'_>,
+    type_name: &str,
+) -> Result<(), MumeiError> {
+    fn validate(
+        vc: &VCtx<'_>,
+        type_name: &str,
+        visiting: &mut std::collections::HashSet<String>,
+    ) -> Result<(), MumeiError> {
+        let resolved = vc.module_env.resolve_base_type(type_name);
+        let base = crate::verification::support::datatype::type_name_base(&resolved);
+        let Some(enum_def) = vc
+            .module_env
+            .get_enum(&resolved)
+            .or_else(|| vc.module_env.get_enum(base))
+        else {
+            return Ok(());
+        };
+        if !visiting.insert(enum_def.name.clone())
+            || !crate::verification::support::datatype::is_finite_adt(enum_def, vc.module_env)
+            || crate::verification::support::datatype::datatype_sort_for_type(vc, type_name)
+                .is_none()
+        {
+            return Err(MumeiError::type_error(format!(
+                "array element enum '{type_name}' is unsupported; enum arrays require a resolved finite ADT"
+            )));
+        }
+        for variant in &enum_def.variants {
+            for field in &variant.field_types {
+                let field_type =
+                    crate::verification::support::datatype::payload_field_type_name(field);
+                let leaves = crate::verification::support::datatype::field_leaf_types(
+                    &field_type,
+                    vc.module_env,
+                )
+                .ok_or_else(|| {
+                    MumeiError::type_error(format!(
+                        "array element enum '{type_name}' has an unsupported payload"
+                    ))
+                })?;
+                for (_, leaf) in leaves {
+                    if leaf == "array_len" || leaf.starts_with("array:") {
+                        return Err(MumeiError::type_error(format!(
+                            "array element enum '{type_name}' has an array-bearing payload, which is unsupported"
+                        )));
+                    }
+                    if let Some(inner) = leaf.strip_prefix("enum:") {
+                        validate(vc, inner, visiting)?;
+                    }
+                }
+            }
+        }
+        visiting.remove(&enum_def.name);
+        Ok(())
+    }
+
+    validate(vc, type_name, &mut std::collections::HashSet::new())
+}
+
+pub(crate) fn validate_enum_array_type(vc: &VCtx<'_>, type_name: &str) -> Result<(), MumeiError> {
+    fn validate(
+        vc: &VCtx<'_>,
+        type_name: &str,
+        visiting_structs: &mut std::collections::HashSet<String>,
+    ) -> Result<(), MumeiError> {
+        let resolved = vc.module_env.resolve_base_type(type_name);
+        if resolved.trim_start().starts_with('[') || resolved.trim_end().ends_with("[]") {
+            let element_type = array_element_type_from_annotation(Some(type_name), vc.module_env);
+            validate_enum_array_element_type(vc, &element_type)?;
+        } else if let Some(struct_def) = vc.module_env.get_struct(&resolved) {
+            if visiting_structs.insert(struct_def.name.clone()) {
+                for field in &struct_def.fields {
+                    validate(vc, &field.type_name, visiting_structs)?;
+                }
+                visiting_structs.remove(&struct_def.name);
+            }
+        }
+        Ok(())
+    }
+    validate(vc, type_name, &mut std::collections::HashSet::new())
 }
 
 /// Convert an `f64` literal to a Z3 `Real` (exact rational) value.
@@ -929,21 +1067,26 @@ fn z3_sort_for_lowered<'a>(
 /// Z3 element sort for a resolved element type *name* — the sort-valued
 /// counterpart of `array_element_sort_from_type`, able to express the `Str`
 /// and nested `[T]` elements the flat tag cannot.
-pub(crate) fn z3_element_sort<'a>(
-    ctx: &'a Context,
-    type_name: &str,
-    ieee754_f64: bool,
-) -> z3::Sort<'a> {
-    z3_sort_for_lowered(ctx, &lower(type_name), ieee754_f64)
+pub(crate) fn z3_element_sort<'a>(vc: &VCtx<'a>, type_name: &str) -> z3::Sort<'a> {
+    if let Some((sort, _)) =
+        crate::verification::support::datatype::datatype_sort_for_type(vc, type_name)
+    {
+        return sort.sort.clone();
+    }
+    z3_sort_for_lowered(
+        vc.ctx,
+        &lower(&vc.module_env.resolve_base_type(type_name)),
+        vc.ieee754_f64,
+    )
 }
 
 pub(crate) fn z3_array_for_sort<'a>(
     ctx: &'a Context,
     name: &str,
     sort: ArrayElementSort,
-) -> Array<'a> {
+) -> Result<Array<'a>, MumeiError> {
     let int_sort = z3::Sort::int(ctx);
-    match sort {
+    Ok(match sort {
         ArrayElementSort::Int => Array::new_const(ctx, name, &int_sort, &int_sort),
         ArrayElementSort::Real => {
             let real_sort = z3::Sort::real(ctx);
@@ -961,6 +1104,11 @@ pub(crate) fn z3_array_for_sort<'a>(
             let string_sort = z3::Sort::string(ctx);
             Array::new_const(ctx, name, &int_sort, &string_sort)
         }
+        ArrayElementSort::Enum | ArrayElementSort::UnsupportedEnum => {
+            return Err(MumeiError::type_error(
+                "enum array construction requires its resolved datatype sort",
+            ));
+        }
         // The flat tag cannot rebuild the precise inner sort of a `[[T]]` —
         // callers holding the element type (`param_z3_value`,
         // `z3_array_for_name`) go through `z3_element_sort` instead. This
@@ -970,12 +1118,12 @@ pub(crate) fn z3_array_for_sort<'a>(
             let inner = z3::Sort::array(ctx, &int_sort, &int_sort);
             Array::new_const(ctx, name, &int_sort, &inner)
         }
-    }
+    })
 }
 
 pub(crate) fn z3_array_for_name<'a>(vc: &VCtx<'a>, name: &str) -> Array<'a> {
     let int_sort = z3::Sort::int(vc.ctx);
-    let elem_sort = z3_element_sort(vc.ctx, &array_element_type_name(name, vc), vc.ieee754_f64);
+    let elem_sort = z3_element_sort(vc, &array_element_type_name(name, vc));
     Array::new_const(vc.ctx, name, &int_sort, &elem_sort)
 }
 
@@ -1003,7 +1151,7 @@ pub(crate) fn wire_array_slots<'a>(
     val: &Dynamic<'a>,
     env: &mut Env<'a>,
     solver_opt: Option<&Solver<'a>>,
-) {
+) -> MumeiResult<()> {
     // For `var` sources the live array is the tracked `__z3_arr_<src>` chain —
     // `env[src]` is only the base const, and `src[i] = v` stores never rewrite
     // it, so using `val` here would drop prior writes.
@@ -1024,25 +1172,25 @@ pub(crate) fn wire_array_slots<'a>(
         // A `#`-suffixed name can never collide with a source identifier.
         let len_key = array_len_key(name);
         if env.contains_key(&format!("__z3_arr_{name}")) || env.contains_key(&len_key) {
-            let sort = vc
-                .local_array_elem_types
-                .borrow()
-                .get(name)
-                .map(|s| array_element_sort_from_type(s.as_str(), vc.ieee754_f64))
-                .unwrap_or_else(|| array_element_sort(name, vc));
+            let sort = array_element_sort(name, vc);
             static REBOUND_ARRAY_UID: std::sync::atomic::AtomicUsize =
                 std::sync::atomic::AtomicUsize::new(0);
             let rebound_name = format!(
                 "{name}#rebound#{}",
                 REBOUND_ARRAY_UID.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             );
-            let rebound = z3_array_for_sort(vc.ctx, &rebound_name, sort);
+            let rebound = if sort == ArrayElementSort::Enum {
+                let range = z3_element_sort(vc, &array_element_type_name(name, vc));
+                z3_array_for_range(vc.ctx, &rebound_name, &range)
+            } else {
+                z3_array_for_sort(vc.ctx, &rebound_name, sort)?
+            };
             let len = array_len_for_value(vc, env, &rebound, solver_opt);
             env.insert(format!("__z3_arr_{name}"), rebound.into());
             env.insert(len_key, len);
         }
         vc.local_array_elem_types.borrow_mut().remove(name);
-        return;
+        return Ok(());
     };
     let elem_ty = z3_range_type_name(&arr.get_sort());
     let arr_dyn: Dynamic = arr.clone().into();
@@ -1053,6 +1201,7 @@ pub(crate) fn wire_array_slots<'a>(
     vc.local_array_elem_types
         .borrow_mut()
         .insert(name.to_string(), elem_ty.to_string());
+    Ok(())
 }
 
 /// A concrete array length, sorted like `array_len_symbol` under
@@ -1359,17 +1508,10 @@ pub(crate) fn havoc_array_name<'a>(vc: &VCtx<'a>, name: &str, env: &mut Env<'a>)
         .or_else(|| env.get(name).and_then(|d| d.as_array()));
     let Some(arg_arr) = arg_arr else { return };
     let root = array_root_ast(&arg_arr);
-    let elem_sort = match arg_arr.get_sort().array_range().map(|s| s.kind()) {
-        Some(z3::SortKind::Real) => ArrayElementSort::Real,
-        Some(z3::SortKind::FloatingPoint) => ArrayElementSort::Float,
-        Some(z3::SortKind::Bool) => ArrayElementSort::Bool,
-        Some(z3::SortKind::Seq) => ArrayElementSort::Str,
-        Some(z3::SortKind::Array) => ArrayElementSort::Nested,
-        _ => ArrayElementSort::Int,
-    };
     let uid = POSTCALL_UID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let range = z3_element_sort(vc, &array_element_type_name(name, vc));
     let fresh: Dynamic =
-        z3_array_for_sort(vc.ctx, &format!("__postcall_arr_{uid}"), elem_sort).into();
+        z3_array_for_range(vc.ctx, &format!("__postcall_arr_{uid}"), &range).into();
     // Every tracked slot rooting at the same backing chain aliases the
     // shared buffer — havoc them together.
     let keys: Vec<String> = env
@@ -1494,6 +1636,7 @@ pub(crate) fn z3_range_type_name(sort: &z3::Sort<'_>) -> String {
         Some(z3::SortKind::Real) | Some(z3::SortKind::FloatingPoint) => "f64".to_string(),
         Some(z3::SortKind::Bool) => "bool".to_string(),
         Some(z3::SortKind::Seq) => "Str".to_string(),
+        Some(z3::SortKind::Datatype) => sort.array_range().unwrap().to_string(),
         Some(z3::SortKind::Array) => format!(
             "[{}]",
             sort.array_range()
@@ -1502,6 +1645,14 @@ pub(crate) fn z3_range_type_name(sort: &z3::Sort<'_>) -> String {
         ),
         _ => "i64".to_string(),
     }
+}
+
+pub(crate) fn z3_array_for_range<'a>(
+    ctx: &'a Context,
+    name: &str,
+    range: &z3::Sort<'a>,
+) -> Array<'a> {
+    Array::new_const(ctx, name, &z3::Sort::int(ctx), range)
 }
 
 /// Does `callee`'s body possibly store into the array bound to `param_name`?
@@ -2171,7 +2322,19 @@ pub(crate) fn coerce_array_store_value<'a>(
     array: &str,
     value: Dynamic<'a>,
 ) -> DynResult<'a> {
-    coerce_to_array_elem_sort(vc, array_element_sort(array, vc), &value)
+    validate_enum_array_element_type(vc, &array_element_type_name(array, vc))?;
+    let sort = array_element_sort(array, vc);
+    if sort == ArrayElementSort::Enum {
+        let expected = z3_element_sort(vc, &array_element_type_name(array, vc));
+        if value.get_sort() != expected {
+            return Err(MumeiError::type_error(format!(
+                "Array store value has enum sort {}, expected {}",
+                value.get_sort(),
+                expected
+            )));
+        }
+    }
+    coerce_to_array_elem_sort(vc, sort, &value)
 }
 
 /// Coerce `value` to the given array element sort (the name-keyed version
@@ -2208,6 +2371,13 @@ pub(crate) fn coerce_to_array_elem_sort<'a>(
             .as_string()
             .map(Into::into)
             .ok_or_else(|| MumeiError::type_error("Array store value must be a string")),
+        ArrayElementSort::Enum => value
+            .as_datatype()
+            .map(Into::into)
+            .ok_or_else(|| MumeiError::type_error("Array store value must be an enum datatype")),
+        ArrayElementSort::UnsupportedEnum => Err(MumeiError::type_error(
+            "array element enum is not a supported finite ADT",
+        )),
         ArrayElementSort::Nested => Err(MumeiError::type_error(
             "array-valued elements (`[[T]]`) are not supported for array stores",
         )),
@@ -2227,11 +2397,8 @@ pub(crate) fn param_z3_value<'a>(
         .unwrap_or_else(|| "i64".to_string());
     if type_name.is_some_and(|ty| ty.starts_with('[') && ty.ends_with(']')) {
         let int_sort = z3::Sort::int(ctx);
-        let elem_sort = z3_element_sort(
-            ctx,
-            &array_element_type_from_annotation(type_name, module_env),
-            ieee754_f64,
-        );
+        let elem_type = array_element_type_from_annotation(type_name, module_env);
+        let elem_sort = z3_sort_for_lowered(ctx, &lower(&elem_type), ieee754_f64);
         Array::new_const(ctx, name, &int_sort, &elem_sort).into()
     } else {
         // TODO(strict-preservation): `lower()` unifies `Str`/`String` into

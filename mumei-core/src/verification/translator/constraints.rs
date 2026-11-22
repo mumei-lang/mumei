@@ -146,13 +146,10 @@ pub(crate) fn check_contract_subsumption<'a>(
     let mut param_values = Vec::with_capacity(concrete_atom.params.len());
     let mut array_len_constraints = Vec::new();
     for (i, param) in concrete_atom.params.iter().enumerate() {
-        let z3_var = param_z3_value(
-            ctx,
+        let z3_var = crate::verification::support::datatype::param_z3_value_for_vc(
+            vc,
             &format!("__sub_{}", param.name),
             param.type_name.as_deref(),
-            vc.module_env,
-            vc.ieee754_f64,
-            vc.bitvec_i64,
         );
         if param
             .type_name
@@ -189,13 +186,10 @@ pub(crate) fn check_contract_subsumption<'a>(
     }
 
     // Create a fresh symbolic result that both ensures clauses reference.
-    let result_var = param_z3_value(
-        ctx,
+    let result_var = crate::verification::support::datatype::param_z3_value_for_vc(
+        vc,
         "__sub_result",
         concrete_atom.return_type.as_deref(),
-        vc.module_env,
-        vc.ieee754_f64,
-        vc.bitvec_i64,
     );
     concrete_env.insert("result".to_string(), result_var.clone());
     contract_env.insert("result".to_string(), result_var);

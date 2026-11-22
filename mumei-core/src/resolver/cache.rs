@@ -70,7 +70,7 @@ use std::path::Path;
 /// Version 24 keeps array types out of canonical struct binding detection,
 /// preventing array element fields from becoming struct projection slots, so
 /// cached verdicts must be re-derived.
-pub const VERIFIER_POLICY_VERSION: u32 = 30;
+pub const VERIFIER_POLICY_VERSION: u32 = 31;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -2699,7 +2699,7 @@ body: { p.a };\n";
         let baseline = proof_hash_for(source, "g");
         assert_eq!(
             baseline,
-            "27636ad15e6bbfcca4810453487b93bc54f5eef2ad9daa1c350a71735d75f417"
+            "dca851600c78c7939ee6ac0f29b54e18c72db8a8cee023c83724c1d67158e9bc"
         );
         let changed = proof_hash_for(
             &source.replace(
@@ -2712,7 +2712,7 @@ body: { p.a };\n";
     }
 
     #[test]
-    fn effect_free_proof_hash_matches_policy_version_30() {
+    fn effect_free_proof_hash_matches_policy_version_31() {
         let hash = proof_hash_for(
             "atom main(x: i64) -> i64\n\
              requires: true;\n\
@@ -2723,7 +2723,7 @@ body: { p.a };\n";
 
         assert_eq!(
             hash,
-            "1d658254dbea416fc272009a00a4a87da56cf99a95c4ec4abf18248c9e1aa1d8"
+            "660979f2a917ad285e58b209da303fd47926dad94bcf08209e6f8b33dd6e1cc0"
         );
     }
 }

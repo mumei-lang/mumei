@@ -1801,15 +1801,7 @@ fn verify_inner_impl(
         }
     }
 
-    seed_tuple_result_components(
-        &ctx,
-        &mut env,
-        "result",
-        atom.return_type.as_deref(),
-        module_env,
-        ieee754_f64,
-        bitvec_i64,
-    );
+    seed_tuple_result_components(&vc, &mut env, "result", atom.return_type.as_deref());
     // 構造体を返す atom: param と対称に `result.<field>` のシンボルを事前生成する。
     // body 評価後に返り値のフィールドへ束縛し、Invariant(result) を暗黙の事後条件として課す。
     let struct_return = atom
@@ -2139,6 +2131,23 @@ fn verify_inner_impl(
     // scalar param — every enum datatype constant seeded so far (params,
     // bound struct fields, `result`) gets its per-variant leaf bounds.
     datatype::assert_enum_value_domains(&vc, &solver, &env);
+
+    for param in &atom.params {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        crate::verification::translator::z3_types::validate_enum_array_type(&vc, type_name)?;
+    }
+    let mut result_types = crate::verification::translator::z3_types::tuple_component_types(
+        atom.return_type.as_deref(),
+    )
+    .unwrap_or_default();
+    if result_types.is_empty() {
+        result_types.extend(atom.return_type.iter().cloned());
+    }
+    for type_name in result_types {
+        crate::verification::translator::z3_types::validate_enum_array_type(&vc, &type_name)?;
+    }
 
     // 2c. 全パラメータに対して配列長シンボルを事前生成
     for param in &atom.params {
@@ -2629,7 +2638,7 @@ fn verify_inner_impl(
                 &body_result,
                 &mut env,
                 Some(&solver),
-            );
+            )?;
             env.insert("result".to_string(), body_result.clone());
         }
         for ens_clause in split_top_level_conjunctions(&body_ensures) {
@@ -3410,7 +3419,7 @@ fn verify_inner_impl(
                 &body_result,
                 &mut env,
                 Some(&solver),
-            );
+            )?;
             env.insert("result".to_string(), body_result.clone());
         }
 

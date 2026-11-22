@@ -141,12 +141,15 @@ fn bind_lambda_arg<'a>(
         let data_ptr = builder
             .build_extract_value(struct_val, 1, &format!("{name}_data"))
             .map_err(|e| MumeiError::codegen(format!("lambda arg extract failed: {e:?}")))?;
+        let declared_elem_ty = match declared_ty {
+            Some(type_name) => {
+                super::lowering::array_elem_llvm_type(context, type_name, module_env)?
+            }
+            None => None,
+        };
         let elem_ty = src_array
             .map(|(_, e, _)| e)
-            .or_else(|| {
-                declared_ty
-                    .and_then(|t| super::lowering::array_elem_llvm_type(context, t, module_env))
-            })
+            .or(declared_elem_ty)
             .unwrap_or_else(|| context.i64_type().into());
         array_ptrs.insert(name.to_string(), (len_val, elem_ty, data_ptr));
         // A `Str` binding's scalar value is the `*i8` byte pointer, not
@@ -1592,6 +1595,36 @@ pub(crate) fn emit_array_literal<'a>(
         )?);
     }
     let elem_ty = elem_vals[0].get_type();
+    let enum_names = elements
+        .iter()
+        .map(|element| {
+            infer_struct_type_name(element, var_types, module_env)
+                .filter(|type_name| module_env.get_enum(type_name).is_some())
+        })
+        .collect::<Vec<_>>();
+    if enum_names.iter().any(Option::is_some) {
+        let Some(enum_name) = enum_names.first().and_then(Option::as_deref) else {
+            return Err(MumeiError::codegen(
+                "array literal mixes enum and non-enum elements",
+            ));
+        };
+        if enum_names
+            .iter()
+            .any(|candidate| candidate.as_deref() != Some(enum_name))
+        {
+            return Err(MumeiError::codegen(
+                "array literal enum elements must have the same datatype",
+            ));
+        }
+        let expected =
+            super::lowering::array_elem_llvm_type(context, &format!("[{enum_name}]"), module_env)?
+                .ok_or_else(|| MumeiError::codegen("enum array element type did not resolve"))?;
+        if elem_ty != expected {
+            return Err(MumeiError::codegen(format!(
+                "enum array literal element type mismatch for '{enum_name}'"
+            )));
+        }
+    }
     let n = elements.len() as u32;
     let array_ty = elem_ty.array_type(n);
     // Every `alloca` goes in the entry block — the canonical LLVM form
@@ -2216,25 +2249,32 @@ pub(crate) fn compile_hir_expr<'a>(
                 // merged read is always `i64` — zero-extend narrower
                 // elements so the byte read carries 0–255 like the
                 // verifier's unsigned leaf.
-                let loaded = if loaded.into_int_value().get_type().get_bit_width() < 64 {
-                    llvm!(builder.build_int_z_extend(
-                        loaded.into_int_value(),
-                        context.i64_type(),
-                        "elem_zext"
-                    ))
+                let loaded = if loaded.is_int_value() {
+                    let int_val = loaded.into_int_value();
+                    if int_val.get_type().get_bit_width() < 64 {
+                        llvm!(builder.build_int_z_extend(int_val, context.i64_type(), "elem_zext"))
+                            .into()
+                    } else {
+                        int_val.into()
+                    }
                 } else {
-                    loaded.into_int_value()
+                    loaded
+                };
+                let result_ty: BasicTypeEnum = if *elem_ty == context.i8_type().into() {
+                    context.i64_type().into()
+                } else {
+                    *elem_ty
                 };
                 let safe_end = builder.get_insert_block().unwrap();
                 llvm!(builder.build_unconditional_branch(merge_block));
 
                 builder.position_at_end(oob_block);
-                let zero_val = context.i64_type().const_int(0, false);
+                let zero_val = result_ty.const_zero();
                 let oob_end = builder.get_insert_block().unwrap();
                 llvm!(builder.build_unconditional_branch(merge_block));
 
                 builder.position_at_end(merge_block);
-                let phi = llvm!(builder.build_phi(context.i64_type(), "arr_result"));
+                let phi = llvm!(builder.build_phi(result_ty, "arr_result"));
                 phi.add_incoming(&[(&loaded, safe_end), (&zero_val, oob_end)]);
                 Ok(phi.as_basic_value())
             } else {
@@ -2850,6 +2890,19 @@ pub(crate) fn compile_hir_expr<'a>(
             // ctor expressions and enum-returning calls).
             let enum_hint: Option<String> = match target.as_ref() {
                 HirExpr::Variable(name) => var_types.get(name).cloned(),
+                HirExpr::ArrayAccess(name, _) => var_types.get(name).and_then(|array_type| {
+                    let resolved = module_env.resolve_base_type(array_type);
+                    let element = resolved
+                        .strip_prefix("[]<")
+                        .and_then(|inner| inner.strip_suffix('>'))
+                        .or_else(|| {
+                            resolved
+                                .strip_prefix('[')
+                                .and_then(|inner| inner.strip_suffix(']'))
+                        })?;
+                    let element = resolve_named_type(module_env, element.trim());
+                    module_env.get_enum(&element).map(|_| element)
+                }),
                 HirExpr::FieldAccess(inner, field) => {
                     infer_struct_type_name(inner, var_types, module_env).and_then(|s| {
                         module_env
