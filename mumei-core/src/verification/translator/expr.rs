@@ -1523,8 +1523,19 @@ fn expr_struct_type(vc: &VCtx, expr: &Expr) -> Option<String> {
 /// the parameter or local it reads. `None` when nothing declares one
 /// (literals, calls, lengths), which the overflow check treats as `i64`.
 pub(crate) fn fixed_width_int_type(vc: &VCtx, expr: &Expr) -> Option<&'static str> {
+    fixed_width_int_type_in_scope(vc, expr, &std::collections::HashMap::new())
+}
+
+fn fixed_width_int_type_in_scope(
+    vc: &VCtx,
+    expr: &Expr,
+    local_types: &std::collections::HashMap<String, Option<&'static str>>,
+) -> Option<&'static str> {
     match expr {
         Expr::Variable(name) => {
+            if let Some(ty) = local_types.get(name) {
+                return *ty;
+            }
             if let Some((_, ty)) = vc
                 .refined_operand_types
                 .borrow()
@@ -1578,12 +1589,14 @@ pub(crate) fn fixed_width_int_type(vc: &VCtx, expr: &Expr) -> Option<&'static st
             | Op::Shl
             | Op::Shr,
             r,
-        ) => fixed_width_int_type(vc, l).or_else(|| fixed_width_int_type(vc, r)),
+        ) => fixed_width_int_type_in_scope(vc, l, local_types)
+            .or_else(|| fixed_width_int_type_in_scope(vc, r, local_types)),
         Expr::IfThenElse {
             then_branch,
             else_branch,
             ..
-        } => stmt_tail_int_type(vc, then_branch).or_else(|| stmt_tail_int_type(vc, else_branch)),
+        } => stmt_tail_int_type(vc, then_branch, local_types)
+            .or_else(|| stmt_tail_int_type(vc, else_branch, local_types)),
         Expr::FieldAccess(inner, field) => {
             // Preserve the declared width through nested structs and named
             // enum payloads, not only fields whose receiver is a struct.
@@ -1602,10 +1615,24 @@ pub(crate) fn fixed_width_int_type(vc: &VCtx, expr: &Expr) -> Option<&'static st
     }
 }
 
-fn stmt_tail_int_type(vc: &VCtx, stmt: &Stmt) -> Option<&'static str> {
+fn stmt_tail_int_type(
+    vc: &VCtx,
+    stmt: &Stmt,
+    local_types: &std::collections::HashMap<String, Option<&'static str>>,
+) -> Option<&'static str> {
     match stmt {
-        Stmt::Expr(e, _) => fixed_width_int_type(vc, e),
-        Stmt::Block(stmts, _) => stmts.last().and_then(|s| stmt_tail_int_type(vc, s)),
+        Stmt::Expr(e, _) => fixed_width_int_type_in_scope(vc, e, local_types),
+        Stmt::Block(stmts, _) => {
+            let (tail, preceding) = stmts.split_last()?;
+            let mut scoped_types = local_types.clone();
+            for stmt in preceding {
+                if let Stmt::Let { var, value, .. } = stmt {
+                    let ty = fixed_width_int_type_in_scope(vc, value, &scoped_types);
+                    scoped_types.insert(var.clone(), ty);
+                }
+            }
+            stmt_tail_int_type(vc, tail, &scoped_types)
+        }
         _ => None,
     }
 }

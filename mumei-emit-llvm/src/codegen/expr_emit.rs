@@ -1309,9 +1309,24 @@ fn stmt_int_type_name(
 ) -> Option<String> {
     match stmt {
         HirStmt::Expr(expr) => hir_int_type_name(expr, var_types, module_env),
-        HirStmt::Block { tail_expr, .. } => tail_expr
-            .as_deref()
-            .and_then(|expr| hir_int_type_name(expr, var_types, module_env)),
+        HirStmt::Block { stmts, tail_expr } => {
+            let mut scoped_types = var_types.clone();
+            for stmt in stmts {
+                if let HirStmt::Let { var, value, .. } = stmt {
+                    match hir_int_type_name(value, &scoped_types, module_env) {
+                        Some(ty) => {
+                            scoped_types.insert(var.clone(), ty);
+                        }
+                        None => {
+                            scoped_types.remove(var);
+                        }
+                    }
+                }
+            }
+            tail_expr
+                .as_deref()
+                .and_then(|expr| hir_int_type_name(expr, &scoped_types, module_env))
+        }
         _ => None,
     }
 }
@@ -4255,6 +4270,72 @@ mod tests {
         llvm!(builder.build_return(Some(&cmp)));
         assert!(function.verify(false));
         assert!(module.print_to_string().to_string().contains("icmp ule"));
+        Ok(())
+    }
+
+    #[test]
+    fn if_expression_with_local_let_shadow_compares_signed(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        variables.insert(
+            "a".to_string(),
+            context.i64_type().const_int(u64::MAX, false).into(),
+        );
+        variables.insert(
+            "c".to_string(),
+            context.i64_type().const_int(1, false).into(),
+        );
+        let mut var_types = HashMap::new();
+        var_types.insert("a".to_string(), "u64".to_string());
+        let mut array_ptrs = HashMap::new();
+        let negative_one = || {
+            HirExpr::BinaryOp(
+                Box::new(HirExpr::Number(0)),
+                HirBinOp::Sub,
+                Box::new(HirExpr::Number(1)),
+            )
+        };
+        let condition = HirExpr::BinaryOp(
+            Box::new(HirExpr::IfThenElse {
+                cond: Box::new(HirExpr::Variable("c".to_string())),
+                then_branch: Box::new(HirStmt::Block {
+                    stmts: vec![HirStmt::Let {
+                        var: "a".to_string(),
+                        ty: None,
+                        value: Box::new(negative_one()),
+                    }],
+                    tail_expr: Some(Box::new(HirExpr::Variable("a".to_string()))),
+                }),
+                else_branch: Box::new(HirStmt::Block {
+                    stmts: vec![],
+                    tail_expr: Some(Box::new(negative_one())),
+                }),
+            }),
+            HirBinOp::Lt,
+            Box::new(HirExpr::Number(0)),
+        );
+        let cmp = compile_hir_expr(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &condition,
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+        llvm!(builder.build_return(Some(&cmp)));
+        assert!(function.verify(false));
+        assert!(module.print_to_string().to_string().contains("icmp slt"));
         Ok(())
     }
 

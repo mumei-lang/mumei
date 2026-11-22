@@ -148,6 +148,16 @@ fn shift_width_uses_right_u64_operand() {
 }
 
 #[test]
+fn branch_local_let_shadow_uses_signed_comparison() {
+    let output = run_verify("shadow");
+    assert!(
+        output.status.success(),
+        "a local let shadowing a u64 parameter must use its inferred signed width\n{}",
+        output_text(&output)
+    );
+}
+
+#[test]
 fn refined_u64_predicate_rejects_operand_rebinding() {
     let output = run_verify("rebind");
     let text = output_text(&output);
