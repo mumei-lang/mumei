@@ -3198,8 +3198,10 @@ use the mixed INTEGER/SSE rules described below. Register-only
 Memory operands and parity conditions after integer flag producers remain
 outside the profile. Agent consumers must adopt these names.
 
-The same bounded profile admits one- through eight-leaf struct parameters and
-direct-call arguments whose leaves are INTEGER (`i64`) and/or SSE (`f64`).
+The same bounded profile admits one- through sixteen-leaf struct parameters
+and direct-call arguments whose leaves are INTEGER (`i64`) and/or SSE (`f64`) —
+the admission fragment's own sixteen-leaf flattening limit bounds how large a
+struct a source can declare.
 INTEGER leaves use the next GPR from `rdi`–`r9`; SSE leaves use the next XMM
 register from `xmm0`–`xmm7`, independently. LLVM `expand` lowering flattens
 aggregates leaf-by-leaf into the scalar argument sequence, so INTEGER leaves
@@ -3226,8 +3228,8 @@ modeling; LLVM stack-memory lowering remains outside the profile. Enum
 signatures, enum values, enum scalar operations and enum payload writes stay
 fail-closed; enum `match` paths without an enum-use flag remain closed by the
 separate enum-signature gate. F64 tail calls remain fail-closed. Function-signature and direct-call
-aggregates used as parameters or call arguments with nine or more leaves, or
-as results with five or more leaves, remain
+aggregates used as parameters or call arguments with seventeen or more
+leaves, or as results with five or more leaves, remain
 fail-closed. Local struct values inside a body are not subject to this
 aggregate limit because the source model flattens them. i128/u128 struct leaves
 remain fail-closed. Leaf-function bounded arrays admit qword `%rsp`-relative
