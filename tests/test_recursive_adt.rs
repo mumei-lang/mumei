@@ -94,6 +94,33 @@ fn bounded_recursive_datatypes_verify_in_both_integer_modes() {
 }
 
 #[test]
+fn recursive_enum_payload_field_updates_are_sound() {
+    for bitvec_i64 in [false, true] {
+        assert_verified(
+            &run_verify("test_recursive_adt_payload_read_positive.mm", bitvec_i64),
+            "test_recursive_adt_payload_read_positive.mm",
+            bitvec_i64,
+        );
+        assert_rejected(
+            &run_verify("test_recursive_adt_payload_update_negative.mm", bitvec_i64),
+            "test_recursive_adt_payload_update_negative.mm",
+            "Verification Error",
+            bitvec_i64,
+        );
+        for name in [
+            "test_recursive_adt_self_field_write_negative.mm",
+            "test_recursive_adt_nested_self_write_negative.mm",
+        ] {
+            assert_rejected(
+                &run_verify(name, bitvec_i64),
+                name,
+                "recursive self payload",
+                bitvec_i64,
+            );
+        }
+    }
+}
+#[test]
 fn recursive_datatype_codegen_keeps_the_clean_llvm_error() {
     let dir = tempfile::tempdir().expect("create recursive-ADT build directory");
     let output = Command::new(env!("CARGO_BIN_EXE_mumei"))

@@ -725,7 +725,7 @@ mod tests {
         let (_, root, env) = enum_dependency_fixture("enum E { A(v: i64), B }");
         assert_eq!(
             crate::resolver::compute_proof_hash(&root, &env),
-            "365f7208490f2ffe94c762a91a53cc633f752a3fe83c15408ece28e4e2dec417"
+            "dece130044961c62523480ba03a0508e4d0957a023a0996459edf629b49891d3"
         );
     }
 

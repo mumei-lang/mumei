@@ -2142,7 +2142,7 @@ fn enum_payload_field_read<'a>(
     let Some(enum_def) = enum_def else {
         return Ok(None);
     };
-    if !datatype::is_finite_adt(enum_def, vc.module_env)
+    if !datatype::uses_datatype_sort(enum_def, vc.module_env)
         || datatype::enum_datatype_sort(vc, enum_def).is_none()
     {
         return Ok(None);
@@ -2165,13 +2165,42 @@ fn enum_payload_field_read<'a>(
     let Some((variant_idx, field_idx)) = owner else {
         return Ok(None);
     };
-    let Some(field_type) = enum_def.variants[variant_idx]
-        .field_types
-        .get(field_idx)
-        .map(datatype::payload_field_type_name)
-    else {
+    let Some(field_type_ref) = enum_def.variants[variant_idx].field_types.get(field_idx) else {
         return Ok(None);
     };
+    if datatype::is_direct_self_field(enum_def, field_type_ref, vc.module_env) {
+        let Some((payload_offset, _)) =
+            datatype::payload_leaf_range(enum_def, vc.module_env, variant_idx, field_idx)
+        else {
+            return Ok(None);
+        };
+        let base = expr_to_z3(vc, &root, env, None)?;
+        let Some((sort, is_variant, resolved_idx, resolved_enum)) =
+            datatype::variant_tester_condition(vc, &base, &enum_def.variants[variant_idx].name)
+        else {
+            return Ok(None);
+        };
+        if resolved_idx != variant_idx || resolved_enum.name != enum_def.name {
+            return Ok(None);
+        }
+        let Some(selector) =
+            datatype::variant_selector_apply(&sort, variant_idx, payload_offset, &base)
+        else {
+            return Ok(None);
+        };
+        let Some(fresh) = super::z3_types::dynamic_fresh_const(
+            vc.ctx,
+            "__recursive_enum_payload_read",
+            &selector,
+        ) else {
+            return Ok(None);
+        };
+        let Some(value) = super::z3_types::dynamic_ite(&is_variant, &selector, &fresh) else {
+            return Ok(None);
+        };
+        return Ok(Some(value));
+    }
+    let field_type = datatype::payload_field_type_name(field_type_ref);
     let Some((payload_offset, payload_width)) =
         datatype::payload_leaf_range(enum_def, vc.module_env, variant_idx, field_idx)
     else {
@@ -2281,7 +2310,7 @@ fn enum_payload_field_read<'a>(
             let Some(outer_enum_def) = outer_enum_def else {
                 return Ok(None);
             };
-            if !datatype::is_finite_adt(outer_enum_def, vc.module_env)
+            if !datatype::uses_datatype_sort(outer_enum_def, vc.module_env)
                 || datatype::enum_datatype_sort(vc, outer_enum_def).is_none()
             {
                 return Ok(None);
@@ -2306,13 +2335,15 @@ fn enum_payload_field_read<'a>(
             let Some((outer_variant_idx, outer_field_idx)) = outer_owner else {
                 return Ok(None);
             };
-            let Some(outer_field_type) = outer_enum_def.variants[outer_variant_idx]
+            let Some(outer_field_type_ref) = outer_enum_def.variants[outer_variant_idx]
                 .field_types
                 .get(outer_field_idx)
-                .map(datatype::payload_field_type_name)
             else {
                 return Ok(None);
             };
+            let outer_self_field =
+                datatype::is_direct_self_field(outer_enum_def, outer_field_type_ref, vc.module_env);
+            let outer_field_type = datatype::payload_field_type_name(outer_field_type_ref);
             let Some((_, width)) = datatype::payload_leaf_range(
                 outer_enum_def,
                 vc.module_env,
@@ -2321,11 +2352,17 @@ fn enum_payload_field_read<'a>(
             ) else {
                 return Ok(None);
             };
-            let Some(leaves) = datatype::field_leaf_types(&outer_field_type, vc.module_env) else {
+            if width == 0 {
                 return Ok(None);
-            };
-            if width == 0 || leaves.len() != width {
-                return Ok(None);
+            }
+            if !outer_self_field {
+                let Some(leaves) = datatype::field_leaf_types(&outer_field_type, vc.module_env)
+                else {
+                    return Ok(None);
+                };
+                if leaves.len() != width {
+                    return Ok(None);
+                }
             }
             let outer_base = expr_to_z3(vc, outer_root, env, None)?;
             let Some((_, is_variant, resolved_idx, resolved_enum)) =
@@ -2413,7 +2450,7 @@ fn enum_payload_field_read<'a>(
         let Some(outer_enum_def) = outer_enum_def else {
             return Ok(None);
         };
-        if !datatype::is_finite_adt(outer_enum_def, vc.module_env)
+        if !datatype::uses_datatype_sort(outer_enum_def, vc.module_env)
             || datatype::enum_datatype_sort(vc, outer_enum_def).is_none()
         {
             return Ok(None);
@@ -2438,13 +2475,15 @@ fn enum_payload_field_read<'a>(
         let Some((outer_variant_idx, outer_field_idx)) = outer_owner else {
             return Ok(None);
         };
-        let Some(outer_field_type) = outer_enum_def.variants[outer_variant_idx]
+        let Some(outer_field_type_ref) = outer_enum_def.variants[outer_variant_idx]
             .field_types
             .get(outer_field_idx)
-            .map(datatype::payload_field_type_name)
         else {
             return Ok(None);
         };
+        let outer_self_field =
+            datatype::is_direct_self_field(outer_enum_def, outer_field_type_ref, vc.module_env);
+        let outer_field_type = datatype::payload_field_type_name(outer_field_type_ref);
         let Some((_, width)) = datatype::payload_leaf_range(
             outer_enum_def,
             vc.module_env,
@@ -2453,11 +2492,16 @@ fn enum_payload_field_read<'a>(
         ) else {
             return Ok(None);
         };
-        let Some(leaves) = datatype::field_leaf_types(&outer_field_type, vc.module_env) else {
+        if width == 0 {
             return Ok(None);
-        };
-        if width == 0 || leaves.len() != width {
-            return Ok(None);
+        }
+        if !outer_self_field {
+            let Some(leaves) = datatype::field_leaf_types(&outer_field_type, vc.module_env) else {
+                return Ok(None);
+            };
+            if leaves.len() != width {
+                return Ok(None);
+            }
         }
         let outer_base = expr_to_z3(vc, outer_root, env, Some(solver))?;
         let Some((_, is_variant, resolved_idx, resolved_enum)) = datatype::variant_tester_condition(
