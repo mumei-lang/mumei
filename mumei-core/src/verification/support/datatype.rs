@@ -2,7 +2,7 @@
 //! direct-self-recursive enums (`Z3_DATATYPE_SORT`).
 //!
 //! Finite non-generic enums with supported payload leaves, and non-generic
-//! direct-self-recursive enums with a base variant and only scalar/self
+//! direct-self-recursive enums with a base variant and finite non-self
 //! payloads, are lowered to native Z3 datatypes. Other enums, mutual cycles,
 //! and recursion through structs or arrays keep the Int-tag path. Native
 //! variants become constructors with `is-<Variant>` testers and selectors of
@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use z3::ast::{Ast, Bool, Datatype, Dynamic, Int, BV};
-use z3::{Context, DatatypeAccessor, DatatypeSort, Solver, Sort};
+use z3::{Context, DatatypeAccessor, DatatypeSort, SatResult, Solver, Sort};
 
 use crate::ast::TypeRef;
 use crate::lowering::{lower, LoweredType};
@@ -34,7 +34,7 @@ use crate::verification::types::{Env, MumeiError, MumeiResult};
 const MAX_ENUM_PAYLOAD_NEST: u8 = 8;
 
 /// `true` when `enum_def` is finite + non-recursive and every payload
-/// flattens to supported scalar leaves
+/// flattens to supported leaves
 /// (a declared *struct* payload whose direct fields are all scalar also
 /// counts: its leaves flatten into the constructor, mirroring the trusted
 /// verifier's `pure-i64-composite/v18` layout; a payload field typed as
@@ -76,10 +76,16 @@ pub(crate) fn is_self_recursive_adt(enum_def: &EnumDef, module_env: &ModuleEnv) 
         return false;
     }
 
+    let mut memo = FiniteFuelMemo::default();
     enum_def.variants.iter().all(|variant| {
         variant.field_types.iter().all(|field| {
             is_direct_self_field(enum_def, field, module_env)
-                || field_is_scalar(&payload_field_type_name(field), module_env)
+                || field_is_finite_payload(
+                    &payload_field_type_name(field),
+                    module_env,
+                    MAX_ENUM_PAYLOAD_NEST,
+                    &mut memo,
+                )
         })
     })
 }
@@ -114,12 +120,20 @@ fn is_finite_adt_fueled(
         && !enum_def.variants.is_empty()
         && enum_def.variants.iter().all(|variant| {
             variant.field_types.iter().all(|field| {
-                field_leaf_types_fueled(&payload_field_type_name(field), module_env, fuel, memo)
-                    .is_some()
+                field_is_finite_payload(&payload_field_type_name(field), module_env, fuel, memo)
             })
         });
     memo.insert(key, finite);
     finite
+}
+
+fn field_is_finite_payload(
+    field_type: &str,
+    module_env: &ModuleEnv,
+    fuel: u8,
+    memo: &mut FiniteFuelMemo,
+) -> bool {
+    field_leaf_types_fueled(field_type, module_env, fuel, memo).is_some()
 }
 
 /// The `(leaf_name, leaf_base_type)` pairs a payload field contributes to
@@ -533,6 +547,24 @@ pub(crate) fn scalar_int_leaf_domain<'a>(
         .and_then(|bv| bitvec_leaf_bound(vc.ctx, &base, &bv))
 }
 
+pub(crate) fn array_int_leaf_domain<'a>(
+    vc: &VCtx<'a>,
+    array_value: &Dynamic<'a>,
+    length_value: &Dynamic<'a>,
+    element_type: &str,
+) -> Option<Bool<'a>> {
+    let array = array_value.as_array()?;
+    let length = crate::verification::translator::z3_types::as_int_like(length_value)?;
+    let index = Int::fresh_const(vc.ctx, "enum_payload_array_index");
+    let lower_bound = index.ge(&Int::from_i64(vc.ctx, 0));
+    let upper_bound = index.lt(&length);
+    let in_bounds = Bool::and(vc.ctx, &[&lower_bound, &upper_bound]);
+    let element_value = array.select(&index);
+    let element_domain = scalar_int_leaf_domain(vc, element_type, &element_value)?;
+    let in_range = in_bounds.implies(&element_domain);
+    Some(z3::ast::forall_const(vc.ctx, &[&index], &[], &in_range))
+}
+
 /// `value` is an enum datatype constant: the conjunction holding every
 /// `u64`/`u32`/`i32` payload leaf inside its declared width, gated on the
 /// variant that owns it (`is_V(value) => bounds_V`). The widened
@@ -591,9 +623,28 @@ fn enum_leaf_domain_for<'a>(
                 accessor_idx += 1;
                 continue;
             }
-            for (_leaf_name, base) in
-                field_leaf_types(&payload_field_type_name(field), vc.module_env)?
-            {
+            let leaves = field_leaf_types(&payload_field_type_name(field), vc.module_env)?;
+            let mut leaf_idx = 0;
+            while leaf_idx < leaves.len() {
+                let base = &leaves[leaf_idx].1;
+                if let Some(element_type) = base.strip_prefix("array:") {
+                    let array = variant_selector_apply(&sort, vidx, accessor_idx, value)?;
+                    let length = variant_selector_apply(&sort, vidx, accessor_idx + 1, value)?;
+                    let nonnegative =
+                        crate::verification::translator::nonneg_constraint(vc.ctx, &length)?;
+                    bounds.push(nonnegative);
+                    if *budget > 0 {
+                        if let Some(bound) =
+                            array_int_leaf_domain(vc, &array, &length, element_type)
+                        {
+                            *budget = budget.saturating_sub(1);
+                            bounds.push(bound);
+                        }
+                    }
+                    accessor_idx += 2;
+                    leaf_idx += 2;
+                    continue;
+                }
                 let sel = variant_selector_apply(&sort, vidx, accessor_idx, value);
                 if base == "array_len" {
                     let value = sel?;
@@ -619,6 +670,7 @@ fn enum_leaf_domain_for<'a>(
                     bounds.push(bound);
                 }
                 accessor_idx += 1;
+                leaf_idx += 1;
             }
         }
         if bounds.is_empty() {
@@ -865,6 +917,141 @@ pub(crate) struct PayloadSnapshot<'a> {
     pub leaves: Vec<Dynamic<'a>>,
 }
 
+fn prove_enum_payload_domain<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+    enum_def: &EnumDef,
+    variant: &crate::parser::ast::EnumVariant,
+    payload_name: &str,
+    type_name: &str,
+    domain: &Bool<'a>,
+) -> MumeiResult<()> {
+    if let Some(obligations) = vc.cover_obligations.as_ref() {
+        let obligation = vc.path_cond_conj().implies(domain);
+        obligations.borrow_mut().push(obligation);
+        return Ok(());
+    }
+    solver.push();
+    solver.assert(&vc.path_cond_conj());
+    solver.assert(&domain.not());
+    let verdict = crate::verification::phase_artifacts::check(solver);
+    solver.pop(1);
+    if verdict != SatResult::Unsat {
+        return Err(MumeiError::verification(format!(
+            "Enum '{}' variant '{}' payload '{}' value may be outside the '{}' domain",
+            enum_def.name, variant.name, payload_name, type_name
+        ))
+        .with_verdict(crate::verification::VerdictKind::Rejected));
+    }
+    Ok(())
+}
+
+fn check_enum_ctor_payload_domains<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+    enum_def: &EnumDef,
+    variant: &crate::parser::ast::EnumVariant,
+    leaf_args: &[Dynamic<'a>],
+) -> MumeiResult<()> {
+    let mut offset = 0;
+    for (field_idx, field_type_ref) in variant.field_types.iter().enumerate() {
+        let payload_name = variant
+            .fields
+            .get(field_idx)
+            .map(|field| {
+                field
+                    .split_once(':')
+                    .map(|(name, _)| name.trim())
+                    .unwrap_or(field)
+                    .to_owned()
+            })
+            .unwrap_or_else(|| field_idx.to_string());
+        if is_direct_self_field(enum_def, field_type_ref, vc.module_env) {
+            let value = leaf_args.get(offset).ok_or_else(|| {
+                MumeiError::type_error("enum constructor is missing a recursive payload leaf")
+            })?;
+            if let Some(domain) = enum_value_leaf_domain(vc, value) {
+                prove_enum_payload_domain(
+                    vc,
+                    solver,
+                    enum_def,
+                    variant,
+                    &payload_name,
+                    &enum_def.name,
+                    &domain,
+                )?;
+            }
+            offset += 1;
+            continue;
+        }
+
+        let field_type = payload_field_type_name(field_type_ref);
+        let leaf_types = field_leaf_types(&field_type, vc.module_env).ok_or_else(|| {
+            MumeiError::type_error(format!(
+                "enum constructor payload '{field_type}' has no flattened leaves"
+            ))
+        })?;
+        for (leaf_name, leaf_type) in leaf_types {
+            if leaf_type == "array_len" {
+                offset += 1;
+                continue;
+            }
+            let value = leaf_args.get(offset).ok_or_else(|| {
+                MumeiError::type_error("enum constructor is missing a payload leaf")
+            })?;
+            if let Some(element_type) = leaf_type.strip_prefix("array:") {
+                let length = leaf_args.get(offset + 1).ok_or_else(|| {
+                    MumeiError::type_error("enum constructor is missing an array length leaf")
+                })?;
+                if let Some(domain) = array_int_leaf_domain(vc, value, length, element_type) {
+                    let leaf_payload_name = if leaf_name.is_empty() {
+                        payload_name.clone()
+                    } else {
+                        format!("{payload_name}.{leaf_name}")
+                    };
+                    prove_enum_payload_domain(
+                        vc,
+                        solver,
+                        enum_def,
+                        variant,
+                        &leaf_payload_name,
+                        element_type,
+                        &domain,
+                    )?;
+                }
+                offset += 1;
+                continue;
+            }
+            let (type_name, domain) = if let Some(enum_type) = leaf_type.strip_prefix("enum:") {
+                (enum_type.to_string(), enum_value_leaf_domain(vc, value))
+            } else {
+                (
+                    leaf_type.clone(),
+                    scalar_int_leaf_domain(vc, &leaf_type, value),
+                )
+            };
+            if let Some(domain) = domain {
+                let leaf_payload_name = if leaf_name.is_empty() {
+                    payload_name.clone()
+                } else {
+                    format!("{payload_name}.{leaf_name}")
+                };
+                prove_enum_payload_domain(
+                    vc,
+                    solver,
+                    enum_def,
+                    variant,
+                    &leaf_payload_name,
+                    &type_name,
+                    &domain,
+                )?;
+            }
+            offset += 1;
+        }
+    }
+    Ok(())
+}
+
 /// The accessor domain sorts of `enum_def.variants[idx]`'s constructor,
 /// recomputed from `field_leaf_sorts` (the same source the datatype was
 /// built with). Returned in leaf order so callers can bridge arg sorts —
@@ -937,6 +1124,7 @@ pub(crate) fn enum_ctor_apply<'a>(
     ctor_path: &str,
     args: &[Dynamic<'a>],
     payload_snapshots: &[Option<PayloadSnapshot<'a>>],
+    solver_opt: Option<&Solver<'a>>,
 ) -> MumeiResult<Option<Dynamic<'a>>> {
     let Some((enum_def, idx)) = resolve_enum_ctor(vc, ctor_path)? else {
         return Ok(None);
@@ -954,6 +1142,9 @@ pub(crate) fn enum_ctor_apply<'a>(
         args,
         payload_snapshots,
     )?;
+    if let Some(solver) = solver_opt {
+        check_enum_ctor_payload_domains(vc, solver, enum_def, &enum_def.variants[idx], &leaf_args)?;
+    }
     Ok(enum_ctor_apply_leaves(vc, enum_def, idx, &leaf_args))
 }
 

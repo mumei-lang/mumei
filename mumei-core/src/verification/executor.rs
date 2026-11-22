@@ -613,7 +613,7 @@ fn lower_clause_with_skip<'a>(
     let clause_z3 =
         match crate::verification::translator::z3_types::with_array_shared_markers_restored(
             env,
-            |env| expr_to_z3(vc, &clause_ast, env, solver_opt),
+            |env| expr_to_z3_with_domain_obligations(vc, &clause_ast, env, solver_opt),
         ) {
             Ok(value) => value,
             // Dropping a requires would quietly weaken the assumptions and could
@@ -1724,6 +1724,7 @@ fn verify_inner_impl(
         linearity_ctx: Some(&linearity_ctx_cell),
         inferred_invariants: Some(&inferred_invariants_cell),
         cover_obligations: None,
+        spec_domain_obligations: Default::default(),
         effect_ctx: Some(&effect_ctx_cell),
         constraint_count: Some(&constraint_count_cell),
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
@@ -2092,23 +2093,76 @@ fn verify_inner_impl(
         solver.assert(&v.lt(&z3::ast::Int::from_i64(&ctx, n)));
     }
 
-    // 2d. `u64` params: under the `Int` encoding the symbol is unbounded —
-    // assert `0 <= v <= u64::MAX` so `a >= 0` and `a < 0` are decided
-    // correctly. The `BV(64)` encoding needs no bound (every value is valid;
-    // the unsigned ops carry the semantics).
-    let u64_max = z3::ast::Int::from_u64(&ctx, u64::MAX);
+    // 2d. Fixed-width scalar params must satisfy their declared domains before
+    // a later constructor or match may rely on those domains.
     for param in &atom.params {
         let Some(type_name) = param.type_name.as_deref() else {
             continue;
         };
-        if module_env.resolve_base_type(type_name) != "u64" {
-            continue;
-        }
-        let Some(v) = env.get(&param.name).and_then(|d| d.as_int()) else {
+        let Some(value) = env.get(&param.name) else {
             continue;
         };
-        solver.assert(&v.ge(&z3::ast::Int::from_u64(&ctx, 0)));
-        solver.assert(&v.le(&u64_max));
+        if let Some(domain) = datatype::scalar_int_leaf_domain(&vc, type_name, value) {
+            solver.assert(&domain);
+        }
+    }
+
+    // 2d''. Fixed-width leaves of struct params carry the same entry domains
+    // as scalar params, so a later enum constructor may rely on them.
+    for param in &atom.params {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        let base = module_env.resolve_base_type(type_name);
+        if module_env.get_struct(&base).is_none() {
+            continue;
+        }
+        let Some(leaves) = datatype::field_leaf_types(&base, module_env) else {
+            continue;
+        };
+        let Some(value) = env.get(&param.name) else {
+            continue;
+        };
+        let values = crate::verification::translator::nested_field_bindings(&env, value);
+        for (leaf_name, leaf_type) in leaves {
+            if leaf_type == "array_len" {
+                continue;
+            }
+            let Some(leaf_value) = values
+                .iter()
+                .find(|(name, _)| name == &leaf_name)
+                .map(|(_, value)| value)
+            else {
+                continue;
+            };
+            if let Some(element_type) = leaf_type.strip_prefix("array:") {
+                let field_name = format!("{}_{}", param.name, leaf_name);
+                let root_length_key =
+                    crate::verification::translator::z3_types::array_root_len_key(&field_name);
+                let length_key =
+                    crate::verification::translator::z3_types::array_len_key(&field_name);
+                let length = env
+                    .get(&root_length_key)
+                    .or_else(|| env.get(&length_key))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        array_root_len_value(&ctx, &mut env, &field_name, bitvec_i64, Some(&solver))
+                    });
+                env.insert(root_length_key, length.clone());
+                env.insert(length_key, length.clone());
+                if let Some(domain) =
+                    datatype::array_int_leaf_domain(&vc, leaf_value, &length, element_type)
+                {
+                    solver.assert(&domain);
+                }
+            } else if leaf_type.starts_with("enum:") {
+                continue;
+            } else if let Some(domain) =
+                datatype::scalar_int_leaf_domain(&vc, &leaf_type, leaf_value)
+            {
+                solver.assert(&domain);
+            }
+        }
     }
 
     // 2d'. `i128`/`u128` params: same unbounded-`Int` gap — assert the
@@ -2185,6 +2239,26 @@ fn verify_inner_impl(
             env.insert(len_name, unsafe { Int::wrap(&ctx, ast) }.into());
         } else {
             array_len_value(&ctx, &mut env, &param.name, bitvec_i64, Some(&solver));
+        }
+    }
+
+    for param in &atom.params {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        let resolved = module_env.resolve_base_type(type_name);
+        if !resolved.trim_start().starts_with('[') && !resolved.trim_end().ends_with("[]") {
+            continue;
+        }
+        let (Some(array), Some(length)) =
+            (env.get(&param.name), env.get(&array_len_key(&param.name)))
+        else {
+            continue;
+        };
+        let element_type =
+            crate::verification::translator::z3_types::array_element_type_name(&param.name, &vc);
+        if let Some(domain) = datatype::array_int_leaf_domain(&vc, array, length, &element_type) {
+            solver.assert(&domain);
         }
     }
 

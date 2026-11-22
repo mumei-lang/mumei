@@ -122,8 +122,12 @@ body: {
     let ys = [0];
     let v = s.xs;
     let f = |ys: [i64]| {
-        ys[0] = 1;
-        0
+        if len(ys) > 0 {
+            ys[0] = 1;
+            0
+        } else {
+            0
+        }
     };
     f(v)
 };
@@ -217,8 +221,12 @@ ensures: result == 0;
 body: {
     let ys = [1];
     let is_empty = |ys: [i64]| {
-        ys[0] = 9;
-        0
+        if len(ys) > 0 {
+            ys[0] = 9;
+            0
+        } else {
+            0
+        }
     };
     is_empty(xs)
 };
@@ -249,9 +257,13 @@ body: {
     let s = S { xs: a };
     let xs = s.xs;
     let f = |xs: [i64]| {
-        let ys = xs;
-        ys[0] = 9;
-        0
+        if len(xs) > 0 {
+            let ys = xs;
+            ys[0] = 9;
+            0
+        } else {
+            0
+        }
     };
     f(xs);
     let w = s.xs;

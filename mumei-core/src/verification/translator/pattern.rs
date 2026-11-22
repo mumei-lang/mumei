@@ -206,6 +206,31 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                                     leaf_types,
                                     &leaf_values,
                                 );
+                                let recursive_payload = enum_def.is_some_and(|edef| {
+                                    datatype::is_self_recursive_adt(edef, vc.module_env)
+                                        && edef.variants[variant_idx]
+                                            .field_types
+                                            .get(i)
+                                            .is_some_and(|field_type| {
+                                                !datatype::is_direct_self_field(
+                                                    edef,
+                                                    field_type,
+                                                    vc.module_env,
+                                                )
+                                            })
+                                });
+                                if recursive_payload {
+                                    for ((_, base), (_, value)) in leaf_types.iter().zip(&leaves) {
+                                        let domain = if base.starts_with("enum:") {
+                                            datatype::enum_value_leaf_domain(vc, value)
+                                        } else {
+                                            datatype::scalar_int_leaf_domain(vc, base, value)
+                                        };
+                                        if let Some(domain) = domain {
+                                            solver.assert(&is_v.implies(&domain));
+                                        }
+                                    }
+                                }
                             }
                             let handle = crate::verification::translator::fresh_struct_handle(
                                 ctx, &sdef.name,
@@ -262,10 +287,32 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                                 && !datatype::is_direct_self_field(edef, field_type, vc.module_env)
                             {
                                 let type_name = datatype::payload_field_type_name(field_type);
-                                if let Some(domain) =
-                                    datatype::scalar_int_leaf_domain(vc, &type_name, &field_sym)
+                                if let Some(leaf_types) =
+                                    datatype::field_leaf_types(&type_name, vc.module_env)
                                 {
-                                    solver.assert(&is_v.implies(&domain));
+                                    for (offset, (_, base)) in leaf_types.iter().enumerate() {
+                                        let leaf = if offset == 0 {
+                                            Some(field_sym.clone())
+                                        } else {
+                                            datatype::variant_selector_apply(
+                                                &sort,
+                                                variant_idx,
+                                                off + offset,
+                                                target,
+                                            )
+                                        };
+                                        let Some(leaf) = leaf else {
+                                            continue;
+                                        };
+                                        let domain = if base.starts_with("enum:") {
+                                            datatype::enum_value_leaf_domain(vc, &leaf)
+                                        } else {
+                                            datatype::scalar_int_leaf_domain(vc, base, &leaf)
+                                        };
+                                        if let Some(domain) = domain {
+                                            solver.assert(&is_v.implies(&domain));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -391,11 +438,11 @@ pub(crate) fn pattern_to_z3_condition<'a>(
 /// - Variant の fields 内の Variable → projector シンボル `__proj_{Variant}_{i}` にバインド
 /// - Variant の fields 内の Variant → 再帰的に projector を生成してバインド
 pub(crate) fn pattern_bind_variables<'a>(
-    ctx: &'a Context,
     pattern: &Pattern,
     target: &Dynamic<'a>,
     env: &mut Env<'a>,
     vc: &VCtx<'a>,
+    solver_opt: Option<&Solver<'a>>,
     decl_hint: Option<&str>,
     bound: &mut std::collections::HashSet<String>,
 ) {
@@ -413,7 +460,7 @@ pub(crate) fn pattern_bind_variables<'a>(
             // selectors so the bound symbol carries the payload's real sort
             // (String/Real/Bool), not an unconstrained Int projector.
             if target.as_datatype().is_some() {
-                if let Some((sort, _is_v, variant_idx, enum_def)) =
+                if let Some((sort, is_v, variant_idx, enum_def)) =
                     datatype::variant_tester_condition(vc, target, variant_name)
                 {
                     {
@@ -459,7 +506,7 @@ pub(crate) fn pattern_bind_variables<'a>(
                                     continue;
                                 };
                                 if let Pattern::Variable(name) = field_pattern {
-                                    super::z3_types::mark_array_shared(ctx, env, name);
+                                    super::z3_types::mark_array_shared(vc.ctx, env, name);
                                     env.insert(name.clone(), array.clone());
                                     env.insert(format!("__z3_arr_{name}"), array.clone());
                                     let len_key = super::z3_types::array_len_key(name);
@@ -533,7 +580,7 @@ pub(crate) fn pattern_bind_variables<'a>(
                                     continue;
                                 }
                                 let handle = crate::verification::translator::fresh_struct_handle(
-                                    ctx, &sdef.name,
+                                    vc.ctx, &sdef.name,
                                 );
                                 let handle_name = handle.decl().name();
                                 // The handle carries the declared direct
@@ -546,7 +593,7 @@ pub(crate) fn pattern_bind_variables<'a>(
                                 let leaf_vals: Vec<Dynamic> =
                                     leaves.iter().map(|(_, v)| v.clone()).collect();
                                 let direct = match rebuild_payload_direct_fields(
-                                    ctx, vc, env, sdef, &leaf_vals,
+                                    vc.ctx, vc, env, sdef, &leaf_vals,
                                 ) {
                                     Some(direct) => direct,
                                     None if leaf_types.as_ref().is_some_and(|types| {
@@ -629,7 +676,7 @@ pub(crate) fn pattern_bind_variables<'a>(
                                 datatype::variant_selector_apply(&sort, variant_idx, off, target)
                                     .unwrap_or_else(|| {
                                         Int::new_const(
-                                            ctx,
+                                            vc.ctx,
                                             format!("__proj_{}_{}", variant_leaf, i).as_str(),
                                         )
                                         .into()
@@ -651,6 +698,12 @@ pub(crate) fn pattern_bind_variables<'a>(
                                                 )
                                             })
                                         {
+                                            if let (Some(solver), Some(domain)) = (
+                                                solver_opt,
+                                                datatype::enum_value_leaf_domain(vc, &field_sym),
+                                            ) {
+                                                solver.assert(&is_v.implies(&domain));
+                                            }
                                             vc.local_enum_types
                                                 .borrow_mut()
                                                 .insert(fname.clone(), edef.name.clone());
@@ -676,11 +729,11 @@ pub(crate) fn pattern_bind_variables<'a>(
                                 }
                                 Pattern::Variant { .. } => {
                                     pattern_bind_variables(
-                                        ctx,
                                         field_pattern,
                                         &field_sym,
                                         env,
                                         vc,
+                                        solver_opt,
                                         None,
                                         bound,
                                     );
@@ -707,12 +760,14 @@ pub(crate) fn pattern_bind_variables<'a>(
                                 module_env.resolve_base_type(field_type)
                             };
                             match base.as_str() {
-                                "f64" => Float::new_const(ctx, proj_name.as_str(), 11, 53).into(),
-                                "bool" => Bool::new_const(ctx, proj_name.as_str()).into(),
-                                _ => Int::new_const(ctx, proj_name.as_str()).into(),
+                                "f64" => {
+                                    Float::new_const(vc.ctx, proj_name.as_str(), 11, 53).into()
+                                }
+                                "bool" => Bool::new_const(vc.ctx, proj_name.as_str()).into(),
+                                _ => Int::new_const(vc.ctx, proj_name.as_str()).into(),
                             }
                         } else {
-                            Int::new_const(ctx, proj_name.as_str()).into()
+                            Int::new_const(vc.ctx, proj_name.as_str()).into()
                         };
                         env.insert(proj_name.clone(), field_sym.clone());
 
@@ -757,11 +812,11 @@ pub(crate) fn pattern_bind_variables<'a>(
                                         module_env.get_enum(&resolved).map(|_| resolved)
                                     });
                                 pattern_bind_variables(
-                                    ctx,
                                     field_pattern,
                                     &field_sym,
                                     env,
                                     vc,
+                                    solver_opt,
                                     field_hint.as_deref(),
                                     bound,
                                 );
