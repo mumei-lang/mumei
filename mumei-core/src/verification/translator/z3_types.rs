@@ -1369,12 +1369,13 @@ pub(crate) fn wire_array_slots<'a>(
                             ))
                         })?
                 }
-                Some(Expr::Call(_, _)) => {
-                    call_result_struct_array(vc, &arr, &path).unwrap_or_else(|| {
-                        z3_fresh_array_for_range(vc.ctx, &key, &z3_element_sort(vc, &leaf_type))
-                    })
+                Some(expression) => {
+                    struct_array_leaf_for_expr(vc, env, expression, &arr_dyn, &path, 0, None)
+                        .unwrap_or_else(|| {
+                            z3_fresh_array_for_range(vc.ctx, &key, &z3_element_sort(vc, &leaf_type))
+                        })
                 }
-                _ => z3_fresh_array_for_range(vc.ctx, &key, &z3_element_sort(vc, &leaf_type)),
+                None => z3_fresh_array_for_range(vc.ctx, &key, &z3_element_sort(vc, &leaf_type)),
             };
             env.insert(key, leaf_array.into());
         }
@@ -1607,6 +1608,126 @@ fn branch_tail_len<'a>(
             solver_opt,
         ),
         None => array_value_len_or_fresh(vc, env, val_node, solver_opt),
+    }
+}
+
+fn branch_tail_struct_array_leaf<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    scope: &Stmt,
+    val_node: &Dynamic<'a>,
+    leaf_path: &str,
+    depth: u32,
+) -> Option<z3::ast::Array<'a>> {
+    let tail = stmt_tail_expr(scope)?;
+    struct_array_leaf_for_expr(
+        vc,
+        env,
+        tail,
+        val_node,
+        leaf_path,
+        depth,
+        Some(LetScope::of(scope)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn struct_array_leaf_for_expr<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    expression: &Expr,
+    val_node: &Dynamic<'a>,
+    leaf_path: &str,
+    depth: u32,
+    scope: Option<LetScope<'_>>,
+) -> Option<z3::ast::Array<'a>> {
+    if depth >= TAIL_LEN_DEPTH {
+        return None;
+    }
+    match expression {
+        Expr::Variable(source) => {
+            if let Some(scope) = scope {
+                if let Some((rhs, before)) = let_rhs_in(scope.stmts, source) {
+                    return struct_array_leaf_for_expr(
+                        vc,
+                        env,
+                        rhs,
+                        val_node,
+                        leaf_path,
+                        depth + 1,
+                        Some(scope.before(before)),
+                    );
+                }
+                if !scope.env_is_current(source) {
+                    return None;
+                }
+            }
+            env.get(&struct_array_leaf_key(source, leaf_path))
+                .and_then(|value| value.as_array())
+        }
+        Expr::ArrayLit(_) => {
+            let arr = val_node.as_array()?;
+            let source = array_root_name(&arr)?;
+            env.get(&struct_array_leaf_key(&source, leaf_path))
+                .and_then(|value| value.as_array())
+        }
+        Expr::Call(_, _) => val_node
+            .as_array()
+            .and_then(|arr| call_result_struct_array(vc, &arr, leaf_path)),
+        Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let cond = val_node.nth_child(0)?.as_bool()?;
+            let then_value = val_node.nth_child(1)?;
+            let else_value = val_node.nth_child(2)?;
+            let then_leaf = branch_tail_struct_array_leaf(
+                vc,
+                env,
+                then_branch,
+                &then_value,
+                leaf_path,
+                depth + 1,
+            )?;
+            let else_leaf = branch_tail_struct_array_leaf(
+                vc,
+                env,
+                else_branch,
+                &else_value,
+                leaf_path,
+                depth + 1,
+            )?;
+            Some(cond.ite(&then_leaf, &else_leaf))
+        }
+        Expr::Block(stmt) => {
+            let tail = stmt_tail_expr(stmt)?;
+            struct_array_leaf_for_expr(
+                vc,
+                env,
+                tail,
+                val_node,
+                leaf_path,
+                depth + 1,
+                Some(scope.map_or_else(|| LetScope::of(stmt), |scope| scope.nested(stmt))),
+            )
+        }
+        Expr::Match { arms, .. } => {
+            let (conds, vals) = match_ite_spine(arms, val_node)?;
+            let mut leaves: Vec<z3::ast::Array> = arms
+                .iter()
+                .zip(vals.iter())
+                .map(|(arm, value)| {
+                    branch_tail_struct_array_leaf(vc, env, &arm.body, value, leaf_path, depth + 1)
+                })
+                .collect::<Option<_>>()?;
+            let mut acc = leaves.pop()?;
+            for (cond, leaf) in conds.iter().zip(leaves.iter()).rev() {
+                acc = cond.ite(leaf, &acc);
+            }
+            Some(acc)
+        }
+        _ => None,
     }
 }
 

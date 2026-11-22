@@ -30,6 +30,43 @@ struct Holder {
     value: P
 }
 
+enum Choice {
+    A,
+    B
+}
+
+atom mk_struct_array() -> [P]
+requires: true;
+ensures: len(result) == 1 && result[0].x == 11;
+body: [P { x: 11, y: 0 }];
+
+atom struct_array_block_result() -> i64
+requires: true;
+ensures: result == 11;
+body: {
+    let ps = { mk_struct_array() };
+    ps[0].x
+};
+
+atom struct_array_if_result(c: bool) -> i64
+requires: true;
+ensures: result == 11;
+body: {
+    let ps = if c { mk_struct_array() } else { mk_struct_array() };
+    ps[0].x
+};
+
+atom struct_array_match_result(c: Choice) -> i64
+requires: true;
+ensures: result == 11;
+body: {
+    let ps = match c {
+        Choice::A => mk_struct_array(),
+        Choice::B => mk_struct_array()
+    };
+    ps[0].x
+};
+
 atom field_fact(ps: [P]) -> i64
 requires: len(ps) > 0 && ps[0].x > 5;
 ensures: result > 5;
