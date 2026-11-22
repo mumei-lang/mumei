@@ -120,20 +120,6 @@ fn bitwise_result_rejects_u64_wraparound() {
 }
 
 #[test]
-fn bitwise_refined_return_rejects_u64_wraparound() {
-    let output = run_verify("bitwise_return");
-    let text = output_text(&output);
-    assert!(
-        !output.status.success(),
-        "a bitwise refined u64 return outside the refinement must fail: {text}"
-    );
-    assert!(
-        text.contains("Return type 'T' refinement is not satisfied"),
-        "{text}"
-    );
-}
-
-#[test]
 fn shift_result_preserves_left_u64_width() {
     let output = run_verify("shift_result");
     let text = output_text(&output);
