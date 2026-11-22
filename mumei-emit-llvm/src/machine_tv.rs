@@ -1004,14 +1004,15 @@ fn lift<'ctx>(
     let mut input_index = 0usize;
     for (parameter_shape, leaves) in model.param_shapes.iter().zip(&model.param_leaf_doubles) {
         if parameter_shape.is_some() {
-            let integer_leaf_count = leaves.iter().filter(|is_double| !**is_double).count();
+            // LLVM `expand` lowering flattens aggregate arguments leaf-by-leaf
+            // into the scalar argument sequence: INTEGER leaves that do not
+            // fit `rdi`-`r9` spill to the argument stack exactly like scalar
+            // arguments, so only an SSE leaf without a free xmm0-xmm7 slot is
+            // rejected here.
             let float_leaf_count = leaves.iter().filter(|is_double| **is_double).count();
-            if (integer_leaf_count > 0
-                && integer_argument_index.saturating_add(integer_leaf_count)
-                    > ARGUMENT_REGISTERS.len())
-                || (float_leaf_count > 0
-                    && float_argument_index.saturating_add(float_leaf_count)
-                        > FLOAT_ARGUMENT_REGISTER_COUNT)
+            if float_leaf_count > 0
+                && float_argument_index.saturating_add(float_leaf_count)
+                    > FLOAT_ARGUMENT_REGISTER_COUNT
             {
                 return Err(FunctionOutcome::OutsideProfile("argument_count"));
             }
@@ -2842,6 +2843,41 @@ fn call_site_has_unsupported_composite_shape(site: &CallSite<'_>) -> bool {
         && !aggregate_result_register_classes_supported(&site.result_leaf_doubles))))
 }
 
+// Resolves an INTEGER call-argument leaf that spilled past `rdi`-`r9` to the
+// stack slot the caller must have written, and records the slot in
+// `outgoing_slots` so a non-tail call can discard it afterwards. Scalar and
+// aggregate INTEGER leaves share this path because `expand` lowering flattens
+// both into the same argument sequence.
+fn spilled_integer_call_argument<'ctx>(
+    integer_argument_index: usize,
+    rsp_is_known: bool,
+    rsp_offset: i64,
+    stack: &[(i64, BV<'ctx>)],
+    outgoing_slots: &mut BTreeSet<i64>,
+) -> Result<BV<'ctx>, FunctionOutcome> {
+    if !rsp_is_known || rsp_offset % 8 != 0 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let stack_argument_index = integer_argument_index - ARGUMENT_REGISTERS.len();
+    let word_index = i64::try_from(stack_argument_index)
+        .map_err(|_| FunctionOutcome::OutsideProfile("call_arguments"))?;
+    let Some(stack_slot) = word_index
+        .checked_mul(8)
+        .and_then(|offset| rsp_offset.checked_add(offset))
+    else {
+        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+    };
+    if stack_slot % 8 != 0 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let Some((_, stack_argument)) = stack.iter().find(|(candidate, _)| *candidate == stack_slot)
+    else {
+        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+    };
+    outgoing_slots.insert(stack_slot);
+    Ok(stack_argument.clone())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lift_call<'ctx>(
     instruction: &Instruction,
@@ -2966,15 +3002,10 @@ fn lift_call<'ctx>(
                 else {
                     return Err(FunctionOutcome::OutsideProfile("call_arguments"));
                 };
-                let integer_leaf_count =
-                    leaf_doubles.iter().filter(|is_double| !**is_double).count();
                 let float_leaf_count = leaf_doubles.iter().filter(|is_double| **is_double).count();
-                if (integer_leaf_count > 0
-                    && integer_argument_index.saturating_add(integer_leaf_count)
-                        > ARGUMENT_REGISTERS.len())
-                    || (float_leaf_count > 0
-                        && float_argument_index.saturating_add(float_leaf_count)
-                            > FLOAT_ARGUMENT_REGISTER_COUNT)
+                if float_leaf_count > 0
+                    && float_argument_index.saturating_add(float_leaf_count)
+                        > FLOAT_ARGUMENT_REGISTER_COUNT
                 {
                     return Err(FunctionOutcome::OutsideProfile("argument_count"));
                 }
@@ -2989,11 +3020,24 @@ fn lift_call<'ctx>(
                             .exact_f64_argument_obligations
                             .push(argument._eq(&register));
                         float_argument_index += 1;
-                    } else {
-                        let register_index = ARGUMENT_REGISTERS[integer_argument_index];
+                    } else if let Some(register_index) =
+                        ARGUMENT_REGISTERS.get(integer_argument_index)
+                    {
                         call_state
                             .argument_obligations
-                            .push(argument._eq(&registers[register_index]));
+                            .push(argument._eq(&registers[*register_index]));
+                        integer_argument_index += 1;
+                    } else {
+                        let stack_argument = spilled_integer_call_argument(
+                            integer_argument_index,
+                            rsp_is_known,
+                            rsp_offset,
+                            stack,
+                            &mut outgoing_slots,
+                        )?;
+                        call_state
+                            .argument_obligations
+                            .push(argument._eq(&stack_argument));
                         integer_argument_index += 1;
                     }
                 }
@@ -3043,30 +3087,16 @@ fn lift_call<'ctx>(
                         .push(argument._eq(&registers[*register_index]));
                     integer_argument_index += 1;
                 } else {
-                    if !rsp_is_known || rsp_offset % 8 != 0 {
-                        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-                    }
-                    let stack_argument_index = integer_argument_index - ARGUMENT_REGISTERS.len();
-                    let word_index = i64::try_from(stack_argument_index)
-                        .map_err(|_| FunctionOutcome::OutsideProfile("call_arguments"))?;
-                    let Some(stack_slot) = word_index
-                        .checked_mul(8)
-                        .and_then(|offset| rsp_offset.checked_add(offset))
-                    else {
-                        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
-                    };
-                    if stack_slot % 8 != 0 {
-                        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-                    }
-                    let Some((_, stack_argument)) =
-                        stack.iter().find(|(candidate, _)| *candidate == stack_slot)
-                    else {
-                        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
-                    };
+                    let stack_argument = spilled_integer_call_argument(
+                        integer_argument_index,
+                        rsp_is_known,
+                        rsp_offset,
+                        stack,
+                        &mut outgoing_slots,
+                    )?;
                     call_state
                         .argument_obligations
-                        .push(argument._eq(stack_argument));
-                    outgoing_slots.insert(stack_slot);
+                        .push(argument._eq(&stack_argument));
                     integer_argument_index += 1;
                 }
             }
@@ -5663,9 +5693,11 @@ entry:
             &context,
             RefinedAdmission::CompositeV23,
         );
+        // p.y spills to the argument stack like a scalar argument, so the
+        // signature stays inside the profile.
         assert_eq!(
             check_function(&[0xc3], 0, &after_five, &BTreeMap::new(), &context),
-            FunctionOutcome::OutsideProfile("argument_count")
+            FunctionOutcome::Different
         );
     }
 
@@ -5896,11 +5928,81 @@ entry:
             &context,
             RefinedAdmission::CompositeV23,
         );
+        // INTEGER leaves beyond rdi-r9 spill to the argument stack like
+        // scalars, so a seven-i64-leaf struct still fits the profile.
         assert!(supports_signature(&sum7_model));
         assert_eq!(
             check_function(&[0xc3], 0, &sum7_model, &BTreeMap::new(), &context),
-            FunctionOutcome::OutsideProfile("argument_count")
+            FunctionOutcome::Different
         );
+
+        let eight_integer_source = "struct P8 { a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64 }\n\
+            atom sum8(p: P8) -> i64 requires: true; ensures: true; body: { p.a + p.b + p.c + p.d + p.e + p.f + p.g + p.h };\n\
+            atom last8(p: P8) -> i64 requires: true; ensures: true; body: { p.h };\n\
+            atom main8() -> i64 requires: true; ensures: true; body: { sum8(P8 { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8 }) };";
+        let eight_models = |name| {
+            source_model_named_with_admission(
+                eight_integer_source,
+                name,
+                &context,
+                RefinedAdmission::CompositeV23,
+            )
+        };
+        let eight_integer_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @sum8({ i64, i64, i64, i64, i64, i64, i64, i64 } %p) {
+entry:
+  %a = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %p, 0
+  %b = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %p, 1
+  %c = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %p, 2
+  %d = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %p, 3
+  %e = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %p, 4
+  %f = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %p, 5
+  %g = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %p, 6
+  %h = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %p, 7
+  %ab = add i64 %a, %b
+  %abc = add i64 %ab, %c
+  %abcd = add i64 %abc, %d
+  %abcde = add i64 %abcd, %e
+  %abcdef = add i64 %abcde, %f
+  %abcdefg = add i64 %abcdef, %g
+  %result = add i64 %abcdefg, %h
+  ret i64 %result
+}
+define i64 @last8({ i64, i64, i64, i64, i64, i64, i64, i64 } %p) {
+entry:
+  %h = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %p, 7
+  ret i64 %h
+}
+define i64 @main8() {
+entry:
+  %p0 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64 } undef, i64 1, 0
+  %p1 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %p0, i64 2, 1
+  %p2 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %p1, i64 3, 2
+  %p3 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %p2, i64 4, 3
+  %p4 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %p3, i64 5, 4
+  %p5 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %p4, i64 6, 5
+  %p6 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %p5, i64 7, 6
+  %p7 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %p6, i64 8, 7
+  %result = call i64 @sum8({ i64, i64, i64, i64, i64, i64, i64, i64 } %p7)
+  ret i64 %result
+}
+"#;
+        for name in ["sum8", "last8", "main8"] {
+            let model = eight_models(name);
+            let (address, bytes, targets) = compiled_function_with_targets(eight_integer_ir, name);
+            let disassembly = disassemble(&bytes, address)
+                .unwrap()
+                .iter()
+                .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+                .collect::<Vec<_>>()
+                .join("\n");
+            println!("eight-i64 aggregate {name} disassembly:\n{disassembly}");
+            assert_eq!(
+                check_function(&bytes, address, &model, &targets, &context),
+                FunctionOutcome::Equivalent,
+                "{name}"
+            );
+        }
 
         let nine_leaf_source = "struct P9 { a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64 }\n\
             atom sum9(p: P9) -> i64 requires: true; ensures: true; body: { p.a + p.i };";
@@ -6065,6 +6167,8 @@ entry:
 
         let mut after_five_targets = helper_call_targets(&[1]);
         after_five_targets.get_mut(&1).unwrap().name = "callee5".to_owned();
+        // The seventh INTEGER leaf spills to the argument stack; a caller that
+        // never stores it fails as call_arguments.
         assert_eq!(
             check_function(
                 &[0xe8, 0, 0, 0, 0, 0xc3],
@@ -6073,7 +6177,7 @@ entry:
                 &after_five_targets,
                 &context,
             ),
-            FunctionOutcome::OutsideProfile("argument_count")
+            FunctionOutcome::OutsideProfile("call_arguments")
         );
     }
 
@@ -6233,6 +6337,8 @@ entry:
             atom after_four(a: i64, b: i64, c: i64, d: i64) -> i64 requires: true; ensures: true; body: { target(a, b, c, d, T { a: 1, b: 2, c: 3 }) };";
         let mut after_four_targets = targets;
         after_four_targets.get_mut(&1).unwrap().name = "target".to_owned();
+        // The struct's last leaf spills to the argument stack; a caller that
+        // never stores it fails as call_arguments.
         assert_eq!(
             check_function(
                 &regular_bytes,
@@ -6241,7 +6347,7 @@ entry:
                 &after_four_targets,
                 &context,
             ),
-            FunctionOutcome::OutsideProfile("argument_count")
+            FunctionOutcome::OutsideProfile("call_arguments")
         );
     }
 
