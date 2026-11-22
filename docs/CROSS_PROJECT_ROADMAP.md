@@ -8560,6 +8560,7 @@ Stage 1 は非破壊なので実装済みのまま維持する。
 `docs/CAPABILITY_SECURITY.md` §4 の Recommendation（Option A 継続）は撤回しない。Option A を既定パスとして継続し、
 capability model は Stage 1 のみが opt-in 拡張として上積みされている位置づけとなる。
 
+- ✅ **追補（2026-11-22, 10）— 追補（9）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: 新規なし。mumei-agent: C06 Sol lexical member access が非識別子オブジェクト上の member を解決（#1121。contract 配列要素 `tokens[0].f()`・call 戻り値 `getToken().f()`・コンストラクタ/キャスト `Token(addr).f()`・`new Token().f`・public getter 経由 `this.token().f()` が宣言 contract 型の member に bind。function 型戻り値・function 型変数・`new Token[]`・mapping 索引・member チェーンは引き続き opaque）。mumei-demo: 新規シナリオなし。いずれも各 PR の境界のまま。
 **関連ファイル**:
 - `docs/CAPABILITY_MODEL_STUDY.md` — 調査成果物（4 項目の分析、opt-in 判定、段階分割案）
 - `docs/CAPABILITY_SECURITY.md` — 現状評価と Section 3 の代替案、Next Steps の設計調査項目
