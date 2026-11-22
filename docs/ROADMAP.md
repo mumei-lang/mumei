@@ -3114,7 +3114,10 @@ argument `k >= 7` is at call-time `%rsp + 8*(k-7)`. Only 64-bit `movq` loads and
 outgoing `movq`/`pushq` stores (sign-extended
 immediate, register, or incoming-argument/memory source) are supported; the incoming area is read-only.
 Frame slots inside the current frame read back the value the function
-recorded storing there (register spill/reload). The
+recorded storing there (register spill/reload). A packed
+`movaps`/`movups`/`movdqa`/`movdqu` `N(%rsp)`↔xmm transfer copies two
+adjacent slots at once — LLVM's vectorized argument forwarding — with
+each qword half resolved like the scalar forms. The
 `main` wrapper, CRT/startup
 code, loader, libc and runtime are not covered. Full object-code TV remains
 the deeper endpoint.
