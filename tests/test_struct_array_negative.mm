@@ -33,12 +33,29 @@ struct S {
     values: [P]
 }
 
+atom mk_array_with_eleven() -> [P]
+requires: true;
+ensures: len(result) == 1 && result[0].x == 11;
+body: [P { x: 11, y: 11 }];
+
 atom stale_read(ps: [P]) -> i64
 requires: len(ps) > 1 && ps[1].x == 3;
 ensures: result == 3;
 body: {
     ps[1] = P { x: 1, y: 2 };
     ps[1].x
+};
+
+atom stale_block_tail_after_store() -> i64
+requires: true;
+ensures: result == 11;
+body: {
+    let ps = {
+        let qs = mk_array_with_eleven();
+        qs[0] = P { x: 9, y: 9 };
+        qs
+    };
+    ps[0].x
 };
 
 atom unconstrained_field(ps: [P]) -> i64

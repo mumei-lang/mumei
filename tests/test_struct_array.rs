@@ -105,6 +105,7 @@ fn unsupported_or_unjustified_struct_array_uses_fail_closed_errors() {
             .unwrap_or_else(|| panic!("verify JSON has no diagnostics array:\n{payload:#}"));
         for atom in [
             "stale_read",
+            "stale_block_tail_after_store",
             "unconstrained_field",
             "independent_fields",
             "shadowed_fresh_array_bindings",

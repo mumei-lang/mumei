@@ -48,6 +48,18 @@ body: {
     ps[0].x
 };
 
+atom struct_array_block_post_store() -> i64
+requires: true;
+ensures: result == 9;
+body: {
+    let ps = {
+        let qs = mk_struct_array();
+        qs[0] = P { x: 9, y: 9 };
+        qs
+    };
+    ps[0].x
+};
+
 atom struct_array_if_result(c: bool) -> i64
 requires: true;
 ensures: result == 11;
