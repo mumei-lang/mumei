@@ -166,6 +166,48 @@ fn refined_operand_width_precedes_instantiated_parameter_type() {
 }
 
 #[test]
+fn refined_u64_operand_rebinding_returns_type_error_with_help() {
+    let ctx = Context::new(&z3::Config::new());
+    let mut module_env = ModuleEnv::new();
+    let refined = parse_module("type Small = u64 where v <= 10 && forall(v, 0, 1, v < 0);")
+        .into_iter()
+        .find_map(|item| match item {
+            Item::TypeDef(refined) => Some(refined),
+            _ => None,
+        })
+        .expect("refined type");
+    module_env.register_type(&refined);
+    let decl = module_env
+        .get_type("Small")
+        .expect("registered refined type");
+    let expected_span = decl.span.clone();
+    let predicate = crate::parser::parse_expression(&decl.predicate_raw);
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let result = refined_predicate_to_z3(&vc, decl, &predicate, &mut HashMap::new(), None);
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("a refined u64 predicate must reject operand rebinding"),
+    };
+
+    match error {
+        MumeiError::TypeError {
+            msg,
+            help,
+            original_span,
+            ..
+        } => {
+            assert_eq!(
+                msg,
+                "Refinement predicate for 'Small' rebinds its operand 'v'"
+            );
+            assert_eq!(help.as_deref(), Some("Rename the inner binding"));
+            assert_eq!(original_span, expected_span);
+        }
+        error => panic!("expected a type error, got {error:?}"),
+    }
+}
+
+#[test]
 fn test_rec_fn_reregistration_returns_cached_decl() {
     let ctx = Context::new(&z3::Config::new());
     let module_env = ModuleEnv::new();

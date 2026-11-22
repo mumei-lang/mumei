@@ -142,7 +142,31 @@ fn shift_width_uses_right_u64_operand() {
         "a shift using a right u64 operand must retain its unsigned width: {text}"
     );
     assert!(
-        text.contains("Postcondition (ensures) is not satisfied"),
+        text.contains("ensures clause 1 is inconsistent with requires"),
         "{text}"
+    );
+}
+
+#[test]
+fn refined_u64_predicate_rejects_operand_rebinding() {
+    let output = run_verify("rebind");
+    let text = output_text(&output);
+    assert!(
+        !output.status.success(),
+        "a refined u64 predicate must reject operand rebinding: {text}"
+    );
+    assert!(
+        text.contains("Refinement predicate for 'Small' rebinds its operand 'v'"),
+        "{text}"
+    );
+}
+
+#[test]
+fn signed_i64_refinement_with_operand_rebinding_remains_usable() {
+    let output = run_verify("i64_rebind_control");
+    assert!(
+        output.status.success(),
+        "a signed i64 refinement should remain usable\n{}",
+        output_text(&output)
     );
 }

@@ -2924,6 +2924,128 @@ fn read_struct_array_field<'a>(
     Ok(Some(selected))
 }
 
+fn refined_predicate_rebinds_operand(expr: &Expr, operand: &str) -> bool {
+    expr.rebinds_name(operand) || predicate_contains_shadowing_binder(expr, operand)
+}
+
+fn predicate_pattern_binds_operand(pattern: &crate::parser::ast::Pattern, operand: &str) -> bool {
+    match pattern {
+        crate::parser::ast::Pattern::Variable(name) => name == operand,
+        crate::parser::ast::Pattern::Variant { fields, .. } => fields
+            .iter()
+            .any(|field| predicate_pattern_binds_operand(field, operand)),
+        crate::parser::ast::Pattern::Wildcard | crate::parser::ast::Pattern::Literal(_) => false,
+    }
+}
+
+fn predicate_contains_shadowing_binder(expr: &Expr, operand: &str) -> bool {
+    match expr {
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => false,
+        Expr::ArrayLit(elements) => elements
+            .iter()
+            .any(|element| predicate_contains_shadowing_binder(element, operand)),
+        Expr::ArrayAccess(_, index) => predicate_contains_shadowing_binder(index, operand),
+        Expr::BinaryOp(left, _, right) => {
+            predicate_contains_shadowing_binder(left, operand)
+                || predicate_contains_shadowing_binder(right, operand)
+        }
+        Expr::Block(stmt) => stmt_contains_shadowing_binder(stmt, operand),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            predicate_contains_shadowing_binder(cond, operand)
+                || stmt_contains_shadowing_binder(then_branch, operand)
+                || stmt_contains_shadowing_binder(else_branch, operand)
+        }
+        Expr::Call(name, args) => {
+            (matches!(name.as_str(), "forall" | "exists")
+                && args
+                    .first()
+                    .is_some_and(|arg| matches!(arg, Expr::Variable(bound) if bound == operand)))
+                || args
+                    .iter()
+                    .any(|arg| predicate_contains_shadowing_binder(arg, operand))
+        }
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| predicate_contains_shadowing_binder(value, operand)),
+        Expr::FieldAccess(inner, _) => predicate_contains_shadowing_binder(inner, operand),
+        Expr::Match { target, arms } => {
+            predicate_contains_shadowing_binder(target, operand)
+                || arms.iter().any(|arm| {
+                    predicate_pattern_binds_operand(&arm.pattern, operand)
+                        || arm.guard.as_ref().is_some_and(|guard| {
+                            predicate_contains_shadowing_binder(guard, operand)
+                        })
+                        || stmt_contains_shadowing_binder(&arm.body, operand)
+                })
+        }
+        Expr::Async { body } => stmt_contains_shadowing_binder(body, operand),
+        Expr::Lambda { params, body, .. } => {
+            params.iter().any(|param| param.name == operand)
+                || stmt_contains_shadowing_binder(body, operand)
+        }
+        Expr::Await { expr } => predicate_contains_shadowing_binder(expr, operand),
+        Expr::CallRef { callee, args } => {
+            predicate_contains_shadowing_binder(callee, operand)
+                || args
+                    .iter()
+                    .any(|arg| predicate_contains_shadowing_binder(arg, operand))
+        }
+        Expr::Perform { args, .. } => args
+            .iter()
+            .any(|arg| predicate_contains_shadowing_binder(arg, operand)),
+        Expr::ChanSend { channel, value } => {
+            predicate_contains_shadowing_binder(channel, operand)
+                || predicate_contains_shadowing_binder(value, operand)
+        }
+        Expr::ChanRecv { channel } => predicate_contains_shadowing_binder(channel, operand),
+    }
+}
+
+fn stmt_contains_shadowing_binder(stmt: &Stmt, operand: &str) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            predicate_contains_shadowing_binder(value, operand)
+        }
+        Stmt::ArrayStore { index, value, .. } => {
+            predicate_contains_shadowing_binder(index, operand)
+                || predicate_contains_shadowing_binder(value, operand)
+        }
+        Stmt::Block(stmts, _) => stmts
+            .iter()
+            .any(|stmt| stmt_contains_shadowing_binder(stmt, operand)),
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            predicate_contains_shadowing_binder(cond, operand)
+                || predicate_contains_shadowing_binder(invariant, operand)
+                || decreases.as_ref().is_some_and(|decreases| {
+                    predicate_contains_shadowing_binder(decreases, operand)
+                })
+                || stmt_contains_shadowing_binder(body, operand)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            stmt_contains_shadowing_binder(body, operand)
+        }
+        Stmt::TaskGroup { children, .. } => children
+            .iter()
+            .any(|child| stmt_contains_shadowing_binder(child, operand)),
+        Stmt::Cancel { .. } => false,
+        Stmt::Expr(expr, _) => predicate_contains_shadowing_binder(expr, operand),
+    }
+}
+
 pub(crate) fn refined_predicate_to_z3<'a>(
     vc: &VCtx<'a>,
     decl: &crate::parser::ast::RefinedType,
@@ -2931,8 +3053,61 @@ pub(crate) fn refined_predicate_to_z3<'a>(
     env: &mut Env<'a>,
     solver_opt: Option<&Solver<'a>>,
 ) -> DynResult<'a> {
+    let base = vc.module_env.resolve_base_type(&decl._base_type);
+    if fixed_width_int(&base).is_some_and(|ty| ty.0.starts_with('u'))
+        && refined_predicate_rebinds_operand(expr, &decl.operand)
+    {
+        return Err(MumeiError::type_error_at(
+            format!(
+                "Refinement predicate for '{}' rebinds its operand '{}'",
+                decl.name, decl.operand
+            ),
+            decl.span.clone(),
+        )
+        .with_help("Rename the inner binding"));
+    }
     let _guard = LocalIntTypeGuard::for_refined_operand(vc, decl);
     expr_to_z3(vc, expr, env, solver_opt)
+}
+
+#[cfg(test)]
+mod refined_predicate_rebinding_tests {
+    use super::refined_predicate_rebinds_operand;
+    use crate::parser::ast::{Expr, MatchArm, Pattern, Span, Stmt};
+
+    #[test]
+    fn finds_local_quantifier_and_match_bindings() {
+        let local_binding = Expr::Block(Box::new(Stmt::Let {
+            var: "v".to_string(),
+            value: Box::new(Expr::Number(-1)),
+            span: Span::default(),
+        }));
+        assert!(refined_predicate_rebinds_operand(&local_binding, "v"));
+
+        let quantifier = Expr::Call(
+            "forall".to_string(),
+            vec![
+                Expr::Variable("v".to_string()),
+                Expr::Number(0),
+                Expr::Number(1),
+                Expr::Number(1),
+            ],
+        );
+        assert!(refined_predicate_rebinds_operand(&quantifier, "v"));
+
+        let match_binding = Expr::Match {
+            target: Box::new(Expr::Number(0)),
+            arms: vec![MatchArm {
+                pattern: Pattern::Variant {
+                    variant_name: "Some".to_string(),
+                    fields: vec![Pattern::Variable("v".to_string())],
+                },
+                guard: None,
+                body: Box::new(Stmt::Expr(Expr::Number(0), Span::default())),
+            }],
+        };
+        assert!(refined_predicate_rebinds_operand(&match_binding, "v"));
+    }
 }
 
 pub(crate) fn expr_to_z3<'a>(
