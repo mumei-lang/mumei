@@ -62,7 +62,21 @@ TransformationRelation {
     output_identity: Some(executable_sha256),
     validation: "checked_object_link_correspondence",
 }
+TransformationRelation {
+    from: "source_atom",
+    to: "machine_code",
+    relation: "machine_code_translation_validation",
+    output_identity: Some(object_sha256),
+    validation: "checked_source_machine_tv_within_profile",
+}
 ```
+
+注意: Step 2 で emit する `checked_source_machine_tv_within_profile` は
+source↔machine の等価性を主張するもので、乗せるべき変換関係は
+`llvm_ir→object_code` ではなく `source_atom→machine_code`。
+`llvm_ir→object_code` の `validation` は (a) の直接検証が実装されるまで
+`unchecked_not_translation_validated` のまま残す（source↔machine の結果で
+埋めない）。
 
 注意: `SemanticContract` 本体の変更は a672 の C03 レーンに属するため、
 フィールド追加・`relation`/`validation` 語彙の確定は親セッション経由で
@@ -87,8 +101,10 @@ TransformationRelation {
 
 `object_link_corresponds` が比較するのは関数バイトと call 解決先のみ。
 producer は object の relocation エントリを列挙し、各 reloc の
-{適用位置（セクション内オフセット）、種別（PC32/PLT32 等）、ターゲットシンボル、
-addend、適用後の exe 内値} を emit 対象とする。
+{適用位置（対象セクション識別子＋セクション内オフセット）、種別（PC32/PLT32 等）、
+ターゲットシンボル、addend、適用後の exe 内値} を emit 対象とする。
+セクション識別子がないと別セクションの同一オフセット・種別・ターゲットの
+reloc を区別できない（既存のリンク照合もセクション単位で読んでいる）。
 適用位置と種別がないと同一シンボル・addend の複数 reloc を区別できない
 （既存のリンク照合もこの2項目を読み PC 相対値を検算している）。
 外部シンボル（libc/runtime stub）は「前提」として区別し、
