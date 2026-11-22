@@ -12,6 +12,41 @@ use serde_json::json;
 use z3::ast::Ast as _;
 use z3::{FuncDecl, Sort};
 
+fn field_access_chain_text(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Variable(name) => Some(name.clone()),
+        Expr::FieldAccess(inner, field) => {
+            Some(format!("{}.{}", field_access_chain_text(inner)?, field))
+        }
+        _ => None,
+    }
+}
+
+fn reject_shared_array_mutating_call_args<'a>(
+    vc: &VCtx<'a>,
+    callee: CalleeRef<'_>,
+    args: &[Expr],
+    arg_values: &[Dynamic<'a>],
+    env: &Env<'a>,
+) -> Result<(), MumeiError> {
+    for name in super::may_write::callee_may_write_args(vc, callee, args, env) {
+        if super::z3_types::is_array_shared(env, &name) {
+            return Err(super::z3_types::shared_array_mutation_error(&name));
+        }
+    }
+    for index in super::may_write::callee_may_write_arg_indices(vc, callee, args, env) {
+        let (Some(arg), Some(value)) = (args.get(index), arg_values.get(index)) else {
+            continue;
+        };
+        if value.as_array().is_some() && matches!(arg, Expr::FieldAccess(_, _)) {
+            if let Some(name) = field_access_chain_text(arg) {
+                return Err(super::z3_types::shared_array_mutation_error(&name));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Generations of constant-argument contract instances unfolded below a congruent call (§8 D7).
 pub(crate) const CONSTANT_UNFOLD_DEPTH: usize = 32;
 /// Upper bound on the total number of unfolded instances per top-level call.
@@ -454,7 +489,10 @@ fn constant_call_antecedent<'a>(
     } else {
         let req_ast = parse_expression(&requires);
         let mut req_env = call_env.clone();
-        let req_value = expr_to_z3(vc, &req_ast, &mut req_env, None).ok()?;
+        let req_value = super::z3_types::with_array_shared_markers_restored(&mut req_env, |env| {
+            expr_to_z3(vc, &req_ast, env, None)
+        })
+        .ok()?;
         terms.push(req_value.as_bool()?);
     }
 
@@ -685,7 +723,11 @@ fn unfold_constant_calls<'a>(
             }
             let ens_ast = parse_expression(&ensures);
             let sink_guard = UnfoldSinkGuard::new(vc);
-            let Ok(ens_value) = expr_to_z3(vc, &ens_ast, &mut call_env, None) else {
+            let Ok(ens_value) =
+                super::z3_types::with_array_shared_markers_restored(&mut call_env, |env| {
+                    expr_to_z3(vc, &ens_ast, env, None)
+                })
+            else {
                 continue;
             };
             let Some(ens_bool) = ens_value.as_bool() else {
@@ -840,7 +882,9 @@ fn termination_obligation_at_call<'a>(
         .iter()
         .map(|component| {
             let measure_ast = parse_expression(component);
-            expr_to_z3(vc, &measure_ast, call_env, None)
+            super::z3_types::with_array_shared_markers_restored(call_env, |env| {
+                expr_to_z3(vc, &measure_ast, env, None)
+            })
         })
         .collect::<MumeiResult<Vec<_>>>()?;
     let Some(obligation) = termination_measure_obligation(vc.ctx, &measure_a, &measure_b) else {
@@ -914,9 +958,11 @@ fn congruent_ensures_antecedent<'a>(
         Bool::from_bool(ctx, true)
     } else {
         let req_ast = parse_expression(caller_requires);
-        expr_to_z3(vc, &req_ast, call_env, None)?
-            .as_bool()
-            .unwrap_or_else(|| Bool::from_bool(ctx, true))
+        super::z3_types::with_array_shared_markers_restored(call_env, |env| {
+            expr_to_z3(vc, &req_ast, env, None)
+        })?
+        .as_bool()
+        .unwrap_or_else(|| Bool::from_bool(ctx, true))
     };
     let domain_facts = param_domain_facts(vc, callee, call_env)?;
     let has_domain_facts = domain_facts.simplify().as_bool() != Some(true);
@@ -2884,6 +2930,13 @@ pub(crate) fn expr_to_z3<'a>(
                         let recursive_instance = vc.is_instantiating_contract(&callee.name);
                         // The unconstrained recursive result only weakens assumptions.
                         vc.reject_quantifier_dependent_call(name, &arg_vals)?;
+                        reject_shared_array_mutating_call_args(
+                            vc,
+                            CalleeRef::Name(name.as_str()),
+                            args,
+                            &arg_vals,
+                            env,
+                        )?;
                         let cong = vc.callee_congruent(&callee);
                         let scc_internal = cong && scc_internal_call(vc, &callee);
 
@@ -2977,7 +3030,10 @@ pub(crate) fn expr_to_z3<'a>(
                             let _contract_guard = vc.enter_contract_instantiation(&callee);
                             if let Some(solver) = solver_opt {
                                 let req_ast = parse_expression(&caller_requires);
-                                let req_z3 = expr_to_z3(vc, &req_ast, &mut call_env, None)?;
+                                let req_z3 = super::z3_types::with_array_shared_markers_restored(
+                                    &mut call_env,
+                                    |env| expr_to_z3(vc, &req_ast, env, None),
+                                )?;
                                 if let Some(req_bool) = req_z3.as_bool() {
                                     if vc.cover_obligations.is_some() {
                                         record_cover_obligation(vc, req_bool);
@@ -3630,7 +3686,10 @@ pub(crate) fn expr_to_z3<'a>(
                                 // `CallerRequires => CallerEnsures`. SCC-internal
                                 // calls additionally conjoin the path conditions
                                 // under which the decrease was proved.
-                                let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;
+                                let ens_z3 = super::z3_types::with_array_shared_markers_restored(
+                                    &mut call_env,
+                                    |env| expr_to_z3(vc, &ens_ast, env, None),
+                                )?;
                                 if let (Some(ens_bool), Some(solver)) =
                                     (ens_z3.as_bool(), solver_opt)
                                 {
@@ -3656,7 +3715,10 @@ pub(crate) fn expr_to_z3<'a>(
                                 // ensures が `result == expr` の形式の場合、
                                 // expr を評価して result と等価であることを直接 assert する。
                                 // これにより Z3 が等式を完全に活用できる。
-                                let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;
+                                let ens_z3 = super::z3_types::with_array_shared_markers_restored(
+                                    &mut call_env,
+                                    |env| expr_to_z3(vc, &ens_ast, env, None),
+                                )?;
                                 if let Some(ens_bool) = ens_z3.as_bool() {
                                     if let Some(solver) = solver_opt {
                                         solver.assert(&ens_bool);
@@ -3672,7 +3734,10 @@ pub(crate) fn expr_to_z3<'a>(
                                             // ensures: result == <expr> の場合
                                             // <expr> を call_env で評価し、result_z3 == eval(<expr>) を assert
                                             if let Ok(rhs_val) =
-                                                expr_to_z3(vc, right, &mut call_env, None)
+                                                super::z3_types::with_array_shared_markers_restored(
+                                                    &mut call_env,
+                                                    |env| expr_to_z3(vc, right, env, None),
+                                                )
                                             {
                                                 if let Some(solver) = solver_opt {
                                                     assert_result_equality(
@@ -3686,7 +3751,10 @@ pub(crate) fn expr_to_z3<'a>(
                                     if let Expr::Variable(ref var_name) = right.as_ref() {
                                         if var_name == "result" {
                                             if let Ok(lhs_val) =
-                                                expr_to_z3(vc, left, &mut call_env, None)
+                                                super::z3_types::with_array_shared_markers_restored(
+                                                    &mut call_env,
+                                                    |env| expr_to_z3(vc, left, env, None),
+                                                )
                                             {
                                                 if let Some(solver) = solver_opt {
                                                     assert_result_equality(
@@ -3700,12 +3768,13 @@ pub(crate) fn expr_to_z3<'a>(
 
                                 // 複合 ensures（&& で結合された複数条件）内の等式も伝播
                                 // ensures: result >= 0 && result == n + 1 のような場合
-                                propagate_equality_from_ensures(
-                                    vc,
-                                    &ens_ast,
-                                    &result_z3,
+                                super::z3_types::with_array_shared_markers_restored(
                                     &mut call_env,
-                                    solver_opt,
+                                    |env| {
+                                        propagate_equality_from_ensures(
+                                            vc, &ens_ast, &result_z3, env, solver_opt,
+                                        )
+                                    },
                                 )?;
                             }
                         }
@@ -3810,6 +3879,9 @@ pub(crate) fn expr_to_z3<'a>(
                                         if datatype::array_payload_element_type(&field_leaves)
                                             .is_some()
                                         {
+                                            if let Expr::Variable(name) = arg {
+                                                super::z3_types::mark_array_shared(ctx, env, name);
+                                            }
                                             let array = match arg {
                                                 Expr::Variable(name) => env
                                                     .get(&format!("__z3_arr_{name}"))
@@ -4685,6 +4757,9 @@ pub(crate) fn expr_to_z3<'a>(
                     .and_then(|field| datatype::field_leaf_types(&field.type_name, vc.module_env))
                     .is_some_and(|leaves| datatype::array_payload_element_type(&leaves).is_some());
                 if array_field {
+                    if let Expr::Variable(name) = field_expr {
+                        super::z3_types::mark_array_shared(ctx, env, name);
+                    }
                     let array = match field_expr {
                         Expr::Variable(name) => env
                             .get(&format!("__z3_arr_{name}"))
@@ -5615,6 +5690,13 @@ pub(crate) fn expr_to_z3<'a>(
                     }
                     let recursive_instance = vc.is_instantiating_contract(&callee_atom.name);
                     vc.reject_quantifier_dependent_call(callee_name, &arg_vals)?;
+                    reject_shared_array_mutating_call_args(
+                        vc,
+                        CalleeRef::Expr(callee.as_ref()),
+                        args,
+                        &arg_vals,
+                        env,
+                    )?;
                     let cong = vc.callee_congruent(&callee_atom);
                     let scc_internal = cong && scc_internal_call(vc, &callee_atom);
 
@@ -5663,7 +5745,10 @@ pub(crate) fn expr_to_z3<'a>(
                     if caller_requires.trim() != "true" && !recursive_instance {
                         let _contract_guard = vc.enter_contract_instantiation(&callee_atom);
                         let req_ast = parse_expression(&caller_requires);
-                        let req_z3 = expr_to_z3(vc, &req_ast, &mut call_env, None)?;
+                        let req_z3 = super::z3_types::with_array_shared_markers_restored(
+                            &mut call_env,
+                            |env| expr_to_z3(vc, &req_ast, env, None),
+                        )?;
                         if let Some(req_bool) = req_z3.as_bool() {
                             if let Some(solver) = solver_opt {
                                 solver.push();
@@ -5989,7 +6074,10 @@ pub(crate) fn expr_to_z3<'a>(
                             };
                             let unfold_guard =
                                 unfold_key.as_ref().map(|_| UnfoldSinkGuard::new(vc));
-                            let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;
+                            let ens_z3 = super::z3_types::with_array_shared_markers_restored(
+                                &mut call_env,
+                                |env| expr_to_z3(vc, &ens_ast, env, None),
+                            )?;
                             if let (Some(ens_bool), Some(solver)) = (ens_z3.as_bool(), solver_opt) {
                                 let ante = congruent_ensures_antecedent(
                                     vc,
@@ -6009,7 +6097,10 @@ pub(crate) fn expr_to_z3<'a>(
                                 }
                             }
                         } else {
-                            let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;
+                            let ens_z3 = super::z3_types::with_array_shared_markers_restored(
+                                &mut call_env,
+                                |env| expr_to_z3(vc, &ens_ast, env, None),
+                            )?;
                             if let Some(ens_bool) = ens_z3.as_bool() {
                                 if let Some(solver) = solver_opt {
                                     solver.assert(&ens_bool);
@@ -6021,7 +6112,10 @@ pub(crate) fn expr_to_z3<'a>(
                                 if let Expr::Variable(ref var_name) = left.as_ref() {
                                     if var_name == "result" {
                                         if let Ok(rhs_val) =
-                                            expr_to_z3(vc, right, &mut call_env, None)
+                                            super::z3_types::with_array_shared_markers_restored(
+                                                &mut call_env,
+                                                |env| expr_to_z3(vc, right, env, None),
+                                            )
                                         {
                                             if let Some(solver) = solver_opt {
                                                 if let (Some(res_int), Some(rhs_int)) =
@@ -6057,6 +6151,13 @@ pub(crate) fn expr_to_z3<'a>(
                 arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
             }
             vc.reject_quantifier_dependent_call("call", &arg_vals)?;
+            reject_shared_array_mutating_call_args(
+                vc,
+                CalleeRef::Expr(callee.as_ref()),
+                args,
+                &arg_vals,
+                env,
+            )?;
 
             // The callee didn't resolve to a known atom — a concrete
             // `atom_ref` target or contract callee may still store through
@@ -6112,7 +6213,11 @@ pub(crate) fn expr_to_z3<'a>(
                             if let Some(ref fn_requires) = param.fn_contract_requires {
                                 if fn_requires.trim() != "true" {
                                     let req_ast = parse_expression(fn_requires);
-                                    let req_z3 = expr_to_z3(vc, &req_ast, &mut contract_env, None)
+                                    let req_z3 =
+                                        super::z3_types::with_array_shared_markers_restored(
+                                            &mut contract_env,
+                                            |env| expr_to_z3(vc, &req_ast, env, None),
+                                        )
                                         .map_err(|e| MumeiError::verification(format!(
                                             "call_with_contract({}): failed to evaluate requires '{}': {}",
                                             callee_var_name, fn_requires, e
@@ -6150,7 +6255,11 @@ pub(crate) fn expr_to_z3<'a>(
                             if let Some(fn_ensures) = param.fn_contract_ensures.as_deref() {
                                 if fn_ensures.trim() != "true" {
                                     let ens_ast = parse_expression(fn_ensures);
-                                    let ens_z3 = expr_to_z3(vc, &ens_ast, &mut contract_env, None)
+                                    let ens_z3 =
+                                        super::z3_types::with_array_shared_markers_restored(
+                                            &mut contract_env,
+                                            |env| expr_to_z3(vc, &ens_ast, env, None),
+                                        )
                                     .map_err(|e| MumeiError::verification(format!(
                                         "call_with_contract({}): failed to evaluate ensures '{}': {}",
                                         callee_var_name, fn_ensures, e
@@ -6471,6 +6580,7 @@ pub(crate) fn expr_to_z3<'a>(
             // Register parameter names in a sub-environment for body verification
             let mut lambda_env = env.clone();
             for p in params {
+                super::z3_types::clear_array_shared(ctx, &mut lambda_env, &p.name);
                 let p_sym = Int::new_const(ctx, p.name.as_str());
                 lambda_env.insert(p.name.clone(), p_sym.into());
             }
@@ -6630,9 +6740,11 @@ fn apply_local_lambda<'a>(
     for arg in args {
         arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
     }
+    reject_shared_array_mutating_call_args(vc, CalleeRef::Expr(expr), args, &arg_vals, env)?;
 
     let mut call_env = env.clone();
     for (i, param) in params.iter().enumerate() {
+        super::z3_types::clear_array_shared(vc.ctx, &mut call_env, &param.name);
         call_env.insert(param.name.clone(), arg_vals[i].clone());
         alias_struct_fields(&mut call_env, &param.name, &arg_vals[i]);
         wire_array_slots(
