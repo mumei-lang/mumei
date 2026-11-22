@@ -345,13 +345,14 @@ SHA-256(
 `dependency_hashes` is a separate freshness record; consumers must not compare
 or recompute `proof_hash` to decide whether dependencies are current. Its
 ordered keys use `atom:<name>`, `effect:<name>`, `type:<name>`, `struct:<name>`,
-and `enum:<name>`. Atom values
+`enum:<name>`, and `resource:<name>`. Atom values
 hash the same contract bytes used by the corresponding `|dep:` proof-hash
 block and the parameter constraints of the trait method a call resolves to.
 Effect values use the same field hashing as the proof hash's
 `|effect_def:` block. Type values cover the named refined type's operand, base
 type, and raw predicate; struct values cover its fields, field constraints,
-and invariants.
+and invariants. Resource values cover the resource name, priority, mode, state
+fields, and invariant for declared or body-acquired resources.
 Enum keys pin variant names, payload field names and types for enums used
 directly in an atom's signature. The proof hash covers every refined-type
 definition in the module.
@@ -360,7 +361,7 @@ literals, enum variant patterns and constructors in its body, and the
 signatures of every keyed callee. It follows struct fields, enum payloads,
 refined-type bases, and generic arguments; other types referenced only in
 bodies are not keyed. Legacy certificates missing a reachable `type:`,
-`struct:`, or `enum:` key are reported as
+`struct:`, `enum:`, or `resource:` key are reported as
 `dependency_unchecked`.
 The dependency walk follows syntactic callees through atoms registered in the
 current `ModuleEnv`, independently of its dependency graph. Unresolved names

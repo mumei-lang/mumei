@@ -357,22 +357,17 @@ pub fn compute_proof_hash_with_flags(
         hasher.update(b"|resource:");
         hasher.update(r.as_bytes());
         if let Some(resource) = module_env.get_resource(r) {
-            hasher.update(b"|priority:");
-            hasher.update(resource.priority.to_string().as_bytes());
-            hasher.update(b"|mode:");
-            hasher.update(format!("{:?}", resource.mode).as_bytes());
-            for field in &resource.state {
-                hasher.update(b"|state:");
-                hasher.update(field.name.as_bytes());
-                hasher.update(b":");
-                hasher.update(field.ty.as_bytes());
-            }
-            if let Some(invariant) = &resource.invariant {
-                hasher.update(b"|resource_invariant:");
-                hasher.update(
-                    crate::verification::support::expr_to_source_string(invariant).as_bytes(),
-                );
-            }
+            hash_resource_definition(&mut hasher, resource);
+        }
+    }
+    for resource_name in body_acquired_resource_names(atom) {
+        if atom.resources.contains(&resource_name) {
+            continue;
+        }
+        hasher.update(b"|acquired_resource:");
+        hasher.update(resource_name.as_bytes());
+        if let Some(resource) = module_env.get_resource(&resource_name) {
+            hash_resource_definition(&mut hasher, resource);
         }
     }
     for e in &atom.effects {
@@ -786,6 +781,23 @@ fn hash_callee_contract(
     );
 }
 
+fn hash_resource_definition(hasher: &mut Sha256, resource: &crate::parser::ResourceDef) {
+    hasher.update(b"|priority:");
+    hasher.update(resource.priority.to_string().as_bytes());
+    hasher.update(b"|mode:");
+    hasher.update(format!("{:?}", resource.mode).as_bytes());
+    for field in &resource.state {
+        hasher.update(b"|state:");
+        hasher.update(field.name.as_bytes());
+        hasher.update(b":");
+        hasher.update(field.ty.as_bytes());
+    }
+    if let Some(invariant) = &resource.invariant {
+        hasher.update(b"|resource_invariant:");
+        hasher.update(crate::verification::support::expr_to_source_string(invariant).as_bytes());
+    }
+}
+
 fn hash_trait_method_constraints(hasher: &mut Sha256, callee: &Atom, module_env: &ModuleEnv) {
     let callee_type = callee
         .params
@@ -870,7 +882,9 @@ fn compute_dependency_hashes_with_names(
     };
     let atom_type_params = atom.type_params.iter().cloned().collect::<HashSet<_>>();
     let mut pending_type_names = Vec::new();
+    let mut resource_names = BTreeSet::new();
     if !legacy_names {
+        resource_names.extend(atom.resources.iter().cloned());
         collect_atom_signature_type_names(atom, &mut pending_type_names);
         let body = parse_body_expr(&atom.body_expr);
         collect_body_type_names_stmt(
@@ -879,6 +893,7 @@ fn compute_dependency_hashes_with_names(
             &atom_type_params,
             &mut pending_type_names,
         );
+        collect_acquired_resource_names_stmt(&body, &mut resource_names);
     }
     let mut pending = dependency_callees(atom, module_env, legacy_names)
         .into_iter()
@@ -1056,6 +1071,18 @@ fn compute_dependency_hashes_with_names(
                 hasher.update(unit.as_bytes());
             }
             hashes.insert(format!("enum:{name}"), format!("{:x}", hasher.finalize()));
+        }
+        for name in resource_names {
+            if let Some(resource) = module_env.get_resource(&name) {
+                let mut hasher = Sha256::new();
+                hasher.update(b"|resource:");
+                hasher.update(name.as_bytes());
+                hash_resource_definition(&mut hasher, resource);
+                hashes.insert(
+                    format!("resource:{name}"),
+                    format!("{:x}", hasher.finalize()),
+                );
+            }
         }
     }
 
@@ -1268,6 +1295,125 @@ fn collect_body_type_names_expr(
         Expr::ChanRecv { channel } => {
             collect_body_type_names_expr(channel, module_env, bound_params, names);
         }
+    }
+}
+
+fn body_acquired_resource_names(atom: &Atom) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    collect_acquired_resource_names_stmt(&parse_body_expr(&atom.body_expr), &mut names);
+    names
+}
+
+fn collect_acquired_resource_names_stmt(stmt: &Stmt, names: &mut BTreeSet<String>) {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            collect_acquired_resource_names_expr(value, names);
+        }
+        Stmt::ArrayStore { index, value, .. } => {
+            collect_acquired_resource_names_expr(index, names);
+            collect_acquired_resource_names_expr(value, names);
+        }
+        Stmt::Block(stmts, _) => {
+            for stmt in stmts {
+                collect_acquired_resource_names_stmt(stmt, names);
+            }
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            collect_acquired_resource_names_expr(cond, names);
+            collect_acquired_resource_names_expr(invariant, names);
+            if let Some(decreases) = decreases {
+                collect_acquired_resource_names_expr(decreases, names);
+            }
+            collect_acquired_resource_names_stmt(body, names);
+        }
+        Stmt::Acquire { resource, body, .. } => {
+            names.insert(resource.clone());
+            collect_acquired_resource_names_stmt(body, names);
+        }
+        Stmt::Task { body, .. } => collect_acquired_resource_names_stmt(body, names),
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                collect_acquired_resource_names_stmt(child, names);
+            }
+        }
+        Stmt::Cancel { .. } => {}
+        Stmt::Expr(expr, _) => collect_acquired_resource_names_expr(expr, names),
+    }
+}
+
+fn collect_acquired_resource_names_expr(expr: &Expr, names: &mut BTreeSet<String>) {
+    match expr {
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => {}
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                collect_acquired_resource_names_expr(element, names);
+            }
+        }
+        Expr::ArrayAccess(_, index) => collect_acquired_resource_names_expr(index, names),
+        Expr::BinaryOp(left, _, right) => {
+            collect_acquired_resource_names_expr(left, names);
+            collect_acquired_resource_names_expr(right, names);
+        }
+        Expr::Block(stmt) => collect_acquired_resource_names_stmt(stmt, names),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_acquired_resource_names_expr(cond, names);
+            collect_acquired_resource_names_stmt(then_branch, names);
+            collect_acquired_resource_names_stmt(else_branch, names);
+        }
+        Expr::Call(_, args) => {
+            for arg in args {
+                collect_acquired_resource_names_expr(arg, names);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_acquired_resource_names_expr(value, names);
+            }
+        }
+        Expr::FieldAccess(inner, _) => collect_acquired_resource_names_expr(inner, names),
+        Expr::Match { target, arms } => {
+            collect_acquired_resource_names_expr(target, names);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_acquired_resource_names_expr(guard, names);
+                }
+                collect_acquired_resource_names_stmt(&arm.body, names);
+            }
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => {
+            collect_acquired_resource_names_stmt(body, names);
+        }
+        Expr::Await { expr } => collect_acquired_resource_names_expr(expr, names),
+        Expr::CallRef { callee, args } => {
+            collect_acquired_resource_names_expr(callee, names);
+            for arg in args {
+                collect_acquired_resource_names_expr(arg, names);
+            }
+        }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                collect_acquired_resource_names_expr(arg, names);
+            }
+        }
+        Expr::ChanSend { channel, value } => {
+            collect_acquired_resource_names_expr(channel, names);
+            collect_acquired_resource_names_expr(value, names);
+        }
+        Expr::ChanRecv { channel } => collect_acquired_resource_names_expr(channel, names),
     }
 }
 
@@ -1844,6 +1990,12 @@ mod nominal_hash_tests {
     }
 
     fn dependency_hash_for(source: &str, root_name: &str, dependency_key: &str) -> String {
+        dependency_hashes_for(source, root_name)
+            .remove(dependency_key)
+            .unwrap()
+    }
+
+    fn dependency_hashes_for(source: &str, root_name: &str) -> BTreeMap<String, String> {
         let items = parse_module(source);
         let mut module_env = ModuleEnv::default();
         for item in items {
@@ -1852,13 +2004,12 @@ mod nominal_hash_tests {
                     module_env.atoms.insert(atom.name.clone(), atom);
                 }
                 Item::TypeDef(refined) => module_env.register_type(&refined),
+                Item::ResourceDef(resource) => module_env.register_resource(&resource),
                 _ => {}
             }
         }
         let root = module_env.atoms.get(root_name).unwrap().clone();
         compute_dependency_hashes(&root, &module_env)
-            .remove(dependency_key)
-            .unwrap()
     }
 
     fn trait_dependency_and_proof_hashes(
@@ -2667,6 +2818,50 @@ body: { p.a };\n";
     }
 
     #[test]
+    fn declared_resource_invariant_changes_its_dependency_hash() {
+        let before = dependency_hash_for(
+            "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;\n\
+             atom main() -> i64\n\
+             resources: [counter];\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: 0;",
+            "main",
+            "resource:counter",
+        );
+        let after = dependency_hash_for(
+            "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 5;\n\
+             atom main() -> i64\n\
+             resources: [counter];\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: 0;",
+            "main",
+            "resource:counter",
+        );
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn body_acquired_resource_invariant_change_invalidates_the_proof_hash() {
+        let before = env_and_hash(
+            "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;\n\
+             atom main() -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: { acquire counter { counter.value = 3; 0 } };",
+        );
+        let after = env_and_hash(
+            "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 5;\n\
+             atom main() -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: { acquire counter { counter.value = 3; 0 } };",
+        );
+        assert_ne!(before, after);
+    }
+
+    #[test]
     fn proof_hash_tracks_callee_effect_pre_and_effect_post() {
         let source = "atom f(x: i64) -> i64\n\
              effect_pre: { File: Closed };\n\
@@ -2994,18 +3189,19 @@ body: { p.a };\n";
 
     #[test]
     fn effect_free_proof_hash_matches_policy_version_30() {
-        let hash = proof_hash_for(
-            "atom main(x: i64) -> i64\n\
-             requires: true;\n\
-             ensures: result == x;\n\
-             body: x;\n",
-            "main",
-        );
+        let source = "atom main(x: i64) -> i64\n\
+                      requires: true;\n\
+                      ensures: result == x;\n\
+                      body: x;\n";
+        let hash = proof_hash_for(source, "main");
 
         assert_eq!(
             hash,
             "1d658254dbea416fc272009a00a4a87da56cf99a95c4ec4abf18248c9e1aa1d8"
         );
+        assert!(!dependency_hashes_for(source, "main")
+            .keys()
+            .any(|key| key.starts_with("resource:")));
     }
 }
 
