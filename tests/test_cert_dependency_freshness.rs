@@ -2530,3 +2530,135 @@ fn manifest_dependency_definitions_stay_in_root_dependency_keys() {
     );
     assert!(changed_text.contains("type:Limit"), "{changed_text}");
 }
+
+#[test]
+fn manifest_dependency_of_dependency_stays_in_dep_dependency_keys() {
+    // B certified standalone keys the definitions its own manifest dependency
+    // A provides. When C loads both packages, B's certificate must still match:
+    // B's entry closure inside C's environment must contain A's entry, or the
+    // stored keys recompute as missing and strict imports reject a fresh
+    // certificate as dependency_unchecked.
+    let fixture = Fixture::new();
+    let a_dir = fixture.root.join("dep_a");
+    let b_dir = fixture.root.join("dep_b");
+    let c_dir = fixture.root.join("consumer");
+    for dir in [&a_dir, &b_dir, &c_dir] {
+        std::fs::create_dir_all(dir.join("src")).expect("create package source directory");
+    }
+
+    std::fs::write(
+        a_dir.join("mumei.toml"),
+        "[package]\nname = \"dep_a\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("write A manifest");
+    let a_main = a_dir.join("src/main.mm");
+    let a_source = |predicate: &str| {
+        format!(
+            "type Limit = i64 where {predicate};\n\
+             atom a_fn(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n"
+        )
+    };
+    std::fs::write(&a_main, a_source("v >= 0")).expect("write A source");
+
+    std::fs::write(
+        b_dir.join("mumei.toml"),
+        format!(
+            "[package]\nname = \"dep_b\"\nversion = \"0.1.0\"\n\n[dependencies]\ndep_a = {{ path = \"{}\" }}\n",
+            a_dir.display()
+        ),
+    )
+    .expect("write B manifest");
+    std::fs::write(
+        b_dir.join("src/main.mm"),
+        "atom b_fn(x: i64) -> i64\n  requires: true;\n  ensures: result == x;\n  body: x;\n",
+    )
+    .expect("write B source");
+    let b_certificate = b_dir.join(".proof-cert.json");
+    assert_success(
+        &fixture.run_in_directory(
+            &b_dir,
+            &[
+                "verify",
+                "--proof-cert",
+                "--output",
+                b_certificate.to_str().expect("certificate path is UTF-8"),
+                "src/main.mm",
+            ],
+        ),
+        "certify B against its manifest dependency",
+    );
+    let certificate: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&b_certificate).unwrap())
+            .expect("parse B certificate");
+    let b_fn = certificate
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "b_fn")
+        .expect("b_fn certificate");
+    assert!(
+        b_fn.dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes")
+            .contains_key("type:Limit"),
+        "B's manifest-only dependency must contribute its refined type key"
+    );
+
+    // A needs its own certificate for strict import too.
+    assert_success(
+        &fixture.run_in_directory(
+            &a_dir,
+            &[
+                "verify",
+                "--proof-cert",
+                "--output",
+                a_dir
+                    .join(".proof-cert.json")
+                    .to_str()
+                    .expect("certificate path is UTF-8"),
+                "src/main.mm",
+            ],
+        ),
+        "certify A",
+    );
+
+    // C declares both packages; strict import must accept B's certificate
+    // unchanged — B's closure has to reach A's entry for `type:Limit`.
+    std::fs::write(
+        c_dir.join("mumei.toml"),
+        format!(
+            "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\n\n[dependencies]\nx_a = {{ path = \"{}\" }}\ny_b = {{ path = \"{}\" }}\n",
+            a_dir.display(),
+            b_dir.display()
+        ),
+    )
+    .expect("write C manifest");
+    std::fs::write(
+        c_dir.join("src/main.mm"),
+        "atom main(x: i64) -> i64\n  requires: true;\n  ensures: result == x;\n  body: dep_b::b_fn(x);\n",
+    )
+    .expect("write C source");
+    let unchanged =
+        fixture.run_in_directory(&c_dir, &["verify", "--strict-imports", "src/main.mm"]);
+    let unchanged_text = output_text(&unchanged);
+    assert_success(
+        &unchanged,
+        "strictly import B whose certificate keys a dep-of-dep definition",
+    );
+    assert!(
+        !unchanged_text.contains("dependency_unchecked"),
+        "{unchanged_text}"
+    );
+
+    // Changing A's unused refined type must invalidate B's certificate in C's
+    // environment the same way it does for B standalone.
+    std::fs::write(&a_main, a_source("v <= 50")).expect("change A's predicate");
+    let changed = fixture.run_in_directory(&c_dir, &["verify", "--strict-imports", "src/main.mm"]);
+    let changed_text = output_text(&changed);
+    assert!(
+        changed_text.contains("dependency_changed") || !changed.status.success(),
+        "stale dep-of-dep definition must surface under strict import\n{changed_text}"
+    );
+}

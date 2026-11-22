@@ -413,6 +413,54 @@ pub fn resolve_manifest_dependencies_with_full_options_persistence_and_source(
         }
     }
 
+    // A dependency can declare its own manifest dependencies: a package
+    // certified standalone keys the definitions its manifest deps provide, so
+    // validating that certificate here needs the same edges in the dep
+    // entry's import closure — not just the root's. Wire every loaded dep
+    // entry to the entries its manifest names (matched by the dependency key
+    // or the package's declared name). Iterate to a fixpoint so dep-of-dep
+    // chains merge transitively; cycles terminate because each round adds at
+    // least one previously absent edge.
+    let mut name_to_entry: HashMap<String, PathBuf> = HashMap::new();
+    for deferred in &deferred_certificates {
+        name_to_entry.insert(
+            deferred.dependency_name.clone(),
+            deferred.entry_path.clone(),
+        );
+        if let Some(package_alias) = &deferred.package_alias {
+            name_to_entry.insert(package_alias.clone(), deferred.entry_path.clone());
+        }
+    }
+    loop {
+        let mut changed = false;
+        for deferred in &deferred_certificates {
+            let Ok(dep_manifest) = crate::manifest::load(&deferred.module_dir.join("mumei.toml"))
+            else {
+                continue;
+            };
+            for dep_name in dep_manifest.dependencies.keys() {
+                let Some(target) = name_to_entry.get(dep_name) else {
+                    continue;
+                };
+                let (Some(entry), Some(target)) = (deferred.entry_path.to_str(), target.to_str())
+                else {
+                    continue;
+                };
+                let already_wired = module_env
+                    .import_closure
+                    .get(entry)
+                    .is_some_and(|imports| imports.contains(target));
+                if !already_wired {
+                    record_import_closure(module_env, Some(entry), Some(target));
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
     deferred_certificates.sort_by(|a, b| a.dependency_name.cmp(&b.dependency_name));
     let mut package_alias_claims = HashMap::new();
     for deferred in &deferred_certificates {
