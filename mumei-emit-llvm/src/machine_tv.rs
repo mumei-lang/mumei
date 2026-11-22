@@ -7833,7 +7833,8 @@ define i64 @after_five(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i128 %x) {
             FunctionOutcome::Equivalent
         );
         let ret_registered_lo = [
-            0x48, 0x89, 0xf8, // movq %rdi, %rax  -- returns `a`, not `x.hi`
+            0x41, 0x51, // pushq %r9   -- x.lo is the registered half
+            0x58, // popq %rax
             0x31, 0xd2, // xorl %edx, %edx
             0xc3,
         ];
