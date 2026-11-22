@@ -663,16 +663,14 @@ fn havoc_written_struct_array_fields<'a>(
         ) else {
             continue;
         };
-        let mut written = std::collections::HashSet::new();
-        body.written_fields(&param.name, &mut written);
-        for path in written {
-            let paths: Vec<String> = if path == "*" {
+        for write in body.array_store_targets(&param.name) {
+            let paths: Vec<String> = if let Some(path) = &write.field_path {
+                vec![path.join("_")]
+            } else {
                 leaves
                     .iter()
                     .map(|(leaf_path, _)| leaf_path.clone())
                     .collect()
-            } else {
-                vec![path]
             };
             for path in paths {
                 let key = crate::verification::translator::z3_types::struct_array_leaf_key(
@@ -687,11 +685,31 @@ fn havoc_written_struct_array_fields<'a>(
                 };
                 let root = crate::verification::translator::z3_types::array_root_ast(&old_array);
                 let uid = ARRAY_HAVOC_UID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let fresh = crate::verification::translator::z3_types::z3_fresh_const_like(
-                    vc.ctx,
-                    &format!("__post_struct_array_{uid}"),
-                    &old,
-                );
+                let fresh = if !write.may_repeat {
+                    if let crate::parser::ast::Expr::Number(index) = &write.index {
+                        let index = Int::from_i64(vc.ctx, *index);
+                        let previous = old_array.select(&index);
+                        let replacement =
+                            crate::verification::translator::z3_types::z3_fresh_const_like(
+                                vc.ctx,
+                                &format!("__post_struct_array_{uid}"),
+                                &previous,
+                            );
+                        old_array.store(&index, &replacement).into()
+                    } else {
+                        crate::verification::translator::z3_types::z3_fresh_const_like(
+                            vc.ctx,
+                            &format!("__post_struct_array_{uid}"),
+                            &old,
+                        )
+                    }
+                } else {
+                    crate::verification::translator::z3_types::z3_fresh_const_like(
+                        vc.ctx,
+                        &format!("__post_struct_array_{uid}"),
+                        &old,
+                    )
+                };
                 let aliases: Vec<String> = env
                     .iter()
                     .filter(|(_, value)| {

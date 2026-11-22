@@ -550,3 +550,57 @@ fn native_enum_struct_array_element_store_read_and_match_returns_12() {
         "native enum struct-array program should return 12:\n{stdout}\n{stderr}"
     );
 }
+
+#[test]
+fn struct_array_equality_checks_mutated_leaves_in_both_integer_modes() {
+    for bitvec_i64 in [false, true] {
+        let output = run_verify("test_struct_array_equality_negative.mm", bitvec_i64);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "mutated struct-array equality must fail (bitvec={bitvec_i64}):\n{stdout}\n{stderr}"
+        );
+        let payload = verify_json(&output);
+        let diagnostics = payload["diagnostics"]
+            .as_array()
+            .unwrap_or_else(|| panic!("verify JSON has no diagnostics array:\n{payload:#}"));
+        for atom in ["loop_rewrite_keeps_equality", "field_write_keeps_equality"] {
+            assert!(
+                diagnostics.iter().any(|entry| {
+                    entry["atom"] == atom
+                        && entry["message"]
+                            .as_str()
+                            .is_some_and(|message| message.contains("Postcondition"))
+                }),
+                "missing expected equality failure for {atom} (bitvec={bitvec_i64}):\n{payload:#}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unmodified_struct_array_equality_verifies_in_both_integer_modes() {
+    for bitvec_i64 in [false, true] {
+        let output = run_verify("test_struct_array_equality_positive.mm", bitvec_i64);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "unmodified struct-array equality must verify (bitvec={bitvec_i64}):\n{stdout}\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn struct_array_postcondition_havoc_preserves_untouched_indices() {
+    for bitvec_i64 in [false, true] {
+        let output = run_verify("test_struct_array_store_precision.mm", bitvec_i64);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "stores to index zero must preserve facts about index one (bitvec={bitvec_i64}):\n{stdout}\n{stderr}"
+        );
+    }
+}

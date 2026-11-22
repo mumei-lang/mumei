@@ -81,7 +81,7 @@ use std::path::Path;
 /// direct-self-recursive enum values, so cached verdicts must be re-derived.
 /// Version 38 binds refined predicates to their declared operand and rejects
 /// free identifiers, so cached verdicts must be re-derived.
-pub const VERIFIER_POLICY_VERSION: u32 = 39;
+pub const VERIFIER_POLICY_VERSION: u32 = 40;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -3364,7 +3364,7 @@ body: { p.a };\n";
         let baseline = proof_hash_for(source, "g");
         assert_eq!(
             baseline,
-            "6de5f7a87aca4d48b483111ae374e6a9d876921fe33343766700146fa660164d"
+            "6f8d35d89e5631169f0031483b171a210ed483e591e9d06f8803cc4ed8587eba"
         );
         let changed = proof_hash_for(
             &source.replace(
@@ -3377,7 +3377,7 @@ body: { p.a };\n";
     }
 
     #[test]
-    fn effect_free_proof_hash_matches_policy_version_39() {
+    fn effect_free_proof_hash_matches_policy_version_40() {
         let source = "atom main(x: i64) -> i64\n\
                       requires: true;\n\
                       ensures: result == x;\n\
@@ -3386,7 +3386,7 @@ body: { p.a };\n";
 
         assert_eq!(
             hash,
-            "599f3a957a211f94a2674c986ce166cb36cb4cfb9c264f8f3a26af4f7a2f4ec3"
+            "a0b4e856070f148ba54d0c8a09ae40a6f09c177cb56315cfe3027f85ce05fc4c"
         );
         assert!(!dependency_hashes_for(source, "main")
             .keys()

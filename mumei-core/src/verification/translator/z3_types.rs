@@ -1315,6 +1315,16 @@ pub(crate) struct StructArrayLeafSnapshot<'a> {
     arrays: HashMap<String, Array<'a>>,
 }
 
+impl<'a> StructArrayLeafSnapshot<'a> {
+    pub(crate) fn element_type(&self) -> &str {
+        &self.element_type
+    }
+
+    pub(crate) fn leaf_array(&self, path: &str) -> Option<Array<'a>> {
+        self.arrays.get(path).cloned()
+    }
+}
+
 pub(crate) fn snapshot_struct_array_leaves<'a>(
     vc: &VCtx<'a>,
     env: &mut Env<'a>,

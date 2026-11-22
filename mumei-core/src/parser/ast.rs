@@ -475,6 +475,13 @@ pub enum Stmt {
     Expr(Expr, Span),
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ArrayStoreTarget {
+    pub(crate) field_path: Option<Vec<String>>,
+    pub(crate) index: Expr,
+    pub(crate) may_repeat: bool,
+}
+
 impl Stmt {
     /// True when executing this statement can bind or rebind `name`: a
     /// `name`/`name.field` assignment, an array store through `name`, a
@@ -574,6 +581,12 @@ impl Stmt {
         }
     }
 
+    pub(crate) fn array_store_targets(&self, base: &str) -> Vec<ArrayStoreTarget> {
+        let mut targets = Vec::new();
+        collect_stmt_array_store_targets(self, base, false, &mut targets);
+        targets
+    }
+
     /// True when executing this statement can rebind `name` as a whole
     /// (`name = …`, including inside nested control flow). A `let name`
     /// shadows locally and does not count, nor does `name.f = …`.
@@ -622,6 +635,155 @@ impl Stmt {
             | Stmt::TaskGroup { span, .. }
             | Stmt::Cancel { span, .. } => span,
             Stmt::Block(_, span) | Stmt::Expr(_, span) => span,
+        }
+    }
+}
+
+fn collect_expr_array_store_targets(
+    expr: &Expr,
+    base: &str,
+    may_repeat: bool,
+    targets: &mut Vec<ArrayStoreTarget>,
+) {
+    match expr {
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => {}
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                collect_expr_array_store_targets(element, base, may_repeat, targets);
+            }
+        }
+        Expr::ArrayAccess(_, index) => {
+            collect_expr_array_store_targets(index, base, may_repeat, targets);
+        }
+        Expr::BinaryOp(left, _, right) => {
+            collect_expr_array_store_targets(left, base, may_repeat, targets);
+            collect_expr_array_store_targets(right, base, may_repeat, targets);
+        }
+        Expr::Block(stmt) => {
+            collect_stmt_array_store_targets(stmt, base, may_repeat, targets);
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_expr_array_store_targets(cond, base, may_repeat, targets);
+            collect_stmt_array_store_targets(then_branch, base, may_repeat, targets);
+            collect_stmt_array_store_targets(else_branch, base, may_repeat, targets);
+        }
+        Expr::Call(_, args) => {
+            for arg in args {
+                collect_expr_array_store_targets(arg, base, may_repeat, targets);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_expr_array_store_targets(value, base, may_repeat, targets);
+            }
+        }
+        Expr::FieldAccess(inner, _) => {
+            collect_expr_array_store_targets(inner, base, may_repeat, targets);
+        }
+        Expr::Match { target, arms } => {
+            collect_expr_array_store_targets(target, base, may_repeat, targets);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_expr_array_store_targets(guard, base, may_repeat, targets);
+                }
+                collect_stmt_array_store_targets(&arm.body, base, may_repeat, targets);
+            }
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => {
+            collect_stmt_array_store_targets(body, base, true, targets);
+        }
+        Expr::Await { expr } => {
+            collect_expr_array_store_targets(expr, base, may_repeat, targets);
+        }
+        Expr::CallRef { callee, args } => {
+            collect_expr_array_store_targets(callee, base, may_repeat, targets);
+            for arg in args {
+                collect_expr_array_store_targets(arg, base, may_repeat, targets);
+            }
+        }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                collect_expr_array_store_targets(arg, base, may_repeat, targets);
+            }
+        }
+        Expr::ChanSend { channel, value } => {
+            collect_expr_array_store_targets(channel, base, may_repeat, targets);
+            collect_expr_array_store_targets(value, base, may_repeat, targets);
+        }
+        Expr::ChanRecv { channel } => {
+            collect_expr_array_store_targets(channel, base, may_repeat, targets);
+        }
+    }
+}
+
+fn collect_stmt_array_store_targets(
+    stmt: &Stmt,
+    base: &str,
+    may_repeat: bool,
+    targets: &mut Vec<ArrayStoreTarget>,
+) {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            collect_expr_array_store_targets(value, base, may_repeat, targets);
+        }
+        Stmt::ArrayStore {
+            array,
+            index,
+            field_path,
+            value,
+            ..
+        } => {
+            collect_expr_array_store_targets(value, base, may_repeat, targets);
+            collect_expr_array_store_targets(index, base, may_repeat, targets);
+            if array == base {
+                targets.push(ArrayStoreTarget {
+                    field_path: field_path.clone(),
+                    index: (**index).clone(),
+                    may_repeat,
+                });
+            }
+        }
+        Stmt::Block(stmts, _) => {
+            for stmt in stmts {
+                collect_stmt_array_store_targets(stmt, base, may_repeat, targets);
+            }
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            collect_expr_array_store_targets(cond, base, true, targets);
+            collect_expr_array_store_targets(invariant, base, true, targets);
+            if let Some(decreases) = decreases {
+                collect_expr_array_store_targets(decreases, base, true, targets);
+            }
+            collect_stmt_array_store_targets(body, base, true, targets);
+        }
+        Stmt::Acquire { body, .. } => {
+            collect_stmt_array_store_targets(body, base, may_repeat, targets);
+        }
+        Stmt::Task { body, .. } => {
+            collect_stmt_array_store_targets(body, base, true, targets);
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                collect_stmt_array_store_targets(child, base, true, targets);
+            }
+        }
+        Stmt::Cancel { .. } => {}
+        Stmt::Expr(expr, _) => {
+            collect_expr_array_store_targets(expr, base, may_repeat, targets);
         }
     }
 }

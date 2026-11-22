@@ -109,6 +109,7 @@ fn collect_assigned_vars(
                     array,
                     &field_path.join("_"),
                 ));
+                out.insert(format!("__z3_arr_{array}"));
             } else if let Some(leaves) =
                 super::z3_types::struct_array_leaf_types(&element_type, vc.module_env)
             {
@@ -117,6 +118,7 @@ fn collect_assigned_vars(
                         .into_iter()
                         .map(|(path, _)| super::z3_types::struct_array_leaf_key(array, &path)),
                 );
+                out.insert(format!("__z3_arr_{array}"));
             } else {
                 out.insert(format!("__z3_arr_{}", array));
             }
@@ -288,7 +290,17 @@ fn havoc_vars<'a>(
                         for key in shared {
                             env.insert(key, fresh_arr.clone());
                         }
-                        super::z3_types::havoc_struct_array_leaf_arrays(vc, &struct_bindings, env);
+                        let has_explicit_leaf_havoc = struct_bindings.iter().any(|binding| {
+                            let prefix = format!("__struct_arr#{binding}#");
+                            vars.iter().any(|key| key.starts_with(&prefix))
+                        });
+                        if !has_explicit_leaf_havoc {
+                            super::z3_types::havoc_struct_array_leaf_arrays(
+                                vc,
+                                &struct_bindings,
+                                env,
+                            );
+                        }
                     }
                     fresh_arr
                 }
