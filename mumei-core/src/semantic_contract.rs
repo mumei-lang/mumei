@@ -8989,6 +8989,7 @@ fn module_atom_obligations<'ctx>(
         &EnumEnv::new(),
     )?
     .boolean()?;
+    let requires_definedness = std::mem::take(&mut *call_returns.perform_definedness.borrow_mut());
     env.insert(
         "result".to_string(),
         result_value(&atom.name, &body.value, context, call_returns),
@@ -9017,7 +9018,7 @@ fn module_atom_obligations<'ctx>(
         &EnumEnv::new(),
     )?
     .boolean()?;
-    let clause_definedness = std::mem::take(&mut *call_returns.perform_definedness.borrow_mut());
+    let ensures_definedness = std::mem::take(&mut *call_returns.perform_definedness.borrow_mut());
     // A refined result type adds its declaration conjuncts to the
     // postcondition the atom must satisfy — `-> Port` guarantees
     // `ensures` AND `v >= 1 && v <= 65535` at the encoded result.
@@ -9196,10 +9197,17 @@ fn module_atom_obligations<'ctx>(
     assumptions.extend(source_domain.iter().cloned());
     let assumption = Bool::and(context, &assumptions.iter().collect::<Vec<_>>());
     let mut obligations = vec![Bool::and(context, &[&requires, &assumption, &post.not()])];
+    let source_domain_formula = Bool::and(context, &source_domain.iter().collect::<Vec<_>>());
+    for defined in &requires_definedness {
+        obligations.push(Bool::and(
+            context,
+            &[&source_domain_formula, &defined.not()],
+        ));
+    }
     for defined in body
         .perform_definedness
         .iter()
-        .chain(clause_definedness.iter())
+        .chain(ensures_definedness.iter())
     {
         obligations.push(Bool::and(
             context,
@@ -9209,7 +9217,7 @@ fn module_atom_obligations<'ctx>(
     obligations.extend(domain_obligations);
     Ok(ModuleAtomObligations {
         atom: atom.name.clone(),
-        domain: Bool::and(context, &source_domain.iter().collect::<Vec<_>>()),
+        domain: source_domain_formula,
         obligations,
     })
 }
@@ -17085,6 +17093,43 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
         let outcomes =
             refined_module_outcomes_admission(local_array, RefinedAdmission::CompositeV24);
         assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+    }
+
+    #[test]
+    fn composite_v26_requires_array_read_bounds_do_not_assume_requires() {
+        let unguarded = "atom f(a: [i64]) -> i64\n\
+            requires: a[0] != 0;\n\
+            ensures: result == 1;\n\
+            body: 1;";
+        let outcomes = refined_module_outcomes_admission(unguarded, RefinedAdmission::CompositeV26);
+        assert_eq!(outcomes[0], z3::SatResult::Unsat, "{outcomes:?}");
+        assert!(outcomes[1..].contains(&z3::SatResult::Sat), "{outcomes:?}");
+
+        let len_guarded = "atom f(a: [i64]) -> i64\n\
+            requires: len(a) > 0 && a[0] != 0;\n\
+            ensures: result == 1;\n\
+            body: 1;";
+        let outcomes =
+            refined_module_outcomes_admission(len_guarded, RefinedAdmission::CompositeV26);
+        assert!(
+            outcomes
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat),
+            "{outcomes:?}"
+        );
+
+        let short_circuit = "atom f(a: [i64], i: i64) -> i64\n\
+            requires: i >= 0 && i < len(a) && a[i] > 0;\n\
+            ensures: result > 0;\n\
+            body: a[i];";
+        let outcomes =
+            refined_module_outcomes_admission(short_circuit, RefinedAdmission::CompositeV26);
+        assert!(
+            outcomes
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat),
+            "{outcomes:?}"
+        );
     }
 
     #[test]
