@@ -1393,6 +1393,33 @@ atom write_log(msg: i64)
     }
 
     #[test]
+    fn refined_type_operand_uses_the_first_unqualified_value_identifier() {
+        for (predicate, expected_operand) in [
+            ("(v | 0) <= 10", "v"),
+            ("0 <= v && v <= 10", "v"),
+            ("(v) <= 10", "v"),
+            ("forall(v, 0, 1, v >= 0)", "v"),
+            ("forall(i, 0, v, i >= 0)", "v"),
+            ("v <= 10 && exists(j, 0, v, j == 1)", "v"),
+            ("req_handle > 0", "req_handle"),
+            ("len(v) <= 10", "v"),
+            ("A::Variant == 1", "v"),
+            ("1 <= 10", "v"),
+            ("", "v"),
+        ] {
+            let items = parse_module(&format!("type T = i64 where {predicate};"));
+            let refined = items
+                .iter()
+                .find_map(|item| match item {
+                    Item::TypeDef(refined) => Some(refined),
+                    _ => None,
+                })
+                .expect("refined type parsed");
+            assert_eq!(refined.operand, expected_operand, "predicate {predicate:?}");
+        }
+    }
+
+    #[test]
     fn test_parse_type_def_with_unit() {
         let source = r#"
 type Usd = i64 unit USD;
