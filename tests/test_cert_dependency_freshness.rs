@@ -2653,12 +2653,29 @@ fn manifest_dependency_of_dependency_stays_in_dep_dependency_keys() {
     );
 
     // Changing A's unused refined type must invalidate B's certificate in C's
-    // environment the same way it does for B standalone.
+    // environment the same way it does for B standalone. A's own certificate
+    // also goes stale, so re-certify A first: the assertion below then
+    // isolates B's invalidation instead of passing only because A's check
+    // (sorted first) already failed.
     std::fs::write(&a_main, a_source("v <= 50")).expect("change A's predicate");
+    let recertify_a = fixture.run_in_directory(
+        &a_dir,
+        &[
+            "verify",
+            "--proof-cert",
+            "--output",
+            a_dir
+                .join(".proof-cert.json")
+                .to_str()
+                .expect("certificate path is UTF-8"),
+            "src/main.mm",
+        ],
+    );
+    assert_success(&recertify_a, "re-certify A after changing its predicate");
     let changed = fixture.run_in_directory(&c_dir, &["verify", "--strict-imports", "src/main.mm"]);
     let changed_text = output_text(&changed);
     assert!(
-        changed_text.contains("dependency_changed") || !changed.status.success(),
-        "stale dep-of-dep definition must surface under strict import\n{changed_text}"
+        !changed.status.success() && changed_text.contains("dependency_changed"),
+        "B's stale dep-of-dep definition must surface under strict import\n{changed_text}"
     );
 }

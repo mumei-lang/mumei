@@ -18,6 +18,19 @@ struct DeferredCertificateCheck {
     entry_path: PathBuf,
     items: Vec<parser::Item>,
     load_message: Option<String>,
+    spec: crate::manifest::Dependency,
+}
+
+struct LoadedDep {
+    entry_path: PathBuf,
+    module_dir: PathBuf,
+    spec: crate::manifest::Dependency,
+    package_name: Option<String>,
+}
+
+fn same_module_dir(a: &Path, b: &Path) -> bool {
+    let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canon(a) == canon(b)
 }
 
 fn package_name_alias(
@@ -183,6 +196,7 @@ pub fn resolve_manifest_dependencies_with_full_options_persistence_and_source(
                     module_dir: abs_path,
                     entry_path: entry_path.to_path_buf(),
                     items,
+                    spec: dep.clone(),
                     load_message: Some(format!(
                         "  📦 Dependency '{}': loaded from {}",
                         dep_name,
@@ -310,6 +324,7 @@ pub fn resolve_manifest_dependencies_with_full_options_persistence_and_source(
                     module_dir: clone_dir,
                     entry_path: entry_path.to_path_buf(),
                     items,
+                    spec: dep.clone(),
                     load_message: None,
                 });
             } else {
@@ -390,6 +405,7 @@ pub fn resolve_manifest_dependencies_with_full_options_persistence_and_source(
                         module_dir: pkg_dir.clone(),
                         entry_path: entry_path.to_path_buf(),
                         items,
+                        spec: dep.clone(),
                         load_message: Some(format!(
                             "  📦 Dependency '{}': loaded from registry ({})",
                             dep_name,
@@ -417,20 +433,39 @@ pub fn resolve_manifest_dependencies_with_full_options_persistence_and_source(
     // certified standalone keys the definitions its manifest deps provide, so
     // validating that certificate here needs the same edges in the dep
     // entry's import closure — not just the root's. Wire every loaded dep
-    // entry to the entries its manifest names (matched by the dependency key
-    // or the package's declared name). Iterate to a fixpoint so dep-of-dep
-    // chains merge transitively; cycles terminate because each round adds at
-    // least one previously absent edge.
-    let mut name_to_entry: HashMap<String, PathBuf> = HashMap::new();
-    for deferred in &deferred_certificates {
-        name_to_entry.insert(
-            deferred.dependency_name.clone(),
-            deferred.entry_path.clone(),
-        );
-        if let Some(package_alias) = &deferred.package_alias {
-            name_to_entry.insert(package_alias.clone(), deferred.entry_path.clone());
-        }
-    }
+    // entry to the entries its manifest names. Matching is by resolved
+    // dependency spec, never by bare name: a dependency key is only an alias
+    // in the consumer's manifest, so a same-named but different package must
+    // not leak into the dep's tracked closure. Iterate to a fixpoint so
+    // dep-of-dep chains merge transitively; cycles terminate because each
+    // round adds at least one previously absent edge.
+    let loaded_deps: Vec<LoadedDep> = deferred_certificates
+        .iter()
+        .map(|deferred| {
+            let package_name = crate::manifest::load(&deferred.module_dir.join("mumei.toml"))
+                .ok()
+                .map(|manifest| manifest.package.name);
+            LoadedDep {
+                entry_path: deferred.entry_path.clone(),
+                module_dir: deferred.module_dir.clone(),
+                spec: deferred.spec.clone(),
+                package_name,
+            }
+        })
+        .collect();
+    let resolved_target =
+        |dep_name: &str, spec: &crate::manifest::Dependency, base: &Path| -> Option<PathBuf> {
+            loaded_deps.iter().find_map(|loaded| {
+                let matched = if let Some(rel_path) = spec.as_path() {
+                    same_module_dir(&base.join(rel_path), &loaded.module_dir)
+                } else if spec.as_git().is_some() {
+                    loaded.spec.as_git() == spec.as_git()
+                } else {
+                    loaded.package_name.as_deref() == Some(dep_name)
+                };
+                matched.then(|| loaded.entry_path.clone())
+            })
+        };
     loop {
         let mut changed = false;
         for deferred in &deferred_certificates {
@@ -438,8 +473,8 @@ pub fn resolve_manifest_dependencies_with_full_options_persistence_and_source(
             else {
                 continue;
             };
-            for dep_name in dep_manifest.dependencies.keys() {
-                let Some(target) = name_to_entry.get(dep_name) else {
+            for (dep_name, spec) in &dep_manifest.dependencies {
+                let Some(target) = resolved_target(dep_name, spec, &deferred.module_dir) else {
                     continue;
                 };
                 let (Some(entry), Some(target)) = (deferred.entry_path.to_str(), target.to_str())
