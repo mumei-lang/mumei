@@ -5313,29 +5313,27 @@ pub(crate) fn expr_to_z3<'a>(
             let array = z3_dynamic_array(vc, name, env);
 
             // 配列名に紐づく長さシンボルを使った境界チェック
-            if vc.recursion.lambda_bind_depth.get() == 0 {
-                if let Some(solver) = solver_opt {
-                    let len = array_len_value(ctx, env, name, vc.bitvec_i64, Some(solver));
-                    let safe = index_in_bounds(ctx, &idx_value, &len)
-                        .ok_or(MumeiError::type_error("Index must be integer"))?;
-                    solver.push();
-                    for cond in vc.path_cond_stack.borrow().iter() {
-                        solver.assert(cond);
-                    }
-                    solver.assert(&safe.not());
-                    if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
-                        solver.pop(1);
-                        return Err(MumeiError::verification(format!(
-                            "Potential Out-of-Bounds on '{}' (index may be < 0 or >= len_{})",
-                            name, name
-                        ))
-                        .with_help(
-                            "requires にインデックスの範囲制約 (0 <= idx < len) を追加してください",
-                        )
-                        .with_verdict(crate::verification::VerdictKind::Rejected));
-                    }
-                    solver.pop(1);
+            if let Some(solver) = solver_opt {
+                let len = array_len_value(ctx, env, name, vc.bitvec_i64, Some(solver));
+                let safe = index_in_bounds(ctx, &idx_value, &len)
+                    .ok_or(MumeiError::type_error("Index must be integer"))?;
+                solver.push();
+                for cond in vc.path_cond_stack.borrow().iter() {
+                    solver.assert(cond);
                 }
+                solver.assert(&safe.not());
+                if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
+                    solver.pop(1);
+                    return Err(MumeiError::verification(format!(
+                        "Potential Out-of-Bounds on '{}' (index may be < 0 or >= len_{})",
+                        name, name
+                    ))
+                    .with_help(
+                        "requires にインデックスの範囲制約 (0 <= idx < len) を追加してください",
+                    )
+                    .with_verdict(crate::verification::VerdictKind::Rejected));
+                }
+                solver.pop(1);
             }
             let selected = array.select(&idx);
             if let Some(solver) = solver_opt {

@@ -2384,19 +2384,18 @@ pub(crate) fn stmt_to_z3<'a>(
             // OOB check mirrors `Expr::ArrayAccess`: store at an index that may
             // fall outside `[0, len_<name>)` is flagged as a verification
             // error with a counter-example hint.
-            if vc.recursion.lambda_bind_depth.get() == 0 {
-                if let Some(solver) = solver_opt {
-                    let len = array_len_value(ctx, env, array, vc.bitvec_i64, Some(solver));
-                    let safe = index_in_bounds(ctx, &idx_value, &len)
-                        .ok_or(MumeiError::type_error("Array index must be integer"))?;
-                    solver.push();
-                    for cond in vc.path_cond_stack.borrow().iter() {
-                        solver.assert(cond);
-                    }
-                    solver.assert(&safe.not());
-                    if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
-                        solver.pop(1);
-                        return Err(MumeiError::verification(format!(
+            if let Some(solver) = solver_opt {
+                let len = array_len_value(ctx, env, array, vc.bitvec_i64, Some(solver));
+                let safe = index_in_bounds(ctx, &idx_value, &len)
+                    .ok_or(MumeiError::type_error("Array index must be integer"))?;
+                solver.push();
+                for cond in vc.path_cond_stack.borrow().iter() {
+                    solver.assert(cond);
+                }
+                solver.assert(&safe.not());
+                if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
+                    solver.pop(1);
+                    return Err(MumeiError::verification(format!(
                         "Potential Out-of-Bounds store on '{}' (index may be < 0 or >= len_{})",
                         array, array
                     ))
@@ -2404,9 +2403,8 @@ pub(crate) fn stmt_to_z3<'a>(
                         "requires にストアインデックスの範囲制約 (0 <= idx < len) を追加してください",
                     )
                     .with_verdict(crate::verification::VerdictKind::Rejected));
-                    }
-                    solver.pop(1);
                 }
+                solver.pop(1);
             }
 
             let arr_key = format!("__z3_arr_{}", array);

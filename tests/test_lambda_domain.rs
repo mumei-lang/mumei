@@ -28,6 +28,7 @@ fn typed_lambda_domains_are_scoped_and_checked_at_invocation() {
             "tests/positive/test_lambda_struct_domain.mm",
             "tests/positive/test_lambda_struct_shadow.mm",
             "tests/positive/test_lambda_hof_domain.mm",
+            "tests/positive/test_lambda_hof_guarded_array_store.mm",
         ] {
             let (verified, output) = verify_fixture(fixture, bitvec_i64);
             assert!(
@@ -44,6 +45,14 @@ fn typed_lambda_domains_are_scoped_and_checked_at_invocation() {
             (
                 "tests/negative/test_lambda_array_oob.mm",
                 "Potential Out-of-Bounds store on 'ys'",
+            ),
+            (
+                "tests/negative/test_lambda_hof_array_store_oob.mm",
+                "Potential Out-of-Bounds store on 'ys'",
+            ),
+            (
+                "tests/negative/test_lambda_hof_array_read_oob.mm",
+                "Potential Out-of-Bounds on 'ys'",
             ),
             (
                 "tests/negative/test_lambda_callref_domain.mm",

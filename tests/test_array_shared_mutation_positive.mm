@@ -49,8 +49,12 @@ ensures: result == 9;
 body: {
     let xs = s.xs;
     let f = |xs: [i64]| {
-        xs[0] = 9;
-        xs[0]
+        if len(xs) > 0 {
+            xs[0] = 9;
+            xs[0]
+        } else {
+            9
+        }
     };
     f(b)
 };
