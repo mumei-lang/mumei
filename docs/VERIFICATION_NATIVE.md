@@ -1648,8 +1648,12 @@ domain assumes the length is nonnegative. Elements remain unconstrained.
 `len(a)` and `a[i]` are admitted in the body and contract clauses as
 read-only operations. Every indexed read from a parameter adds a signed
 in-bounds obligation (`0 <= i && i < len(a)`), discharged separately
-under the same `requires` and call/loop assumptions as the postcondition;
-these checks do not narrow the source domain. Although out-of-bounds
+from the postcondition. Reads in the body and `ensures` use the
+postcondition's `requires` and call/loop assumptions. Reads in `requires`
+are checked under the source domain, the bounded-loop exit hypotheses
+collected while encoding `requires`, and the read's own short-circuit path
+guard, without assuming `requires` itself. These checks do not narrow the
+source domain. Although out-of-bounds
 reads retain the existing zero-value encoding, a contract is not accepted
 unless every parameter-read obligation is proved.
 
