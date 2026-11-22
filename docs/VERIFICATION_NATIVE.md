@@ -489,8 +489,8 @@ paths are unchanged.
 
 `mumei evidence sign <record> --key-file <PATH> --producer-key-id <ID>
 [--json]` is the first detached producer-authenticity surface. Any bounded
-regular file (at most 65,536 bytes; `--stdin` reads the same bound) is hashed
-and signed over its raw bytes — the record is never parsed, decoded or
+regular file (at most 4 MiB (4,194,304 bytes); `--stdin` reads the same bound)
+is hashed and signed over its raw bytes — the record is never parsed, decoded or
 canonicalized, so non-UTF8 bytes sign identically and every pin on the record
 stays byte-identical. `subject_digest` is the record's SHA-256 lowercase hex,
 the same convention as `evidence_fingerprint`, so a consumer reproduces it
@@ -634,9 +634,8 @@ binds the exact sidecar bytes using the existing signature-binding rules; it
 does not by itself establish producer authenticity. The descriptor records
 that source-to-LLVM correspondence, artifact semantics, parser/encoder/solver
 correctness, grade promotion and Lean-kernel checks remain unperformed.
-`mumei evidence sign` accepts subjects up to 65,536 bytes, so sidecars larger
-than 64 KiB cannot be signed with that command even though sidecar consumers
-accept files up to 4 MiB.
+`mumei evidence sign` accepts subjects up to 4 MiB (4,194,304 bytes), matching
+the sidecar consumer cap.
 
 An optional `requested_target_triple` is a caller request, never a binding to
 emitted code or a capability/availability claim. `None` serializes as null. The

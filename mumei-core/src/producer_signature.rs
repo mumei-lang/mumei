@@ -27,6 +27,9 @@ pub const PRODUCER_KEY_REGISTRY_SCHEMA: &str = "mumei.producer-key-registry/v1";
 pub const KEY_REVOCATION_LIST_SCHEMA: &str = "mumei.key-revocation-list/v1";
 pub const KEY_REVOCATION_LIST_V2_SCHEMA: &str = "mumei.key-revocation-list/v2";
 
+/// Maximum raw subject size accepted by the sign command (4 MiB).
+pub const MAX_SUBJECT_BYTES: u64 = 4 * 1024 * 1024;
+
 /// Closed envelope shape; `producer_key_id` is a caller-declared label the
 /// consumer pins separately — it is never derived from the key bytes.
 /// `produced_at` joins the envelope only when the caller stamps one; like

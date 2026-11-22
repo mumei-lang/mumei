@@ -274,13 +274,13 @@ Usage: mumei evidence sign [OPTIONS] --key-file <KEY_FILE> --producer-key-id <PR
 
 | Name | Required | Description |
 |---|---|---|
-| `INPUT` | No | Regular file (at most 65,536 bytes) whose raw bytes become the signed subject; never parsed or canonicalized |
+| `INPUT` | No | Regular file (at most 4 MiB (4,194,304 bytes)) whose raw bytes become the signed subject; never parsed or canonicalized |
 
 ### Options
 
 | Option | Default | Possible values | Description |
 |---|---|---|---|
-| `--stdin` | false | — | Read the record bytes from standard input (at most 65,536 bytes); never infer stdin from a missing file |
+| `--stdin` | false | — | Read the record bytes from standard input (at most 4 MiB (4,194,304 bytes)); never infer stdin from a missing file |
 | `--json` | false | — | Emit the detached mumei.producer-signature/v1 envelope, not a verification or acceptance result |
 | `--key-file <KEY_FILE>` | — | — | Regular file holding exactly the 64-char lowercase-hex ed25519 secret key; the value is never printed |
 | `--producer-key-id <PRODUCER_KEY_ID>` | — | — | Caller-declared producer key label the consumer pins separately; never derived from the key bytes |

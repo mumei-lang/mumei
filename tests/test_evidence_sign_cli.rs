@@ -30,6 +30,25 @@ fn assert_failure(output: &Output, code: i32) {
     assert!(!error.contains("/"));
 }
 
+fn assert_signed_subject(output: &Output, subject: &[u8]) -> Value {
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains(SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(SECRET));
+    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        envelope["subject_digest"],
+        format!("{:x}", Sha256::digest(subject))
+    );
+    envelope
+}
+
 fn write(path: &Path, bytes: &[u8]) {
     fs::write(path, bytes).unwrap();
 }
@@ -219,14 +238,12 @@ fn malformed_key_material_and_empty_key_id_fail_statically() {
 }
 
 #[test]
-fn input_selection_and_bound_match_the_evidence_family() {
+fn input_selection_and_subject_cap_apply_to_file_and_stdin() {
     let dir = tempfile::tempdir().unwrap();
     let key = dir.path().join("key.hex");
     let record = dir.path().join("record.bin");
-    let large = dir.path().join("large.bin");
     write(&key, SECRET.as_bytes());
     write(&record, b"data");
-    write(&large, &vec![0u8; 65_537]);
 
     // input and --stdin are mutually exclusive.
     let output = run({
@@ -241,14 +258,44 @@ fn input_selection_and_bound_match_the_evidence_family() {
     });
     assert_failure(&output, 2);
 
-    // records over the bound are rejected.
+    let old_limit_plus_one = vec![0x5a; 65_537];
+    let larger_than_old_limit = dir.path().join("larger-than-old-limit.bin");
+    write(&larger_than_old_limit, &old_limit_plus_one);
     let output = run({
         let mut command = sign_command();
         command
-            .arg(&large)
+            .arg(&larger_than_old_limit)
             .args(["--key-file"])
             .arg(&key)
-            .args(["--producer-key-id", "producer-a"]);
+            .args(["--producer-key-id", "producer-a", "--json"]);
+        command
+    });
+    assert_signed_subject(&output, &old_limit_plus_one);
+
+    let max_subject = vec![0x6b; mumei_core::producer_signature::MAX_SUBJECT_BYTES as usize];
+    let max_subject_file = dir.path().join("max-subject.bin");
+    write(&max_subject_file, &max_subject);
+    let output = run({
+        let mut command = sign_command();
+        command
+            .arg(&max_subject_file)
+            .args(["--key-file"])
+            .arg(&key)
+            .args(["--producer-key-id", "producer-a", "--json"]);
+        command
+    });
+    assert_signed_subject(&output, &max_subject);
+
+    let oversized_subject = vec![0x7c; max_subject.len() + 1];
+    let oversized_file = dir.path().join("oversized.bin");
+    write(&oversized_file, &oversized_subject);
+    let output = run({
+        let mut command = sign_command();
+        command
+            .arg(&oversized_file)
+            .args(["--key-file"])
+            .arg(&key)
+            .args(["--producer-key-id", "producer-a", "--json"]);
         command
     });
     assert_failure(&output, 1);
@@ -275,21 +322,36 @@ fn input_selection_and_bound_match_the_evidence_family() {
         .arg(&key)
         .args(["--producer-key-id", "producer-a", "--json"])
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = command.spawn().unwrap();
     child
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(b"stdin record")
+        .write_all(&old_limit_plus_one)
         .unwrap();
     let output = child.wait_with_output().unwrap();
-    assert!(output.status.success());
-    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(
-        envelope["subject_digest"],
-        format!("{:x}", Sha256::digest(b"stdin record"))
-    );
+    assert_signed_subject(&output, &old_limit_plus_one);
+
+    let mut command = sign_command();
+    command
+        .arg("--stdin")
+        .args(["--key-file"])
+        .arg(&key)
+        .args(["--producer-key-id", "producer-a", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(&oversized_subject)
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_failure(&output, 1);
 }
 
 fn keygen_command() -> Command {
