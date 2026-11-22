@@ -987,19 +987,7 @@ fn lift<'ctx>(
     let mut float_argument_index = 0usize;
     let mut arguments = Vec::with_capacity(model.inputs.len());
     let mut input_index = 0usize;
-    for (parameter_shape, leaves) in model.param_shapes.iter().zip(&model.param_leaf_doubles) {
-        if parameter_shape.is_none()
-            && leaves.len() == 2
-            && integer_argument_index.saturating_add(2) > ARGUMENT_REGISTERS.len()
-        {
-            // A scalar 128-bit leaf that cannot stay fully inside the
-            // INTEGER argument registers is rejected — LLVM `expand`
-            // lowering flattens aggregate arguments leaf-by-leaf into
-            // the scalar sequence, so INTEGER and SSE leaves that do
-            // not fit their class's registers spill to the argument
-            // stack exactly like scalar arguments.
-            return Err(FunctionOutcome::OutsideProfile("argument_count"));
-        }
+    for leaves in model.param_leaf_doubles.iter() {
         for is_double in leaves {
             if *is_double {
                 // xmm0-xmm7 carry `f64` arguments; the ninth and later
@@ -2986,13 +2974,7 @@ fn lift_stack_argument_binary<'ctx>(
     } else {
         destination
     };
-    let slot = stack_memory_source(
-        slot_operand,
-        state,
-        stack_argument_leaves,
-        arguments,
-        false,
-    )?;
+    let slot = stack_memory_source(slot_operand, state, stack_argument_leaves, arguments, false)?;
     match instruction.mnemonic.as_str() {
         "cmpq" | "testq" => {
             let other_operand = if memory_is_source {
@@ -3328,16 +3310,33 @@ fn lift_call<'ctx>(
                 else {
                     return Err(FunctionOutcome::OutsideProfile("call_arguments"));
                 };
-                if leaf_doubles.iter().any(|is_double| *is_double)
-                    || integer_argument_index.saturating_add(2) > ARGUMENT_REGISTERS.len()
-                {
+                if leaf_doubles.iter().any(|is_double| *is_double) {
                     return Err(FunctionOutcome::OutsideProfile("argument_count"));
                 }
+                // `expand` lowering flattens a 128-bit argument into two
+                // independent INTEGER scalars: when the register budget
+                // runs out mid-pair the low half keeps its register and
+                // only the high half spills (real codegen puts `y.lo` in
+                // `r9` and `y.hi` at `(%rsp)`).
                 for offset in 0..2 {
-                    let register_index = ARGUMENT_REGISTERS[integer_argument_index];
-                    call_state
-                        .argument_obligations
-                        .push(call_site.args[leaf_index + offset]._eq(&registers[register_index]));
+                    let argument = &call_site.args[leaf_index + offset];
+                    if let Some(register_index) = ARGUMENT_REGISTERS.get(integer_argument_index) {
+                        call_state
+                            .argument_obligations
+                            .push(argument._eq(&registers[*register_index]));
+                    } else {
+                        let stack_argument = spilled_call_argument(
+                            stack_argument_index,
+                            rsp_is_known,
+                            rsp_offset,
+                            stack,
+                            &mut outgoing_slots,
+                        )?;
+                        call_state
+                            .argument_obligations
+                            .push(argument._eq(&stack_argument));
+                        stack_argument_index += 1;
+                    }
                     integer_argument_index += 1;
                 }
             }
@@ -7785,9 +7784,27 @@ define i64 @after_five(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i128 %x) {
             FunctionOutcome::OutsideProfile("call_order")
         );
         let (address, bytes, targets) = compiled_function_with_targets(ir, "after_five");
+        // Seven flattened INTEGER leaves: `x.lo` stays in `r9` and only
+        // `x.hi` spills to the argument stack, so the signature is inside
+        // the profile now. The machine ignores `x`, which is equivalent to
+        // the model's `ret i64 0`.
         assert_eq!(
             check_function(&bytes, address, &model("after_five"), &targets, &context),
-            FunctionOutcome::OutsideProfile("argument_count")
+            FunctionOutcome::Equivalent
+        );
+        // Reading the spilled `x.hi` slot binds it to the high half of the
+        // wide argument, not to `x.lo` or a register, so returning it does
+        // not satisfy `ret i64 0`.
+        let read_spilled_hi = [0x48, 0x8b, 0x44, 0x24, 0x08, 0xc3];
+        assert_eq!(
+            check_function(
+                &read_spilled_hi,
+                address,
+                &model("after_five"),
+                &targets,
+                &context
+            ),
+            FunctionOutcome::Different
         );
     }
 

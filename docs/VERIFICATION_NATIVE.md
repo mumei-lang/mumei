@@ -2112,7 +2112,10 @@ Local struct values inside a body are not subject to this aggregate limit
 because the source model flattens them. i128/u128 leaves inside aggregate
 parameters, call arguments and aggregate results flatten into the same
 per-slot sequence LLVM emits — each wide leaf is two consecutive INTEGER
-slots, low half first, matching the source model's `[lo, hi]` slot order —
+slots, low half first, matching the source model's `[lo, hi]` slot order.
+The two halves are independent scalars in the argument sequence: when
+registers run out mid-pair LLVM keeps the low half in the last register
+and spills only the high half onto the argument stack —
 while bounded
 memory, and tail calls with struct arguments or results also remain outside
 the profile. When an equivalent function uses a struct

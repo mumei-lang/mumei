@@ -3248,7 +3248,10 @@ fail-closed. Local struct values inside a body are not subject to this
 aggregate limit because the source model flattens them. i128/u128 leaves inside
 aggregate parameters, call arguments and aggregate results follow the same
 flattening — each wide leaf is two consecutive INTEGER slots, and LLVM emits
-its low half first, matching the source model's `[lo, hi]` slot order. Leaf-function bounded arrays admit qword `%rsp`-relative
+its low half first, matching the source model's `[lo, hi]` slot order. The
+halves are independent scalars: when registers run out mid-pair the low half
+keeps the last register and only the high half spills to the argument stack.
+Leaf-function bounded arrays admit qword `%rsp`-relative
 red-zone accesses with proven `-128..=-8` offsets; red-zone non-clobbering is
 assumed, not validated. Red-zone accesses in functions with calls
 (`frame_memory_call`) or stack adjustments (`frame_memory_stack_adjust`) remain
