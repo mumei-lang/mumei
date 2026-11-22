@@ -201,13 +201,15 @@ fn machine_tv_model_uses_wide_composite_aggregate(
         .any(|leaf_count| *leaf_count > 2)
         || model.result_shape.is_some_and(|leaf_count| {
             leaf_count > 2
-                // An all-INTEGER aggregate result past the three
-                // register-resident INTEGER leaves comes back through
-                // the `sret` convention the lifter now models — it is
+                // An aggregate result the lifter resolves — within the
+                // per-class register budgets, or back through the
+                // `sret` convention past the INTEGER budget — is
                 // validated, not an assumed memory-class ABI.
-                && !((4..=16).contains(&leaf_count)
-                    && model.result_leaf_doubles.len() == leaf_count
-                    && model.result_leaf_doubles.iter().all(|is_double| !*is_double))
+                && !(model.result_leaf_doubles.len() == leaf_count
+                    && (aggregate_result_leaf_doubles_modeled(
+                        &model.result_leaf_doubles,
+                    ) || ((4..=16).contains(&leaf_count)
+                        && integer_result_leaf_count(&model.result_leaf_doubles) > 3)))
         })
         || model.call_sites.iter().any(|call_site| {
             call_site.argument_shapes.iter().any(|shape| {
@@ -224,20 +226,32 @@ fn machine_tv_model_uses_wide_composite_aggregate(
                     has_enum: false,
                     ..
                 } if leaf_count > 2
-                    // An all-INTEGER call result of four to sixteen
-                    // leaves comes back through the caller's `sret`
-                    // buffer — modeled, not an assumed memory-class ABI.
-                    && !((4..=16).contains(&leaf_count)
-                        && call_site.result_leaf_doubles.len() == leaf_count
-                        && call_site
-                            .result_leaf_doubles
-                            .iter()
-                            .all(|is_double| !*is_double))
+                    // A call result the lifter resolves —
+                    // register-resident within the per-class budgets,
+                    // or back through the caller's `sret` buffer past
+                    // the INTEGER budget — is modeled, not an assumed
+                    // memory-class ABI.
+                    && !(call_site.result_leaf_doubles.len() == leaf_count
+                        && (aggregate_result_leaf_doubles_modeled(
+                            &call_site.result_leaf_doubles,
+                        ) || ((4..=16).contains(&leaf_count)
+                            && integer_result_leaf_count(&call_site.result_leaf_doubles)
+                                > 3)))
             ) || matches!(
                 call_site.result_shape,
                 semantic_contract::CallValueShape::Enum { leaf_count } if leaf_count > 2
             )
         })
+}
+
+fn integer_result_leaf_count(leaf_doubles: &[bool]) -> usize {
+    leaf_doubles.iter().filter(|is_double| !**is_double).count()
+}
+
+fn aggregate_result_leaf_doubles_modeled(leaf_doubles: &[bool]) -> bool {
+    !leaf_doubles.is_empty()
+        && integer_result_leaf_count(leaf_doubles) <= 3
+        && leaf_doubles.iter().filter(|is_double| **is_double).count() <= 2
 }
 
 fn machine_tv_model_uses_wide_scalar(model: &semantic_contract::PureI64Body<'_>) -> bool {
