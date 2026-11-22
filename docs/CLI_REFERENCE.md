@@ -14,6 +14,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei evidence` | 0 | Check common Evidence representation or produce fresh scoped source Evidence; no proof acceptance |
 | `mumei evidence recheck-source` | 5 | Freshly recheck saved source Evidence with linked Z3 and caller-supplied source/budgets; not proof acceptance |
 | `mumei evidence recheck-sidecar` | 5 | Freshly recheck a semantic-contract sidecar against caller-supplied source and LLVM IR bytes; hash binding and source-model obligations only, not LLVM correspondence or acceptance |
+| `mumei evidence accept-sidecar` | 17 | Evaluate a semantic-contract sidecar's hash binding and fresh source obligations into a bounded acceptance descriptor |
 | `mumei evidence accept-source` | 17 | Evaluate representation plus fresh same-profile source consistency into a bounded acceptance descriptor |
 | `mumei evidence verify-source` | 4 | Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance |
 | `mumei evidence sign` | 5 | Detachably sign a bounded record's raw bytes with a declared ed25519 key into a producer-signature envelope; binds the declared key id only |
@@ -157,6 +158,44 @@ Usage: mumei evidence recheck-sidecar [OPTIONS] --source <SOURCE> --artifact <AR
 | `--json` | false | — | Emit a static diagnostic, not evidence or an acceptance receipt |
 | `--solver-timeout <SOLVER_TIMEOUT>` | 10000 | — | Solver timeout in milliseconds (1..=10000) |
 | `--solver-resource-limit <SOLVER_RESOURCE_LIMIT>` | 1000000 | — | Solver resource units (1..=1000000); zero/unlimited is rejected |
+
+## `mumei evidence accept-sidecar`
+
+Evaluate a semantic-contract sidecar's hash binding and fresh source obligations into a bounded acceptance descriptor
+
+Usage:
+
+```text
+Usage: mumei evidence accept-sidecar [OPTIONS] --source <SOURCE> --artifact <ARTIFACT> <SIDECAR>
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `SIDECAR` | Yes | Regular semantic-contract sidecar JSON (at most 4 MiB) |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--source <SOURCE>` | — | — | Separate regular source file (at most 65,536 bytes); the saved label is never opened |
+| `--artifact <ARTIFACT>` | — | — | Separate regular LLVM IR artifact (at most 16 MiB); hash-bound only |
+| `--json` | false | — | Emit a static acceptance descriptor, not reusable Evidence or a certificate |
+| `--solver-timeout <SOLVER_TIMEOUT>` | 10000 | — | Solver timeout in milliseconds (1..=10000) |
+| `--solver-resource-limit <SOLVER_RESOURCE_LIMIT>` | 1000000 | — | Solver resource units (1..=1000000); zero/unlimited is rejected |
+| `--signature <SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 envelope file (at most 65,536 bytes) |
+| `--producer-key <PRODUCER_KEY>` | — | — | 64-char lowercase-hex ed25519 producer public key |
+| `--expected-producer-key <EXPECTED_PRODUCER_KEY>` | — | — | Pin the unsigned producer key id to the supplied key; required for registry/revocation checks |
+| `--reference-time <REFERENCE_TIME>` | — | — | Declared RFC 3339 reference time for freshness and registry checks |
+| `--max-age-seconds <MAX_AGE_SECONDS>` | — | — | Maximum envelope age in seconds |
+| `--key-registry <KEY_REGISTRY>` | — | — | Regular mumei.producer-key-registry/v1 file (at most 65,536 bytes); requires a pinned producer key id |
+| `--registry-signature <REGISTRY_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 registry signature file |
+| `--registry-key <REGISTRY_KEY>` | — | — | 64-char lowercase-hex ed25519 registry root public key |
+| `--revocation-list <REVOCATION_LIST>` | — | — | Regular mumei.key-revocation-list/v1 or /v2 file (at most 65,536 bytes); requires a pinned producer key id |
+| `--revocation-signature <REVOCATION_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 revocation-list signature file |
+| `--revocation-key <REVOCATION_KEY>` | — | — | 64-char lowercase-hex ed25519 revocation root public key |
+| `--min-revocation-version <MIN_REVOCATION_VERSION>` | — | — | Minimum acceptable v2 version; checks not_after and requires a root-signed list and reference time |
 
 ## `mumei evidence accept-source`
 
