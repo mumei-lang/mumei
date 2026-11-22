@@ -4530,6 +4530,50 @@ fn recheck_machine_tv_accepts_mixed_f64_struct_aggregates() {
 }
 
 #[test]
+fn recheck_machine_tv_accept_object_sixteen_leaf_struct_arguments_spill_to_stack() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "struct P { a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, n: i64, o: i64, p: i64 }\n\
+         atom first_last(p: P) -> i64 requires: true; ensures: true; body: { p.a + p.p };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { first_last(P { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8, i: 9, j: 10, k: 11, l: 12, m: 13, n: 14, o: 15, p: 16 }) };",
+    );
+
+    let machine_tv = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&machine_tv);
+    let machine_tv: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
+    assert_eq!(
+        machine_tv["register_convention_assumed"],
+        "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax_llvm_first_class_aggregates_split_into_registers_result_rax_rdx_rcx_xmm0_xmm1"
+    );
+    for function in ["first_last", "main"] {
+        assert_eq!(
+            machine_tv["functions"][function]["outcome"], "equivalent_within_profile",
+            "{function}"
+        );
+    }
+    assert!(machine_tv["checks_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check == "machine_code_composite_register_aggregate_tv"));
+    assert!(machine_tv["checks_not_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check == "machine_code_tv_sysv_memory_class_aggregate_abi"));
+
+    let accepted = accept_object(&source, &bundle, &id, true);
+    assert_success(&accepted);
+    let accepted: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(accepted["accepted"], true);
+    assert_eq!(
+        accepted["register_convention_assumed"],
+        machine_tv["register_convention_assumed"]
+    );
+}
+
+#[test]
 fn recheck_machine_tv_accepts_f64_equality_branch() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build_source(

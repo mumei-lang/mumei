@@ -2036,13 +2036,20 @@ equivalent function has an f64 leaf, including inside a struct or a call shape,
 `sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_result_rax_or_xmm0`;
 otherwise the descriptor retains the integer-only convention string.
 
-One- through four-leaf struct parameters and direct-call values may contain
-integer and/or f64 leaves. Each leaf uses its own assumed register class:
-integer leaves consume the next GPR from `rdi`–`r9`, and f64 leaves consume
-the next XMM register from `xmm0`–`xmm7`. A struct must fit wholly in the
-remaining registers of both classes before any of its leaves are assigned;
-otherwise it is outside as `argument_count`. Structs are never split between
-registers and the stack, and stack arguments remain scalar-only.
+One- through sixteen-leaf struct parameters and direct-call values may
+contain integer and/or f64 leaves — the admission fragment's own sixteen-leaf
+flattening limit bounds the largest struct a source can declare. Each leaf
+uses its own assumed register class: integer leaves consume the next GPR from
+`rdi`–`r9`, and f64 leaves consume the next XMM register from `xmm0`–`xmm7`.
+LLVM `expand` lowering flattens aggregates leaf-by-leaf into the scalar
+argument sequence, so integer leaves without a free GPR spill onto the
+argument stack exactly like scalar stack arguments. f64 leaves without a
+free XMM register fail closed — across the whole argument list SSE leaves
+are bounded by eight — and aggregates with seventeen or more leaves fail
+closed (`argument_count` for function parameters, `call_arguments` for
+direct-call arguments). The source admission fragment already rejects
+struct declarations wider than sixteen leaves, so these checks fire only
+on hand-written object inputs, not compiler output.
 
 Aggregate results are admitted only with at most four leaves overall, at
 most three INTEGER leaves, and at most two SSE leaves. The `llc-17 -O2`
