@@ -2105,6 +2105,64 @@ fn verify_inner_impl(
         }
     }
 
+    // 2d''. Fixed-width leaves of struct params carry the same entry domains
+    // as scalar params, so a later enum constructor may rely on them.
+    for param in &atom.params {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        let base = module_env.resolve_base_type(type_name);
+        if module_env.get_struct(&base).is_none() {
+            continue;
+        }
+        let Some(leaves) = datatype::field_leaf_types(&base, module_env) else {
+            continue;
+        };
+        let Some(value) = env.get(&param.name) else {
+            continue;
+        };
+        let values = crate::verification::translator::nested_field_bindings(&env, value);
+        for (leaf_name, leaf_type) in leaves {
+            if leaf_type == "array_len" {
+                continue;
+            }
+            let Some(leaf_value) = values
+                .iter()
+                .find(|(name, _)| name == &leaf_name)
+                .map(|(_, value)| value)
+            else {
+                continue;
+            };
+            if let Some(element_type) = leaf_type.strip_prefix("array:") {
+                let field_name = format!("{}_{}", param.name, leaf_name);
+                let root_length_key =
+                    crate::verification::translator::z3_types::array_root_len_key(&field_name);
+                let length_key =
+                    crate::verification::translator::z3_types::array_len_key(&field_name);
+                let length = env
+                    .get(&root_length_key)
+                    .or_else(|| env.get(&length_key))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        array_root_len_value(&ctx, &mut env, &field_name, bitvec_i64, Some(&solver))
+                    });
+                env.insert(root_length_key, length.clone());
+                env.insert(length_key, length.clone());
+                if let Some(domain) =
+                    datatype::array_int_leaf_domain(&vc, leaf_value, &length, element_type)
+                {
+                    solver.assert(&domain);
+                }
+            } else if leaf_type.starts_with("enum:") {
+                continue;
+            } else if let Some(domain) =
+                datatype::scalar_int_leaf_domain(&vc, &leaf_type, leaf_value)
+            {
+                solver.assert(&domain);
+            }
+        }
+    }
+
     // 2d'. `i128`/`u128` params: same unbounded-`Int` gap — assert the
     // declared width's domain (`0 <= v <= u128::MAX` also carries the
     // unsigned non-negativity `a >= 0` relies on).
