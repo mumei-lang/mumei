@@ -2186,7 +2186,7 @@ fn check_call_argument_domain<'a>(
             continue;
         }
         let Some(solver) = solver_opt else {
-            if vc.record_spec_domain_obligation(domain) {
+            if vc.record_spec_domain_obligation(vc.path_cond_conj().implies(&domain)) {
                 continue;
             }
             return Err(MumeiError::verification(format!(
@@ -6101,6 +6101,7 @@ pub(crate) fn expr_to_z3<'a>(
             // Unsat であることを証明する。Sat なら網羅性欠如エラー。
             {
                 let mut arm_conditions: Vec<Bool> = Vec::new();
+                let mut coverage_negations: Vec<Bool> = Vec::new();
                 let enum_types_before_coverage = vc.local_enum_types.borrow().clone();
                 for arm in arms {
                     *vc.local_enum_types.borrow_mut() = enum_types_before_coverage.clone();
@@ -6141,7 +6142,20 @@ pub(crate) fn expr_to_z3<'a>(
                         );
                         // The arm pass below checks the guard's arithmetic.
                         let check_i64 = vc.check_i64_overflow.replace(false);
+                        {
+                            let mut stack = vc.path_cond_stack.borrow_mut();
+                            for negation in &coverage_negations {
+                                stack.push(negation.clone());
+                            }
+                            stack.push(cond.clone());
+                        }
                         let guard_z3 = expr_to_z3(vc, guard, &mut check_env, None);
+                        {
+                            let mut stack = vc.path_cond_stack.borrow_mut();
+                            for _ in 0..=coverage_negations.len() {
+                                stack.pop();
+                            }
+                        }
                         vc.check_i64_overflow.set(check_i64);
                         *vc.local_enum_types.borrow_mut() = enum_types_before_guard;
                         let guard_z3 = guard_z3?
@@ -6153,6 +6167,7 @@ pub(crate) fn expr_to_z3<'a>(
                     };
                     *vc.local_int_types.borrow_mut() = int_types_before_check;
                     *vc.local_enum_types.borrow_mut() = enum_types_before_coverage.clone();
+                    coverage_negations.push(full_cond.not());
                     arm_conditions.push(full_cond);
                 }
                 *vc.local_enum_types.borrow_mut() = enum_types_before_coverage;

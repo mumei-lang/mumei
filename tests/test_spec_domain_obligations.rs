@@ -46,5 +46,12 @@ fn spec_call_domains_are_conjoined_and_out_of_range_calls_fail() {
                 && output.contains("u32"),
             "out-of-range atom call in ensures should be rejected (bitvec_i64={bitvec_i64}):\n{output}"
         );
+
+        let (verified, output) =
+            verify_fixture("tests/negative/test_spec_guard_domain.mm", bitvec_i64);
+        assert!(
+            !verified && output.contains("Postcondition"),
+            "guarded spec calls must not constrain paths that skip the call (bitvec_i64={bitvec_i64}):\n{output}"
+        );
     }
 }
