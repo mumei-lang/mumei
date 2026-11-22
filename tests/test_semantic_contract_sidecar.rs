@@ -1,6 +1,6 @@
 use mumei_core::semantic_contract::{
     extract_pure_i64_module_contracts, RefinedAdmission, PURE_I64_COMPOSITE_PROFILE_V24,
-    SEMANTIC_CONTRACT_VERSION,
+    PURE_I64_COMPOSITE_PROFILE_V25, SEMANTIC_CONTRACT_VERSION,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -15,13 +15,31 @@ const SIGNED_AT: &str = "2024-02-01T00:00:00Z";
 const REFERENCE_TIME: &str = "2024-02-02T00:00:00Z";
 
 const UNSUPPORTED_EFFECT_SOURCE: &str = r#"
-effect FileWrite;
+effect FileWrite(path: i64);
 
 atom write_value(x: i64)
 effects: [FileWrite];
 requires: x >= 0;
 ensures: result >= 0;
 body: x;
+"#;
+
+const STATEFUL_EFFECT_SOURCE: &str = r#"
+effect Vault
+    states: [Idle, Checked];
+    initial: Idle;
+    transition check: Idle -> Checked;
+
+atom main() -> i64
+    effects: [Vault];
+    effect_pre: { Vault: Idle };
+    effect_post: { Vault: Checked };
+    requires: true;
+    ensures: result == 7;
+    body: {
+        perform Vault.check;
+        7
+    }
 "#;
 
 const REFUTED_SOURCE: &str = r#"
@@ -227,13 +245,24 @@ fn llvm_build_writes_hash_bound_semantic_contract_sidecar() {
     let llvm_bytes = fs::read(&llvm_path).unwrap();
     let sidecar_bytes = fs::read(&sidecar_path).unwrap();
     let sidecar: Value = serde_json::from_slice(&sidecar_bytes).unwrap();
-    let expected_contracts = extract_pure_i64_module_contracts(
+    let contracts_v24 = extract_pure_i64_module_contracts(
         CLAMP_SOURCE,
         "clamp.mm",
         None,
         RefinedAdmission::CompositeV24,
     )
     .unwrap();
+    let contracts_v25 = extract_pure_i64_module_contracts(
+        CLAMP_SOURCE,
+        "clamp.mm",
+        None,
+        RefinedAdmission::CompositeV25,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&contracts_v24).unwrap(),
+        serde_json::to_vec(&contracts_v25).unwrap()
+    );
 
     assert_keys(
         &sidecar,
@@ -268,13 +297,27 @@ fn llvm_build_writes_hash_bound_semantic_contract_sidecar() {
             .and_then(|name| name.to_str()),
         Some(artifact_file_name)
     );
+    let develop_sidecar_bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        "schema_version": "mumei.semantic-contract-sidecar/v1",
+        "semantic_contract_version": SEMANTIC_CONTRACT_VERSION,
+        "artifact": {
+            "kind": "llvm-ir",
+            "file_name": artifact_file_name,
+            "sha256": format!("{:x}", Sha256::digest(&llvm_bytes)),
+        },
+        "artifact_binding": "sha256_of_emitted_file_not_correspondence",
+        "correspondence": "unchecked",
+        "contracts": serde_json::to_value(contracts_v24).unwrap(),
+    }))
+    .unwrap();
+    assert_eq!(sidecar_bytes, develop_sidecar_bytes);
     assert_eq!(
         sidecar["artifact"]["sha256"],
         format!("{:x}", Sha256::digest(&llvm_bytes))
     );
     assert_eq!(
         sidecar["contracts"],
-        serde_json::to_value(expected_contracts).unwrap()
+        serde_json::to_value(contracts_v25).unwrap()
     );
     assert!(!String::from_utf8(sidecar_bytes)
         .unwrap()
@@ -296,6 +339,76 @@ fn inferred_i64_sidecar_uses_composite_v24_profile() {
         sidecar["contracts"][0]["profile"],
         PURE_I64_COMPOSITE_PROFILE_V24
     );
+}
+
+#[test]
+fn effect_sidecar_uses_composite_v25_and_rechecks_and_accepts() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = write_input(dir.path(), "effectful.mm", STATEFUL_EFFECT_SOURCE);
+    let output_base = dir.path().join("effectful");
+    succeeds(run_build(&input, &output_base, true));
+
+    let artifact = only_llvm_file(dir.path());
+    let sidecar = artifact.with_extension("semantic-contract.json");
+    let sidecar_value: Value = serde_json::from_slice(&fs::read(&sidecar).unwrap()).unwrap();
+    assert_eq!(
+        sidecar_value["contracts"][0]["profile"],
+        PURE_I64_COMPOSITE_PROFILE_V25
+    );
+    assert_eq!(
+        sidecar_value["contracts"][0]["specification"]["effects"],
+        serde_json::json!(["Vault"])
+    );
+    assert_eq!(
+        sidecar_value["contracts"][0]["specification"]["effect_pre"]["Vault"],
+        "Idle"
+    );
+    assert_eq!(
+        sidecar_value["contracts"][0]["specification"]["effect_post"]["Vault"],
+        "Checked"
+    );
+
+    let recheck = succeeds(run_sidecar_recheck(&sidecar, &input, &artifact, true));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&recheck.stdout).unwrap()["recheck"],
+        "consistent"
+    );
+    let unsigned_accept = sidecar_accept_command(&sidecar, &input, &artifact, true)
+        .output()
+        .unwrap();
+    assert!(
+        unsigned_accept.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&unsigned_accept.stdout),
+        String::from_utf8_lossy(&unsigned_accept.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&unsigned_accept.stdout).unwrap()["accepted"],
+        true
+    );
+
+    let (secret, public) = generate_producer_key(dir.path());
+    let signature = dir.path().join("effectful.signature.json");
+    write_signature(&signature, &sidecar, &secret, None);
+    let mut command = sidecar_accept_command(&sidecar, &input, &artifact, true);
+    command
+        .args(["--signature"])
+        .arg(&signature)
+        .args(["--producer-key", &public])
+        .args(["--expected-producer-key", PRODUCER_KEY_ID]);
+    let signed_accept = command.output().unwrap();
+    assert!(
+        signed_accept.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&signed_accept.stdout),
+        String::from_utf8_lossy(&signed_accept.stderr)
+    );
+    let descriptor: Value = serde_json::from_slice(&signed_accept.stdout).unwrap();
+    assert_eq!(descriptor["accepted"], true);
+    assert!(descriptor["checks_performed"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("producer_signature_binding".to_owned())));
 }
 
 #[test]

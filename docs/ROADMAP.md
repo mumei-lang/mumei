@@ -3693,13 +3693,14 @@ The C03 `mumei.pure-i64-composite/v24` source profile admits an omitted
 atom return type only when compiler inference is exactly `i64`, and
 pins v24 only when the module relies on that inference. Other inferred
 types remain rejected; native module and multifile bundle profile v27
-uses this source admission for inferred-`i64` atoms, while semantic-contract
-sidecars remain on CompositeV24.
+uses this source admission for inferred-`i64` atoms.
 
 The C03 `mumei.pure-i64-composite/v25` source profile records simple
 stateful effect declarations and atom effect annotations; `perform`
 is a value no-op in the contract, with effect containment and temporal
-conformance remaining separate verifier obligations.
+conformance remaining separate verifier obligations. Native module and
+multifile bundles pin v25 sources at profile v28, and semantic-contract
+sidecars now produce, recheck and accept under CompositeV25.
 
 `mumei build --semantic-contract` is an opt-in production sidecar. It binds the
 exact emitted `.ll` bytes by SHA-256 only; correspondence remains unchecked,
