@@ -51,9 +51,7 @@ impl Drop for LocalArrayElementTypeGuard<'_> {
 }
 
 struct LocalIntTypeGuard<'a> {
-    types: &'a std::cell::RefCell<std::collections::HashMap<String, &'static str>>,
-    name: String,
-    previous: Option<&'static str>,
+    types: &'a std::cell::RefCell<Vec<(String, &'static str)>>,
 }
 
 impl<'a> LocalIntTypeGuard<'a> {
@@ -63,27 +61,18 @@ impl<'a> LocalIntTypeGuard<'a> {
     ) -> Option<Self> {
         let base = vc.module_env.resolve_base_type(&decl._base_type);
         let int_type = fixed_width_int(&base).map(|(ty, _, _)| ty)?;
-        let name = decl.operand.clone();
-        let previous = vc
-            .local_int_types
+        vc.refined_operand_types
             .borrow_mut()
-            .insert(name.clone(), int_type);
+            .push((decl.operand.clone(), int_type));
         Some(Self {
-            types: &vc.local_int_types,
-            name,
-            previous,
+            types: &vc.refined_operand_types,
         })
     }
 }
 
 impl Drop for LocalIntTypeGuard<'_> {
     fn drop(&mut self) {
-        let mut types = self.types.borrow_mut();
-        if let Some(previous) = self.previous.take() {
-            types.insert(self.name.clone(), previous);
-        } else {
-            types.remove(&self.name);
-        }
+        self.types.borrow_mut().pop();
     }
 }
 
@@ -1536,6 +1525,15 @@ fn expr_struct_type(vc: &VCtx, expr: &Expr) -> Option<String> {
 pub(crate) fn fixed_width_int_type(vc: &VCtx, expr: &Expr) -> Option<&'static str> {
     match expr {
         Expr::Variable(name) => {
+            if let Some((_, ty)) = vc
+                .refined_operand_types
+                .borrow()
+                .iter()
+                .rev()
+                .find(|(operand, _)| operand == name)
+            {
+                return Some(*ty);
+            }
             // Inside an instantiated callee contract (`ensures`/`requires`
             // evaluated in `call_env`) names bind to the callee's signature,
             // not the caller's: `result` is the callee's return value and a
