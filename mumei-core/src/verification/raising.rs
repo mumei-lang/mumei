@@ -983,6 +983,11 @@ fn raise_enum_value<'ctx>(
         .iter()
         .zip(&variant.field_types)
         .map(|(arg, field_type)| {
+            if crate::verification::support::datatype::is_direct_self_field(
+                enum_def, field_type, module_env,
+            ) {
+                return Some(arg.to_string());
+            }
             let (rendering, _, status) = raise_model_value_with_env(
                 model,
                 arg,

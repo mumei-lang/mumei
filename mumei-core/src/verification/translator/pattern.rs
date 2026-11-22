@@ -253,6 +253,22 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                                     )
                                     .into()
                                 });
+                        if let (Some(solver), Some(edef), Some(field_type)) = (
+                            solver_opt,
+                            enum_def,
+                            enum_def.and_then(|edef| edef.variants[variant_idx].field_types.get(i)),
+                        ) {
+                            if datatype::is_self_recursive_adt(edef, vc.module_env)
+                                && !datatype::is_direct_self_field(edef, field_type, vc.module_env)
+                            {
+                                let type_name = datatype::payload_field_type_name(field_type);
+                                if let Some(domain) =
+                                    datatype::scalar_int_leaf_domain(vc, &type_name, &field_sym)
+                                {
+                                    solver.assert(&is_v.implies(&domain));
+                                }
+                            }
+                        }
                         env.insert(format!("__proj_{}_{}", variant_leaf, i), field_sym.clone());
                         let field_cond = pattern_to_z3_condition(
                             ctx,
@@ -622,6 +638,24 @@ pub(crate) fn pattern_bind_variables<'a>(
                             match field_pattern {
                                 Pattern::Variable(fname) => {
                                     env.insert(fname.clone(), field_sym.clone());
+                                    if let Some(edef) = enum_def {
+                                        if edef
+                                            .variants
+                                            .get(variant_idx)
+                                            .and_then(|variant| variant.field_types.get(i))
+                                            .is_some_and(|field_type| {
+                                                datatype::is_direct_self_field(
+                                                    edef,
+                                                    field_type,
+                                                    vc.module_env,
+                                                )
+                                            })
+                                        {
+                                            vc.local_enum_types
+                                                .borrow_mut()
+                                                .insert(fname.clone(), edef.name.clone());
+                                        }
+                                    }
                                     // A payload leaf keeps its declared
                                     // width — `u64`/`u32`/`i32` — so later
                                     // `x < y` / `x - 1` pick the unsigned

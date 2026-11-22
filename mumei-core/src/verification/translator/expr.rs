@@ -7012,7 +7012,10 @@ pub(crate) fn expr_to_z3<'a>(
             if let Expr::Variable(name) = inner_expr.as_ref() {
                 if !env.contains_key(name)
                     && vc.module_env.enums.contains_key(name)
-                    && datatype::is_finite_adt(vc.module_env.get_enum(name).unwrap(), vc.module_env)
+                    && datatype::uses_datatype_sort(
+                        vc.module_env.get_enum(name).unwrap(),
+                        vc.module_env,
+                    )
                 {
                     if let Some(value) = datatype::enum_ctor_apply(
                         vc,

@@ -72,7 +72,7 @@ use std::path::Path;
 /// cached verdicts must be re-derived.
 /// Version 33 rejects calls where later argument evaluation may mutate an
 /// array root passed by an earlier argument, matching runtime buffer aliasing.
-pub const VERIFIER_POLICY_VERSION: u32 = 33;
+pub const VERIFIER_POLICY_VERSION: u32 = 34;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -3298,7 +3298,7 @@ body: { p.a };\n";
         let baseline = proof_hash_for(source, "g");
         assert_eq!(
             baseline,
-            "d61316a01e4088ecc63b423a4a1dd43435e863bf58766bc9bad958d6a9a4874b"
+            "96f47b0ab84d179b569e2f9f572ed63c80799bfab2e8967652fb31d2c401094b"
         );
         let changed = proof_hash_for(
             &source.replace(
@@ -3311,7 +3311,7 @@ body: { p.a };\n";
     }
 
     #[test]
-    fn effect_free_proof_hash_matches_policy_version_33() {
+    fn effect_free_proof_hash_matches_policy_version_34() {
         let source = "atom main(x: i64) -> i64\n\
                       requires: true;\n\
                       ensures: result == x;\n\
@@ -3320,7 +3320,7 @@ body: { p.a };\n";
 
         assert_eq!(
             hash,
-            "c6f6bc116ad3dc8c347bc1120b8333125da6184f1e637e374d37227fb6e9bec7"
+            "7058c391759c749f74d75a7c1dd96ac617434e2f6593a81da99d7f7f7c86cb2d"
         );
         assert!(!dependency_hashes_for(source, "main")
             .keys()
