@@ -401,10 +401,11 @@ fn call_arg_sorts_match<'a>(vc: &VCtx<'a>, callee: &Atom, arg_vals: &[Dynamic<'a
             })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum RecFnParamKind {
     Scalar,
     Array,
+    StructArray(Vec<String>),
     Struct(usize),
 }
 
@@ -419,18 +420,20 @@ fn array_element_type_name(type_name: &str) -> Option<&str> {
 /// Expand source parameters into the domain arguments of a congruent
 /// recursive function. Arrays carry their tracked length and structs are
 /// represented by their fields rather than their opaque handles.
-fn expand_rec_fn_args<'a, Array, Length, Field>(
+fn expand_rec_fn_args<'a, Array, Length, Field, ArrayLeaf>(
     kinds: &[RecFnParamKind],
     arg_vals: &[Dynamic<'a>],
     array_len_sort: &Sort<'a>,
     mut array_for: Array,
     mut length_for: Length,
     mut field_for: Field,
+    mut array_leaf_for: ArrayLeaf,
 ) -> Option<Vec<Dynamic<'a>>>
 where
     Array: FnMut(usize) -> Option<Dynamic<'a>>,
     Length: FnMut(usize) -> Option<Dynamic<'a>>,
     Field: FnMut(usize, usize) -> Option<Dynamic<'a>>,
+    ArrayLeaf: FnMut(usize, &str) -> Option<Dynamic<'a>>,
 {
     if kinds.len() != arg_vals.len() {
         return None;
@@ -450,6 +453,21 @@ where
                     return None;
                 }
                 expanded.push(length);
+            }
+            RecFnParamKind::StructArray(paths) => {
+                let array = array_for(param_index)?;
+                if array.get_sort() != arg_val.get_sort() {
+                    return None;
+                }
+                expanded.push(array);
+                let length = length_for(param_index)?;
+                if length.get_sort() != array_len_sort.clone() {
+                    return None;
+                }
+                expanded.push(length);
+                for path in paths {
+                    expanded.push(array_leaf_for(param_index, path)?);
+                }
             }
             RecFnParamKind::Struct(field_count) => {
                 for field_index in 0..*field_count {
@@ -476,8 +494,16 @@ fn rec_fn_args<'a>(
             return None;
         }
         let type_name = param.type_name.as_deref().map(str::trim);
-        if type_name.and_then(array_element_type_name).is_some() {
-            kinds.push(RecFnParamKind::Array);
+        if let Some(element_type) = type_name.and_then(array_element_type_name) {
+            if let Some(leaves) =
+                super::z3_types::struct_array_leaf_types(element_type, vc.module_env)
+            {
+                kinds.push(RecFnParamKind::StructArray(
+                    leaves.into_iter().map(|(path, _)| path).collect(),
+                ));
+            } else {
+                kinds.push(RecFnParamKind::Array);
+            }
         } else if let Some(sdef) = type_name.and_then(|name| vc.module_env.get_struct(name)) {
             kinds.push(RecFnParamKind::Struct(sdef.fields.len()));
         } else {
@@ -507,6 +533,14 @@ fn rec_fn_args<'a>(
                 .get(&struct_field_key(
                     &callee.params[param_index].name,
                     &field.name,
+                ))
+                .cloned()
+        },
+        |param_index, path| {
+            call_env
+                .get(&super::z3_types::struct_array_leaf_key(
+                    &callee.params[param_index].name,
+                    path,
                 ))
                 .cloned()
         },
@@ -2109,7 +2143,30 @@ fn check_call_argument_domain<'a>(
     if let Some(domain) = datatype::scalar_int_leaf_domain(vc, &resolved_type, value) {
         domains.push((resolved_type.clone(), domain));
     } else if let Some(element_type) = array_element_type_name(&resolved_type) {
-        if let Some(length) = call_env.get(&array_len_key(param_name)) {
+        if let Some(leaves) = super::z3_types::struct_array_leaf_types(element_type, vc.module_env)
+        {
+            if let Some(length) = call_env.get(&array_len_key(param_name)) {
+                for (path, leaf_type) in leaves {
+                    let key = super::z3_types::struct_array_leaf_key(param_name, &path);
+                    let Some(array) = call_env.get(&key).and_then(|value| value.as_array()) else {
+                        continue;
+                    };
+                    let array: Dynamic = array.into();
+                    let domain = if leaf_type.starts_with("enum:") {
+                        datatype::enum_array_leaf_domain(vc, &array, length)
+                    } else {
+                        datatype::array_int_leaf_domain(vc, &array, length, &leaf_type)
+                    };
+                    if let Some(domain) = domain {
+                        let domain_type = leaf_type
+                            .strip_prefix("enum:")
+                            .unwrap_or(&leaf_type)
+                            .to_string();
+                        domains.push((domain_type, domain));
+                    }
+                }
+            }
+        } else if let Some(length) = call_env.get(&array_len_key(param_name)) {
             if let Some(domain) = datatype::array_int_leaf_domain(vc, value, length, element_type) {
                 domains.push((element_type.to_string(), domain));
             }
@@ -2312,6 +2369,7 @@ fn array_value_equality<'a>(
     env: &mut Env<'a>,
     solver_opt: Option<&Solver<'a>>,
     left_live: Option<(Array<'a>, Dynamic<'a>)>,
+    left_struct_leaves: Option<super::z3_types::StructArrayLeafSnapshot<'a>>,
 ) -> MumeiResult<Bool<'a>> {
     let ctx = vc.ctx;
     let (left_arr_live, left_len_live) = left_live
@@ -2346,6 +2404,68 @@ fn array_value_equality<'a>(
             "Array lengths are not comparable i64 values".to_string(),
         ));
     };
+    let right_struct_leaves =
+        super::z3_types::snapshot_struct_array_leaves(vc, env, right, r, None)?;
+    if left_struct_leaves.is_some() || right_struct_leaves.is_some() {
+        let (Some(left_struct_leaves), Some(right_struct_leaves)) =
+            (left_struct_leaves, right_struct_leaves)
+        else {
+            return Err(MumeiError::type_error(
+                "Cannot compare arrays of different element types".to_string(),
+            ));
+        };
+        let left_type = vc
+            .module_env
+            .resolve_base_type(left_struct_leaves.element_type());
+        let right_type = vc
+            .module_env
+            .resolve_base_type(right_struct_leaves.element_type());
+        if left_type != right_type {
+            return Err(MumeiError::type_error(
+                "Cannot compare arrays of different element types".to_string(),
+            ));
+        }
+        let leaves = super::z3_types::struct_array_leaf_types(&left_type, vc.module_env)
+            .ok_or_else(|| {
+                MumeiError::type_error(format!(
+                    "Array equality is not supported for `[{}]` elements",
+                    left_type
+                ))
+            })?;
+        let k = Int::fresh_const(ctx, "k");
+        let len_l_int = as_int_like(&len_l).ok_or_else(|| {
+            MumeiError::verification("Array length is not an i64 value".to_string())
+        })?;
+        let in_bounds = Bool::and(ctx, &[&k.ge(&Int::from_i64(ctx, 0)), &k.lt(&len_l_int)]);
+        let mut leaf_equalities = Vec::with_capacity(leaves.len());
+        for (path, _) in leaves {
+            let left_leaf = left_struct_leaves
+                .leaf_array(&path)
+                .ok_or_else(|| MumeiError::type_error(format!("Missing array leaf '{path}'")))?;
+            let right_leaf = right_struct_leaves
+                .leaf_array(&path)
+                .ok_or_else(|| MumeiError::type_error(format!("Missing array leaf '{path}'")))?;
+            if left_leaf.get_sort() != right_leaf.get_sort() {
+                return Err(MumeiError::type_error(format!(
+                    "Cannot compare array leaves of different types at '{path}'"
+                )));
+            }
+            let left_value = left_leaf.select(&k);
+            let right_value = right_leaf.select(&k);
+            leaf_equalities.push(array_eq_element(ctx, &left_value, &right_value).ok_or_else(
+                || {
+                    MumeiError::type_error(format!(
+                        "Array equality is not supported for struct leaf '{path}'"
+                    ))
+                },
+            )?);
+        }
+        let leaf_equalities: Vec<&Bool> = leaf_equalities.iter().collect();
+        let all_leaves_equal = Bool::and(ctx, &leaf_equalities);
+        let contents_eq =
+            z3::ast::forall_const(ctx, &[&k], &[], &in_bounds.implies(&all_leaves_equal));
+        return Ok(Bool::and(ctx, &[&len_eq, &contents_eq]));
+    }
     // `forall k. 0 <= k < len_l => a[k] == b[k]`. The bound is built in
     // the `Int` theory: the select index is always `Int`, and for a
     // *bound* variable `int2bv(k) <bv len` (what `index_in_bounds` would
@@ -3023,10 +3143,9 @@ fn bind_struct_array_fields<'a>(
             let leaf_array =
                 super::z3_types::struct_array_leaf_array(vc, array_name, &path, &field_type, env);
             let selected = leaf_array.select(index);
-            if let (Some(solver), Some(bound)) = (
-                solver_opt,
-                datatype::scalar_int_leaf_domain(vc, &field_type, &selected),
-            ) {
+            let bound = datatype::enum_value_leaf_domain(vc, &selected)
+                .or_else(|| datatype::scalar_int_leaf_domain(vc, &field_type, &selected));
+            if let (Some(solver), Some(bound)) = (solver_opt, bound) {
                 solver.assert(&bound);
             }
             env.insert(
@@ -3152,10 +3271,9 @@ fn read_struct_array_field<'a>(
     let leaf_array =
         super::z3_types::struct_array_leaf_array(vc, array_name, &path, &leaf_type, env);
     let selected = leaf_array.select(&index);
-    if let (Some(solver), Some(bound)) = (
-        solver_opt,
-        datatype::scalar_int_leaf_domain(vc, &leaf_type, &selected),
-    ) {
+    let bound = datatype::enum_value_leaf_domain(vc, &selected)
+        .or_else(|| datatype::scalar_int_leaf_domain(vc, &leaf_type, &selected));
+    if let (Some(solver), Some(bound)) = (solver_opt, bound) {
         solver.assert(&bound);
     }
     Ok(Some(selected))
@@ -3753,7 +3871,8 @@ pub(crate) fn expr_to_z3<'a>(
                         // access uses `__z3_arr_<name>` when present so that
                         // patterns refer to the post-store array state seen
                         // by the body of the forall.
-                        let mut pattern_asts: Vec<Dynamic> = Vec::new();
+                        let mut scalar_pattern_asts: Vec<Dynamic> = Vec::new();
+                        let mut pattern_groups: Vec<Vec<Dynamic>> = Vec::new();
                         // Re-bind the quantified variable while we lower
                         // index expressions so that they see `var_name`.
                         let var_re = match &args[0] {
@@ -3775,12 +3894,33 @@ pub(crate) fn expr_to_z3<'a>(
                         for (arr_name, idx_expr) in arr_accesses.iter() {
                             if let Ok(idx_z3) = expr_to_z3(vc, idx_expr, env, None) {
                                 if let Some(idx_int) = idx_z3.as_int() {
-                                    let term = z3_dynamic_array(vc, arr_name, env).select(&idx_int);
-                                    if is_admissible_trigger(&term) {
-                                        pattern_asts.push(term);
+                                    let element_type =
+                                        super::z3_types::array_element_type_name(arr_name, vc);
+                                    if let Some(leaves) = super::z3_types::struct_array_leaf_types(
+                                        &element_type,
+                                        vc.module_env,
+                                    ) {
+                                        for (path, leaf_type) in leaves {
+                                            let leaf = super::z3_types::struct_array_leaf_array(
+                                                vc, arr_name, &path, &leaf_type, env,
+                                            );
+                                            let term = leaf.select(&idx_int);
+                                            if is_admissible_trigger(&term) {
+                                                pattern_groups.push(vec![term]);
+                                            }
+                                        }
+                                    } else {
+                                        let term =
+                                            z3_dynamic_array(vc, arr_name, env).select(&idx_int);
+                                        if is_admissible_trigger(&term) {
+                                            scalar_pattern_asts.push(term);
+                                        }
                                     }
                                 }
                             }
+                        }
+                        if !scalar_pattern_asts.is_empty() {
+                            pattern_groups.push(scalar_pattern_asts);
                         }
                         // Restore env for var_re
                         if !var_re.is_empty() {
@@ -3791,15 +3931,21 @@ pub(crate) fn expr_to_z3<'a>(
                             }
                         }
                         let body = range_cond.implies(&condition_z3);
-                        if pattern_asts.is_empty() {
+                        if pattern_groups.is_empty() {
                             z3::ast::forall_const(ctx, &[&bound_var], &[], &body)
                         } else {
-                            let pattern_refs: Vec<&dyn z3::ast::Ast> = pattern_asts
+                            let patterns: Vec<z3::Pattern> = pattern_groups
                                 .iter()
-                                .map(|d| d as &dyn z3::ast::Ast)
+                                .map(|group| {
+                                    let pattern_refs: Vec<&dyn z3::ast::Ast> = group
+                                        .iter()
+                                        .map(|term| term as &dyn z3::ast::Ast)
+                                        .collect();
+                                    z3::Pattern::new(ctx, &pattern_refs)
+                                })
                                 .collect();
-                            let pattern = z3::Pattern::new(ctx, &pattern_refs);
-                            z3::ast::forall_const(ctx, &[&bound_var], &[&pattern], &body)
+                            let pattern_refs: Vec<&z3::Pattern> = patterns.iter().collect();
+                            z3::ast::forall_const(ctx, &[&bound_var], &pattern_refs, &body)
                         }
                     } else {
                         // ∃ var ∈ [start, end). condition
@@ -5646,6 +5792,13 @@ pub(crate) fn expr_to_z3<'a>(
             // lowered: a shadowing `let a = …` or a rebind inside the right
             // operand rewrites the same tracked slots, so reading them at
             // dispatch time would compare the post-right `a` on both sides.
+            let array_eq_left_struct_leaves =
+                if matches!(op, Op::Eq | Op::Neq) && l.as_array().is_some() {
+                    super::z3_types::snapshot_struct_array_leaves(vc, env, left, &l, None)?
+                } else {
+                    None
+                };
+
             let array_eq_left_live = if matches!(op, Op::Eq | Op::Neq) && l.as_array().is_some() {
                 match &**left {
                     Expr::Variable(name) => Some((
@@ -5676,6 +5829,7 @@ pub(crate) fn expr_to_z3<'a>(
                     env,
                     solver_opt,
                     array_eq_left_live,
+                    array_eq_left_struct_leaves,
                 )?;
                 return Ok(if matches!(op, Op::Neq) {
                     eq.not().into()
@@ -8407,7 +8561,32 @@ fn fixed_width_param_domains<'a>(
                 vc.bitvec_i64,
                 solver_opt,
             );
-            if let Some(domain) = datatype::array_int_leaf_domain(vc, value, &length, element_type)
+            if let Some(leaves) =
+                super::z3_types::struct_array_leaf_types(element_type, vc.module_env)
+            {
+                for (path, leaf_type) in leaves {
+                    let key = super::z3_types::struct_array_leaf_key(param_name, &path);
+                    let Some(array) = env.get(&key).and_then(|value| value.as_array()) else {
+                        continue;
+                    };
+                    let array: Dynamic = array.into();
+                    let domain = if leaf_type.starts_with("enum:") {
+                        datatype::enum_array_leaf_domain(vc, &array, &length)
+                    } else {
+                        datatype::array_int_leaf_domain(vc, &array, &length, &leaf_type)
+                    };
+                    if let Some(domain) = domain {
+                        domains.push((
+                            leaf_type
+                                .strip_prefix("enum:")
+                                .unwrap_or(&leaf_type)
+                                .to_string(),
+                            domain,
+                        ));
+                    }
+                }
+            } else if let Some(domain) =
+                datatype::array_int_leaf_domain(vc, value, &length, element_type)
             {
                 domains.push((element_type.to_string(), domain));
             }
@@ -8883,6 +9062,7 @@ mod rec_fn_args_tests {
             |_| Some(array.clone().into()),
             |_| Some(length_one.clone()),
             |_, _| None,
+            |_, _| None,
         )
         .expect("array length should expand");
         let expanded_two = expand_rec_fn_args(
@@ -8891,6 +9071,7 @@ mod rec_fn_args_tests {
             &length_sort,
             |_| Some(array.clone().into()),
             |_| Some(length_two.clone()),
+            |_, _| None,
             |_, _| None,
         )
         .expect("array length should expand");

@@ -303,6 +303,7 @@ pub fn check_spec_satisfiability_with_timeout(
         }
         if let Some(body) = &body_stmt {
             havoc_written_struct_fields(&vc, atom, body, &mut local_env);
+            havoc_written_struct_array_fields(&vc, atom, body, &mut local_env);
             super::support::datatype::assert_enum_value_domains(&vc, &local_solver, &local_env);
         }
         match assert_clause(&vc, &local_solver, &mut local_env, atom, clause, "ensures")? {
@@ -342,6 +343,7 @@ pub fn check_spec_satisfiability_with_timeout(
         }
         if let Some(body) = &body_stmt {
             havoc_written_struct_fields(&vc, atom, body, &mut combined_env);
+            havoc_written_struct_array_fields(&vc, atom, body, &mut combined_env);
             super::support::datatype::assert_enum_value_domains(
                 &vc,
                 &combined_solver,
@@ -639,6 +641,104 @@ fn havoc_written_struct_fields<'a>(
     }
 }
 
+fn havoc_written_struct_array_fields<'a>(
+    vc: &VCtx<'a>,
+    atom: &Atom,
+    body: &crate::parser::ast::Stmt,
+    env: &mut Env<'a>,
+) {
+    static ARRAY_HAVOC_UID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    for param in &atom.params {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        let element_type =
+            crate::verification::translator::z3_types::array_element_type_from_annotation(
+                Some(type_name),
+                vc.module_env,
+            );
+        let Some(leaves) = crate::verification::translator::z3_types::struct_array_leaf_types(
+            &element_type,
+            vc.module_env,
+        ) else {
+            continue;
+        };
+        if body.rebinds_name(&param.name)
+            || crate::verification::translator::may_write::stmt_may_write_array(
+                vc,
+                body,
+                &param.name,
+                env,
+            )
+        {
+            crate::verification::translator::z3_types::havoc_array_name(vc, &param.name, env);
+            continue;
+        }
+        for write in body.array_store_targets(&param.name) {
+            let paths: Vec<String> = if let Some(path) = &write.field_path {
+                vec![path.join("_")]
+            } else {
+                leaves
+                    .iter()
+                    .map(|(leaf_path, _)| leaf_path.clone())
+                    .collect()
+            };
+            for path in paths {
+                let key = crate::verification::translator::z3_types::struct_array_leaf_key(
+                    &param.name,
+                    &path,
+                );
+                let Some(old) = env.get(&key).cloned() else {
+                    continue;
+                };
+                let Some(old_array) = old.as_array() else {
+                    continue;
+                };
+                let root = crate::verification::translator::z3_types::array_root_ast(&old_array);
+                let uid = ARRAY_HAVOC_UID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let fresh = if !write.may_repeat {
+                    if let crate::parser::ast::Expr::Number(index) = &write.index {
+                        let index = Int::from_i64(vc.ctx, *index);
+                        let previous = old_array.select(&index);
+                        let replacement =
+                            crate::verification::translator::z3_types::z3_fresh_const_like(
+                                vc.ctx,
+                                &format!("__post_struct_array_{uid}"),
+                                &previous,
+                            );
+                        old_array.store(&index, &replacement).into()
+                    } else {
+                        crate::verification::translator::z3_types::z3_fresh_const_like(
+                            vc.ctx,
+                            &format!("__post_struct_array_{uid}"),
+                            &old,
+                        )
+                    }
+                } else {
+                    crate::verification::translator::z3_types::z3_fresh_const_like(
+                        vc.ctx,
+                        &format!("__post_struct_array_{uid}"),
+                        &old,
+                    )
+                };
+                let aliases: Vec<String> = env
+                    .iter()
+                    .filter(|(_, value)| {
+                        value.as_array().is_some_and(|array| {
+                            crate::verification::translator::z3_types::array_root_ast(&array)
+                                == root
+                        })
+                    })
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                for alias in aliases {
+                    env.insert(alias, fresh.clone());
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn seed_env<'a>(vc: &VCtx<'a>, atom: &Atom) -> Env<'a> {
     let ctx = vc.ctx;
     let module_env = vc.module_env;
@@ -649,6 +749,12 @@ pub(crate) fn seed_env<'a>(vc: &VCtx<'a>, atom: &Atom) -> Env<'a> {
         env.insert(
             param.name.clone(),
             param_z3_value_for_vc(vc, &param.name, param.type_name.as_deref()),
+        );
+        crate::verification::translator::z3_types::seed_struct_array_param_leaves(
+            vc,
+            &param.name,
+            param.type_name.as_deref(),
+            &mut env,
         );
         if let Some(sdef) = param
             .type_name

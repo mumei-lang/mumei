@@ -463,12 +463,13 @@ pub enum HirStmt {
     },
     /// 代入: var = expr
     Assign { var: String, value: Box<HirExpr> },
-    /// 配列要素代入: arr[idx] = value
+    /// 配列要素または構造体フィールド代入: arr[idx][.field] = value
     /// Z3 レベルでは `Array::store(arr, idx, value)` でモデル化される。
     /// LLVM codegen では GEP + store 命令を生成する。
     ArrayStore {
         array: String,
         index: Box<HirExpr>,
+        field_path: Option<Vec<String>>,
         value: Box<HirExpr>,
     },
     /// While ループ
@@ -1191,11 +1192,13 @@ pub fn lower_stmt_with_env(
         Stmt::ArrayStore {
             array,
             index,
+            field_path,
             value,
             ..
         } => HirStmt::ArrayStore {
             array: array.clone(),
             index: Box::new(lower_expr_with_env(index, module_env)),
+            field_path: field_path.clone(),
             value: Box::new(lower_expr_with_env(value, module_env)),
         },
         Stmt::Block(stmts, _) => {
@@ -1304,6 +1307,7 @@ pub fn collect_free_variables_stmt(stmt: &HirStmt) -> HashSet<String> {
             array,
             index,
             value,
+            ..
         } => {
             vars.insert(array.clone());
             vars.extend(collect_free_variables_expr(index));

@@ -98,6 +98,12 @@ pub(crate) fn verify_atom_invariant(
             param.type_name.as_deref(),
         );
         env.insert(param.name.clone(), var);
+        crate::verification::translator::z3_types::seed_struct_array_param_leaves(
+            &vc,
+            &param.name,
+            param.type_name.as_deref(),
+            &mut env,
+        );
 
         // 精緻型制約も適用
         if let Some(type_name) = &param.type_name {

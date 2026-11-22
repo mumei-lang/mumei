@@ -922,6 +922,7 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &HirStmt) -> Option<Operand> {
         HirStmt::ArrayStore {
             array,
             index,
+            field_path,
             value,
         } => {
             // Evaluate value first (matches LLVM codegen / Z3 ordering).
@@ -938,7 +939,10 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &HirStmt) -> Option<Operand> {
             ));
 
             let arr_place = ctx.lookup_var(array);
-            let store_place = Place::Index(Box::new(arr_place), idx_local);
+            let store_place = field_path.iter().flatten().fold(
+                Place::Index(Box::new(arr_place), idx_local),
+                |place, field| Place::Field(Box::new(place), field.clone()),
+            );
             ctx.emit(MirStatement::Assign(store_place, Rvalue::Use(val_op)));
             None
         }

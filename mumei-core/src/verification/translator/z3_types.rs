@@ -232,57 +232,66 @@ pub(crate) fn array_element_type_name(name: &str, vc: &VCtx<'_>) -> String {
         .unwrap_or_else(|| "i64".to_string())
 }
 
+fn enum_array_leaf_shape_supported(
+    module_env: &ModuleEnv,
+    type_name: &str,
+    visiting: &mut std::collections::HashSet<String>,
+) -> bool {
+    let resolved = module_env.resolve_base_type(type_name);
+    let base = crate::verification::support::datatype::type_name_base(&resolved);
+    let Some(enum_def) = module_env
+        .get_enum(&resolved)
+        .or_else(|| module_env.get_enum(base))
+    else {
+        return false;
+    };
+    if !enum_def.type_params.is_empty()
+        || !visiting.insert(enum_def.name.clone())
+        || !crate::verification::support::datatype::is_finite_adt(enum_def, module_env)
+    {
+        return false;
+    }
+    for variant in &enum_def.variants {
+        for field in &variant.field_types {
+            let field_type = crate::verification::support::datatype::payload_field_type_name(field);
+            let Some(leaves) =
+                crate::verification::support::datatype::field_leaf_types(&field_type, module_env)
+            else {
+                return false;
+            };
+            for (_, leaf) in leaves {
+                if leaf == "array_len" || leaf.starts_with("array:") {
+                    return false;
+                }
+                if let Some(inner) = leaf.strip_prefix("enum:") {
+                    if !enum_array_leaf_shape_supported(module_env, inner, visiting) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    visiting.remove(&enum_def.name);
+    true
+}
+
 pub(crate) fn array_element_sort_from_type(
     type_name: &str,
     module_env: &ModuleEnv,
     ieee754_f64: bool,
 ) -> ArrayElementSort {
-    fn enum_supported(
-        enum_def: &crate::parser::EnumDef,
-        module_env: &ModuleEnv,
-        visited: &mut std::collections::HashSet<String>,
-    ) -> bool {
-        if !visited.insert(enum_def.name.clone())
-            || !crate::verification::support::datatype::is_finite_adt(enum_def, module_env)
-        {
-            return false;
-        }
-        for variant in &enum_def.variants {
-            for field in &variant.field_types {
-                let field_type =
-                    crate::verification::support::datatype::payload_field_type_name(field);
-                let Some(leaves) = crate::verification::support::datatype::field_leaf_types(
-                    &field_type,
-                    module_env,
-                ) else {
-                    return false;
-                };
-                for (_, leaf) in leaves {
-                    if leaf == "array_len" || leaf.starts_with("array:") {
-                        return false;
-                    }
-                    if let Some(inner) = leaf.strip_prefix("enum:") {
-                        let Some(inner_def) = module_env.get_enum(inner) else {
-                            return false;
-                        };
-                        if !enum_supported(inner_def, module_env, visited) {
-                            return false;
-                        }
-                    }
-                }
-            }
-        }
-        visited.remove(&enum_def.name);
-        true
-    }
-
+    let type_name = type_name.strip_prefix("enum:").unwrap_or(type_name);
     let resolved = module_env.resolve_base_type(type_name);
     let enum_base = crate::verification::support::datatype::type_name_base(&resolved);
     if let Some(enum_def) = module_env
         .get_enum(&resolved)
         .or_else(|| module_env.get_enum(enum_base))
     {
-        return if enum_supported(enum_def, module_env, &mut Default::default()) {
+        return if enum_array_leaf_shape_supported(
+            module_env,
+            &enum_def.name,
+            &mut Default::default(),
+        ) {
             ArrayElementSort::Enum
         } else {
             ArrayElementSort::UnsupportedEnum
@@ -328,16 +337,20 @@ pub(crate) fn struct_array_leaf_types(
     let leaves = crate::verification::support::datatype::field_leaf_types(&resolved, module_env)?;
     if leaves.is_empty()
         || leaves.iter().any(|(_, leaf)| {
-            !matches!(
-                lower(&module_env.resolve_base_type(leaf)),
-                LoweredType::I64
-                    | LoweredType::I32
-                    | LoweredType::U64
-                    | LoweredType::U32
-                    | LoweredType::F64
-                    | LoweredType::Bool
-                    | LoweredType::Str
-            )
+            if let Some(enum_type) = leaf.strip_prefix("enum:") {
+                !enum_array_leaf_shape_supported(module_env, enum_type, &mut Default::default())
+            } else {
+                !matches!(
+                    lower(&module_env.resolve_base_type(leaf)),
+                    LoweredType::I64
+                        | LoweredType::I32
+                        | LoweredType::U64
+                        | LoweredType::U32
+                        | LoweredType::F64
+                        | LoweredType::Bool
+                        | LoweredType::Str
+                )
+            }
         })
     {
         return None;
@@ -351,6 +364,15 @@ pub(crate) fn validate_array_element_type(
 ) -> Result<(), MumeiError> {
     validate_enum_array_element_type(vc, type_name)?;
     let sort = array_element_sort_from_type(type_name, vc.module_env, vc.ieee754_f64);
+    if sort == ArrayElementSort::Struct {
+        if let Some(leaves) = struct_array_leaf_types(type_name, vc.module_env) {
+            for (_, leaf_type) in leaves {
+                if let Some(enum_type) = leaf_type.strip_prefix("enum:") {
+                    validate_enum_array_element_type(vc, enum_type)?;
+                }
+            }
+        }
+    }
     if sort == ArrayElementSort::UnsupportedStruct {
         return Err(MumeiError::type_error(format!(
             "array element struct '{type_name}' must have only scalar leaves (i64, fixed-width integers, f64, bool, or Str)"
@@ -421,6 +443,7 @@ pub(crate) fn seed_struct_array_param_leaves<'a>(
     vc.local_array_elem_types
         .borrow_mut()
         .insert(name.to_string(), element_type.clone());
+    array_len_value(vc.ctx, env, name, vc.bitvec_i64, None);
     for (path, leaf_type) in leaves {
         let key = struct_array_leaf_key(name, &path);
         env.entry(key.clone()).or_insert_with(|| {
@@ -447,7 +470,8 @@ pub(crate) fn validate_enum_array_element_type(
         else {
             return Ok(());
         };
-        if !visiting.insert(enum_def.name.clone())
+        if !enum_def.type_params.is_empty()
+            || !visiting.insert(enum_def.name.clone())
             || !crate::verification::support::datatype::is_finite_adt(enum_def, vc.module_env)
             || crate::verification::support::datatype::datatype_sort_for_type(vc, type_name)
                 .is_none()
@@ -497,7 +521,18 @@ pub(crate) fn validate_enum_array_type(vc: &VCtx<'_>, type_name: &str) -> Result
         let resolved = vc.module_env.resolve_base_type(type_name);
         if resolved.trim_start().starts_with('[') || resolved.trim_end().ends_with("[]") {
             let element_type = array_element_type_from_annotation(Some(type_name), vc.module_env);
-            validate_enum_array_element_type(vc, &element_type)?;
+            let element_sort =
+                array_element_sort_from_type(&element_type, vc.module_env, vc.ieee754_f64);
+            if visiting_structs.is_empty()
+                && matches!(
+                    element_sort,
+                    ArrayElementSort::Struct | ArrayElementSort::UnsupportedStruct
+                )
+            {
+                validate_array_element_type(vc, &element_type)?;
+            } else {
+                validate_enum_array_element_type(vc, &element_type)?;
+            }
         } else if let Some(struct_def) = vc.module_env.get_struct(&resolved) {
             if visiting_structs.insert(struct_def.name.clone()) {
                 for field in &struct_def.fields {
@@ -1198,6 +1233,7 @@ fn z3_sort_for_lowered<'a>(
 /// counterpart of `array_element_sort_from_type`, able to express the `Str`
 /// and nested `[T]` elements the flat tag cannot.
 pub(crate) fn z3_element_sort<'a>(vc: &VCtx<'a>, type_name: &str) -> z3::Sort<'a> {
+    let type_name = type_name.strip_prefix("enum:").unwrap_or(type_name);
     if let Some((sort, _)) =
         crate::verification::support::datatype::datatype_sort_for_type(vc, type_name)
     {
@@ -1277,6 +1313,16 @@ pub(crate) fn z3_dynamic_array<'a>(vc: &VCtx<'a>, name: &str, env: &Env<'a>) -> 
 pub(crate) struct StructArrayLeafSnapshot<'a> {
     element_type: String,
     arrays: HashMap<String, Array<'a>>,
+}
+
+impl<'a> StructArrayLeafSnapshot<'a> {
+    pub(crate) fn element_type(&self) -> &str {
+        &self.element_type
+    }
+
+    pub(crate) fn leaf_array(&self, path: &str) -> Option<Array<'a>> {
+        self.arrays.get(path).cloned()
+    }
 }
 
 pub(crate) fn snapshot_struct_array_leaves<'a>(
@@ -2394,7 +2440,7 @@ fn stmt_stores_to_array(
     stmt_stores_to_array_with_aliases(module_env, stmt, &aliases, bound_names, visited, depth)
 }
 
-fn array_aliases_in_stmt(stmt: &Stmt, name: &str) -> std::collections::HashSet<String> {
+pub(crate) fn array_aliases_in_stmt(stmt: &Stmt, name: &str) -> std::collections::HashSet<String> {
     let mut aliases = std::collections::HashSet::new();
     aliases.insert(name.to_string());
     loop {
@@ -2861,19 +2907,29 @@ pub(crate) fn coerce_array_store_value<'a>(
     array: &str,
     value: Dynamic<'a>,
 ) -> DynResult<'a> {
-    validate_array_element_type(vc, &array_element_type_name(array, vc))?;
+    let element_type = array_element_type_name(array, vc);
+    validate_array_element_type(vc, &element_type)?;
     let sort = array_element_sort(array, vc);
     if sort == ArrayElementSort::Enum {
-        let expected = z3_element_sort(vc, &array_element_type_name(array, vc));
-        if value.get_sort() != expected {
-            return Err(MumeiError::type_error(format!(
-                "Array store value has enum sort {}, expected {}",
-                value.get_sort(),
-                expected
-            )));
-        }
+        check_enum_array_store_type(vc, &element_type, &value)?;
     }
     coerce_to_array_elem_sort(vc, sort, &value)
+}
+
+pub(crate) fn check_enum_array_store_type(
+    vc: &VCtx<'_>,
+    element_type: &str,
+    value: &Dynamic<'_>,
+) -> Result<(), MumeiError> {
+    let expected = z3_element_sort(vc, element_type);
+    if value.get_sort() != expected {
+        return Err(MumeiError::type_error(format!(
+            "Array store value has enum sort {}, expected {}",
+            value.get_sort(),
+            expected
+        )));
+    }
+    Ok(())
 }
 
 /// Coerce `value` to the given array element sort (the name-keyed version
