@@ -219,6 +219,9 @@ pub const PURE_I64_COMPOSITE_PROFILE_V23: &str = "mumei.pure-i64-composite/v23";
 /// An omitted atom return type inferred as `i64` by the compiler
 /// (`pure-i64-composite/v24`).
 pub const PURE_I64_COMPOSITE_PROFILE_V24: &str = "mumei.pure-i64-composite/v24";
+/// Stateful effect declarations and their atom-level annotations
+/// (`pure-i64-composite/v25`).
+pub const PURE_I64_COMPOSITE_PROFILE_V25: &str = "mumei.pure-i64-composite/v25";
 
 /// Maximum byte length a `Str` literal may declare under
 /// `pure-i64-composite/v13`: one cell per byte under the
@@ -323,6 +326,10 @@ pub enum RefinedAdmission {
     /// when compiler inference resolves it to `i64`
     /// (`pure-i64-composite/v24`).
     CompositeV24,
+    /// `CompositeV25` additionally admits simple stateful effect
+    /// declarations and their bounded atom-level use
+    /// (`pure-i64-composite/v25`).
+    CompositeV25,
 }
 
 impl RefinedAdmission {
@@ -491,6 +498,12 @@ impl RefinedAdmission {
     pub fn admits_inferred_i64_returns(self) -> bool {
         self >= Self::CompositeV24
     }
+
+    /// Whether simple effect declarations and atom-level effect
+    /// annotations are admitted (`pure-i64-composite/v25`).
+    pub fn admits_effects(self) -> bool {
+        self >= Self::CompositeV25
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -517,6 +530,12 @@ pub struct ScalarSpecification {
     pub binders: Vec<TypedBinder>,
     pub requires: String,
     pub ensures: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effects: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect_pre: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect_post: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -626,6 +645,7 @@ pub fn extract_pure_i64_contract(
         allow_wrapping_arithmetic,
         false,
         false,
+        false,
         &refined,
         &structs,
         &EnumEnv::new(),
@@ -687,6 +707,7 @@ pub fn extract_pure_i64_module_contracts(
         str_bound_declared,
         wide_leaves,
     ) = admit_pure_i64_atoms(source, true, admission)?;
+    let effect_features_used = uses_effect_features(&items);
     // The translator-IR pin must see the same type environment the
     // verifier's certificate does — a `Port`-typed binder carries its
     // refinement annotation only when the alias is registered, and a
@@ -722,6 +743,7 @@ pub fn extract_pure_i64_module_contracts(
                     true,
                     inferred_i64_return,
                     inferred_i64_return_used,
+                    effect_features_used,
                     &refined,
                     &structs,
                     &enums,
@@ -780,9 +802,11 @@ pub fn module_source_profile(
         wide_leaves,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     let inferred_i64_return_used = !inferred_i64_return_atoms(&items, admission).is_empty();
+    let effect_features_used = uses_effect_features(&items);
     Ok(fragment_profile(
         true,
         inferred_i64_return_used,
+        effect_features_used,
         &refined,
         &structs,
         &enums,
@@ -925,11 +949,27 @@ fn admit_pure_i64_atoms(
     // uninterpreted function site — a callee's own contract is a separate
     // per-function obligation.
     let mut atom_names = BTreeSet::new();
+    let mut effect_names = BTreeSet::new();
     for item in &items {
         match item {
             Item::Atom(sibling) => {
                 if !atom_names.insert(sibling.name.clone()) {
                     return Err(SemanticContractError::Unsupported("duplicate atom name"));
+                }
+            }
+            Item::EffectDef(effect) if admission.admits_effects() => {
+                if !effect.params.is_empty()
+                    || effect.constraint.is_some()
+                    || effect.refinement.is_some()
+                    || !effect.includes.is_empty()
+                    || !effect.parent.is_empty()
+                {
+                    return Err(SemanticContractError::Unsupported(
+                        "effect declaration outside profile",
+                    ));
+                }
+                if !effect_names.insert(effect.name.clone()) {
+                    return Err(SemanticContractError::Unsupported("duplicate effect name"));
                 }
             }
             Item::TypeDef(_) if admission.admits_typedefs() => (),
@@ -939,6 +979,11 @@ fn admit_pure_i64_atoms(
                 return Err(SemanticContractError::Unsupported("non-atom declarations"));
             }
         }
+    }
+    if effect_names.iter().any(|name| atom_names.contains(name)) {
+        return Err(SemanticContractError::Unsupported(
+            "effect name collides with an atom or type name",
+        ));
     }
     // The arithmetic-used flag is shared with alias resolution below:
     // an `f64` predicate inside a `type` declaration needs the v19
@@ -954,12 +999,13 @@ fn admit_pure_i64_atoms(
         .keys()
         .chain(structs.keys())
         .chain(enums.keys())
-        .any(|name| atom_names.contains(name))
+        .any(|name| atom_names.contains(name) || effect_names.contains(name))
     {
         return Err(SemanticContractError::Unsupported(
-            "type name collides with an atom name",
+            "type name collides with an atom or effect name",
         ));
     }
+    let effects = effect_env(&items);
     let inferred_i64_returns = inferred_i64_return_atoms(&items, admission);
     let callees: BTreeMap<String, CalleeSig> = items
         .iter()
@@ -1002,6 +1048,9 @@ fn admit_pure_i64_atoms(
         let Item::Atom(sibling) = item else {
             continue;
         };
+        if admission.admits_effects() {
+            validate_atom_effects(sibling, &effects)?;
+        }
         validate_atom(
             sibling,
             inferred_i64_returns.contains(&sibling.name),
@@ -1015,6 +1064,7 @@ fn admit_pure_i64_atoms(
             admission.admits_enum_values(),
             admission.admits_str_bound(),
             admission.admits_wide_leaves(),
+            admission.admits_effects(),
         )?;
         // Every atom's contract is checked against the complete callee map,
         // not only the tail's: module validation compares each atom
@@ -1029,6 +1079,8 @@ fn admit_pure_i64_atoms(
             &refined,
             &structs,
             &enums,
+            &effects,
+            admission.admits_effects(),
             admission.admits_struct_values(),
             admission.admits_field_writes(),
             admission.admits_enum_values(),
@@ -1081,6 +1133,62 @@ fn admit_pure_i64_atoms(
         str_bound_declared,
         wide_leaves,
     ))
+}
+
+fn effect_env(items: &[Item]) -> EffectEnv {
+    items
+        .iter()
+        .filter_map(|item| {
+            let Item::EffectDef(effect) = item else {
+                return None;
+            };
+            Some((
+                effect.name.clone(),
+                EffectInfo {
+                    states: effect.states.iter().cloned().collect(),
+                    transitions: effect
+                        .transitions
+                        .iter()
+                        .map(|transition| transition.operation.clone())
+                        .collect(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn validate_atom_effects(atom: &Atom, effects: &EffectEnv) -> Result<(), SemanticContractError> {
+    for effect in &atom.effects {
+        if effect.negated || !effect.params.is_empty() {
+            return Err(SemanticContractError::Unsupported(
+                "parametric or negated effect use outside profile",
+            ));
+        }
+        if !effects.contains_key(&effect.name) {
+            return Err(SemanticContractError::Unsupported("effect outside module"));
+        }
+    }
+    for (name, state) in atom.effect_pre.iter().chain(&atom.effect_post) {
+        let Some(effect) = effects.get(name) else {
+            return Err(SemanticContractError::Unsupported("effect outside module"));
+        };
+        if !effect.states.contains(state) {
+            return Err(SemanticContractError::Unsupported(
+                "effect state outside declaration",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn uses_effect_features(items: &[Item]) -> bool {
+    items.iter().any(|item| match item {
+        Item::EffectDef(_) => true,
+        Item::Atom(atom) => {
+            !atom.effects.is_empty() || !atom.effect_pre.is_empty() || !atom.effect_post.is_empty()
+        }
+        _ => false,
+    })
 }
 
 /// Instantiate every generic `struct` declaration a module uses, as a
@@ -1421,6 +1529,7 @@ fn uses_f64_leaves(items: &[Item], inferred_i64_returns: &BTreeSet<String>) -> b
 fn fragment_profile(
     allow_wrapping_arithmetic: bool,
     inferred_i64_return_used: bool,
+    effect_features_used: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
@@ -1442,6 +1551,8 @@ fn fragment_profile(
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if effect_features_used {
+        PURE_I64_COMPOSITE_PROFILE_V25
     } else if inferred_i64_return_used {
         PURE_I64_COMPOSITE_PROFILE_V24
     } else if has_nested_enum_payloads(enums) {
@@ -1623,6 +1734,7 @@ fn atom_contract(
     allow_wrapping_arithmetic: bool,
     inferred_i64_return: bool,
     inferred_i64_return_used: bool,
+    effect_features_used: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
@@ -1647,6 +1759,7 @@ fn atom_contract(
     let profile = fragment_profile(
         allow_wrapping_arithmetic,
         inferred_i64_return_used,
+        effect_features_used,
         refined,
         structs,
         enums,
@@ -1734,10 +1847,30 @@ fn atom_contract(
                 span_precision: "atom",
             }),
     );
+    let effect_data_used =
+        !atom.effects.is_empty() || !atom.effect_pre.is_empty() || !atom.effect_post.is_empty();
     let specification = ScalarSpecification {
         binders,
         requires: atom.requires.clone(),
         ensures: atom.ensures.clone(),
+        effects: effect_data_used.then(|| {
+            atom.effects
+                .iter()
+                .map(|effect| effect.name.clone())
+                .collect()
+        }),
+        effect_pre: (!atom.effect_pre.is_empty()).then(|| {
+            atom.effect_pre
+                .iter()
+                .map(|(effect, state)| (effect.clone(), state.clone()))
+                .collect()
+        }),
+        effect_post: (!atom.effect_post.is_empty()).then(|| {
+            atom.effect_post
+                .iter()
+                .map(|(effect, state)| (effect.clone(), state.clone()))
+                .collect()
+        }),
     };
     // Provenance is separate from the logical identity; file relocation does not
     // change the obligation, while the full source digest still binds its text.
@@ -1786,6 +1919,15 @@ fn atom_contract(
     });
     if inferred_i64_return {
         specification_identity["inferred_return_type"] = serde_json::json!("i64");
+    }
+    if let Some(effects) = &specification.effects {
+        specification_identity["effects"] = serde_json::json!(effects);
+    }
+    if let Some(effect_pre) = &specification.effect_pre {
+        specification_identity["effect_pre"] = serde_json::json!(effect_pre);
+    }
+    if let Some(effect_post) = &specification.effect_post {
+        specification_identity["effect_post"] = serde_json::json!(effect_post);
     }
     // A struct result's identity includes the returned field layout the
     // same way a struct parameter's does; scalar results keep their
@@ -1880,6 +2022,31 @@ fn atom_contract(
             validation: LLVM_CORRESPONDENCE_STATUS,
         },
     ];
+    let mut exclusions = vec![
+        "Extraction does not prove the postcondition or precondition satisfiability.",
+        "HIR/MIR fingerprints identify internal snapshots, not semantic equivalence.",
+        "Target availability, LLVM lowering and final machine code are not verified.",
+        if u64_leaves {
+            if effect_features_used {
+                "Unsigned division and logical right shift are admitted for `u64`/`usize`/`isize` leaves only (`usize` folds to `u64`, `isize` to `i64` on the 64-bit target); `i128`, heap, FFI, ownership and concurrency are outside this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven. Division, remainder and shifts bind inputs only where defined. Calls are call-site comparisons only: the callee's own contract is a separate obligation. `while` loops are claimed only where every guard fails within the profile bound (4 evaluations); deeper executions are outside the compared domain."
+            } else {
+                "Unsigned division and logical right shift are admitted for `u64`/`usize`/`isize` leaves only (`usize` folds to `u64`, `isize` to `i64` on the 64-bit target); `i128`, heap, FFI, ownership, effects and concurrency are outside this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven. Division, remainder and shifts bind inputs only where defined. Calls are call-site comparisons only: the callee's own contract is a separate obligation. `while` loops are claimed only where every guard fails within the profile bound (4 evaluations); deeper executions are outside the compared domain."
+            }
+        } else if allow_wrapping_arithmetic {
+            if effect_features_used {
+                "No unsigned division, logical shifts, heap, FFI, ownership or concurrency in this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven. Division, remainder and shifts bind inputs only where defined. Calls are call-site comparisons only: the callee's own contract is a separate obligation. `while` loops are claimed only where every guard fails within the profile bound (4 evaluations); deeper executions are outside the compared domain."
+            } else {
+                "No unsigned division, logical shifts, heap, FFI, ownership, effects or concurrency in this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven. Division, remainder and shifts bind inputs only where defined. Calls are call-site comparisons only: the callee's own contract is a separate obligation. `while` loops are claimed only where every guard fails within the profile bound (4 evaluations); deeper executions are outside the compared domain."
+            }
+        } else {
+            "No arithmetic, heap, calls, FFI, ownership, effects or concurrency in this profile."
+        },
+    ];
+    if effect_features_used {
+        exclusions.push(
+            "Effect declarations, effect sets and pre/post states are recorded but not modeled; perform is a value no-op. Effect containment, temporal pre/post conformance and transition order are separate verifier obligations outside this contract.",
+        );
+    }
     Ok(SemanticContract {
         schema_version: SEMANTIC_CONTRACT_VERSION,
         profile,
@@ -1992,18 +2159,7 @@ fn atom_contract(
         } else {
             "Inputs are representable signed 64-bit integers."
         }],
-        exclusions: vec![
-            "Extraction does not prove the postcondition or precondition satisfiability.",
-            "HIR/MIR fingerprints identify internal snapshots, not semantic equivalence.",
-            "Target availability, LLVM lowering and final machine code are not verified.",
-            if u64_leaves {
-                "Unsigned division and logical right shift are admitted for `u64`/`usize`/`isize` leaves only (`usize` folds to `u64`, `isize` to `i64` on the 64-bit target); `i128`, heap, FFI, ownership, effects and concurrency are outside this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven. Division, remainder and shifts bind inputs only where defined. Calls are call-site comparisons only: the callee's own contract is a separate obligation. `while` loops are claimed only where every guard fails within the profile bound (4 evaluations); deeper executions are outside the compared domain."
-            } else if allow_wrapping_arithmetic {
-                "No unsigned division, logical shifts, heap, FFI, ownership, effects or concurrency in this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven. Division, remainder and shifts bind inputs only where defined. Calls are call-site comparisons only: the callee's own contract is a separate obligation. `while` loops are claimed only where every guard fails within the profile bound (4 evaluations); deeper executions are outside the compared domain."
-            } else {
-                "No arithmetic, heap, calls, FFI, ownership, effects or concurrency in this profile."
-            },
-        ],
+        exclusions,
     })
 }
 
@@ -2030,12 +2186,23 @@ enum ValueKind {
     Enum(String),
 }
 
+#[derive(Clone, Default)]
+struct EffectInfo {
+    states: BTreeSet<String>,
+    transitions: BTreeSet<String>,
+}
+
+type EffectEnv = BTreeMap<String, EffectInfo>;
+
 /// The kind-checking environment shared by every expression position of
 /// one atom: the module's callee map, the atom's struct-typed parameters
 /// (parameter name → struct name) and the module's struct map.
 #[derive(Clone)]
 struct KindEnv<'a> {
     callees: &'a BTreeMap<String, CalleeSig>,
+    effects: &'a EffectEnv,
+    atom_effects: BTreeSet<String>,
+    admit_effects: bool,
     composites: BTreeMap<String, &'a str>,
     structs: &'a StructEnv,
     /// The module's admitted enums: a composite name resolving to an
@@ -2964,6 +3131,8 @@ fn check_atom_contract(
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
+    effects: &EffectEnv,
+    admit_effects: bool,
     admit_struct_values: bool,
     admit_field_writes: bool,
     admit_enum_values: bool,
@@ -3037,6 +3206,13 @@ fn check_atom_contract(
         .collect();
     let env = KindEnv {
         callees,
+        effects,
+        atom_effects: atom
+            .effects
+            .iter()
+            .map(|effect| effect.name.clone())
+            .collect(),
+        admit_effects,
         composites,
         structs,
         enums,
@@ -3214,6 +3390,7 @@ fn validate_atom(
     admit_enum_values: bool,
     admit_str_bound: bool,
     admit_wide: bool,
+    admit_effects: bool,
 ) -> Result<(), SemanticContractError> {
     // A declared subrange integer result lowers to an i64 return like
     // the parameters — the emitter emits no truncation, so the checked
@@ -3277,9 +3454,10 @@ fn validate_atom(
         || !atom.type_params.is_empty()
         || !atom.where_bounds.is_empty()
         || !atom.resources.is_empty()
-        || !atom.effects.is_empty()
-        || !atom.effect_pre.is_empty()
-        || !atom.effect_post.is_empty()
+        || (!admit_effects
+            && (!atom.effects.is_empty()
+                || !atom.effect_pre.is_empty()
+                || !atom.effect_post.is_empty()))
         || !atom.forall_constraints.is_empty()
         || !atom.clause_modes.is_empty()
         || !atom.clause_labels.is_empty()
@@ -5059,6 +5237,9 @@ fn resolve_alias(
                 &BTreeSet::new(),
                 &KindEnv {
                     callees: &BTreeMap::new(),
+                    effects: &EffectEnv::new(),
+                    atom_effects: BTreeSet::new(),
+                    admit_effects: false,
                     composites: BTreeMap::new(),
                     structs: &StructEnv::new(),
                     enums: &EnumEnv::new(),
@@ -5265,6 +5446,57 @@ fn statement_kind(
     }
 }
 
+fn validate_perform_statement(
+    effect: &str,
+    operation: &str,
+    args: &[Expr],
+    scope: &BTreeMap<String, ScalarKind>,
+    result_in_scope: bool,
+    allow_wrapping_arithmetic: bool,
+    env: &KindEnv<'_>,
+) -> Result<(), SemanticContractError> {
+    if !env.atom_effects.contains(effect) {
+        return Err(SemanticContractError::Unsupported(
+            "perform effect not declared by atom",
+        ));
+    }
+    let Some(declaration) = env.effects.get(effect) else {
+        return Err(SemanticContractError::Unsupported(
+            "perform effect outside module",
+        ));
+    };
+    if !declaration.transitions.is_empty() && !declaration.transitions.contains(operation) {
+        return Err(SemanticContractError::Unsupported(
+            "perform operation outside effect transitions",
+        ));
+    }
+    for arg in args {
+        let kind = expression_kind(
+            arg,
+            scope,
+            result_in_scope,
+            allow_wrapping_arithmetic,
+            &BTreeSet::new(),
+            env,
+        )?;
+        if !matches!(
+            kind,
+            ScalarKind::I64
+                | ScalarKind::U64
+                | ScalarKind::Bool
+                | ScalarKind::Num
+                | ScalarKind::F64
+                | ScalarKind::I128
+                | ScalarKind::U128
+        ) {
+            return Err(SemanticContractError::Unsupported(
+                "perform argument outside scalar profile",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The non-tail statements of a sequential block: `let` bindings
 /// (scalar, or struct-valued under `pure-i64-composite/v3`), scalar
 /// reassignments, discarded pure expressions and mid-block `while`s.
@@ -5413,6 +5645,24 @@ fn block_prefix_kinds<'a>(
                     &inner_env,
                 )?;
                 expect_kind(kind, inner[var])?;
+            }
+            Stmt::Expr(
+                Expr::Perform {
+                    effect,
+                    operation,
+                    args,
+                },
+                _,
+            ) if inner_env.admit_effects => {
+                validate_perform_statement(
+                    effect,
+                    operation,
+                    args,
+                    &inner,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    &inner_env,
+                )?;
             }
             Stmt::Expr(value, _) => {
                 expression_kind(
@@ -6525,6 +6775,9 @@ fn expression_kind(
         // and an `i64` one both accept them, so `a(u64) >= 0` kind-checks
         // like `a(i64) >= 0` does — with no numeric-suffix syntax.
         Expr::Number(_) => Ok(ScalarKind::Num),
+        Expr::Perform { .. } => Err(SemanticContractError::Unsupported(
+            "perform outside statement position",
+        )),
         // A `Str` literal (`pure-i64-composite/v13`): a bounded inline
         // byte sequence, immutable, at most `STR_BOUND` cells under
         // the bounded-memory model.
@@ -10382,6 +10635,25 @@ fn source_expr<'ctx>(
         return Err(SemanticContractError::Unsupported("source depth limit"));
     }
     Ok(match expr {
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                source_expr(
+                    arg,
+                    ctx,
+                    env,
+                    guard,
+                    definedness,
+                    depth + 1,
+                    &BTreeSet::new(),
+                    written,
+                    loop_exits,
+                    call_sites,
+                    call_returns,
+                    enums,
+                )?;
+            }
+            N(BV::from_u64(ctx, 0, 64))
+        }
         Expr::Number(n) => N(BV::from_i64(ctx, *n, 64)),
         Expr::Variable(n) if n == "true" || n == "false" => B(Bool::from_bool(ctx, n == "true")),
         Expr::Variable(n) => env
@@ -15971,6 +16243,197 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
         assert!(wrong_callee[1..]
             .iter()
             .all(|result| *result == z3::SatResult::Unsat));
+    }
+
+    #[test]
+    fn composite_v25_records_effects_and_models_perform_as_noop() {
+        let source = "effect Audit states: [Open, Closed];\n\
+            effect Vault\n\
+            states: [Idle, Checked, Effected, Interacted, Extra];\n\
+            initial: Idle;\n\
+            transition check: Idle -> Checked;\n\
+            transition update: Checked -> Effected;\n\
+            transition interact: Effected -> Interacted;\n\
+            atom withdraw(balance: i64, amount: i64) -> i64\n\
+                effects: [Vault, Audit];\n\
+                effect_pre: { Vault: Idle, Audit: Open };\n\
+                effect_post: { Vault: Interacted, Audit: Closed };\n\
+                requires: balance >= 0 && balance <= 1000000000 && amount > 0 && balance >= amount;\n\
+                ensures: result == balance - amount && result >= 0;\n\
+                body: {\n\
+                    perform Vault.check;\n\
+                    perform Vault.update;\n\
+                    perform Vault.interact;\n\
+                    balance - amount\n\
+                }";
+        let contracts =
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV25)
+                .unwrap();
+        assert_eq!(contracts.len(), 1);
+        assert_eq!(contracts[0].profile, PURE_I64_COMPOSITE_PROFILE_V25);
+        assert_eq!(
+            module_source_profile(source, RefinedAdmission::CompositeV25).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V25
+        );
+        let specification = serde_json::to_value(&contracts[0].specification).unwrap();
+        assert_eq!(
+            specification["effects"],
+            serde_json::json!(["Vault", "Audit"])
+        );
+        assert_eq!(specification["effect_pre"]["Vault"], "Idle");
+        assert_eq!(specification["effect_post"]["Audit"], "Closed");
+        assert_eq!(
+            serde_json::to_string(&specification["effect_pre"]).unwrap(),
+            r#"{"Audit":"Open","Vault":"Idle"}"#
+        );
+        assert_eq!(specification["effect_post"]["Vault"], "Interacted");
+        assert!(
+            refined_module_outcomes_admission(source, RefinedAdmission::CompositeV25)
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat)
+        );
+        assert!(matches!(
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV24),
+            Err(SemanticContractError::Unsupported("non-atom declarations"))
+        ));
+
+        let changed_states = source.replace(
+            "Effected, Interacted, Extra",
+            "Effected, Interacted, Extra, Added",
+        );
+        let changed_effect_post = source.replace("Vault: Interacted", "Vault: Effected");
+        let changed_effect_set = source.replace("effects: [Vault, Audit]", "effects: [Vault]");
+        for changed in [changed_states, changed_effect_post, changed_effect_set] {
+            let changed_contracts = extract_pure_i64_module_contracts(
+                &changed,
+                "m.mm",
+                None,
+                RefinedAdmission::CompositeV25,
+            )
+            .unwrap();
+            assert_ne!(
+                serde_json::to_vec(&contracts).unwrap(),
+                serde_json::to_vec(&changed_contracts).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn composite_v25_keeps_effect_free_composite_v24_contract_bytes() {
+        let source = "atom inc(x: i64) requires: x >= 0 && x <= 100; ensures: result == x + 1; body: x + 1;\n\
+            atom main() -> i64 requires: true; ensures: result == 4; body: inc(3);";
+        let v24 =
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV24)
+                .unwrap();
+        let v25 =
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV25)
+                .unwrap();
+        assert!(v24
+            .iter()
+            .all(|contract| contract.profile == PURE_I64_COMPOSITE_PROFILE_V24));
+        assert!(v25
+            .iter()
+            .all(|contract| contract.profile == v24[0].profile));
+        assert_eq!(
+            serde_json::to_vec(&v24).unwrap(),
+            serde_json::to_vec(&v25).unwrap()
+        );
+    }
+
+    #[test]
+    fn composite_v25_rejects_out_of_profile_effects_and_perform_forms() {
+        let v25 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV25)
+        };
+        for (source, reason) in [
+            (
+                "effect Vault(x: i64);\natom f() -> i64 requires: true; ensures: true; body: 0;",
+                "effect declaration outside profile",
+            ),
+            (
+                "effect Vault where true;\natom f() -> i64 requires: true; ensures: true; body: 0;",
+                "effect declaration outside profile",
+            ),
+            (
+                "effect Base;\neffect Combined = Base;\natom f() -> i64 requires: true; ensures: true; body: 0;",
+                "effect declaration outside profile",
+            ),
+            (
+                "effect Base;\neffect Child parent: Base;\natom f() -> i64 requires: true; ensures: true; body: 0;",
+                "effect declaration outside profile",
+            ),
+            (
+                "effect Vault;\natom f(x: i64) -> i64 effects: [Vault(x)]; requires: true; ensures: true; body: x;",
+                "parametric or negated effect use outside profile",
+            ),
+            (
+                "effect Vault;\natom f() -> i64 effects: [!Vault]; requires: true; ensures: true; body: 0;",
+                "parametric or negated effect use outside profile",
+            ),
+            (
+                "effect Vault;\natom f(x: i64) -> i64 effects: [Vault]; requires: true; ensures: true; body: { let y = perform Vault.apply(x); y };",
+                "perform outside statement position",
+            ),
+            (
+                "effect Vault;\natom f(x: i64) -> i64 effects: [Vault]; requires: true; ensures: true; body: { perform Vault.apply(x) };",
+                "perform outside statement position",
+            ),
+            (
+                "effect Vault;\natom f(x: i64) -> i64 effects: [Vault]; requires: perform Vault.apply(x) == 0; ensures: true; body: x;",
+                "perform outside statement position",
+            ),
+            (
+                "effect Vault;\natom id(x: i64) -> i64 requires: true; ensures: result == x; body: x;\n\
+                    atom f(x: i64) -> i64 effects: [Vault]; requires: true; ensures: true; body: id(perform Vault.apply(x));",
+                "perform outside statement position",
+            ),
+            (
+                "effect Vault;\natom f(x: i64) -> i64 requires: true; ensures: true; body: { perform Vault.apply(x); x };",
+                "perform effect not declared by atom",
+            ),
+            (
+                "effect Vault states: [Idle, Done]; transition apply: Idle -> Done;\natom f(x: i64) -> i64 effects: [Vault]; requires: true; ensures: true; body: { perform Vault.missing(x); x };",
+                "perform operation outside effect transitions",
+            ),
+            (
+                "effect Vault states: [Idle];\natom f(x: i64) -> i64 effects: [Vault]; effect_pre: { Vault: Missing }; requires: true; ensures: true; body: x;",
+                "effect state outside declaration",
+            ),
+            (
+                "atom f(x: i64) -> i64 effects: [Undeclared]; requires: true; ensures: true; body: x;",
+                "effect outside module",
+            ),
+            (
+                "effect Vault;\neffect Vault;\natom f() -> i64 requires: true; ensures: true; body: 0;",
+                "duplicate effect name",
+            ),
+            (
+                "effect f;\natom f() -> i64 requires: true; ensures: true; body: 0;",
+                "effect name collides with an atom or type name",
+            ),
+            (
+                "type Vault = i64;\neffect Vault;\natom f(x: i64) -> i64 requires: true; ensures: true; body: x;",
+                "type name collides with an atom or effect name",
+            ),
+        ] {
+            assert!(
+                matches!(v25(source), Err(SemanticContractError::Unsupported(actual)) if actual == reason),
+                "unexpected result for {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn composite_v25_refutes_false_effect_atom_postcondition() {
+        let source = "effect Vault states: [Idle];\n\
+            atom withdraw(balance: i64, amount: i64) -> i64\n\
+                effects: [Vault];\n\
+                effect_pre: { Vault: Idle };\n\
+                requires: balance >= 0 && amount > 0 && balance >= amount;\n\
+                ensures: result == balance - amount + 1;\n\
+                body: { perform Vault.withdraw(amount); balance - amount }";
+        let outcomes = refined_module_outcomes_admission(source, RefinedAdmission::CompositeV25);
+        assert!(outcomes.contains(&z3::SatResult::Sat), "{outcomes:?}");
     }
 }
 
