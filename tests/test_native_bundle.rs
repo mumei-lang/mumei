@@ -13,6 +13,49 @@ const GOOD: &str = "atom main() -> i64 requires: true; ensures: result == 7; bod
 const INFERRED_I64_MODULE: &str =
     "atom inc(x: i64) requires: x >= 0 && x <= 100; ensures: result == x + 1; body: { x + 1 };\n\
      atom main() -> i64 requires: true; ensures: result == 4; body: { inc(3) };";
+const STATEFUL_EFFECT_MODULE: &str = r#"
+effect Vault
+    states: [Idle, Checked, Effected, Interacted];
+    initial: Idle;
+    transition check: Idle -> Checked;
+    transition update: Checked -> Effected;
+    transition interact: Effected -> Interacted;
+
+atom wide_identity(value: i128) -> i128
+    requires: true;
+    ensures: result == value;
+    body: value;
+
+atom main() -> i64
+    effects: [Vault];
+    effect_pre: { Vault: Idle };
+    effect_post: { Vault: Interacted };
+    requires: true;
+    ensures: result == 7;
+    body: {
+        perform Vault.check;
+        perform Vault.update;
+        perform Vault.interact;
+        7
+    }
+"#;
+const SINGLE_ATOM_EFFECT_MODULE: &str = r#"
+effect Door
+    states: [Closed, Open];
+    initial: Closed;
+    transition open: Closed -> Open;
+
+atom main() -> i64
+    effects: [Door];
+    effect_pre: { Door: Closed };
+    effect_post: { Door: Open };
+    requires: true;
+    ensures: result == 0;
+    body: {
+        perform Door.open;
+        0
+    }
+"#;
 const BRANCH: &str = "atom absd(x: i64, y: i64) -> i64 requires: x >= 0 && x <= 1000 && y >= 0 && y <= 1000; ensures: result >= 0; body: { if x > y { x - y } else { y - x } };\n\
 atom clamp(x: i64) -> i64 requires: true; ensures: result <= 10; body: { if x > 10 { 10 } else { x } };\n\
 atom pick(b: bool, x: i64) -> i64 requires: true; ensures: true; body: { if b { x } else { 0 } };\n\
@@ -289,6 +332,7 @@ fn repin(bundle: &Path, source: Option<&str>) -> String {
 fn recheck_object_reports_single_bundle_symbol_surface() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build(root.path());
+    assert_eq!(module_record(&bundle)["profile"], native_bundle::PROFILE);
 
     let text = recheck_object(&source, &bundle, &id, false);
     assert_success(&text);
@@ -6513,6 +6557,23 @@ fn module_bundle_with_inferred_i64_return_builds_as_v27_and_rechecks() {
         record["source"]["source_profile"],
         mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V24
     );
+    let binding_v24 = native_bundle::prepare_module_source(
+        INFERRED_I64_MODULE,
+        mumei_core::semantic_contract::RefinedAdmission::CompositeV24,
+    )
+    .unwrap()
+    .0;
+    let binding_v25 = native_bundle::prepare_module_source(
+        INFERRED_I64_MODULE,
+        mumei_core::semantic_contract::RefinedAdmission::CompositeV25,
+    )
+    .unwrap()
+    .0;
+    assert_eq!(
+        serde_json::to_vec(&binding_v24).unwrap(),
+        serde_json::to_vec(&binding_v25).unwrap()
+    );
+    assert_eq!(record["source"], serde_json::to_value(binding_v25).unwrap());
     assert_success(&check(&source, &bundle, &id));
     assert_success(&recheck(&source, &bundle, &id));
     assert_success(&recheck_llvm(&source, &bundle, &id));
@@ -6538,6 +6599,68 @@ fn module_bundle_with_inferred_i64_return_builds_as_v27_and_rechecks() {
     fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
     let tampered = recheck(&source, &bundle, &native_bundle::sha256(&bytes));
     assert!(!tampered.status.success());
+}
+
+#[test]
+fn module_bundle_with_stateful_effects_builds_as_v28_and_rechecks() {
+    let root = tempfile::tempdir().unwrap();
+    mumei_core::semantic_contract::extract_pure_i64_module_contracts(
+        STATEFUL_EFFECT_MODULE,
+        "source.mm",
+        None,
+        mumei_core::semantic_contract::RefinedAdmission::CompositeV25,
+    )
+    .expect("stateful effect module must extract under CompositeV25");
+    let (source, bundle, id) = build_source(root.path(), STATEFUL_EFFECT_MODULE);
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V28);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V25
+    );
+    assert_eq!(
+        record["leaf_widths"]["wide_identity"],
+        serde_json::json!([128])
+    );
+    assert_eq!(record["leaf_widths"]["main"], serde_json::json!([]));
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_eq!(
+        Command::new(bundle.join("program"))
+            .status()
+            .unwrap()
+            .code(),
+        Some(7)
+    );
+
+    let mut downgraded = module_record(&bundle);
+    downgraded["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V27.into());
+    let bytes = serde_json::to_vec_pretty(&downgraded).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!recheck(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
+fn single_atom_effect_module_routes_to_v28_and_rechecks() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), SINGLE_ATOM_EFFECT_MODULE);
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V28);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V25
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_eq!(
+        Command::new(bundle.join("program"))
+            .status()
+            .unwrap()
+            .code(),
+        Some(0)
+    );
 }
 
 #[test]
@@ -6595,4 +6718,79 @@ fn multifile_bundle_with_inferred_i64_return_builds_as_v27() {
         mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V24
     );
     assert_success(&check(&source, &bundle, &id));
+}
+
+#[test]
+fn multifile_bundle_imported_effect_declaration_builds_as_v28_and_rechecks() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    let imported_effect = r#"
+effect Vault
+    states: [Idle, Checked, Effected, Interacted];
+    initial: Idle;
+    transition check: Idle -> Checked;
+    transition update: Checked -> Effected;
+    transition interact: Effected -> Interacted;
+"#;
+    let root_source = r#"
+import "effects" as Vault;
+
+atom main() -> i64
+    effects: [Vault];
+    effect_pre: { Vault: Idle };
+    effect_post: { Vault: Interacted };
+    requires: true;
+    ensures: result == 7;
+    body: {
+        perform Vault.check;
+        perform Vault.update;
+        perform Vault.interact;
+        7
+    }
+"#;
+    fs::write(root.path().join("effects.mm"), imported_effect).unwrap();
+    fs::write(&source, root_source).unwrap();
+
+    let prepared = native_bundle::prepare_multifile_source(
+        "app.mm",
+        &BTreeMap::from([
+            ("app.mm".to_owned(), root_source.to_owned()),
+            ("effects.mm".to_owned(), imported_effect.to_owned()),
+        ]),
+        mumei_core::semantic_contract::RefinedAdmission::CompositeV25,
+    )
+    .unwrap();
+    assert!(prepared.merged.contains("effect Vault"));
+    assert!(prepared.merged.contains("perform Vault.check;"));
+    assert!(!prepared.merged.contains("Vault::"));
+    assert!(native_bundle::prepare_multifile_source(
+        "app.mm",
+        &BTreeMap::from([
+            ("app.mm".to_owned(), root_source.to_owned()),
+            (
+                "effects.mm".to_owned(),
+                "effect Vault(path: i64);".to_owned(),
+            ),
+        ]),
+        mumei_core::semantic_contract::RefinedAdmission::CompositeV25,
+    )
+    .is_err());
+
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MULTIFILE_PROFILE_V28);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V25
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
 }

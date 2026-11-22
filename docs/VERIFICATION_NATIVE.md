@@ -616,13 +616,15 @@ edges; the LLVM edge remains unchecked, while C09's opt-in
 fail closed, and no edge is labeled lossy.
 
 The opt-in `mumei build --semantic-contract` path writes a sidecar beside
-emitted LLVM IR, using the CompositeV24 module profile. Its SHA-256 binds the
+emitted LLVM IR, using the CompositeV25 module profile. Its SHA-256 binds the
 exact `.ll` bytes only; correspondence remains unchecked, and it is not emitted
 by default. The consumer recheck below is diagnostic only, not acceptance.
 
 `mumei evidence recheck-sidecar <SIDECAR> --source <SRC> --artifact <LL>`
-checks the sidecar shape and artifact hash, freshly extracts the CompositeV24
+checks the sidecar shape and artifact hash, freshly extracts the CompositeV25
 contracts from caller-supplied source, and rechecks their module obligations.
+Existing effect-free v24 sidecars remain byte-identical and recheck under the
+widened admission.
 This diagnostic does not establish producer authenticity, source-to-LLVM
 correspondence, artifact semantics or acceptance; correspondence remains
 unchecked.
@@ -1633,9 +1635,11 @@ The declarations, sets and pre/post states are recorded but not modeled.
 Effect containment, temporal pre/post conformance and transition order
 remain separate verifier obligations outside this contract; none of
 these features is marked validated. Modules without effect features keep
-their existing profile pin and serialized contract bytes. Native-bundle
-and semantic-contract sidecar paths remain on their existing
-CompositeV24 source admission.
+their existing profile pin and serialized contract bytes. Native module
+and multifile bundles use profile v28 for v25 sources, while effect-free
+bundles retain their previous profile pins. Semantic-contract sidecar
+production, recheck and acceptance now use CompositeV25; effect-free
+sidecar bytes remain unchanged.
 
 Nothing deeper is claimed: the fragment admitted by the profile grew,
 the guarantees did not — the same identity-plus-recheck scopes apply,

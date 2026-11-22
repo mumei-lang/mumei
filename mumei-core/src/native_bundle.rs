@@ -154,13 +154,16 @@ pub const MODULE_PROFILE_V26: &str = "mumei.native-pure-i64-module-linux-x86_64/
 /// v26 plus compiler-inferred i64 returns on non-main atoms
 /// (`pure-i64-composite/v24`).
 pub const MODULE_PROFILE_V27: &str = "mumei.native-pure-i64-module-linux-x86_64/v27";
+/// v27 plus simple stateful effect declarations and statement-position
+/// `perform` (`pure-i64-composite/v25`).
+pub const MODULE_PROFILE_V28: &str = "mumei.native-pure-i64-module-linux-x86_64/v28";
 pub const MODULE_SCOPE: &str =
     "identity_consistency_only/no_authenticity_or_artifact_semantic_proof";
 pub const MODULE_RECHECK_PROFILE: &str = "mumei.native-module-source-recheck/v1";
 
 /// The admission mode a pinned module/multifile record demands: v1
-/// uses `Reject`, v2/v3 use `V1`/`V2`, and v4–v27 map in order to
-/// `Composite` through `CompositeV24`. Anything else is not this
+/// uses `Reject`, v2/v3 use `V1`/`V2`, and v4–v28 map in order to
+/// `Composite` through `CompositeV25`. Anything else is not this
 /// schema's record.
 pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, BundleError> {
     match profile {
@@ -191,6 +194,7 @@ pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, Bundl
         MODULE_PROFILE_V25 => Ok(RefinedAdmission::CompositeV22),
         MODULE_PROFILE_V26 => Ok(RefinedAdmission::CompositeV23),
         MODULE_PROFILE_V27 => Ok(RefinedAdmission::CompositeV24),
+        MODULE_PROFILE_V28 => Ok(RefinedAdmission::CompositeV25),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -278,10 +282,13 @@ pub const MULTIFILE_PROFILE_V26: &str = "mumei.native-pure-i64-multifile-linux-x
 /// Multifile v27: v26 plus compiler-inferred i64 returns on non-main
 /// atoms (`pure-i64-composite/v24`).
 pub const MULTIFILE_PROFILE_V27: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v27";
+/// Multifile v28: v27 plus simple stateful effect declarations and
+/// statement-position `perform` (`pure-i64-composite/v25`).
+pub const MULTIFILE_PROFILE_V28: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v28";
 pub const MULTIFILE_RECHECK_PROFILE: &str = "mumei.native-multifile-source-recheck/v1";
 
-/// Decode a multifile record's pinned source admission; v27 uses
-/// `CompositeV24`, while older profile numbers retain their own gates.
+/// Decode a multifile record's pinned source admission; v28 uses
+/// `CompositeV25`, while older profile numbers retain their own gates.
 pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, BundleError> {
     match profile {
         MULTIFILE_PROFILE => Ok(RefinedAdmission::Reject),
@@ -311,6 +318,7 @@ pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, Bu
         MULTIFILE_PROFILE_V25 => Ok(RefinedAdmission::CompositeV22),
         MULTIFILE_PROFILE_V26 => Ok(RefinedAdmission::CompositeV23),
         MULTIFILE_PROFILE_V27 => Ok(RefinedAdmission::CompositeV24),
+        MULTIFILE_PROFILE_V28 => Ok(RefinedAdmission::CompositeV25),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -868,7 +876,12 @@ pub fn check_identity(
         || cert.atoms[0].body_expr != atom.body_expr
         || !cert.atoms[0].assumed_clauses.is_empty()
         || !cert.atoms[0].forall_constraints.is_empty()
-        || !cert.atoms[0].effects.is_empty()
+        || cert.atoms[0].effects
+            != atom
+                .effects
+                .iter()
+                .map(|effect| effect.name.clone())
+                .collect::<Vec<_>>()
         || sha256(
             &serde_json::to_vec(&cert.atoms[0].translator_ir)
                 .map_err(|_| BundleError("IR encoding failed"))?,
@@ -888,9 +901,9 @@ pub fn check_identity(
 
 /// Parse and admit a multi-atom module under the widened wrapping profile:
 /// every item is an atom satisfying the per-atom gates — plus, when
-/// `admission` permits, refined scalar type and struct declarations — and
-/// exactly one atom is `main` — zero-argument with a literal `true`
-/// precondition, matching the profile the C `main` wrapper attests.
+/// `admission` permits, refined scalar types, structs, enums and simple
+/// stateful effects — and exactly one atom is `main`, zero-argument with
+/// a literal `true` precondition, matching the profile the C `main` wrapper attests.
 /// Returns the declared refined types and structs so the build path can
 /// register them with the verifier's environment the same way
 /// `mumei verify` does.
@@ -941,6 +954,7 @@ pub fn prepare_module_source(
             parser::Item::TypeDef(typedef) => types.push(typedef),
             parser::Item::StructDef(struct_def) => structs.push(struct_def),
             parser::Item::EnumDef(enum_def) => enums.push(enum_def),
+            parser::Item::EffectDef(_) if admission.admits_effects() => (),
             _ => return Err(BundleError("non-atom declarations")),
         }
     }
@@ -1164,8 +1178,8 @@ type MemberImports = (Vec<String>, Vec<String>, std::collections::BTreeSet<usize
 /// self-import (post-resolution, so `sub/a.mm` importing `"a"` counts),
 /// distinct qualifiers (alias or stem — two members bound to the same
 /// namespace sugar would strip to the same bare-name space
-/// ambiguously), atoms plus the `type`/`struct` declarations the pinned
-/// admission permits the only other allowed items, and every import
+/// ambiguously), atoms plus the declarations the pinned admission
+/// permits, and every import
 /// alone on its line as one strict `import "..." [as x];` statement
 /// (a trailing `//` comment is trivia).
 fn member_imports(
@@ -1209,6 +1223,7 @@ fn member_imports(
             parser::Item::TypeDef(_) if admission.admits_typedefs() => (),
             parser::Item::StructDef(_) if admission.admits_structs() => (),
             parser::Item::EnumDef(_) if admission.admits_enums() => (),
+            parser::Item::EffectDef(_) if admission.admits_effects() => (),
             _ => return Err(BundleError("declaration outside multifile profile")),
         }
     }
@@ -1310,8 +1325,8 @@ pub fn import_graph_sha256(graph: &BTreeMap<String, Vec<String>>) -> String {
 }
 
 /// The full multifile derivation's products: the merged text's per-atom
-/// binding, the file-graph pin, the admitted atoms, type and struct
-/// declarations, and the canonical merged source itself, so
+/// binding, the file-graph pin, the admitted atoms, declarations and
+/// canonical merged source itself, so
 /// emit/recheck feed the same bytes the binding describes.
 pub struct PreparedMultifileSource {
     pub binding: ModuleSourceBinding,
@@ -1324,8 +1339,8 @@ pub struct PreparedMultifileSource {
 }
 
 /// Merge the import closure and admit the merged text under the module
-/// gate (atom items plus, under `admission`, refined `type` and
-/// `struct` declarations).
+/// gate (atom items plus, under `admission`, refined `type`, `struct`,
+/// `enum` and simple stateful `effect` declarations).
 pub fn prepare_multifile_source(
     root_name: &str,
     sources: &BTreeMap<String, String>,
@@ -1385,6 +1400,7 @@ pub fn load_pinned_module_record(
             MODULE_PROFILE_V25,
             MODULE_PROFILE_V26,
             MODULE_PROFILE_V27,
+            MODULE_PROFILE_V28,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1466,6 +1482,7 @@ pub fn load_pinned_multifile_record(
             MULTIFILE_PROFILE_V25,
             MULTIFILE_PROFILE_V26,
             MULTIFILE_PROFILE_V27,
+            MULTIFILE_PROFILE_V28,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1551,10 +1568,12 @@ fn check_leaf_widths(
             | MODULE_PROFILE_V25
             | MODULE_PROFILE_V26
             | MODULE_PROFILE_V27
+            | MODULE_PROFILE_V28
             | MULTIFILE_PROFILE_V24
             | MULTIFILE_PROFILE_V25
             | MULTIFILE_PROFILE_V26
             | MULTIFILE_PROFILE_V27
+            | MULTIFILE_PROFILE_V28
     );
     // v24 pins only when a wide leaf is actually declared in an atom
     // signature, so a v24 record must show a 128 somewhere. v25 pins on
@@ -1647,6 +1666,11 @@ fn check_module_members(
         let Some(atom_binding) = binding.atoms.get(&atom.name) else {
             return Err(BundleError("certificate binding mismatch"));
         };
+        let effects: Vec<String> = atom
+            .effects
+            .iter()
+            .map(|effect| effect.name.clone())
+            .collect();
         // The certificate annotates its translator IR with the
         // manual-lemma reason (`match`/inductive bodies always carry
         // one); the binding pins the extraction gate's IR identity,
@@ -1660,7 +1684,7 @@ fn check_module_members(
             || cert_atom.body_expr != atom.body_expr
             || !cert_atom.assumed_clauses.is_empty()
             || !cert_atom.forall_constraints.is_empty()
-            || !cert_atom.effects.is_empty()
+            || cert_atom.effects != effects
             || sha256(
                 &serde_json::to_vec(&cert_translator_ir)
                     .map_err(|_| BundleError("IR encoding failed"))?,
@@ -2219,8 +2243,16 @@ mod source_recheck_tests {
             RefinedAdmission::CompositeV24
         );
         assert_eq!(
+            module_refined_admission(MODULE_PROFILE_V28).unwrap(),
+            RefinedAdmission::CompositeV25
+        );
+        assert_eq!(
             multifile_refined_admission(MULTIFILE_PROFILE_V27).unwrap(),
             RefinedAdmission::CompositeV24
+        );
+        assert_eq!(
+            multifile_refined_admission(MULTIFILE_PROFILE_V28).unwrap(),
+            RefinedAdmission::CompositeV25
         );
         assert!(module_refined_admission("mumei.other/v1").is_err());
         assert!(multifile_refined_admission("mumei.other/v1").is_err());
