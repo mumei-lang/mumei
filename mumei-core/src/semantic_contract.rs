@@ -15942,6 +15942,36 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
             serde_json::to_vec(&v24).unwrap()
         );
     }
+
+    #[test]
+    fn composite_v24_module_obligations_recheck_inferred_return_callees() {
+        let source = "atom inc(a: i64) requires: a >= 0 && a <= 1000; ensures: result == a + 1; body: a + 1;\n\
+             atom twice(x: i64) -> i64 requires: x >= 0 && x <= 100; ensures: result == x + 2; body: inc(x + 1);";
+        let valid = refined_module_outcomes_admission(source, RefinedAdmission::CompositeV24);
+        assert!(valid.iter().all(|result| *result == z3::SatResult::Unsat));
+
+        let wrong_caller_source =
+            source.replace("ensures: result == x + 2;", "ensures: result == x + 3;");
+        let wrong_caller =
+            refined_module_outcomes_admission(&wrong_caller_source, RefinedAdmission::CompositeV24);
+        assert!(wrong_caller.len() >= 3, "{wrong_caller:?}");
+        assert_eq!(wrong_caller[0], z3::SatResult::Unsat);
+        assert_eq!(wrong_caller[1], z3::SatResult::Sat);
+        assert!(wrong_caller[2..]
+            .iter()
+            .all(|result| *result == z3::SatResult::Unsat));
+
+        let wrong_callee_source = source
+            .replace("ensures: result == a + 1;", "ensures: result == a + 2;")
+            .replace("ensures: result == x + 2;", "ensures: true;");
+        let wrong_callee =
+            refined_module_outcomes_admission(&wrong_callee_source, RefinedAdmission::CompositeV24);
+        assert!(wrong_callee.len() >= 3, "{wrong_callee:?}");
+        assert_eq!(wrong_callee[0], z3::SatResult::Sat);
+        assert!(wrong_callee[1..]
+            .iter()
+            .all(|result| *result == z3::SatResult::Unsat));
+    }
 }
 
 /// Whether a flattened enum payload slot lowers with the profile's
