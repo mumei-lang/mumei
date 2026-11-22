@@ -2801,9 +2801,12 @@ no producer or grade behavior changes, and C02 remains open. The `All
 verified:` line reports the re-check verdict, not the certificate's stored
 claim.
 
-Opt-in detached-signature binding now covers `mumei evidence accept`
-requirement routes; `accept-list`/`accept-source` binding, key rotation,
-root-key revocation and producer-time authenticity remain open.
+Opt-in detached-signature binding covers `mumei evidence accept` requirement
+routes, `accept-list` over raw list-envelope bytes, and `accept-source` over
+raw saved-record bytes. `produced_at_signed` reports that a producer signed the
+record's declared timestamp, not that the timestamp is true. Key rotation and
+root-key revocation (#886 deferred), revocation-list rollback (78a4), and clock
+authenticity remain open.
 
 The initial delivery documents ownership and minimal semantics, and adds a
 standalone evidence schema with synthetic positive/negative fixtures. Its schema

@@ -1,4 +1,4 @@
-use crate::cli::EvidenceCommand;
+use crate::cli::{EvidenceCommand, SignatureArgs};
 use mumei_core::adapter_manifest;
 use mumei_core::attempt_schedule;
 use mumei_core::evidence_acceptance::{self, Verdict};
@@ -45,6 +45,7 @@ pub(crate) fn run(command: EvidenceCommand) {
             solver_timeout,
             solver_resource_limit,
             produced_at,
+            signature,
         } => (
             source_options(&solver_timeout, &solver_resource_limit, produced_at).and_then(
                 |options| {
@@ -53,6 +54,7 @@ pub(crate) fn run(command: EvidenceCommand) {
                         Path::new(&source),
                         json,
                         options,
+                        signature_options(&signature),
                         &mut output,
                     )
                 },
@@ -66,16 +68,6 @@ pub(crate) fn run(command: EvidenceCommand) {
             requirement_list,
             json,
             signature,
-            producer_key,
-            expected_producer_key,
-            reference_time,
-            max_age_seconds,
-            key_registry,
-            registry_signature,
-            registry_key,
-            revocation_list,
-            revocation_signature,
-            revocation_key,
         } => (
             accept(
                 input.as_deref().map(Path::new),
@@ -83,19 +75,7 @@ pub(crate) fn run(command: EvidenceCommand) {
                 json,
                 requirement.as_deref().map(Path::new),
                 requirement_list.as_deref().map(Path::new),
-                SignatureOptions {
-                    signature: signature.as_deref().map(Path::new),
-                    producer_key: producer_key.as_deref(),
-                    expected_producer_key: expected_producer_key.as_deref(),
-                    reference_time: reference_time.as_deref(),
-                    max_age_seconds,
-                    key_registry: key_registry.as_deref().map(Path::new),
-                    registry_signature: registry_signature.as_deref().map(Path::new),
-                    registry_key: registry_key.as_deref(),
-                    revocation_list: revocation_list.as_deref().map(Path::new),
-                    revocation_signature: revocation_signature.as_deref().map(Path::new),
-                    revocation_key: revocation_key.as_deref(),
-                },
+                signature_options(&signature),
                 &mut output,
             ),
             if requirement_list.is_some() {
@@ -110,6 +90,7 @@ pub(crate) fn run(command: EvidenceCommand) {
             requirement,
             requirement_list,
             json,
+            signature,
         } => (
             accept_list(
                 input.as_deref().map(Path::new),
@@ -117,6 +98,7 @@ pub(crate) fn run(command: EvidenceCommand) {
                 json,
                 requirement.as_deref().map(Path::new),
                 requirement_list.as_deref().map(Path::new),
+                signature_options(&signature),
                 &mut output,
             ),
             if requirement_list.is_some() {
@@ -326,9 +308,19 @@ fn accept_source(
     source: &Path,
     json: bool,
     options: Options,
+    signature_options: SignatureOptions<'_>,
     output: &mut impl Write,
 ) -> Result<i32, &'static str> {
     let saved = super::input::read_regular(input, MAX_INPUT_BYTES as u64)?;
+    let evidence_fingerprint = producer_signature::subject_digest(&saved);
+    let saved_record = verification_evidence::decode(&saved).ok();
+    let signed_produced_at = Some(
+        saved_record
+            .as_ref()
+            .and_then(|record| record.produced_at.as_deref()),
+    );
+    let signature_acceptance =
+        load_signature_acceptance(signature_options, &evidence_fingerprint, signed_produced_at)?;
     let source = super::input::read_regular(source, MAX_INPUT_BYTES as u64)?;
     let source = String::from_utf8(source).map_err(|_| "source is not UTF-8")?;
     let outcome =
@@ -344,13 +336,14 @@ fn accept_source(
             }
             _ => "source outside restricted profile or cannot encode evidence",
         })?;
-    write_accept(outcome, json, &saved, output)
+    write_accept(outcome, json, &saved, signature_acceptance.as_ref(), output)
 }
 
 fn write_accept(
     outcome: AcceptOutcome,
     json: bool,
     saved: &[u8],
+    signature_acceptance: Option<&SignatureAcceptance>,
     output: &mut impl Write,
 ) -> Result<i32, &'static str> {
     match outcome {
@@ -358,7 +351,44 @@ fn write_accept(
         AcceptOutcome::Inconclusive => return Ok(3),
         AcceptOutcome::Accepted => (),
     }
-    let bytes = if json {
+    let failed_signature_fields = signature_acceptance
+        .map(|acceptance| acceptance.binding.failed_fields())
+        .unwrap_or_default();
+    let code = if failed_signature_fields.is_empty() {
+        0
+    } else {
+        1
+    };
+    let bytes = if let Some(signature_acceptance) = signature_acceptance {
+        if json {
+            use sha2::{Digest, Sha256};
+            let evidence_fingerprint = format!("{:x}", Sha256::digest(saved));
+            let mut body = serde_json::json!({
+                "schema_version": "mumei.source-evidence-acceptance/v1",
+                "evidence_schema_version": SCHEMA_VERSION,
+                "evidence_fingerprint": evidence_fingerprint,
+                "acceptance": "evaluated",
+                "accepted": failed_signature_fields.is_empty(),
+                "scope": "restricted_c03_source_postcondition_and_same_profile_record_consistency",
+                "checks_performed": ["representation_gate", "fresh_same_profile_source_query"],
+                "checks_not_performed": ["producer_authenticity", "historical_execution", "record_freshness", "parser_encoder_solver_correctness", "independent_model_correspondence", "llvm_correspondence", "artifact_semantics", "grade_promotion", "lean_kernel_checks"],
+            });
+            attach_signature_fields(&mut body, signature_acceptance)?;
+            let mut bytes = serde_json::to_vec_pretty(&body)
+                .map_err(|_| "cannot encode source acceptance descriptor")?;
+            bytes.push(b'\n');
+            bytes
+        } else if failed_signature_fields.is_empty() {
+            b"Source Evidence accepted within restricted C03 source-postcondition profile: representation valid and consistent with a fresh same-profile query.\nAcceptance scope excludes producer authenticity, historical execution, record freshness, independent correspondence, LLVM, artifact, grade and final-executable assurance.\nProducer signature: bound\n".to_vec()
+        } else {
+            format!(
+                "Source Evidence rejected: producer signature failed ({}).\n\
+Acceptance scope excludes producer authenticity, historical execution, record freshness, independent correspondence, LLVM, artifact, grade and final-executable assurance.\n",
+                failed_signature_fields.join(", ")
+            )
+            .into_bytes()
+        }
+    } else if json {
         use sha2::{Digest, Sha256};
         let evidence_fingerprint = format!("{:x}", Sha256::digest(saved));
         let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
@@ -379,7 +409,7 @@ fn write_accept(
     output
         .write_all(&bytes)
         .map_err(|_| "cannot write source acceptance descriptor")?;
-    Ok(0)
+    Ok(code)
 }
 
 fn source_options(
@@ -567,6 +597,22 @@ struct SignatureOptions<'a> {
     revocation_key: Option<&'a str>,
 }
 
+fn signature_options(args: &SignatureArgs) -> SignatureOptions<'_> {
+    SignatureOptions {
+        signature: args.signature.as_deref().map(Path::new),
+        producer_key: args.producer_key.as_deref(),
+        expected_producer_key: args.expected_producer_key.as_deref(),
+        reference_time: args.reference_time.as_deref(),
+        max_age_seconds: args.max_age_seconds,
+        key_registry: args.key_registry.as_deref().map(Path::new),
+        registry_signature: args.registry_signature.as_deref().map(Path::new),
+        registry_key: args.registry_key.as_deref(),
+        revocation_list: args.revocation_list.as_deref().map(Path::new),
+        revocation_signature: args.revocation_signature.as_deref().map(Path::new),
+        revocation_key: args.revocation_key.as_deref(),
+    }
+}
+
 struct SignatureAcceptance {
     binding: producer_signature::SignatureBinding,
     max_age_checked: bool,
@@ -682,6 +728,7 @@ fn read_signature_envelope(path: &Path) -> Result<serde_json::Value, &'static st
 fn load_signature_acceptance(
     options: SignatureOptions<'_>,
     evidence_fingerprint: &str,
+    signed_produced_at: Option<Option<&str>>,
 ) -> Result<Option<SignatureAcceptance>, &'static str> {
     validate_signature_options(options)?;
     let Some(signature_path) = options.signature else {
@@ -761,6 +808,7 @@ fn load_signature_acceptance(
         expected_producer_key: options.expected_producer_key,
         reference_time,
         max_age_seconds: options.max_age_seconds,
+        signed_produced_at,
         key_registry: registry.as_ref(),
         registry_digest: registry_digest.as_deref(),
         registry_signature: registry_signature.as_ref(),
@@ -799,7 +847,11 @@ fn accept(
     let record = verification_evidence::decode(&record_bytes)
         .map_err(|_| "invalid evidence representation")?;
     let evidence_fingerprint = producer_signature::subject_digest(&record_bytes);
-    let signature_acceptance = load_signature_acceptance(signature_options, &evidence_fingerprint)?;
+    let signature_acceptance = load_signature_acceptance(
+        signature_options,
+        &evidence_fingerprint,
+        Some(record.produced_at.as_deref()),
+    )?;
     match (requirement, requirement_list) {
         (Some(requirement), None) => {
             let requirement_bytes =
@@ -937,6 +989,7 @@ fn accept_list(
     json: bool,
     requirement: Option<&Path>,
     requirement_list: Option<&Path>,
+    signature_options: SignatureOptions<'_>,
     output: &mut impl Write,
 ) -> Result<i32, &'static str> {
     let list_bytes = match (input, stdin) {
@@ -944,6 +997,9 @@ fn accept_list(
         (None, true) => super::input::read_stdin(MAX_INPUT_BYTES as u64)?,
         _ => return Err("choose exactly one evidence input"),
     };
+    let list_fingerprint = producer_signature::subject_digest(&list_bytes);
+    let signature_acceptance =
+        load_signature_acceptance(signature_options, &list_fingerprint, None)?;
     let records = verification_evidence::decode_list(&list_bytes)
         .map_err(|_| "invalid evidence representation")?;
     // Consumer-side arbitration over the closed list: one accepting
@@ -978,11 +1034,14 @@ fn accept_list(
                 .collect();
             let verdict = arbitrate(&evaluations);
             accept_list_single(
-                verdict,
-                &evaluations,
-                &consistency,
-                &requirement_bytes,
-                &list_bytes,
+                SingleListAcceptance {
+                    verdict,
+                    evaluations: &evaluations,
+                    consistency: &consistency,
+                    requirement_bytes: &requirement_bytes,
+                    list_bytes: &list_bytes,
+                    signature_acceptance: signature_acceptance.as_ref(),
+                },
                 json,
                 output,
             )
@@ -1002,7 +1061,7 @@ fn accept_list(
                     pin_name: "list_fingerprint",
                     fingerprint: format!("{:x}", Sha256::digest(list_bytes)),
                     schema_version: verification_evidence::LIST_SCHEMA_VERSION,
-                    signature_acceptance: None,
+                    signature_acceptance: signature_acceptance.as_ref(),
                 },
                 json,
                 output,
@@ -1094,15 +1153,29 @@ fn conjunctive_verdict(per_requirement: &[RequirementOutcome]) -> Verdict {
     }
 }
 
-fn accept_list_single(
+struct SingleListAcceptance<'a> {
     verdict: Verdict,
-    evaluations: &[evidence_acceptance::Evaluation],
-    consistency: &verification_evidence::ConsistencyReport,
-    requirement_bytes: &[u8],
-    list_bytes: &[u8],
+    evaluations: &'a [evidence_acceptance::Evaluation],
+    consistency: &'a verification_evidence::ConsistencyReport,
+    requirement_bytes: &'a [u8],
+    list_bytes: &'a [u8],
+    signature_acceptance: Option<&'a SignatureAcceptance>,
+}
+
+fn accept_list_single(
+    acceptance: SingleListAcceptance<'_>,
     json: bool,
     output: &mut impl Write,
 ) -> Result<i32, &'static str> {
+    let SingleListAcceptance {
+        verdict,
+        evaluations,
+        consistency,
+        requirement_bytes,
+        list_bytes,
+        signature_acceptance,
+    } = acceptance;
+    let verdict = narrowed_verdict(verdict, signature_acceptance);
     let code = match verdict {
         Verdict::Accepted => 0,
         Verdict::Rejected => 1,
@@ -1110,7 +1183,7 @@ fn accept_list_single(
     };
     let descriptor = if json {
         use sha2::{Digest, Sha256};
-        let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        let mut body = serde_json::json!({
             "schema_version": "mumei.evidence-list-acceptance/v1",
             "evidence_schema_version": verification_evidence::LIST_SCHEMA_VERSION,
             "requirement_schema_version": evidence_acceptance::REQUIREMENT_SCHEMA,
@@ -1142,8 +1215,12 @@ fn accept_list_single(
                 "historical_execution", "record_freshness",
                 "independent_model_correspondence", "artifact_semantics",
                 "tool_execution", "grade_promotion"],
-        }))
-        .map_err(|_| "cannot encode evidence acceptance descriptor")?;
+        });
+        if let Some(signature_acceptance) = signature_acceptance {
+            attach_signature_fields(&mut body, signature_acceptance)?;
+        }
+        let mut bytes = serde_json::to_vec_pretty(&body)
+            .map_err(|_| "cannot encode evidence acceptance descriptor")?;
         bytes.push(b'\n');
         bytes
     } else {
@@ -1155,7 +1232,7 @@ fn accept_list_single(
             .iter()
             .filter(|ev| ev.verdict == Verdict::Rejected)
             .count();
-        format!(
+        let text = format!(
             "Evidence list acceptance: {} ({} record(s): {} accepted, {} rejected, {} inconclusive; {}).\n\
 Scope: declared-requirement normalization over each record's representation plus cross-record pin agreement; no claim truth, producer authenticity, freshness, independent correspondence, artifact semantics, tool execution or grade promotion checked.\n",
             verdict.as_str(),
@@ -1168,8 +1245,21 @@ Scope: declared-requirement normalization over each record's representation plus
             } else {
                 format!("{} consistency conflict(s)", consistency.conflict_count)
             },
-        )
-        .into_bytes()
+        );
+        if let Some(signature_acceptance) = signature_acceptance {
+            let failed = signature_acceptance.binding.failed_fields();
+            format!(
+                "{text}Producer signature: {}\n",
+                if failed.is_empty() {
+                    "bound".to_owned()
+                } else {
+                    format!("failed ({})", failed.join(", "))
+                }
+            )
+            .into_bytes()
+        } else {
+            text.into_bytes()
+        }
     };
     output
         .write_all(&descriptor)
@@ -1694,19 +1784,25 @@ mod tests {
             ] {
                 let mut output = Vec::new();
                 assert_eq!(
-                    write_accept(outcome, json, b"record", &mut output).unwrap(),
+                    write_accept(outcome, json, b"record", None, &mut output).unwrap(),
                     code
                 );
                 assert!(output.is_empty());
             }
             assert_eq!(
-                write_accept(AcceptOutcome::Accepted, json, b"record", &mut BrokenOutput)
-                    .unwrap_err(),
+                write_accept(
+                    AcceptOutcome::Accepted,
+                    json,
+                    b"record",
+                    None,
+                    &mut BrokenOutput
+                )
+                .unwrap_err(),
                 "cannot write source acceptance descriptor"
             );
             let mut output = Vec::new();
             assert_eq!(
-                write_accept(AcceptOutcome::Accepted, json, b"record", &mut output).unwrap(),
+                write_accept(AcceptOutcome::Accepted, json, b"record", None, &mut output).unwrap(),
                 0
             );
             let text = String::from_utf8(output).unwrap();

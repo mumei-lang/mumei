@@ -518,18 +518,28 @@ Verifying against a pinned public key is the consumer side; key distribution,
 root-key revocation and producer attestation remain open.
 
 `mumei evidence accept` adds opt-in detached signature binding on its
-`--requirement` and `--requirement-list` routes. It checks the raw record-byte
-digest, Ed25519 signature and subject binding, with optional producer-key
-pinning, declared-reference freshness, registry-window checks and signed
-registry/revocation documents. Because `producer_key_id` is unsigned,
+`--requirement` and `--requirement-list` routes. The same binding is available
+on `accept-list` and `accept-source`: `accept-list` signs the list envelope's
+raw bytes, while `accept-source` signs the saved record's raw bytes. Each
+checks the subject digest, Ed25519 signature and binding, with optional
+producer-key pinning, declared-reference freshness, registry-window checks and
+signed registry/revocation documents. Because `producer_key_id` is unsigned,
 registry and revocation checks require `--expected-producer-key` to bind that
 label to the supplied producer public key. A false supplied check rejects the
 acceptance; signature evidence cannot promote an otherwise rejected or
-inconclusive requirement. The declared reference time is not authenticated, and
-producer-time authenticity, clock authenticity, key rotation, root-key
-revocation, `accept-list` binding and `accept-source` binding remain open.
-Malformed anchor documents and public-key encodings fail closed; an object
-envelope with a nonmatching closed shape is reported as a failed binding.
+inconclusive requirement.
+
+For single-record `accept` and `accept-source`, `produced_at_signed` is emitted
+when the record declares `produced_at`. A true value means the verified
+signature covers the record containing that exact timestamp and the envelope
+declares the same string; it means “the producer signed this timestamp,” not
+“the timestamp is true.” The envelope stamp is unsigned, and the producer's
+clock is not authenticated. `accept-list` does not emit this check because its
+envelope stamp describes the list, not each record. Key rotation and root-key
+revocation (#886 deferred), revocation-list rollback (78a4), and clock
+authenticity remain open. Malformed anchor documents and public-key encodings
+fail closed; an object envelope with a nonmatching closed shape is reported as
+a failed binding.
 
 ## 5. Minimal semantic contract (C03)
 

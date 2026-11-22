@@ -271,6 +271,7 @@ impl BindingFixture {
             expected_producer_key: Some("producer-a"),
             reference_time: Some(self.reference_time),
             max_age_seconds: Some(30 * 24 * 60 * 60),
+            signed_produced_at: None,
             key_registry: Some(&self.registry),
             registry_digest: Some(&self.registry_digest),
             registry_signature: Some(&self.registry_signature),
@@ -409,6 +410,64 @@ fn signature_binding_emits_true_results_for_a_valid_complete_chain() {
         binding.checks_not_performed,
         ["producer_time_authenticity", "clock_authenticity"]
     );
+}
+
+#[test]
+fn signed_produced_at_requires_a_declared_matching_record_timestamp_and_all_binding_gates() {
+    let fixture = BindingFixture::new();
+    let timestamp = "2024-02-01T00:00:00Z";
+
+    let mut input = fixture.input();
+    input.signed_produced_at = Some(Some(timestamp));
+    let binding = verify_binding(input);
+    assert_eq!(binding.produced_at_signed, Some(true));
+    assert!(!binding
+        .checks_not_performed
+        .contains(&"producer_time_authenticity"));
+    assert!(binding.checks_not_performed.contains(&"clock_authenticity"));
+    assert!(!binding.failed_fields().contains(&"produced_at_signed"));
+
+    for signed_produced_at in [None, Some(None)] {
+        let mut input = fixture.input();
+        input.signed_produced_at = signed_produced_at;
+        let binding = verify_binding(input);
+        assert_eq!(binding.produced_at_signed, None);
+        assert!(binding
+            .checks_not_performed
+            .contains(&"producer_time_authenticity"));
+        assert!(serde_json::to_value(binding)
+            .unwrap()
+            .get("produced_at_signed")
+            .is_none());
+    }
+
+    let mut input = fixture.input();
+    input.signed_produced_at = Some(Some("2024-02-02T00:00:00Z"));
+    let binding = verify_binding(input);
+    assert_eq!(binding.produced_at_signed, Some(false));
+    assert!(binding.failed_fields().contains(&"produced_at_signed"));
+    assert!(!binding
+        .checks_not_performed
+        .contains(&"producer_time_authenticity"));
+    assert!(binding.checks_not_performed.contains(&"clock_authenticity"));
+
+    let mut input = fixture.input();
+    input.producer_key_hex = &fixture.root_public;
+    input.signed_produced_at = Some(Some(timestamp));
+    assert_eq!(verify_binding(input).produced_at_signed, Some(false));
+
+    let wrong_fingerprint = "0".repeat(64);
+    let mut input = fixture.input();
+    input.evidence_fingerprint = &wrong_fingerprint;
+    input.signed_produced_at = Some(Some(timestamp));
+    assert_eq!(verify_binding(input).produced_at_signed, Some(false));
+
+    let mut missing_stamp = fixture.envelope.clone();
+    missing_stamp.as_object_mut().unwrap().remove("produced_at");
+    let mut input = fixture.input();
+    input.envelope = &missing_stamp;
+    input.signed_produced_at = Some(Some(timestamp));
+    assert_eq!(verify_binding(input).produced_at_signed, Some(false));
 }
 
 #[test]

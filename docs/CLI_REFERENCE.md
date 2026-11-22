@@ -13,7 +13,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei` | 1 | Formally verified language: parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) |
 | `mumei evidence` | 0 | Check common Evidence representation or produce fresh scoped source Evidence; no proof acceptance |
 | `mumei evidence recheck-source` | 5 | Freshly recheck saved source Evidence with linked Z3 and caller-supplied source/budgets; not proof acceptance |
-| `mumei evidence accept-source` | 5 | Evaluate representation plus fresh same-profile source consistency into a bounded acceptance descriptor |
+| `mumei evidence accept-source` | 16 | Evaluate representation plus fresh same-profile source consistency into a bounded acceptance descriptor |
 | `mumei evidence verify-source` | 4 | Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance |
 | `mumei evidence sign` | 5 | Detachably sign a bounded record's raw bytes with a declared ed25519 key into a producer-signature envelope; binds the declared key id only |
 | `mumei evidence keygen` | 1 | Generate a fresh ed25519 producer keypair; writes the 64-char hex secret to a new file and prints only the public key |
@@ -22,7 +22,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei evidence check-adapter` | 2 | Core checks only the static representation and manifest consistency. Manifest-declared argv and stdin remain inert unless host policy opts in through allow_manifest_attempt_argv and allow_manifest_attempt_stdin; a host argv map takes precedence. Verdict markers describe an adapter self-report vocabulary, never a verdict. max_memory_mb is the adapter's declared ceiling: planning uses the smaller of it and the policy memory bound; a scheduled attempt uses it only when the host declares no memory bound. Core does not enforce it. No adapter is executed and no grade is promoted. |
 | `mumei evidence check-attempt-acceptance` | 2 | Core validates the closed representation and producer consistency of a scheduled evidence-check acceptance. `accepted` records the producer's binding of a declared check outcome to its current candidate, never Core Evidence acceptance. `candidate_match` is not rechecked because Core has no attempt-sequence snapshot. No Core check is rerun and no grade is promoted. |
 | `mumei evidence accept` | 15 | Normalize one declared requirement against one Evidence record into a bounded verdict; no tool execution or proof acceptance |
-| `mumei evidence accept-list` | 4 | Normalize one declared requirement against a bounded Evidence list envelope — per-record verdicts plus an aggregate; no tool execution or proof acceptance |
+| `mumei evidence accept-list` | 15 | Normalize one declared requirement against a bounded Evidence list envelope — per-record verdicts plus an aggregate; no tool execution or proof acceptance |
 | `mumei evidence check-list` | 3 | Validate a bounded Evidence list envelope's representation — every record individually, not their truth or consistency |
 | `mumei evidence check-consistency` | 3 | Check a bounded Evidence list envelope's cross-record identity-pin agreement, not pin correctness or truth |
 | `mumei native-bundle` | 0 | Build/check a restricted native identity bundle (not artifact semantic proof) |
@@ -156,6 +156,17 @@ Usage: mumei evidence accept-source [OPTIONS] --source <SOURCE> <INPUT>
 | `--solver-timeout <SOLVER_TIMEOUT>` | 10000 | — | Solver timeout in milliseconds (1..=10000); must match the producer's explicit budget |
 | `--solver-resource-limit <SOLVER_RESOURCE_LIMIT>` | 1000000 | — | Solver resource units (1..=1000000); no saved/ambient policy is loaded |
 | `--produced-at <PRODUCED_AT>` | — | — | Declared RFC 3339 timestamp the producer stamped; must equal the saved record's produced_at |
+| `--signature <SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 envelope file (at most 65,536 bytes) |
+| `--producer-key <PRODUCER_KEY>` | — | — | 64-char lowercase-hex ed25519 producer public key |
+| `--expected-producer-key <EXPECTED_PRODUCER_KEY>` | — | — | Pin the unsigned producer key id to the supplied key; required for registry/revocation checks |
+| `--reference-time <REFERENCE_TIME>` | — | — | Declared RFC 3339 reference time for freshness and registry checks |
+| `--max-age-seconds <MAX_AGE_SECONDS>` | — | — | Maximum envelope age in seconds |
+| `--key-registry <KEY_REGISTRY>` | — | — | Regular mumei.producer-key-registry/v1 file (at most 65,536 bytes); requires a pinned producer key id |
+| `--registry-signature <REGISTRY_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 registry signature file |
+| `--registry-key <REGISTRY_KEY>` | — | — | 64-char lowercase-hex ed25519 registry root public key |
+| `--revocation-list <REVOCATION_LIST>` | — | — | Regular mumei.key-revocation-list/v1 file (at most 65,536 bytes); requires a pinned producer key id |
+| `--revocation-signature <REVOCATION_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 revocation-list signature file |
+| `--revocation-key <REVOCATION_KEY>` | — | — | 64-char lowercase-hex ed25519 revocation root public key |
 
 ## `mumei evidence verify-source`
 
@@ -376,6 +387,17 @@ Usage: mumei evidence accept-list [OPTIONS] [INPUT]
 | `--requirement <REQUIREMENT>` | — | — | Regular mumei.evidence-requirement/v1 JSON file (at most 65,536 bytes); the declared pins and assurance floor |
 | `--requirement-list <REQUIREMENT_LIST>` | — | — | Regular mumei.evidence-requirement-list/v1 JSON file (at most 65,536 bytes); a conjunctive set of declared requirements |
 | `--json` | false | — | Emit a static mumei.evidence-list-acceptance/v1 descriptor, not reusable Evidence or a certificate |
+| `--signature <SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 envelope file (at most 65,536 bytes) |
+| `--producer-key <PRODUCER_KEY>` | — | — | 64-char lowercase-hex ed25519 producer public key |
+| `--expected-producer-key <EXPECTED_PRODUCER_KEY>` | — | — | Pin the unsigned producer key id to the supplied key; required for registry/revocation checks |
+| `--reference-time <REFERENCE_TIME>` | — | — | Declared RFC 3339 reference time for freshness and registry checks |
+| `--max-age-seconds <MAX_AGE_SECONDS>` | — | — | Maximum envelope age in seconds |
+| `--key-registry <KEY_REGISTRY>` | — | — | Regular mumei.producer-key-registry/v1 file (at most 65,536 bytes); requires a pinned producer key id |
+| `--registry-signature <REGISTRY_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 registry signature file |
+| `--registry-key <REGISTRY_KEY>` | — | — | 64-char lowercase-hex ed25519 registry root public key |
+| `--revocation-list <REVOCATION_LIST>` | — | — | Regular mumei.key-revocation-list/v1 file (at most 65,536 bytes); requires a pinned producer key id |
+| `--revocation-signature <REVOCATION_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 revocation-list signature file |
+| `--revocation-key <REVOCATION_KEY>` | — | — | 64-char lowercase-hex ed25519 revocation root public key |
 
 ## `mumei evidence check-list`
 
