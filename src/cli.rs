@@ -469,6 +469,8 @@ pub(crate) enum EvidenceCommand {
         /// Declared RFC 3339 timestamp the producer stamped; must equal the saved record's produced_at
         #[arg(long)]
         produced_at: Option<String>,
+        #[command(flatten)]
+        signature: SignatureArgs,
     },
     /// Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance
     VerifySource {
@@ -595,39 +597,8 @@ pub(crate) enum EvidenceCommand {
         /// Emit a static mumei.evidence-acceptance/v1 descriptor, not reusable Evidence or a certificate
         #[arg(long)]
         json: bool,
-        /// Regular mumei.producer-signature/v1 envelope file (at most 65,536 bytes)
-        #[arg(long, requires = "producer_key")]
-        signature: Option<String>,
-        /// 64-char lowercase-hex ed25519 producer public key
-        #[arg(long, requires = "signature")]
-        producer_key: Option<String>,
-        /// Pin the unsigned producer key id to the supplied key; required for registry/revocation checks
-        #[arg(long, requires = "signature")]
-        expected_producer_key: Option<String>,
-        /// Declared RFC 3339 reference time for freshness and registry checks
-        #[arg(long, requires = "signature")]
-        reference_time: Option<String>,
-        /// Maximum envelope age in seconds
-        #[arg(long, requires_all = ["signature", "reference_time"])]
-        max_age_seconds: Option<u64>,
-        /// Regular mumei.producer-key-registry/v1 file (at most 65,536 bytes); requires a pinned producer key id
-        #[arg(long, requires_all = ["signature", "reference_time", "expected_producer_key"])]
-        key_registry: Option<String>,
-        /// Regular mumei.producer-signature/v1 registry signature file
-        #[arg(long, requires_all = ["signature", "key_registry", "registry_key"])]
-        registry_signature: Option<String>,
-        /// 64-char lowercase-hex ed25519 registry root public key
-        #[arg(long, requires_all = ["signature", "key_registry", "registry_signature"])]
-        registry_key: Option<String>,
-        /// Regular mumei.key-revocation-list/v1 file (at most 65,536 bytes); requires a pinned producer key id
-        #[arg(long, requires_all = ["signature", "expected_producer_key"])]
-        revocation_list: Option<String>,
-        /// Regular mumei.producer-signature/v1 revocation-list signature file
-        #[arg(long, requires_all = ["signature", "revocation_list", "revocation_key"])]
-        revocation_signature: Option<String>,
-        /// 64-char lowercase-hex ed25519 revocation root public key
-        #[arg(long, requires_all = ["signature", "revocation_list", "revocation_signature"])]
-        revocation_key: Option<String>,
+        #[command(flatten)]
+        signature: SignatureArgs,
     },
     /// Normalize one declared requirement against a bounded Evidence list envelope — per-record verdicts plus an aggregate; no tool execution or proof acceptance
     AcceptList {
@@ -650,6 +621,8 @@ pub(crate) enum EvidenceCommand {
         /// Emit a static mumei.evidence-list-acceptance/v1 descriptor, not reusable Evidence or a certificate
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        signature: SignatureArgs,
     },
     /// Validate a bounded Evidence list envelope's representation — every record individually, not their truth or consistency
     CheckList {
@@ -681,6 +654,43 @@ pub(crate) enum EvidenceCommand {
         #[arg(long)]
         expected_adapter: Option<String>,
     },
+}
+
+#[derive(clap::Args)]
+pub(crate) struct SignatureArgs {
+    /// Regular mumei.producer-signature/v1 envelope file (at most 65,536 bytes)
+    #[arg(long, requires = "producer_key")]
+    pub(crate) signature: Option<String>,
+    /// 64-char lowercase-hex ed25519 producer public key
+    #[arg(long, requires = "signature")]
+    pub(crate) producer_key: Option<String>,
+    /// Pin the unsigned producer key id to the supplied key; required for registry/revocation checks
+    #[arg(long, requires = "signature")]
+    pub(crate) expected_producer_key: Option<String>,
+    /// Declared RFC 3339 reference time for freshness and registry checks
+    #[arg(long, requires = "signature")]
+    pub(crate) reference_time: Option<String>,
+    /// Maximum envelope age in seconds
+    #[arg(long, requires_all = ["signature", "reference_time"])]
+    pub(crate) max_age_seconds: Option<u64>,
+    /// Regular mumei.producer-key-registry/v1 file (at most 65,536 bytes); requires a pinned producer key id
+    #[arg(long, requires_all = ["signature", "reference_time", "expected_producer_key"])]
+    pub(crate) key_registry: Option<String>,
+    /// Regular mumei.producer-signature/v1 registry signature file
+    #[arg(long, requires_all = ["signature", "key_registry", "registry_key"])]
+    pub(crate) registry_signature: Option<String>,
+    /// 64-char lowercase-hex ed25519 registry root public key
+    #[arg(long, requires_all = ["signature", "key_registry", "registry_signature"])]
+    pub(crate) registry_key: Option<String>,
+    /// Regular mumei.key-revocation-list/v1 file (at most 65,536 bytes); requires a pinned producer key id
+    #[arg(long, requires_all = ["signature", "expected_producer_key"])]
+    pub(crate) revocation_list: Option<String>,
+    /// Regular mumei.producer-signature/v1 revocation-list signature file
+    #[arg(long, requires_all = ["signature", "revocation_list", "revocation_key"])]
+    pub(crate) revocation_signature: Option<String>,
+    /// 64-char lowercase-hex ed25519 revocation root public key
+    #[arg(long, requires_all = ["signature", "revocation_list", "revocation_signature"])]
+    pub(crate) revocation_key: Option<String>,
 }
 
 #[derive(Subcommand)]

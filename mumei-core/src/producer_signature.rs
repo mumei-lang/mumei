@@ -286,6 +286,8 @@ pub struct SignatureBinding {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub envelope_fresh: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub produced_at_signed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub registry_digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revocation_digest: Option<String>,
@@ -313,6 +315,7 @@ impl SignatureBinding {
             ("key_not_revoked", self.key_not_revoked),
             ("key_authentic", self.key_authentic),
             ("envelope_fresh", self.envelope_fresh),
+            ("produced_at_signed", self.produced_at_signed),
             ("registry_authentic", self.registry_authentic),
             ("revocation_list_authentic", self.revocation_list_authentic),
         ] {
@@ -332,6 +335,7 @@ pub struct SignatureBindingInput<'a> {
     pub expected_producer_key: Option<&'a str>,
     pub reference_time: Option<(i128, i128)>,
     pub max_age_seconds: Option<u64>,
+    pub signed_produced_at: Option<Option<&'a str>>,
     pub key_registry: Option<&'a ProducerKeyRegistry>,
     pub registry_digest: Option<&'a str>,
     pub registry_signature: Option<&'a Value>,
@@ -397,6 +401,12 @@ pub fn verify_binding(input: SignatureBindingInput<'_>) -> SignatureBinding {
                     })
             })
     });
+    let produced_at_signed = input.signed_produced_at.flatten().map(|timestamp| {
+        matched
+            && signature_valid
+            && subject_bound
+            && envelope["produced_at"].as_str() == Some(timestamp)
+    });
 
     let mut checks_not_performed = vec![
         "key_binding",
@@ -426,6 +436,9 @@ pub fn verify_binding(input: SignatureBindingInput<'_>) -> SignatureBinding {
     if input.revocation_signature.is_some() {
         checks_not_performed.retain(|check| *check != "revocation_list_authenticity");
     }
+    if produced_at_signed.is_some() {
+        checks_not_performed.retain(|check| *check != "producer_time_authenticity");
+    }
 
     SignatureBinding {
         envelope_match: matched,
@@ -436,6 +449,7 @@ pub fn verify_binding(input: SignatureBindingInput<'_>) -> SignatureBinding {
         key_not_revoked,
         key_authentic,
         envelope_fresh,
+        produced_at_signed,
         registry_digest: input.registry_digest.map(str::to_owned),
         revocation_digest: input.revocation_digest.map(str::to_owned),
         registry_authentic,
