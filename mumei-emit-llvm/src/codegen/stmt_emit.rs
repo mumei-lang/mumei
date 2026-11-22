@@ -499,7 +499,7 @@ pub(crate) fn compile_hir_stmt<'a>(
                     elements
                         .first()
                         .and_then(|element| {
-                            mumei_core::hir::infer_expr_type_name(element, Some(module_env))
+                            super::expr_emit::infer_struct_type_name(element, var_types, module_env)
                         })
                         .filter(|element_type| {
                             module_env

@@ -1447,6 +1447,24 @@ pub(crate) fn infer_struct_type_name(
 ) -> Option<String> {
     match expr {
         HirExpr::Variable(name) => var_types.get(name).cloned(),
+        HirExpr::ArrayAccess(name, _) => var_types.get(name).and_then(|array_type| {
+            let resolved = module_env.resolve_base_type(array_type);
+            let element = resolved
+                .strip_prefix("[]<")
+                .and_then(|inner| inner.strip_suffix('>'))
+                .or_else(|| {
+                    resolved
+                        .strip_prefix('[')
+                        .and_then(|inner| inner.strip_suffix(']'))
+                })?;
+            let element = resolve_named_type(module_env, element.trim());
+            if module_env.get_struct(&element).is_some() || module_env.get_enum(&element).is_some()
+            {
+                Some(element)
+            } else {
+                None
+            }
+        }),
         HirExpr::StructInit { type_name, .. } => {
             let base = resolve_named_type(module_env, type_name);
             if module_env.get_struct(&base).is_some() {
@@ -2881,38 +2899,13 @@ pub(crate) fn compile_hir_expr<'a>(
             let pre_vars = variables.clone();
             let pre_arrays = array_ptrs.clone();
 
-            // Declared enum type of the scrutinee — resolves which enum owns
-            // a colliding variant name deterministically (prelude `List` vs
-            // a user `IntList` both declaring `Cons`). A bare parameter reads
-            // its declared type from `var_types`; `x.f` walks the field's
-            // declared type via the struct def (nested `a.b.c` recurses);
-            // other targets fall back to `infer_expr_type_name` (e.g. `E::V`
-            // ctor expressions and enum-returning calls).
-            let enum_hint: Option<String> = match target.as_ref() {
-                HirExpr::Variable(name) => var_types.get(name).cloned(),
-                HirExpr::ArrayAccess(name, _) => var_types.get(name).and_then(|array_type| {
-                    let resolved = module_env.resolve_base_type(array_type);
-                    let element = resolved
-                        .strip_prefix("[]<")
-                        .and_then(|inner| inner.strip_suffix('>'))
-                        .or_else(|| {
-                            resolved
-                                .strip_prefix('[')
-                                .and_then(|inner| inner.strip_suffix(']'))
-                        })?;
-                    let element = resolve_named_type(module_env, element.trim());
-                    module_env.get_enum(&element).map(|_| element)
-                }),
-                HirExpr::FieldAccess(inner, field) => {
-                    infer_struct_type_name(inner, var_types, module_env).and_then(|s| {
-                        module_env
-                            .get_struct(&s)
-                            .and_then(|sdef| sdef.fields.iter().find(|f| f.name == *field))
-                            .map(|f| f.type_name.clone())
-                    })
-                }
-                _ => mumei_core::hir::infer_expr_type_name(target, Some(module_env)),
-            };
+            // Resolve the declared type through shared inference so array
+            // element reads use the same enum hint as equality expressions.
+            let enum_hint =
+                infer_struct_type_name(target, var_types, module_env).and_then(|type_name| {
+                    let resolved = module_env.resolve_base_type(&type_name);
+                    module_env.get_enum(&resolved).map(|_| resolved)
+                });
 
             let merge_block = context.append_basic_block(*function, "match.merge");
             let unreachable_block = context.append_basic_block(*function, "match.unreachable");

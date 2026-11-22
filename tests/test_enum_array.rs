@@ -198,3 +198,21 @@ fn native_enum_array_literal_store_and_payload_calls_return_12() {
         "native enum-array program should return 12:\n{stdout}\n{stderr}"
     );
 }
+
+#[test]
+fn native_enum_array_equality_uses_array_element_type_inference() {
+    let (dir, copied) = copy_fixture("test_enum_array_equality.mm");
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("run")
+        .arg(copied)
+        .current_dir(dir.path())
+        .output()
+        .expect("run enum-array equality fixture");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(12),
+        "native enum-array equality program should return 12:\n{stdout}\n{stderr}"
+    );
+}
