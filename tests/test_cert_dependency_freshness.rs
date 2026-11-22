@@ -1,5 +1,7 @@
+use mumei_core::parser::{self, Item};
 use mumei_core::proof_cert::{refresh_certificate_integrity, LeanResultMetadata, ProofCertificate};
-use mumei_core::verification;
+use mumei_core::resolver;
+use mumei_core::verification::{self, ModuleEnv};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -236,6 +238,59 @@ fn effect_dependency_source(transition: &str) -> String {
          ensures: result == x;\n\
          body: f(x);\n"
     )
+}
+
+#[test]
+fn imported_enum_signature_change_is_a_dependency_change() {
+    let fixture = Fixture::new();
+    let source = fixture.root.join("a.mm");
+    let imported = fixture.root.join("b.mm");
+    let certificate = fixture.root.join("a.proof.json");
+    std::fs::write(&imported, "enum E { A(v: i64), B }\n").expect("write enum module");
+    std::fs::write(
+        &source,
+        "import \"./b.mm\";\n\
+         atom choose(e: E) -> i64\n\
+         requires: true;\n\
+         ensures: true;\n\
+         body: match e { E::A(v) => v, _ => 0 };\n",
+    )
+    .expect("write importing module");
+    assert_success(
+        &fixture.certify(&source, &certificate),
+        "certify enum signature",
+    );
+
+    let cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&certificate).unwrap()).expect("parse certificate");
+    let choose = cert
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "choose")
+        .expect("choose certificate");
+    let dependency_hashes = choose
+        .dependency_hashes
+        .as_ref()
+        .expect("generated dependency hashes");
+    assert!(dependency_hashes.contains_key("enum:E"));
+
+    let unchanged = verify_cert(&fixture, &certificate, &source, false);
+    let unchanged_text = output_text(&unchanged);
+    assert_eq!(unchanged.status.code(), Some(0), "{unchanged_text}");
+    assert!(
+        unchanged_text.contains("choose: proven"),
+        "{unchanged_text}"
+    );
+
+    std::fs::write(&imported, "enum E { A(v: i64), B, C }\n").expect("add an enum variant");
+    let changed = verify_cert(&fixture, &certificate, &source, false);
+    let changed_text = output_text(&changed);
+    assert_eq!(changed.status.code(), Some(0), "{changed_text}");
+    assert!(
+        changed_text.contains("choose: dependency_changed"),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("enum:E"), "{changed_text}");
 }
 
 #[test]
@@ -834,6 +889,93 @@ fn lean_callee_trust_policy_does_not_change_dependency_freshness() {
 
     let strict_import = fixture.verify(&c_source, &["--strict-imports", "--allow-lean-verified"]);
     assert_success(&strict_import, "strictly import B with Lean opt-in");
+}
+
+#[test]
+fn generic_enum_dependency_hash_matches_strict_import_path() {
+    let fixture = Fixture::new();
+    let a_dir = fixture.root.join("a");
+    let b_dir = fixture.root.join("b");
+    std::fs::create_dir(&a_dir).expect("create A directory");
+    std::fs::create_dir(&b_dir).expect("create B directory");
+    let a_source = a_dir.join("a.mm");
+    let b_source = b_dir.join("b.mm");
+    let b_cert = b_dir.join(".proof-cert.json");
+    let b_module = "enum Opt<T> { Some(v: T), Nothing }\n\
+                    atom get(opt: Opt<i64>) -> i64\n\
+                    requires: true;\n\
+                    ensures: true;\n\
+                    body: 0;\n";
+    std::fs::write(&b_source, b_module).expect("write generic enum module");
+    std::fs::write(
+        &a_source,
+        "import \"../b/b.mm\";\n\
+         atom main() -> i64\n\
+         requires: true;\n\
+         ensures: result == 0;\n\
+         body: 0;\n",
+    )
+    .expect("write strict-importing module");
+
+    assert_success(
+        &fixture.certify(&b_source, &b_cert),
+        "certify generic enum module",
+    );
+    let cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&b_cert).unwrap()).expect("parse B certificate");
+    let cert_enum_hash = cert.atoms[0]
+        .dependency_hashes
+        .as_ref()
+        .expect("generated dependency hashes")
+        .get("enum:Opt")
+        .expect("generic enum dependency hash");
+
+    let parse_time_enum_hash = {
+        let mut module_env = ModuleEnv::new();
+        let mut atom = None;
+        for item in parser::parse_module(b_module) {
+            match item {
+                Item::Atom(parsed_atom) => {
+                    if parsed_atom.name == "get" {
+                        atom = Some(parsed_atom.clone());
+                    }
+                    module_env.register_atom(&parsed_atom);
+                }
+                Item::EnumDef(enum_def) => module_env.register_enum(&enum_def),
+                _ => {}
+            }
+        }
+        let atom = atom.expect("parse generic enum atom");
+        resolver::compute_dependency_hashes(&atom, &module_env)
+            .remove("enum:Opt")
+            .expect("parse-time generic enum dependency hash")
+    };
+    assert_eq!(
+        cert_enum_hash, &parse_time_enum_hash,
+        "enum:Opt hash differs between certificate and parse-time import inputs"
+    );
+
+    let unchanged_import = fixture.verify(&a_source, &["--strict-imports"]);
+    assert!(
+        unchanged_import.status.success(),
+        "unchanged strict import rejected the certificate; certificate enum:Opt={cert_enum_hash}, \
+         parse-time enum:Opt={parse_time_enum_hash}\n{}",
+        output_text(&unchanged_import)
+    );
+
+    std::fs::write(&b_source, b_module.replace("Nothing }", "Nothing, Extra }"))
+        .expect("add generic enum variant without regenerating certificate");
+    let changed_import = fixture.verify(&a_source, &["--strict-imports"]);
+    let changed_text = output_text(&changed_import);
+    assert!(
+        !changed_import.status.success(),
+        "strict import accepted a changed generic enum without a fresh certificate:\n{changed_text}"
+    );
+    assert!(
+        changed_text.contains("dependency_changed"),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("enum:Opt"), "{changed_text}");
 }
 
 #[test]

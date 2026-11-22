@@ -500,18 +500,7 @@ pub fn compute_proof_hash_with_flags(
     let mut enum_names: Vec<&String> = module_env.enums.keys().collect();
     enum_names.sort();
     for name in enum_names {
-        hasher.update(b"|enum:");
-        hasher.update(name.as_bytes());
-        if let Some(edef) = module_env.enums.get(name) {
-            for variant in &edef.variants {
-                hasher.update(b"|variant:");
-                hasher.update(variant.name.as_bytes());
-                for field_type in &variant.field_types {
-                    hasher.update(b":");
-                    hasher.update(field_type.name.as_bytes());
-                }
-            }
-        }
+        hash_enum_contract(&mut hasher, name, module_env);
     }
 
     // 3. Include callee signatures (transitive dependencies)
@@ -876,6 +865,7 @@ fn compute_dependency_hashes_with_names(
 
     let mut type_names = BTreeSet::new();
     let mut struct_names = BTreeSet::new();
+    let mut enum_names = BTreeSet::new();
     for type_name in atom
         .params
         .iter()
@@ -889,6 +879,9 @@ fn compute_dependency_hashes_with_names(
         if module_env.get_struct(bare_name).is_some() {
             struct_names.insert(bare_name.to_string());
         }
+        if module_env.enums.contains_key(bare_name) {
+            enum_names.insert(bare_name.to_string());
+        }
     }
     for param in &atom.params {
         if let Some(type_ref) = &param.type_ref {
@@ -897,6 +890,15 @@ fn compute_dependency_hashes_with_names(
             }
             if module_env.get_struct(&type_ref.name).is_some() {
                 struct_names.insert(type_ref.name.clone());
+            }
+            let bare_name = type_ref
+                .name
+                .split('<')
+                .next()
+                .unwrap_or(&type_ref.name)
+                .trim();
+            if module_env.enums.contains_key(bare_name) {
+                enum_names.insert(bare_name.to_string());
             }
         }
     }
@@ -918,6 +920,27 @@ fn compute_dependency_hashes_with_names(
         let mut hasher = Sha256::new();
         hash_struct_contract(&mut hasher, &name, module_env);
         hashes.insert(format!("struct:{name}"), format!("{:x}", hasher.finalize()));
+    }
+    if !legacy_names {
+        for name in enum_names {
+            let mut hasher = Sha256::new();
+            hash_enum_contract(&mut hasher, &name, module_env);
+            if let Some(enum_def) = module_env.enums.get(&name) {
+                for variant in &enum_def.variants {
+                    hasher.update(b"|fields:");
+                    hasher.update(variant.name.as_bytes());
+                    for field in &variant.fields {
+                        hasher.update(b":");
+                        hasher.update(field.as_bytes());
+                    }
+                }
+            }
+            if let Some(unit) = module_env.unit_of_type(&name) {
+                hasher.update(b"|unit:");
+                hasher.update(unit.as_bytes());
+            }
+            hashes.insert(format!("enum:{name}"), format!("{:x}", hasher.finalize()));
+        }
     }
 
     hashes
@@ -1027,6 +1050,21 @@ fn hash_struct_contract(hasher: &mut Sha256, name: &str, module_env: &ModuleEnv)
             hasher.update(name.as_bytes());
             hasher.update(b"=");
             hasher.update(invariant.as_bytes());
+        }
+    }
+}
+
+fn hash_enum_contract(hasher: &mut Sha256, name: &str, module_env: &ModuleEnv) {
+    hasher.update(b"|enum:");
+    hasher.update(name.as_bytes());
+    if let Some(enum_def) = module_env.enums.get(name) {
+        for variant in &enum_def.variants {
+            hasher.update(b"|variant:");
+            hasher.update(variant.name.as_bytes());
+            for field_type in &variant.field_types {
+                hasher.update(b":");
+                hasher.update(field_type.name.as_bytes());
+            }
         }
     }
 }
