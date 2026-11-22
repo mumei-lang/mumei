@@ -248,10 +248,7 @@ fn havoc_vars<'a>(
                 }
                 z3::SortKind::Array => {
                     let root = old.as_array().map(|a| array_root_ast(&a));
-                    let element_type = super::z3_types::array_element_type_name(name, vc);
-                    let range = super::z3_types::z3_element_sort(vc, &element_type);
-                    let fresh_arr: Dynamic =
-                        super::z3_types::z3_array_for_range(ctx, &fresh_name, &range).into();
+                    let fresh_arr = super::z3_types::z3_fresh_const_like(ctx, &fresh_name, old);
                     // Aliases (`let b = a`, sibling `__z3_arr_` slots) share
                     // the same backing root — rebind them too or their reads
                     // keep answering with the pre-loop entry const.

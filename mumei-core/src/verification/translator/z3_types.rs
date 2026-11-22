@@ -1179,7 +1179,15 @@ pub(crate) fn wire_array_slots<'a>(
                 "{name}#rebound#{}",
                 REBOUND_ARRAY_UID.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             );
-            let rebound = if sort == ArrayElementSort::Enum {
+            let old_array = env
+                .get(&format!("__z3_arr_{name}"))
+                .and_then(|value| value.as_array());
+            let rebound = if let Some(old_array) = old_array {
+                let old_array: Dynamic = old_array.into();
+                z3_fresh_const_like(vc.ctx, &rebound_name, &old_array)
+                    .as_array()
+                    .expect("fresh value preserves array sort")
+            } else if sort == ArrayElementSort::Enum {
                 let range = z3_element_sort(vc, &array_element_type_name(name, vc));
                 z3_array_for_range(vc.ctx, &rebound_name, &range)
             } else {
@@ -1509,9 +1517,8 @@ pub(crate) fn havoc_array_name<'a>(vc: &VCtx<'a>, name: &str, env: &mut Env<'a>)
     let Some(arg_arr) = arg_arr else { return };
     let root = array_root_ast(&arg_arr);
     let uid = POSTCALL_UID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let range = z3_element_sort(vc, &array_element_type_name(name, vc));
-    let fresh: Dynamic =
-        z3_array_for_range(vc.ctx, &format!("__postcall_arr_{uid}"), &range).into();
+    let old_arr: Dynamic = arg_arr.clone().into();
+    let fresh = z3_fresh_const_like(vc.ctx, &format!("__postcall_arr_{uid}"), &old_arr);
     // Every tracked slot rooting at the same backing chain aliases the
     // shared buffer — havoc them together.
     let keys: Vec<String> = env
@@ -1653,6 +1660,24 @@ pub(crate) fn z3_array_for_range<'a>(
     range: &z3::Sort<'a>,
 ) -> Array<'a> {
     Array::new_const(ctx, name, &z3::Sort::int(ctx), range)
+}
+
+pub(crate) fn z3_fresh_const_like<'a>(
+    ctx: &'a Context,
+    name: &str,
+    existing: &Dynamic<'a>,
+) -> Dynamic<'a> {
+    let raw_ctx = raw_z3_context(ctx);
+    let c_name =
+        std::ffi::CString::new(name).unwrap_or_else(|_| std::ffi::CString::new("__havoc").unwrap());
+    let ast = unsafe {
+        z3_sys::Z3_mk_fresh_const(
+            raw_ctx,
+            c_name.as_ptr(),
+            z3_sys::Z3_get_sort(raw_ctx, existing.get_z3_ast()),
+        )
+    };
+    unsafe { Dynamic::wrap(ctx, ast) }
 }
 
 /// Does `callee`'s body possibly store into the array bound to `param_name`?

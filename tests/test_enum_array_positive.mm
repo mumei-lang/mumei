@@ -105,3 +105,48 @@ body: {
         C::G => 0
     }
 };
+
+atom loop_store_enum_array(xs: [C]) -> i64
+requires: len(xs) > 0;
+ensures: true;
+body: {
+    let i = 0;
+    while i < 1
+    invariant: i >= 0 && i <= 1
+    decreases: 1 - i
+    {
+        xs[i] = C::R(5);
+        i = i + 1
+    };
+    0
+};
+
+atom loop_store_bool_array(xs: [bool]) -> i64
+requires: len(xs) > 0;
+ensures: true;
+body: {
+    let i = 0;
+    while i < 1
+    invariant: i >= 0 && i <= 1
+    decreases: 1 - i
+    {
+        xs[i] = false;
+        i = i + 1
+    };
+    0
+};
+
+atom loop_store_f64_array(xs: [f64], value: f64) -> i64
+requires: len(xs) > 0;
+ensures: true;
+body: {
+    let i = 0;
+    while i < 1
+    invariant: i >= 0 && i <= 1
+    decreases: 1 - i
+    {
+        xs[i] = value;
+        i = i + 1
+    };
+    0
+};
