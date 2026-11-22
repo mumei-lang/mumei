@@ -42,6 +42,10 @@ fn typed_lambda_domains_are_scoped_and_checked_at_invocation() {
                 "Call to 'h' argument 'x' may be outside the 'u32' domain",
             ),
             (
+                "tests/negative/test_lambda_array_oob.mm",
+                "Potential Out-of-Bounds store on 'ys'",
+            ),
+            (
                 "tests/negative/test_lambda_callref_domain.mm",
                 "Call to 'call' argument 'x' may be outside the 'u32' domain",
             ),

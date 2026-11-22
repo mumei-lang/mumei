@@ -5313,27 +5313,29 @@ pub(crate) fn expr_to_z3<'a>(
             let array = z3_dynamic_array(vc, name, env);
 
             // 配列名に紐づく長さシンボルを使った境界チェック
-            if let Some(solver) = solver_opt {
-                let len = array_len_value(ctx, env, name, vc.bitvec_i64, Some(solver));
-                let safe = index_in_bounds(ctx, &idx_value, &len)
-                    .ok_or(MumeiError::type_error("Index must be integer"))?;
-                solver.push();
-                for cond in vc.path_cond_stack.borrow().iter() {
-                    solver.assert(cond);
-                }
-                solver.assert(&safe.not());
-                if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
+            if vc.recursion.lambda_bind_depth.get() == 0 {
+                if let Some(solver) = solver_opt {
+                    let len = array_len_value(ctx, env, name, vc.bitvec_i64, Some(solver));
+                    let safe = index_in_bounds(ctx, &idx_value, &len)
+                        .ok_or(MumeiError::type_error("Index must be integer"))?;
+                    solver.push();
+                    for cond in vc.path_cond_stack.borrow().iter() {
+                        solver.assert(cond);
+                    }
+                    solver.assert(&safe.not());
+                    if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
+                        solver.pop(1);
+                        return Err(MumeiError::verification(format!(
+                            "Potential Out-of-Bounds on '{}' (index may be < 0 or >= len_{})",
+                            name, name
+                        ))
+                        .with_help(
+                            "requires にインデックスの範囲制約 (0 <= idx < len) を追加してください",
+                        )
+                        .with_verdict(crate::verification::VerdictKind::Rejected));
+                    }
                     solver.pop(1);
-                    return Err(MumeiError::verification(format!(
-                        "Potential Out-of-Bounds on '{}' (index may be < 0 or >= len_{})",
-                        name, name
-                    ))
-                    .with_help(
-                        "requires にインデックスの範囲制約 (0 <= idx < len) を追加してください",
-                    )
-                    .with_verdict(crate::verification::VerdictKind::Rejected));
                 }
-                solver.pop(1);
             }
             let selected = array.select(&idx);
             if let Some(solver) = solver_opt {
@@ -7971,6 +7973,7 @@ fn lambda_expr_to_z3<'a>(
         lambda_env.insert(p.name.clone(), p_sym.clone());
         lambda_env.remove(&format!("__z3_arr_{}", p.name));
         lambda_env.remove(&super::z3_types::array_len_key(&p.name));
+        lambda_env.remove(&super::z3_types::array_root_len_key(&p.name));
         let struct_array_prefix = format!("__struct_arr#{}#", p.name);
         lambda_env.retain(|key, _| !key.starts_with(&struct_array_prefix));
         vc.local_int_types.borrow_mut().remove(&p.name);
@@ -7996,8 +7999,12 @@ fn lambda_expr_to_z3<'a>(
                 vc.bitvec_i64,
                 None,
             );
-            lambda_env.insert(super::z3_types::array_len_key(&p.name), length);
+            lambda_env.insert(super::z3_types::array_len_key(&p.name), length.clone());
+            lambda_env.insert(super::z3_types::array_root_len_key(&p.name), length.clone());
             lambda_env.insert(format!("__z3_arr_{}", p.name), p_sym.clone());
+            if let Some(array) = p_sym.as_array() {
+                super::z3_types::register_array_value_len(&mut lambda_env, &array, length);
+            }
             vc.local_array_elem_types
                 .borrow_mut()
                 .insert(p.name.clone(), element_type.display_name());
