@@ -1404,6 +1404,21 @@ fn lift<'ctx>(
                     .get(1)
                     .is_some_and(|destination| destination.contains('('))
             {
+                let operands = split_operands(&instruction.operands);
+                let destination = operands
+                    .get(1)
+                    .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+                if should_use_allocated_frame_memory(
+                    destination,
+                    &state,
+                    allocated_frame_memory_mode,
+                )? {
+                    // An SSE scalar store into the allocated frame
+                    // region has no modeled path: writing only `stack`
+                    // while integer loads read `frame_memory` would
+                    // silently drop the write, so fail closed.
+                    return Err(FunctionOutcome::OutsideProfile("frame_memory_bounds"));
+                }
                 lift_stack_store_sse(instruction, &mut state)?;
             } else if matches!(instruction.mnemonic.as_str(), "addq" | "subq")
                 && split_operands(&instruction.operands)
@@ -6252,6 +6267,35 @@ entry:
         assert_eq!(
             check_function(&[0xc3], 0, &after_five, &BTreeMap::new(), &context),
             FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn movsd_store_into_allocated_frame_memory_fails_closed() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "atom idf(x: f64) -> f64 requires: true; ensures: true; body: { x };";
+        let mut model = source_model_named_with_admission(
+            source,
+            "idf",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        model.bounded_memory = true;
+        // subq $0x10,%rsp; movsd %xmm0,0x8(%rsp); movq (%rsp,%rcx,8),%rax;
+        // retq — the SSE scalar store lands inside the allocated frame
+        // region, which has no modeled path (the integer load reads
+        // `frame_memory`, not the outgoing-argument `stack`), so the
+        // function must fail closed rather than silently drop the write.
+        let bytes = [
+            0x48, 0x83, 0xec, 0x10, 0xf2, 0x0f, 0x11, 0x44, 0x24, 0x08, 0x48, 0x8b, 0x04, 0xcc,
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("frame_memory_bounds")
         );
     }
 
