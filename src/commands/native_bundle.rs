@@ -3161,14 +3161,16 @@ fn object_call_edges_correspond(
     // compiler-rt `__*ti3` calls are injected by the backend for
     // i128/u128 operators the IR spells as plain instructions, so they
     // have no IR call edge; the machine-TV lifter models their effects
-    // instead. A ti3 name the IR itself defines or declares is a real
-    // edge (explicit call or user-defined function), so keep it.
+    // instead. A ti3 edge that the same caller's IR call set names is a
+    // real edge (explicit call or user-defined function), so keep it.
     let mut object_calls = object.calls.clone();
-    for callees in object_calls.values_mut() {
+    for (caller, callees) in object_calls.iter_mut() {
+        // A ti3 edge survives only when the same caller's IR call set
+        // names it — backend-injected calls have no such edge even
+        // when another function calls the helper explicitly.
+        let ir_callees = ir.calls.get(caller);
         callees.retain(|name| {
-            !machine_tv::is_ti3_libcall(name)
-                || ir.declared.contains(name)
-                || ir.calls.values().any(|set| set.contains(name))
+            !machine_tv::is_ti3_libcall(name) || ir_callees.is_some_and(|set| set.contains(name))
         });
     }
     (ir.call_edges_checkable && object.call_edges_checkable).then(|| ir.calls == object_calls)
@@ -5359,6 +5361,39 @@ mod tests {
         };
         assert_eq!(
             object_call_edges_correspond(&explicit_ir, &object),
+            Some(true)
+        );
+
+        // When a different IR function calls the helper explicitly,
+        // this caller's injected edge is still stripped.
+        let other_caller_ir = tv::IrFunctionSurface {
+            defined: BTreeSet::from(["div128".to_owned(), "explicit".to_owned()]),
+            declared: BTreeSet::from(["__udivti3".to_owned()]),
+            calls: BTreeMap::from([
+                ("div128".to_owned(), BTreeSet::new()),
+                (
+                    "explicit".to_owned(),
+                    BTreeSet::from(["__udivti3".to_owned()]),
+                ),
+            ]),
+            call_edges_checkable: true,
+        };
+        let other_object = ObjectSymbolSurface {
+            defined: other_caller_ir.defined.clone(),
+            calls: BTreeMap::from([
+                (
+                    "div128".to_owned(),
+                    BTreeSet::from(["__udivti3".to_owned()]),
+                ),
+                (
+                    "explicit".to_owned(),
+                    BTreeSet::from(["__udivti3".to_owned()]),
+                ),
+            ]),
+            ..object.clone()
+        };
+        assert_eq!(
+            object_call_edges_correspond(&other_caller_ir, &other_object),
             Some(true)
         );
     }
