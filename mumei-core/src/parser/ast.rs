@@ -431,12 +431,13 @@ pub enum Stmt {
         value: Box<Expr>,
         span: Span,
     },
-    /// Array element store: `name[idx] = value`.
+    /// Array element or struct-field store: `name[idx][.field] = value`.
     /// Semantics: Z3 `Array::store(arr, idx, value)` — produces a new logical
     /// array where position `idx` now holds `value`.
     ArrayStore {
         array: String,
         index: Box<Expr>,
+        field_path: Option<Vec<String>>,
         value: Box<Expr>,
         span: Span,
     },

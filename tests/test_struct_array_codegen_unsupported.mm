@@ -1,6 +1,6 @@
 enum E {
     A,
-    B
+    B(next: E)
 }
 
 struct Bad {

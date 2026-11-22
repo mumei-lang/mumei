@@ -2301,9 +2301,11 @@ pub(crate) fn stmt_to_z3<'a>(
         Stmt::ArrayStore {
             array,
             index,
+            field_path,
             value,
             ..
         } => {
+            let field_path = field_path.as_ref();
             if super::z3_types::is_array_shared(env, array) {
                 return Err(super::z3_types::shared_array_mutation_error(array));
             }
@@ -2320,7 +2322,36 @@ pub(crate) fn stmt_to_z3<'a>(
                 vc.module_env,
                 vc.ieee754_f64,
             );
-            let struct_leaf_values = if element_sort == super::z3_types::ArrayElementSort::Struct {
+            let struct_leaf_values = if let Some(field_path) = field_path {
+                if element_sort != super::z3_types::ArrayElementSort::Struct {
+                    return Err(MumeiError::type_error(format!(
+                        "field store requires an array of structs, found '{element_type}'"
+                    )));
+                }
+                let leaves = super::z3_types::struct_array_leaf_types(&element_type, vc.module_env)
+                    .ok_or_else(|| {
+                        MumeiError::type_error(format!(
+                            "array element struct '{element_type}' must have only scalar leaves"
+                        ))
+                    })?;
+                let path = field_path.join("_");
+                let leaf_type = leaves
+                    .iter()
+                    .find(|(leaf_path, _)| leaf_path == &path)
+                    .map(|(_, leaf_type)| leaf_type)
+                    .ok_or_else(|| {
+                        MumeiError::type_error(format!(
+                            "array element struct '{element_type}' has no scalar leaf '{path}'"
+                        ))
+                    })?;
+                let sort = super::z3_types::array_element_sort_from_type(
+                    leaf_type,
+                    vc.module_env,
+                    vc.ieee754_f64,
+                );
+                let value = super::z3_types::coerce_to_array_elem_sort(vc, sort, &val)?;
+                Some(vec![(path, value)])
+            } else if element_sort == super::z3_types::ArrayElementSort::Struct {
                 let value_type =
                     super::expr::struct_array_expr_type(vc, value).ok_or_else(|| {
                         MumeiError::type_error(format!(
@@ -2371,7 +2402,9 @@ pub(crate) fn stmt_to_z3<'a>(
             } else {
                 None
             };
-            let stored_val = if struct_leaf_values.is_some() {
+            let stored_val = if field_path.is_some() {
+                val.clone()
+            } else if struct_leaf_values.is_some() {
                 val.as_int().map(Into::into).ok_or_else(|| {
                     MumeiError::type_error(format!(
                         "array store value must be a struct of type '{element_type}'"
@@ -2407,33 +2440,40 @@ pub(crate) fn stmt_to_z3<'a>(
                 solver.pop(1);
             }
 
-            let arr_key = format!("__z3_arr_{}", array);
-            let current_arr = z3_dynamic_array(vc, array, env);
-            let carrier_root = super::z3_types::array_root_ast(&current_arr);
-            let new_arr = current_arr.store(&idx, &stored_val);
-            let carrier_aliases: Vec<String> = env
-                .iter()
-                .filter(|(_, value)| {
-                    value.as_array().is_some_and(|candidate| {
-                        super::z3_types::array_root_ast(&candidate) == carrier_root
+            if field_path.is_none() {
+                let arr_key = format!("__z3_arr_{}", array);
+                let current_arr = z3_dynamic_array(vc, array, env);
+                let carrier_root = super::z3_types::array_root_ast(&current_arr);
+                let new_arr = current_arr.store(&idx, &stored_val);
+                let carrier_aliases: Vec<String> = env
+                    .iter()
+                    .filter(|(_, value)| {
+                        value.as_array().is_some_and(|candidate| {
+                            super::z3_types::array_root_ast(&candidate) == carrier_root
+                        })
                     })
-                })
-                .map(|(key, _)| key.clone())
-                .collect();
-            if carrier_aliases.is_empty() {
-                env.insert(arr_key, new_arr.into());
-            } else {
-                for key in carrier_aliases {
-                    env.insert(key, new_arr.clone().into());
+                    .map(|(key, _)| key.clone())
+                    .collect();
+                if carrier_aliases.is_empty() {
+                    env.insert(arr_key, new_arr.into());
+                } else {
+                    for key in carrier_aliases {
+                        env.insert(key, new_arr.clone().into());
+                    }
                 }
             }
             if let Some(leaves) = struct_leaf_values {
                 let leaf_types =
                     super::z3_types::struct_array_leaf_types(&element_type, vc.module_env)
                         .expect("validated struct array retains its leaf types");
-                for ((path, value), (_, leaf_type)) in leaves.into_iter().zip(leaf_types) {
+                for (path, value) in leaves {
+                    let leaf_type = leaf_types
+                        .iter()
+                        .find(|(leaf_path, _)| leaf_path == &path)
+                        .map(|(_, leaf_type)| leaf_type)
+                        .expect("validated struct array retains its leaf type");
                     let leaf_array =
-                        super::z3_types::struct_array_leaf_array(vc, array, &path, &leaf_type, env);
+                        super::z3_types::struct_array_leaf_array(vc, array, &path, leaf_type, env);
                     let leaf_root = super::z3_types::array_root_ast(&leaf_array);
                     let updated = leaf_array.store(&idx, &value);
                     let aliases: Vec<String> = env

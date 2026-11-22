@@ -321,3 +321,138 @@ fn unsupported_struct_array_layout_fails_codegen_cleanly() {
         "unsupported struct-array layout must produce a clean codegen error:\n{stdout}\n{stderr}"
     );
 }
+
+#[test]
+fn finite_enum_struct_array_leaves_verify_in_both_integer_modes() {
+    for bitvec_i64 in [false, true] {
+        let output = run_verify("test_struct_array_enum_positive.mm", bitvec_i64);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "finite-enum struct-array leaves must verify (bitvec={bitvec_i64}):\n{stdout}\n{stderr}"
+        );
+        let payload = verify_json(&output);
+        assert_eq!(
+            payload["status"], "success",
+            "finite-enum struct-array fixture did not verify (bitvec={bitvec_i64}):\n{payload:#}"
+        );
+    }
+}
+
+#[test]
+fn enum_struct_array_false_claims_and_unsupported_shapes_fail() {
+    for bitvec_i64 in [false, true] {
+        let output = run_verify("test_struct_array_enum_negative.mm", bitvec_i64);
+        assert!(
+            !output.status.success(),
+            "enum struct-array false claims must fail (bitvec={bitvec_i64}):\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let payload = verify_json(&output);
+        let diagnostics = payload["diagnostics"]
+            .as_array()
+            .expect("diagnostics array");
+        for atom in [
+            "stale_enum_leaf_read",
+            "enum_leaf_call_overflow",
+            "claim_enum_payload_overflow",
+        ] {
+            assert!(
+                diagnostics.iter().any(|entry| entry["atom"] == atom),
+                "missing enum struct-array rejection for {atom} (bitvec={bitvec_i64}):\n{payload:#}"
+            );
+        }
+        assert!(
+            diagnostics.iter().any(|entry| {
+                entry["atom"] == "enum_leaf_call_overflow"
+                    && entry["message"]
+                        .as_str()
+                        .is_some_and(|message| {
+                            message.contains("Call to 'take_enum_leaf_array'")
+                                || message.contains(
+                                    "Enum 'C' variant 'G' payload 'v' value may be outside the 'u32' domain",
+                                )
+                        })
+            }),
+            "out-of-range enum payload passed as a call argument must be rejected:\n{payload:#}"
+        );
+
+        let unsupported = run_verify("test_struct_array_enum_unsupported.mm", bitvec_i64);
+        assert!(
+            !unsupported.status.success(),
+            "unsupported enum struct-array shapes must fail (bitvec={bitvec_i64}):\n{}\n{}",
+            String::from_utf8_lossy(&unsupported.stdout),
+            String::from_utf8_lossy(&unsupported.stderr)
+        );
+        let payload = verify_json(&unsupported);
+        let diagnostics = payload["diagnostics"]
+            .as_array()
+            .expect("diagnostics array");
+        for atom in [
+            "recursive_enum_leaf",
+            "array_payload_enum_leaf",
+            "nested_array_leaf",
+            "struct_array_enum_payload_leaf",
+            "generic_enum_leaf",
+        ] {
+            assert!(
+                diagnostics.iter().any(|entry| {
+                    entry["atom"] == atom
+                        && entry["message"]
+                            .as_str()
+                            .is_some_and(|message| message.contains("Type Error"))
+                }),
+                "unsupported struct-array shape {atom} must be a type error (bitvec={bitvec_i64}):\n{payload:#}"
+            );
+        }
+    }
+}
+
+#[test]
+fn native_enum_struct_array_element_store_read_and_match_returns_12() {
+    let (dir, copied) = copy_fixture("test_struct_array_enum_codegen.mm");
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("build")
+        .arg(&copied)
+        .arg("--emit")
+        .arg("llvm-ir")
+        .current_dir(dir.path())
+        .output()
+        .expect("build enum struct-array LLVM fixture");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "enum struct-array LLVM build failed:\n{stdout}\n{stderr}"
+    );
+    let ir_path = std::fs::read_dir(dir.path())
+        .expect("list enum struct-array output")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "ll"))
+        .expect("find emitted enum struct-array LLVM");
+    let ir = std::fs::read_to_string(ir_path).expect("read emitted enum struct-array LLVM");
+    assert!(
+        ir.contains("getelementptr")
+            && ir.contains("load")
+            && ir.contains("store")
+            && ir.contains("extractvalue"),
+        "enum struct-array field stores, reads, and matches must use GEP/load/store and enum projection:\n{ir}"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("run")
+        .arg(copied)
+        .current_dir(dir.path())
+        .output()
+        .expect("run native enum struct-array fixture");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(12),
+        "native enum struct-array program should return 12:\n{stdout}\n{stderr}"
+    );
+}

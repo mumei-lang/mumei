@@ -2109,7 +2109,30 @@ fn check_call_argument_domain<'a>(
     if let Some(domain) = datatype::scalar_int_leaf_domain(vc, &resolved_type, value) {
         domains.push((resolved_type.clone(), domain));
     } else if let Some(element_type) = array_element_type_name(&resolved_type) {
-        if let Some(length) = call_env.get(&array_len_key(param_name)) {
+        if let Some(leaves) = super::z3_types::struct_array_leaf_types(element_type, vc.module_env)
+        {
+            if let Some(length) = call_env.get(&array_len_key(param_name)) {
+                for (path, leaf_type) in leaves {
+                    let key = super::z3_types::struct_array_leaf_key(param_name, &path);
+                    let Some(array) = call_env.get(&key).and_then(|value| value.as_array()) else {
+                        continue;
+                    };
+                    let array: Dynamic = array.into();
+                    let domain = if leaf_type.starts_with("enum:") {
+                        datatype::enum_array_leaf_domain(vc, &array, length)
+                    } else {
+                        datatype::array_int_leaf_domain(vc, &array, length, &leaf_type)
+                    };
+                    if let Some(domain) = domain {
+                        let domain_type = leaf_type
+                            .strip_prefix("enum:")
+                            .unwrap_or(&leaf_type)
+                            .to_string();
+                        domains.push((domain_type, domain));
+                    }
+                }
+            }
+        } else if let Some(length) = call_env.get(&array_len_key(param_name)) {
             if let Some(domain) = datatype::array_int_leaf_domain(vc, value, length, element_type) {
                 domains.push((element_type.to_string(), domain));
             }
@@ -3023,10 +3046,9 @@ fn bind_struct_array_fields<'a>(
             let leaf_array =
                 super::z3_types::struct_array_leaf_array(vc, array_name, &path, &field_type, env);
             let selected = leaf_array.select(index);
-            if let (Some(solver), Some(bound)) = (
-                solver_opt,
-                datatype::scalar_int_leaf_domain(vc, &field_type, &selected),
-            ) {
+            let bound = datatype::enum_value_leaf_domain(vc, &selected)
+                .or_else(|| datatype::scalar_int_leaf_domain(vc, &field_type, &selected));
+            if let (Some(solver), Some(bound)) = (solver_opt, bound) {
                 solver.assert(&bound);
             }
             env.insert(
@@ -3152,10 +3174,9 @@ fn read_struct_array_field<'a>(
     let leaf_array =
         super::z3_types::struct_array_leaf_array(vc, array_name, &path, &leaf_type, env);
     let selected = leaf_array.select(&index);
-    if let (Some(solver), Some(bound)) = (
-        solver_opt,
-        datatype::scalar_int_leaf_domain(vc, &leaf_type, &selected),
-    ) {
+    let bound = datatype::enum_value_leaf_domain(vc, &selected)
+        .or_else(|| datatype::scalar_int_leaf_domain(vc, &leaf_type, &selected));
+    if let (Some(solver), Some(bound)) = (solver_opt, bound) {
         solver.assert(&bound);
     }
     Ok(Some(selected))
@@ -8407,7 +8428,32 @@ fn fixed_width_param_domains<'a>(
                 vc.bitvec_i64,
                 solver_opt,
             );
-            if let Some(domain) = datatype::array_int_leaf_domain(vc, value, &length, element_type)
+            if let Some(leaves) =
+                super::z3_types::struct_array_leaf_types(element_type, vc.module_env)
+            {
+                for (path, leaf_type) in leaves {
+                    let key = super::z3_types::struct_array_leaf_key(param_name, &path);
+                    let Some(array) = env.get(&key).and_then(|value| value.as_array()) else {
+                        continue;
+                    };
+                    let array: Dynamic = array.into();
+                    let domain = if leaf_type.starts_with("enum:") {
+                        datatype::enum_array_leaf_domain(vc, &array, &length)
+                    } else {
+                        datatype::array_int_leaf_domain(vc, &array, &length, &leaf_type)
+                    };
+                    if let Some(domain) = domain {
+                        domains.push((
+                            leaf_type
+                                .strip_prefix("enum:")
+                                .unwrap_or(&leaf_type)
+                                .to_string(),
+                            domain,
+                        ));
+                    }
+                }
+            } else if let Some(domain) =
+                datatype::array_int_leaf_domain(vc, value, &length, element_type)
             {
                 domains.push((element_type.to_string(), domain));
             }

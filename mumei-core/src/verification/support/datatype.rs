@@ -565,6 +565,31 @@ pub(crate) fn array_int_leaf_domain<'a>(
     Some(z3::ast::forall_const(vc.ctx, &[&index], &[], &in_range))
 }
 
+pub(crate) fn enum_array_leaf_domain<'a>(
+    vc: &VCtx<'a>,
+    array_value: &Dynamic<'a>,
+    length_value: &Dynamic<'a>,
+) -> Option<Bool<'a>> {
+    let array = array_value.as_array()?;
+    let length = crate::verification::translator::z3_types::as_int_like(length_value)?;
+    let index = z3::ast::Int::fresh_const(vc.ctx, "struct_array_enum_index");
+    let in_bounds = Bool::and(
+        vc.ctx,
+        &[
+            &index.ge(&z3::ast::Int::from_i64(vc.ctx, 0)),
+            &index.lt(&length),
+        ],
+    );
+    let selected: Dynamic = array.select(&index);
+    let element_domain = enum_value_leaf_domain(vc, &selected)?;
+    Some(z3::ast::forall_const(
+        vc.ctx,
+        &[&index],
+        &[],
+        &in_bounds.implies(&element_domain),
+    ))
+}
+
 /// `value` is an enum datatype constant: the conjunction holding every
 /// `u64`/`u32`/`i32` payload leaf inside its declared width, gated on the
 /// variant that owns it (`is_V(value) => bounds_V`). The widened
@@ -696,6 +721,37 @@ pub(crate) fn assert_enum_value_domains<'a>(vc: &VCtx<'a>, solver: &Solver<'a>, 
     for value in env.values() {
         if let Some(bound) = enum_value_leaf_domain(vc, value) {
             solver.assert(&bound);
+        }
+    }
+    for (name, element_type) in vc.local_array_elem_types.borrow().iter() {
+        let Some(leaves) = crate::verification::translator::z3_types::struct_array_leaf_types(
+            element_type,
+            vc.module_env,
+        ) else {
+            continue;
+        };
+        let Some(length) = env.get(&crate::verification::translator::z3_types::array_len_key(
+            name,
+        )) else {
+            continue;
+        };
+        if let Some(nonnegative) =
+            crate::verification::translator::z3_types::nonneg_constraint(vc.ctx, length)
+        {
+            solver.assert(&nonnegative);
+        }
+        for (path, leaf_type) in leaves {
+            if !leaf_type.starts_with("enum:") {
+                continue;
+            }
+            let key = crate::verification::translator::z3_types::struct_array_leaf_key(name, &path);
+            let Some(array) = env.get(&key).and_then(|value| value.as_array()) else {
+                continue;
+            };
+            let array: Dynamic = array.into();
+            if let Some(bound) = enum_array_leaf_domain(vc, &array, length) {
+                solver.assert(&bound);
+            }
         }
     }
 }

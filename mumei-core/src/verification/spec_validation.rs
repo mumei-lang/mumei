@@ -650,6 +650,12 @@ pub(crate) fn seed_env<'a>(vc: &VCtx<'a>, atom: &Atom) -> Env<'a> {
             param.name.clone(),
             param_z3_value_for_vc(vc, &param.name, param.type_name.as_deref()),
         );
+        crate::verification::translator::z3_types::seed_struct_array_param_leaves(
+            vc,
+            &param.name,
+            param.type_name.as_deref(),
+            &mut env,
+        );
         if let Some(sdef) = param
             .type_name
             .as_deref()

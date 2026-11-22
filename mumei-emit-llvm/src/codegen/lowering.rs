@@ -655,6 +655,46 @@ pub(crate) fn array_elem_llvm_type<'a>(
             _ => context.i64_type().into(),
         }));
     };
+    fn has_array_payload(
+        type_name: &str,
+        module_env: &ModuleEnv,
+        visiting: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        let base = module_env.resolve_base_type(type_name);
+        match lower(&base) {
+            LoweredType::Array(_) => true,
+            LoweredType::Other(name) => {
+                if let Some(enum_def) = module_env.get_enum(&name) {
+                    if type_cycle_path(module_env, &name).is_some()
+                        || !enum_def.type_params.is_empty()
+                        || !visiting.insert(enum_def.name.clone())
+                    {
+                        return true;
+                    }
+                    let has_array = enum_def.variants.iter().any(|variant| {
+                        variant.field_types.iter().any(|field| {
+                            has_array_payload(&field.display_name(), module_env, visiting)
+                        })
+                    });
+                    visiting.remove(&enum_def.name);
+                    has_array
+                } else if let Some(struct_def) = module_env.get_struct(&name) {
+                    if !visiting.insert(struct_def.name.clone()) {
+                        return true;
+                    }
+                    let has_array = struct_def
+                        .fields
+                        .iter()
+                        .any(|field| has_array_payload(&field.type_name, module_env, visiting));
+                    visiting.remove(&struct_def.name);
+                    has_array
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
     if let Some(struct_def) = module_env.get_struct(&inner_base) {
         fn scalar_struct_element(
             type_name: &str,
@@ -672,6 +712,15 @@ pub(crate) fn array_elem_llvm_type<'a>(
                 | LoweredType::Bool
                 | LoweredType::Str => true,
                 LoweredType::Other(name) => {
+                    if let Some(enum_def) = module_env.get_enum(&name) {
+                        return type_cycle_path(module_env, &name).is_none()
+                            && enum_def.type_params.is_empty()
+                            && !has_array_payload(
+                                &name,
+                                module_env,
+                                &mut std::collections::HashSet::new(),
+                            );
+                    }
                     let Some(definition) = module_env.get_struct(&name) else {
                         return false;
                     };
@@ -702,46 +751,6 @@ pub(crate) fn array_elem_llvm_type<'a>(
         ));
     }
     if let Some(enum_def) = module_env.get_enum(enum_base) {
-        fn has_array_payload(
-            type_name: &str,
-            module_env: &ModuleEnv,
-            visiting: &mut std::collections::HashSet<String>,
-        ) -> bool {
-            let base = module_env.resolve_base_type(type_name);
-            match lower(&base) {
-                LoweredType::Array(_) => true,
-                LoweredType::Other(name) => {
-                    if let Some(enum_def) = module_env.get_enum(&name) {
-                        if type_cycle_path(module_env, &name).is_some()
-                            || !enum_def.type_params.is_empty()
-                            || !visiting.insert(enum_def.name.clone())
-                        {
-                            return true;
-                        }
-                        let has_array = enum_def.variants.iter().any(|variant| {
-                            variant.field_types.iter().any(|field| {
-                                has_array_payload(&field.display_name(), module_env, visiting)
-                            })
-                        });
-                        visiting.remove(&enum_def.name);
-                        has_array
-                    } else if let Some(struct_def) = module_env.get_struct(&name) {
-                        if !visiting.insert(struct_def.name.clone()) {
-                            return true;
-                        }
-                        let has_array = struct_def
-                            .fields
-                            .iter()
-                            .any(|field| has_array_payload(&field.type_name, module_env, visiting));
-                        visiting.remove(&struct_def.name);
-                        has_array
-                    } else {
-                        false
-                    }
-                }
-                _ => false,
-            }
-        }
         if type_cycle_path(module_env, enum_base).is_some()
             || !enum_def.type_params.is_empty()
             || has_array_payload(enum_base, module_env, &mut std::collections::HashSet::new())

@@ -1269,7 +1269,7 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
             }
         }
 
-        // Check for assignment: ident = expr (or array store: ident[idx] = expr)
+        // Check for assignment: ident = expr, field write, or array element store.
         Token::Ident(ref name) => {
             let name_clone = name.clone();
             // A field-path assignment `a.b(.c)* = expr`: collect the
@@ -1352,26 +1352,45 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
     }
 }
 
-/// If `expr` is an `Expr::ArrayAccess(arr, idx)` and the next token is `=`
-/// (and not `==` / `=>`), consume the `=`, parse the RHS and produce
-/// `Stmt::ArrayStore`. Otherwise wrap `expr` in `Stmt::Expr` unchanged.
+/// If `expr` is an array element or one of its fields and the next token is
+/// `=` (and not `==` / `=>`), promote it to `Stmt::ArrayStore`.
 fn try_promote_to_array_store(ctx: &mut ParseContext, expr: Expr, stmt_span: super::Span) -> Stmt {
-    let is_store = matches!(expr, Expr::ArrayAccess(_, _))
+    let target = array_store_target(&expr);
+    let is_store = target.is_some()
         && ctx.peek() == &Token::Assign
         && ctx
             .peek_at(1)
             .is_none_or(|t| *t != Token::Assign && *t != Token::Gt);
     if is_store {
-        if let Expr::ArrayAccess(array, index) = expr {
+        if let Some((array, index, field_path)) = target {
             ctx.advance(); // consume =
             let value = parse_expr(ctx, 0);
             return Stmt::ArrayStore {
                 array,
                 index,
+                field_path: (!field_path.is_empty()).then_some(field_path),
                 value: Box::new(value),
                 span: stmt_span,
             };
         }
     }
     Stmt::Expr(expr, stmt_span)
+}
+
+fn array_store_target(expr: &Expr) -> Option<(String, Box<Expr>, Vec<String>)> {
+    fn collect(expr: &Expr, fields: &mut Vec<String>) -> Option<(String, Box<Expr>)> {
+        match expr {
+            Expr::ArrayAccess(array, index) => Some((array.clone(), index.clone())),
+            Expr::FieldAccess(inner, field) => {
+                let target = collect(inner, fields)?;
+                fields.push(field.clone());
+                Some(target)
+            }
+            _ => None,
+        }
+    }
+
+    let mut fields = Vec::new();
+    let (array, index) = collect(expr, &mut fields)?;
+    Some((array, index, fields))
 }

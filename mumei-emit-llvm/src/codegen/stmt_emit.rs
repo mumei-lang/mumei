@@ -1150,6 +1150,7 @@ pub(crate) fn compile_hir_stmt<'a>(
         HirStmt::ArrayStore {
             array,
             index,
+            field_path,
             value,
         } => {
             let val = compile_hir_expr(
@@ -1164,6 +1165,62 @@ pub(crate) fn compile_hir_stmt<'a>(
             if let Some((len_val, elem_ty, data_ptr_val)) = array_ptrs.get(array.as_str()) {
                 let data_ptr = data_ptr_val.into_pointer_value();
                 let len_int = len_val.into_int_value();
+                let (store_ty, field_indices) = if let Some(field_path) = field_path {
+                    let element_type = infer_struct_type_name(
+                        &HirExpr::ArrayAccess(array.clone(), index.clone()),
+                        var_types,
+                        module_env,
+                    )
+                    .ok_or_else(|| {
+                        MumeiError::codegen(format!(
+                            "Array '{}' field store requires a struct element",
+                            array
+                        ))
+                    })?;
+                    let mut current_type = element_type;
+                    let mut current_llvm_type = *elem_ty;
+                    let mut indices = Vec::with_capacity(field_path.len());
+                    for field in field_path {
+                        let resolved = module_env.resolve_base_type(&current_type);
+                        let struct_def = module_env.get_struct(&resolved).ok_or_else(|| {
+                            MumeiError::codegen(format!(
+                                "Array '{}' field path contains non-struct type '{}'",
+                                array, resolved
+                            ))
+                        })?;
+                        let field_index = struct_def
+                            .fields
+                            .iter()
+                            .position(|candidate| candidate.name == *field)
+                            .ok_or_else(|| {
+                                MumeiError::codegen(format!(
+                                    "Array '{}' struct '{}' has no field '{}'",
+                                    array, resolved, field
+                                ))
+                            })?;
+                        let inkwell::types::BasicTypeEnum::StructType(struct_type) =
+                            current_llvm_type
+                        else {
+                            return Err(MumeiError::codegen(format!(
+                                "Array '{}' field path for '{}' does not match its LLVM struct layout",
+                                array, field
+                            )));
+                        };
+                        current_llvm_type = struct_type
+                            .get_field_type_at_index(field_index as u32)
+                            .ok_or_else(|| {
+                                MumeiError::codegen(format!(
+                                    "Array '{}' field '{}' is missing from its LLVM struct layout",
+                                    array, field
+                                ))
+                            })?;
+                        current_type = struct_def.fields[field_index].type_name.clone();
+                        indices.push(field_index as u32);
+                    }
+                    (current_llvm_type, Some(indices))
+                } else {
+                    (*elem_ty, None)
+                };
 
                 // Guard the GEP + store with an in-bounds check that mirrors
                 // ArrayAccess read-side handling. Out-of-bounds writes are
@@ -1189,13 +1246,13 @@ pub(crate) fn compile_hir_stmt<'a>(
                 builder.position_at_end(safe_block);
                 // Coerce the stored value to the array's declared element
                 // type — `arr[i] = 42` on a `[f64]` stores 42.0.
-                let stored = match (elem_ty, val) {
+                let stored = match (&store_ty, val) {
                     (
                         inkwell::types::BasicTypeEnum::FloatType(ft),
                         BasicValueEnum::IntValue(iv),
                     ) => llvm!(builder.build_signed_int_to_float(iv, *ft, "store_i2f")).into(),
-                    _ if *elem_ty == val.get_type() => val,
-                    _ => crate::codegen::lowering::bitpreserve_cast(builder, val, *elem_ty)
+                    _ if store_ty == val.get_type() => val,
+                    _ => crate::codegen::lowering::bitpreserve_cast(builder, val, store_ty)
                         .map_err(|e| {
                             MumeiError::codegen(format!(
                                 "Array store value type mismatch on '{}': {}",
@@ -1206,7 +1263,39 @@ pub(crate) fn compile_hir_stmt<'a>(
                 let elem_ptr = unsafe {
                     llvm!(builder.build_gep(*elem_ty, data_ptr, &[idx], "store_elem_ptr"))
                 };
-                llvm!(builder.build_store(elem_ptr, stored));
+                let store_ptr = if let Some(field_indices) = field_indices {
+                    let mut field_ptr = elem_ptr;
+                    let mut struct_type = elem_ty.into_struct_type();
+                    for (position, field_index) in field_indices.iter().enumerate() {
+                        field_ptr = llvm!(builder.build_struct_gep(
+                            struct_type,
+                            field_ptr,
+                            *field_index,
+                            "store_field_ptr"
+                        ));
+                        if position + 1 < field_indices.len() {
+                            let inkwell::types::BasicTypeEnum::StructType(nested_type) = struct_type
+                                .get_field_type_at_index(*field_index)
+                                .ok_or_else(|| {
+                                    MumeiError::codegen(format!(
+                                        "Array '{}' field path does not match its LLVM struct layout",
+                                        array
+                                    ))
+                                })?
+                            else {
+                                return Err(MumeiError::codegen(format!(
+                                    "Array '{}' field path descends through a non-struct field",
+                                    array
+                                )));
+                            };
+                            struct_type = nested_type;
+                        }
+                    }
+                    field_ptr
+                } else {
+                    elem_ptr
+                };
+                llvm!(builder.build_store(store_ptr, stored));
                 llvm!(builder.build_unconditional_branch(merge_block));
 
                 builder.position_at_end(merge_block);
