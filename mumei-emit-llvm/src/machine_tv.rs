@@ -4253,10 +4253,6 @@ entry:
 
     #[test]
     fn llvm17_x86_disassembler_is_available() {
-        for i in disassemble(&[0x6a, 0x08, 0x6a, 0x07, 0x48, 0x83, 0xc4, 0x10, 0xc3], 0).unwrap() {
-            eprintln!("DBG {:?} {:?}", i.mnemonic, i.operands);
-        }
-
         let instructions = disassemble(&[0xb8, 7, 0, 0, 0, 0xc3], 0).unwrap();
         assert_eq!(instructions.len(), 2);
         assert_eq!(instructions[0].offset, 0);
