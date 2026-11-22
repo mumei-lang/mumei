@@ -92,10 +92,15 @@
 ### Unreleased: Core attempt-schedule representation check
 
 - `mumei evidence check-schedule <input> | --stdin [--json]` validates the
-  static shape and consistency of `mumei.attempt-schedule/v1`. It does not
-  execute adapters, establish that an adapter's self-reported outcome is
-  true, attest manifest-declared resource bounds, re-judge embedded
-  evidence acceptance or promote a grade.
+  static shape and consistency of `mumei.attempt-schedule/v1`. Its optional
+  per-attempt `enforcement` object is checked for exactly the keys
+  `environment`, `network`, `filesystem_write`, `filesystem_read`,
+  `process_spawn` and `memory_bound_mb`; shape only, not attestation. It is
+  the agent's self-reported effective dispatch boundary, not Evidence or a
+  resource-enforcement attestation. Legacy schedules may omit it. Core does
+  not execute adapters, establish that an adapter's
+  self-reported outcome is true, attest manifest-declared resource bounds,
+  re-judge embedded evidence acceptance or promote a grade.
 
 ### Unreleased: integer `/` truncates toward zero
 
