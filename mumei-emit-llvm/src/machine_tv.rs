@@ -5814,9 +5814,12 @@ merge:
             &context,
             RefinedAdmission::CompositeV23,
         );
+        // A five-leaf all-INTEGER enum result rides the callee-side `sret`
+        // machinery like a struct result, so the signature is admitted and a
+        // bare `ret` fails only on the leaf obligations.
         assert_eq!(
             check_function(&[0xc3], 0, &five_leaf_model, &BTreeMap::new(), &context),
-            FunctionOutcome::OutsideProfile("unsupported_signature")
+            FunctionOutcome::Different
         );
 
         let wide_enum_source = "enum Wide { A(x: i128), B }\n\
