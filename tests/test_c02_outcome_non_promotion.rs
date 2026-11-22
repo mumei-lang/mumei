@@ -300,12 +300,7 @@ fn external_tool_success_requires_explicit_lean_promotion_flag() {
     patch_lean_verified(&cert_path);
 
     let without_allow = verify_cert(dir.path(), &cert_path, &source, false, false);
-    assert_exit(&without_allow, 1);
-    let stdout = String::from_utf8_lossy(&without_allow.stdout);
-    assert!(
-        stdout.contains("inc: unproven"),
-        "Lean result must remain unproven without opt-in:\n{stdout}"
-    );
+    assert_unproven(&without_allow);
     let with_allow = verify_cert(dir.path(), &cert_path, &source, true, false);
     assert_proven(&with_allow);
 }

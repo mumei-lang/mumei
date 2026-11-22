@@ -2797,7 +2797,9 @@ obligation/translation contracts remain follow-ups in the linked issues.
 
 The C02 #786 outcome non-promotion regression is covered end to end by
 `tests/test_c02_outcome_non_promotion.rs`. This is regression coverage only:
-no producer, consumer or grade behavior changes, and C02 remains open.
+no producer, consumer or grade behavior changes, and C02 remains open. The
+`All verified:` line reports the re-check verdict, not the certificate's
+stored claim.
 
 The initial delivery documents ownership and minimal semantics, and adds a
 standalone evidence schema with synthetic positive/negative fixtures. Its schema
