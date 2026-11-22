@@ -3894,6 +3894,18 @@ fn lift_call<'ctx>(
         }
         let dividend = registers[6].concat(&registers[7]);
         let divisor = registers[1].concat(&registers[2]);
+        if !matches!(operation, Ti3Operation::Multiply) {
+            // A zero divisor traps in the helper just as `divq` does,
+            // so the same nonzero proof obligation applies.
+            let zero = BV::from_u64(context, 0, 128);
+            prove_division_safe(
+                model,
+                path_conditions,
+                arguments,
+                &divisor._eq(&zero).not(),
+                context,
+            )?;
+        }
         let result = match operation {
             Ti3Operation::SignedDivide => dividend.bvsdiv(&divisor),
             Ti3Operation::SignedRemainder => dividend.bvsrem(&divisor),
@@ -4451,12 +4463,12 @@ fn call_guard_status<'ctx>(
 
 fn prove_division_safe<'ctx>(
     model: &PureI64Body<'ctx>,
-    state: &MachineState<'ctx>,
+    path_conditions: &[Bool<'ctx>],
     arguments: &[BV<'ctx>],
     safety: &Bool<'ctx>,
     context: &'ctx Context,
 ) -> Result<(), FunctionOutcome> {
-    let status = call_guard_status(model, safety, &state.path_conditions, arguments, context);
+    let status = call_guard_status(model, safety, path_conditions, arguments, context);
     if status == Some(true) {
         Ok(())
     } else {
@@ -4502,7 +4514,7 @@ fn lift_division<'ctx>(
                 .not();
                 prove_division_safe(
                     model,
-                    state,
+                    &state.path_conditions,
                     arguments,
                     &Bool::and(context, &[&nonzero, &overflow]),
                     context,
@@ -4518,7 +4530,7 @@ fn lift_division<'ctx>(
                 let fits = quotient._eq(&quotient_low.sign_ext(64));
                 prove_division_safe(
                     model,
-                    state,
+                    &state.path_conditions,
                     arguments,
                     &Bool::and(context, &[&nonzero, &fits]),
                     context,
@@ -4544,14 +4556,14 @@ fn lift_division<'ctx>(
                 context,
             ) == Some(true);
             if high_half_zero {
-                prove_division_safe(model, state, arguments, &nonzero, context)?;
+                prove_division_safe(model, &state.path_conditions, arguments, &nonzero, context)?;
                 let dividend = state.registers[0].clone();
                 state.registers[0] = dividend.bvudiv(&divisor);
                 state.registers[2] = dividend.bvurem(&divisor);
                 return Ok(());
             }
             let safety = Bool::and(context, &[&nonzero, &fits]);
-            prove_division_safe(model, state, arguments, &safety, context)?;
+            prove_division_safe(model, &state.path_conditions, arguments, &safety, context)?;
             state.registers[0] = quotient.extract(63, 0);
             state.registers[2] = remainder.extract(63, 0);
         }
@@ -4574,7 +4586,7 @@ fn lift_division<'ctx>(
             let nonzero = divisor._eq(&BV::from_u64(context, 0, 32)).not();
             prove_division_safe(
                 model,
-                state,
+                &state.path_conditions,
                 arguments,
                 &Bool::and(
                     context,
