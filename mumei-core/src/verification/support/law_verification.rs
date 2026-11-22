@@ -335,6 +335,7 @@ pub fn verify_impl_with_options(
             linearity_ctx: None,
             inferred_invariants: None,
             cover_obligations: None,
+            spec_domain_obligations: Default::default(),
             effect_ctx: None,
             constraint_count: None,
             constraint_budget: DEFAULT_CONSTRAINT_BUDGET,

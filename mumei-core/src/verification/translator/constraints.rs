@@ -225,12 +225,13 @@ pub(crate) fn check_contract_subsumption<'a>(
     let concrete_req = concrete_requires.trim();
     let requires_bool_opt = if concrete_req != "true" && !concrete_req.is_empty() {
         let req_ast = parse_expression(concrete_req);
-        let value = expr_to_z3(vc, &req_ast, &mut concrete_env, None).map_err(|error| {
-            MumeiError::verification(format!(
-                "Contract subsumption could not lower {}.requires: {}",
-                concrete_atom.name, error
-            ))
-        })?;
+        let value = expr_to_z3_with_domain_obligations(vc, &req_ast, &mut concrete_env, None)
+            .map_err(|error| {
+                MumeiError::verification(format!(
+                    "Contract subsumption could not lower {}.requires: {}",
+                    concrete_atom.name, error
+                ))
+            })?;
         Some(value.as_bool().ok_or_else(|| {
             MumeiError::verification(format!(
                 "Contract subsumption requires '{}' to be boolean",
@@ -244,12 +245,13 @@ pub(crate) fn check_contract_subsumption<'a>(
     let contract_req = contract_requires.unwrap_or("true").trim();
     let contract_requires_bool_opt = if contract_req != "true" && !contract_req.is_empty() {
         let req_ast = parse_expression(contract_req);
-        let value = expr_to_z3(vc, &req_ast, &mut contract_env, None).map_err(|error| {
-            MumeiError::verification(format!(
-                "Contract subsumption could not lower contract requires '{}': {}",
-                contract_req, error
-            ))
-        })?;
+        let value = expr_to_z3_with_domain_obligations(vc, &req_ast, &mut contract_env, None)
+            .map_err(|error| {
+                MumeiError::verification(format!(
+                    "Contract subsumption could not lower contract requires '{}': {}",
+                    contract_req, error
+                ))
+            })?;
         Some(value.as_bool().ok_or_else(|| {
             MumeiError::verification(format!(
                 "Contract subsumption contract requires '{}' must be boolean",
@@ -303,22 +305,24 @@ pub(crate) fn check_contract_subsumption<'a>(
     );
     let concrete_ens_ast = parse_expression(&concrete_ensures);
     let concrete_ens_z3 =
-        expr_to_z3(vc, &concrete_ens_ast, &mut concrete_env, None).map_err(|error| {
-            MumeiError::verification(format!(
-                "Contract subsumption could not lower {}.ensures: {}",
-                concrete_atom.name, error
-            ))
-        })?;
+        expr_to_z3_with_domain_obligations(vc, &concrete_ens_ast, &mut concrete_env, None)
+            .map_err(|error| {
+                MumeiError::verification(format!(
+                    "Contract subsumption could not lower {}.ensures: {}",
+                    concrete_atom.name, error
+                ))
+            })?;
 
     // Parse and evaluate the contract's ensures.
     let contract_ens_ast = parse_expression(contract_ensures);
     let contract_ens_z3 =
-        expr_to_z3(vc, &contract_ens_ast, &mut contract_env, None).map_err(|error| {
-            MumeiError::verification(format!(
-                "Contract subsumption could not lower contract ensures '{}': {}",
-                contract_ensures, error
-            ))
-        })?;
+        expr_to_z3_with_domain_obligations(vc, &contract_ens_ast, &mut contract_env, None)
+            .map_err(|error| {
+                MumeiError::verification(format!(
+                    "Contract subsumption could not lower contract ensures '{}': {}",
+                    contract_ensures, error
+                ))
+            })?;
 
     // Both must be booleans for an implication check.
     let (concrete_bool, contract_bool) =

@@ -50,6 +50,7 @@ pub(crate) fn verify_atom_invariant(
         linearity_ctx: None,
         inferred_invariants: None,
         cover_obligations: None,
+        spec_domain_obligations: Default::default(),
         effect_ctx: None,
         constraint_count: None,
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
@@ -134,7 +135,7 @@ pub(crate) fn verify_atom_invariant(
     // requires → invariant を証明する
     if atom.requires.trim() != "true" {
         let req_ast = parse_expression(&atom.requires);
-        let req_z3 = expr_to_z3(&vc, &req_ast, &mut env, None)?;
+        let req_z3 = expr_to_z3_with_domain_obligations(&vc, &req_ast, &mut env, None)?;
         if let Some(req_bool) = req_z3.as_bool() {
             solver.push();
             // requires を仮定
@@ -188,7 +189,7 @@ pub(crate) fn verify_atom_invariant(
         // requires も仮定
         if atom.requires.trim() != "true" {
             let req_ast = parse_expression(&atom.requires);
-            let req_z3 = expr_to_z3(&vc, &req_ast, &mut env, None)?;
+            let req_z3 = expr_to_z3_with_domain_obligations(&vc, &req_ast, &mut env, None)?;
             if let Some(req_bool) = req_z3.as_bool() {
                 solver.assert(&req_bool);
             }
@@ -227,7 +228,9 @@ pub(crate) fn verify_atom_invariant(
     solver.push();
     if atom.requires.trim() != "true" {
         let req_ast = parse_expression(&atom.requires);
-        if let Some(req_bool) = expr_to_z3(&vc, &req_ast, &mut env, None)?.as_bool() {
+        if let Some(req_bool) =
+            expr_to_z3_with_domain_obligations(&vc, &req_ast, &mut env, None)?.as_bool()
+        {
             solver.assert(&req_bool);
         }
     }

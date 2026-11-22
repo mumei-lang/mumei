@@ -1,8 +1,8 @@
 use super::module_env::ModuleEnv;
 use super::support::nondeterministic_root;
 use super::translator::{
-    apply_refinement_constraint, expr_to_z3, param_z3_value, stmt_to_z3, VCtx,
-    DEFAULT_CONSTRAINT_BUDGET, I64_BITS,
+    apply_refinement_constraint, expr_to_z3_with_domain_obligations, param_z3_value, stmt_to_z3,
+    VCtx, DEFAULT_CONSTRAINT_BUDGET, I64_BITS,
 };
 use super::types::Env;
 use super::{
@@ -1136,6 +1136,7 @@ fn validation_ctx<'a>(
         linearity_ctx: None,
         inferred_invariants: None,
         cover_obligations: None,
+        spec_domain_obligations: Default::default(),
         effect_ctx: None,
         constraint_count: None,
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
@@ -1303,7 +1304,8 @@ fn assert_clause<'a>(
         return Ok(());
     }
     let clause_ast = parse_expression(trimmed);
-    let clause_z3 = expr_to_z3(vc, &clause_ast, env, None).map_err(|err| err.to_string())?;
+    let clause_z3 = expr_to_z3_with_domain_obligations(vc, &clause_ast, env, None)
+        .map_err(|err| err.to_string())?;
     let Some(clause_bool) = clause_z3.as_bool() else {
         return Err(format!("clause '{trimmed}' did not evaluate to bool"));
     };

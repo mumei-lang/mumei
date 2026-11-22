@@ -4,9 +4,9 @@ use super::property_based::{
 };
 use super::support::datatype::param_z3_value_for_vc;
 use super::translator::{
-    apply_refinement_constraint, assume_struct_contract, expr_to_z3, seed_struct_fields,
-    seed_tuple_result_components, struct_fields_of_value, tuple_component_types, VCtx,
-    DEFAULT_CONSTRAINT_BUDGET, UNSUPPORTED_TUPLE_RESULT_INDEXING,
+    apply_refinement_constraint, assume_struct_contract, expr_to_z3_with_domain_obligations,
+    seed_struct_fields, seed_tuple_result_components, struct_fields_of_value,
+    tuple_component_types, VCtx, DEFAULT_CONSTRAINT_BUDGET, UNSUPPORTED_TUPLE_RESULT_INDEXING,
 };
 use super::types::Env;
 use super::SpecContradiction;
@@ -535,6 +535,7 @@ pub(crate) fn validation_ctx<'a>(
         linearity_ctx: None,
         inferred_invariants: None,
         cover_obligations: None,
+        spec_domain_obligations: Default::default(),
         effect_ctx: None,
         constraint_count: None,
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
@@ -794,7 +795,7 @@ pub(crate) fn assert_clause<'a>(
     }
     let clause_ast = parse_expression(trimmed);
     let marks = super::translator::obligation_marks(vc);
-    let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
+    let clause_z3 = match expr_to_z3_with_domain_obligations(vc, &clause_ast, env, None) {
         Ok(value) => value,
         Err(err) if is_unsupported_clause_error(&err) => {
             super::translator::discard_obligations_since(vc, marks);
@@ -854,7 +855,7 @@ pub(crate) fn assert_negated_clause<'a>(
     }
     let clause_ast = parse_expression(trimmed);
     let marks = super::translator::obligation_marks(vc);
-    let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
+    let clause_z3 = match expr_to_z3_with_domain_obligations(vc, &clause_ast, env, None) {
         Ok(value) => value,
         Err(err) if is_unsupported_clause_error(&err) => {
             return Ok(ClauseLoweringOutcome::Skipped(unsupported_clause_warning(

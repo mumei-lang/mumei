@@ -613,7 +613,7 @@ fn lower_clause_with_skip<'a>(
     let clause_z3 =
         match crate::verification::translator::z3_types::with_array_shared_markers_restored(
             env,
-            |env| expr_to_z3(vc, &clause_ast, env, solver_opt),
+            |env| expr_to_z3_with_domain_obligations(vc, &clause_ast, env, solver_opt),
         ) {
             Ok(value) => value,
             // Dropping a requires would quietly weaken the assumptions and could
@@ -1724,6 +1724,7 @@ fn verify_inner_impl(
         linearity_ctx: Some(&linearity_ctx_cell),
         inferred_invariants: Some(&inferred_invariants_cell),
         cover_obligations: None,
+        spec_domain_obligations: Default::default(),
         effect_ctx: Some(&effect_ctx_cell),
         constraint_count: Some(&constraint_count_cell),
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,

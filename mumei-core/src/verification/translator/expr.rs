@@ -665,7 +665,7 @@ fn constant_call_antecedent<'a>(
         let req_ast = parse_expression(&requires);
         let mut req_env = call_env.clone();
         let req_value = super::z3_types::with_array_shared_markers_restored(&mut req_env, |env| {
-            expr_to_z3(vc, &req_ast, env, None)
+            expr_to_z3_with_domain_obligations(vc, &req_ast, env, None)
         })
         .ok()?;
         terms.push(req_value.as_bool()?);
@@ -902,7 +902,7 @@ fn unfold_constant_calls<'a>(
             let sink_guard = UnfoldSinkGuard::new(vc);
             let Ok(ens_value) =
                 super::z3_types::with_array_shared_markers_restored(&mut call_env, |env| {
-                    expr_to_z3(vc, &ens_ast, env, None)
+                    expr_to_z3_with_domain_obligations(vc, &ens_ast, env, None)
                 })
             else {
                 continue;
@@ -1136,7 +1136,7 @@ fn congruent_ensures_antecedent<'a>(
     } else {
         let req_ast = parse_expression(caller_requires);
         super::z3_types::with_array_shared_markers_restored(call_env, |env| {
-            expr_to_z3(vc, &req_ast, env, None)
+            expr_to_z3_with_domain_obligations(vc, &req_ast, env, None)
         })?
         .as_bool()
         .unwrap_or_else(|| Bool::from_bool(ctx, true))
@@ -2066,6 +2066,32 @@ fn record_cover_obligation<'a>(vc: &VCtx<'a>, obligation: Bool<'a>) {
     obligations.borrow_mut().push(obligation);
 }
 
+pub(crate) fn expr_to_z3_with_domain_obligations<'a>(
+    vc: &VCtx<'a>,
+    expr: &Expr,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> MumeiResult<Dynamic<'a>> {
+    vc.begin_spec_domain_clause();
+    let lowered = expr_to_z3(vc, expr, env, solver_opt);
+    let obligations = vc.finish_spec_domain_clause();
+    let value = lowered?;
+    if obligations.is_empty() {
+        return Ok(value);
+    }
+    let Some(clause) = value.as_bool() else {
+        return Err(MumeiError::verification(
+            "argument-domain obligations require a boolean specification clause",
+        )
+        .with_verdict(crate::verification::VerdictKind::Rejected));
+    };
+    let mut conjuncts = Vec::with_capacity(obligations.len() + 1);
+    conjuncts.push(clause);
+    conjuncts.extend(obligations);
+    let conjuncts = conjuncts.iter().collect::<Vec<_>>();
+    Ok(Bool::and(vc.ctx, &conjuncts).into())
+}
+
 fn check_call_argument_domain<'a>(
     vc: &VCtx<'a>,
     solver_opt: Option<&Solver<'a>>,
@@ -2075,9 +2101,6 @@ fn check_call_argument_domain<'a>(
     value: &Dynamic<'a>,
     call_env: &mut Env<'a>,
 ) -> MumeiResult<()> {
-    let Some(solver) = solver_opt else {
-        return Ok(());
-    };
     let resolved_type = vc.module_env.resolve_base_type(type_name);
     let mut domains = Vec::new();
 
@@ -2162,6 +2185,15 @@ fn check_call_argument_domain<'a>(
             record_cover_obligation(vc, domain);
             continue;
         }
+        let Some(solver) = solver_opt else {
+            if vc.record_spec_domain_obligation(domain) {
+                continue;
+            }
+            return Err(MumeiError::verification(format!(
+                "Call to '{callee_name}' argument '{param_name}' may be outside the '{domain_type}' domain"
+            ))
+            .with_verdict(crate::verification::VerdictKind::Rejected));
+        };
         solver.push();
         solver.assert(&vc.path_cond_conj());
         solver.assert(&domain.not());
@@ -3974,7 +4006,9 @@ pub(crate) fn expr_to_z3<'a>(
                                 let req_ast = parse_expression(&caller_requires);
                                 let req_z3 = super::z3_types::with_array_shared_markers_restored(
                                     &mut call_env,
-                                    |env| expr_to_z3(vc, &req_ast, env, None),
+                                    |env| {
+                                        expr_to_z3_with_domain_obligations(vc, &req_ast, env, None)
+                                    },
                                 )?;
                                 if let Some(req_bool) = req_z3.as_bool() {
                                     if vc.cover_obligations.is_some() {
@@ -4666,7 +4700,9 @@ pub(crate) fn expr_to_z3<'a>(
                                 // under which the decrease was proved.
                                 let ens_z3 = super::z3_types::with_array_shared_markers_restored(
                                     &mut call_env,
-                                    |env| expr_to_z3(vc, &ens_ast, env, None),
+                                    |env| {
+                                        expr_to_z3_with_domain_obligations(vc, &ens_ast, env, None)
+                                    },
                                 )?;
                                 if let (Some(ens_bool), Some(solver)) =
                                     (ens_z3.as_bool(), solver_opt)
@@ -4695,7 +4731,9 @@ pub(crate) fn expr_to_z3<'a>(
                                 // これにより Z3 が等式を完全に活用できる。
                                 let ens_z3 = super::z3_types::with_array_shared_markers_restored(
                                     &mut call_env,
-                                    |env| expr_to_z3(vc, &ens_ast, env, None),
+                                    |env| {
+                                        expr_to_z3_with_domain_obligations(vc, &ens_ast, env, None)
+                                    },
                                 )?;
                                 if let Some(ens_bool) = ens_z3.as_bool() {
                                     if let Some(solver) = solver_opt {
@@ -6916,7 +6954,7 @@ pub(crate) fn expr_to_z3<'a>(
                         let req_ast = parse_expression(&caller_requires);
                         let req_z3 = super::z3_types::with_array_shared_markers_restored(
                             &mut call_env,
-                            |env| expr_to_z3(vc, &req_ast, env, None),
+                            |env| expr_to_z3_with_domain_obligations(vc, &req_ast, env, None),
                         )?;
                         if let Some(req_bool) = req_z3.as_bool() {
                             if let Some(solver) = solver_opt {
@@ -7282,7 +7320,7 @@ pub(crate) fn expr_to_z3<'a>(
                                 unfold_key.as_ref().map(|_| UnfoldSinkGuard::new(vc));
                             let ens_z3 = super::z3_types::with_array_shared_markers_restored(
                                 &mut call_env,
-                                |env| expr_to_z3(vc, &ens_ast, env, None),
+                                |env| expr_to_z3_with_domain_obligations(vc, &ens_ast, env, None),
                             )?;
                             if let (Some(ens_bool), Some(solver)) = (ens_z3.as_bool(), solver_opt) {
                                 let ante = congruent_ensures_antecedent(
@@ -7305,7 +7343,7 @@ pub(crate) fn expr_to_z3<'a>(
                         } else {
                             let ens_z3 = super::z3_types::with_array_shared_markers_restored(
                                 &mut call_env,
-                                |env| expr_to_z3(vc, &ens_ast, env, None),
+                                |env| expr_to_z3_with_domain_obligations(vc, &ens_ast, env, None),
                             )?;
                             if let Some(ens_bool) = ens_z3.as_bool() {
                                 if let Some(solver) = solver_opt {
@@ -7484,7 +7522,11 @@ pub(crate) fn expr_to_z3<'a>(
                                     let req_z3 =
                                         super::z3_types::with_array_shared_markers_restored(
                                             &mut contract_env,
-                                            |env| expr_to_z3(vc, &req_ast, env, None),
+                                            |env| {
+                                                expr_to_z3_with_domain_obligations(
+                                                    vc, &req_ast, env, None,
+                                                )
+                                            },
                                         )
                                         .map_err(|e| MumeiError::verification(format!(
                                             "call_with_contract({}): failed to evaluate requires '{}': {}",
@@ -7526,7 +7568,11 @@ pub(crate) fn expr_to_z3<'a>(
                                     let ens_z3 =
                                         super::z3_types::with_array_shared_markers_restored(
                                             &mut contract_env,
-                                            |env| expr_to_z3(vc, &ens_ast, env, None),
+                                            |env| {
+                                                expr_to_z3_with_domain_obligations(
+                                                    vc, &ens_ast, env, None,
+                                                )
+                                            },
                                         )
                                     .map_err(|e| MumeiError::verification(format!(
                                         "call_with_contract({}): failed to evaluate ensures '{}': {}",
@@ -7981,7 +8027,17 @@ pub(crate) fn expr_to_z3<'a>(
                 solver.pop(1);
                 result
             } else {
-                stmt_to_z3(vc, body, &mut lambda_env, solver_opt)
+                vc.begin_spec_domain_clause();
+                let result = stmt_to_z3(vc, body, &mut lambda_env, solver_opt);
+                let obligations = vc.finish_spec_domain_clause();
+                if obligations.is_empty() {
+                    result
+                } else {
+                    Err(MumeiError::verification(
+                        "lambda body has argument-domain obligations that require a solver",
+                    )
+                    .with_verdict(crate::verification::VerdictKind::Rejected))
+                }
             };
             vc.recursion
                 .lambda_bind_depth
@@ -8139,18 +8195,6 @@ fn check_lambda_call_argument_domain<'a>(
     value: &Dynamic<'a>,
     call_env: &mut Env<'a>,
 ) -> MumeiResult<()> {
-    if solver_opt.is_none() {
-        if let Some((domain_type, _)) =
-            fixed_width_param_domains(vc, param_name, type_name, value, call_env, solver_opt)
-                .into_iter()
-                .next()
-        {
-            return Err(MumeiError::verification(format!(
-                "Call to '{callee_name}' argument '{param_name}' may be outside the '{domain_type}' domain"
-            ))
-            .with_verdict(crate::verification::VerdictKind::Rejected));
-        }
-    }
     check_call_argument_domain(
         vc,
         solver_opt,

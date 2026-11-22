@@ -131,6 +131,7 @@ pub(crate) struct VCtx<'a> {
         &'a std::cell::RefCell<Vec<crate::verification::invariant_inference::InferredInvariant>>,
     >,
     pub(crate) cover_obligations: Option<std::cell::RefCell<Vec<Bool<'a>>>>,
+    pub(crate) spec_domain_obligations: std::cell::RefCell<Vec<Vec<Bool<'a>>>>,
     /// EffectCtx for tracking allowed vs used effects during body evaluation.
     pub(crate) effect_ctx: Option<&'a std::cell::RefCell<EffectCtx>>,
     /// Per-atom constraint budget: tracks the number of solver.assert() calls.
@@ -293,6 +294,26 @@ pub(crate) struct VCtx<'a> {
 }
 
 impl<'a> VCtx<'a> {
+    pub(crate) fn begin_spec_domain_clause(&self) {
+        self.spec_domain_obligations.borrow_mut().push(Vec::new());
+    }
+
+    pub(crate) fn finish_spec_domain_clause(&self) -> Vec<Bool<'a>> {
+        self.spec_domain_obligations
+            .borrow_mut()
+            .pop()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn record_spec_domain_obligation(&self, obligation: Bool<'a>) -> bool {
+        let mut collectors = self.spec_domain_obligations.borrow_mut();
+        let Some(collector) = collectors.last_mut() else {
+            return false;
+        };
+        collector.push(obligation);
+        true
+    }
+
     /// Innermost active quantifier binder occurring in any of `vals`.
     /// Quantifier sub-terms are not traversed and count as dependent, so the
     /// check errs on the side of rejecting the call.
