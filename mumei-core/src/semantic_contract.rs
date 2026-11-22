@@ -8990,6 +8990,7 @@ fn module_atom_obligations<'ctx>(
     )?
     .boolean()?;
     let requires_definedness = std::mem::take(&mut *call_returns.perform_definedness.borrow_mut());
+    let requires_loop_exits = Bool::and(context, &requires_exits.iter().collect::<Vec<_>>());
     env.insert(
         "result".to_string(),
         result_value(&atom.name, &body.value, context, call_returns),
@@ -9201,7 +9202,7 @@ fn module_atom_obligations<'ctx>(
     for defined in &requires_definedness {
         obligations.push(Bool::and(
             context,
-            &[&source_domain_formula, &defined.not()],
+            &[&source_domain_formula, &requires_loop_exits, &defined.not()],
         ));
     }
     for defined in body
@@ -17124,6 +17125,50 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
             body: a[i];";
         let outcomes =
             refined_module_outcomes_admission(short_circuit, RefinedAdmission::CompositeV26);
+        assert!(
+            outcomes
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat),
+            "{outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn composite_v26_requires_array_read_bounds_use_requires_loop_exits() {
+        let loop_exit_guards_read = "atom f(a: [i64]) -> i64\n\
+            requires: { let j = 0; while len(a) == 0 invariant: j >= 0 decreases: 4 { j = j + 1 }; true && a[0] != 0 };\n\
+            ensures: result == 1;\n\
+            body: 1;";
+        let outcomes = refined_module_outcomes_admission(
+            loop_exit_guards_read,
+            RefinedAdmission::CompositeV26,
+        );
+        assert!(
+            outcomes
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat),
+            "{outcomes:?}"
+        );
+
+        let loop_without_bound_guard = "atom f(a: [i64], y: i64) -> i64\n\
+            requires: { let j = 0; while y == 0 invariant: j >= 0 decreases: 4 { j = j + 1 }; true && a[0] != 0 };\n\
+            ensures: result == 1;\n\
+            body: 1;";
+        let outcomes = refined_module_outcomes_admission(
+            loop_without_bound_guard,
+            RefinedAdmission::CompositeV26,
+        );
+        assert_eq!(outcomes[0], z3::SatResult::Unsat, "{outcomes:?}");
+        assert!(outcomes[1..].contains(&z3::SatResult::Sat), "{outcomes:?}");
+
+        let loop_with_short_circuit_guard = "atom f(a: [i64], y: i64, i: i64) -> i64\n\
+            requires: { let j = 0; while y == 0 invariant: j >= 0 decreases: 4 { j = j + 1 }; i >= 0 && i < len(a) && a[i] > 0 };\n\
+            ensures: result > 0;\n\
+            body: a[i];";
+        let outcomes = refined_module_outcomes_admission(
+            loop_with_short_circuit_guard,
+            RefinedAdmission::CompositeV26,
+        );
         assert!(
             outcomes
                 .iter()
