@@ -2645,6 +2645,7 @@ fn call_return_kinds<'ctx>(
         merged_composites: admission.admits_merged_composites(),
         next_array_id: std::cell::Cell::new(0),
         alloc_stores: std::cell::RefCell::new(HashMap::new()),
+        perform_definedness: std::cell::RefCell::new(Vec::new()),
         str_bound: std::cell::Cell::new(STR_BOUND),
     }
 }
@@ -2701,6 +2702,9 @@ struct CallShapes<'ctx> {
     /// shadowed: the flat `inner` map overwrites its entry, so name
     /// lookup alone can no longer carry the update.
     alloc_stores: std::cell::RefCell<HashMap<u64, Array<'ctx>>>,
+    /// Definedness checks from effect `perform` arguments, retained as
+    /// explicit module obligations as well as source-domain constraints.
+    perform_definedness: std::cell::RefCell<Vec<Bool<'ctx>>>,
     /// The current atom's effective `Str` literal bound — set by
     /// `encode_atom_body` before each atom's body is encoded.
     str_bound: std::cell::Cell<usize>,
@@ -7360,6 +7364,9 @@ pub struct PureI64Body<'ctx> {
     /// `--bitvec-i64` verification requires. Empty unless the caller admitted
     /// those operators; their conjunction is the domain the source binds.
     pub definedness: Vec<Bool<'ctx>>,
+    /// Definedness checks for effect `perform` arguments, which must be
+    /// established by the atom's `requires` rather than narrowing its domain.
+    pub perform_definedness: Vec<Bool<'ctx>>,
     /// Domain the declared signature itself binds: an admitted `bool`
     /// parameter lowers to i64 carrying 0/1, so its entry is `input <=u 1`;
     /// an admitted subrange integer type (`i8`/`i16`/`i32`/`u8`/`u16`/`u32`)
@@ -7453,6 +7460,7 @@ impl<'ctx> PureI64Body<'ctx> {
             call_sites: Vec::new(),
             call_result_bounds: Vec::new(),
             definedness: Vec::new(),
+            perform_definedness: Vec::new(),
             param_domain: Vec::new(),
             subrange_params: false,
             refined_signature: false,
@@ -7756,6 +7764,7 @@ fn encode_atom_body<'ctx>(
     call_returns
         .str_bound
         .set(atom.str_bound.unwrap_or(STR_BOUND));
+    call_returns.perform_definedness.borrow_mut().clear();
     let value = match source_stmt(
         &body,
         context,
@@ -7808,6 +7817,7 @@ fn encode_atom_body<'ctx>(
             aggregate_value(&leaves)
         }
     };
+    let perform_definedness = call_returns.perform_definedness.borrow().clone();
     // A body that flattens narrower than the atom's declared `i128`/`u128`
     // return (e.g. a match merging only 64-bit literal arms) still
     // materializes the declared width at the call boundary: the emitter
@@ -7919,6 +7929,7 @@ fn encode_atom_body<'ctx>(
         call_sites,
         call_result_bounds,
         definedness,
+        perform_definedness,
         param_domain,
         subrange_params,
         refined_signature,
@@ -8749,12 +8760,9 @@ pub struct ModuleAtomObligations<'ctx> {
 /// - entry 0: `requires ∧ call_assumptions ∧ ¬ensures ∧ exits` — the
 ///   caller's own postcondition, assuming each callee honoured its
 ///   `ensures`;
-/// - entries 1..: `requires ∧ site_guard ∧ ¬(callee_requires ∧ callee_domain)`
-///   — the caller establishes the callee's precondition *and* stays
-///   inside the domain the callee was verified on (its signature
-///   bounds, guarded-operator definedness and bounded-while exits,
-///   instantiated at the call arguments) on every path that reaches
-///   the call, so the ensures assumption above is justified.
+/// - additional entries check each `perform` argument's definedness
+///   under `requires`, then each call site establishes the callee's
+///   precondition *and* stays inside its verified domain.
 ///
 /// The domain obligations deliberately exclude the other sites' ensures
 /// assumptions, so no circular justification is possible: a call whose
@@ -9009,12 +9017,23 @@ fn module_atom_obligations<'ctx>(
         assumptions.push(site_domain.implies(&callee_post));
     }
     let assumption = Bool::and(context, &assumptions.iter().collect::<Vec<_>>());
-    let mut terms = vec![requires, Bool::and(context, &[&assumption, &post.not()])];
+    let mut terms = vec![
+        requires.clone(),
+        Bool::and(context, &[&assumption, &post.not()]),
+    ];
     for exits in requires_exits.iter().chain(ensures_exits.iter()) {
         terms.push(exits.clone());
     }
     terms.extend(source_domain.iter().cloned());
     let mut obligations = vec![Bool::and(context, &terms.iter().collect::<Vec<_>>())];
+    for defined in &body.perform_definedness {
+        let mut terms = vec![requires.clone(), defined.not()];
+        terms.extend(body.param_domain.iter().cloned());
+        if let Some(exits) = &body.loop_bound_exits {
+            terms.push(exits.clone());
+        }
+        obligations.push(Bool::and(context, &terms.iter().collect::<Vec<_>>()));
+    }
     obligations.extend(domain_obligations);
     Ok(ModuleAtomObligations {
         atom: atom.name.clone(),
@@ -10668,6 +10687,7 @@ fn source_expr<'ctx>(
     }
     Ok(match expr {
         Expr::Perform { args, .. } => {
+            let definedness_start = definedness.len();
             for arg in args {
                 source_expr(
                     arg,
@@ -10684,6 +10704,10 @@ fn source_expr<'ctx>(
                     enums,
                 )?;
             }
+            call_returns
+                .perform_definedness
+                .borrow_mut()
+                .extend(definedness[definedness_start..].iter().cloned());
             N(BV::from_u64(ctx, 0, 64))
         }
         Expr::Number(n) => N(BV::from_i64(ctx, *n, 64)),
@@ -16506,6 +16530,51 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
                 body: { perform Vault.withdraw(amount); balance - amount }";
         let outcomes = refined_module_outcomes_admission(source, RefinedAdmission::CompositeV25);
         assert!(outcomes.contains(&z3::SatResult::Sat), "{outcomes:?}");
+    }
+
+    #[test]
+    fn composite_v25_keeps_perform_argument_definedness_and_call_obligations() {
+        let division = "effect Vault;\n\
+            atom f(y: i64) -> i64 effects: [Vault];\n\
+                requires: true;\n\
+                ensures: result == 0;\n\
+                body: { let x = 1; perform Vault.apply(x / y); 0 };";
+        let undefined = refined_module_outcomes_admission(division, RefinedAdmission::CompositeV25);
+        assert_eq!(
+            undefined,
+            vec![z3::SatResult::Unsat, z3::SatResult::Sat],
+            "{undefined:?}"
+        );
+        let guarded_division = division.replace("requires: true", "requires: y != 0");
+        let defined =
+            refined_module_outcomes_admission(&guarded_division, RefinedAdmission::CompositeV25);
+        assert!(
+            defined.iter().all(|result| *result == z3::SatResult::Unsat),
+            "{defined:?}"
+        );
+
+        let call = "effect Vault;\n\
+            atom positive(z: i64) -> i64 requires: z > 0; ensures: result == z; body: z;\n\
+            atom caller(x: i64) -> i64 effects: [Vault];\n\
+                requires: true;\n\
+                ensures: result == x;\n\
+                body: { perform Vault.apply(positive(x)); x };";
+        let unmet = refined_module_outcomes_admission(call, RefinedAdmission::CompositeV25);
+        assert_eq!(
+            unmet,
+            vec![
+                z3::SatResult::Unsat,
+                z3::SatResult::Unsat,
+                z3::SatResult::Sat,
+            ],
+            "{unmet:?}"
+        );
+        let guarded_call = call.replace("requires: true", "requires: x > 0");
+        let met = refined_module_outcomes_admission(&guarded_call, RefinedAdmission::CompositeV25);
+        assert!(
+            met.iter().all(|result| *result == z3::SatResult::Unsat),
+            "{met:?}"
+        );
     }
 }
 
