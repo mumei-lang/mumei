@@ -2813,6 +2813,10 @@ native observations and a wrong-LLVM negative control. This is not a universal
 IR, default sidecar output or semantic equivalence proof; target requests and
 compiler-local fingerprints do not establish artifact binding. See the
 [supported scope and exclusions](VERIFICATION_NATIVE.md#first-supported-scalar-slice).
+`tests/test_c03_module_trace.rs` traces every atom of a multi-atom module
+contract to its certificate obligation, Lean goal and LLVM definition, and
+checks that unsupported specification clauses fail closed; this is regression
+coverage only and C03 remains open.
 
 WASM remains the existing deferred P7-C item, tracked by
 [C14](https://github.com/mumei-lang/mumei/issues/792); dynamic capability
