@@ -10,6 +10,9 @@ use std::process::{Command, Output};
 
 const CLAMP_SOURCE: &str = include_str!("fixtures/semantic_contract_clamp.mm");
 const INFERRED_SOURCE: &str = include_str!("fixtures/semantic_contract_inferred_i64.mm");
+const PRODUCER_KEY_ID: &str = "producer-a";
+const SIGNED_AT: &str = "2024-02-01T00:00:00Z";
+const REFERENCE_TIME: &str = "2024-02-02T00:00:00Z";
 
 const UNSUPPORTED_EFFECT_SOURCE: &str = r#"
 effect FileWrite;
@@ -58,6 +61,71 @@ fn run_sidecar_recheck(sidecar: &Path, source: &Path, artifact: &Path, json: boo
     command.output().unwrap()
 }
 
+fn sidecar_accept_command(sidecar: &Path, source: &Path, artifact: &Path, json: bool) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));
+    command
+        .args(["evidence", "accept-sidecar"])
+        .arg(sidecar)
+        .args(["--source"])
+        .arg(source)
+        .args(["--artifact"])
+        .arg(artifact);
+    if json {
+        command.arg("--json");
+    }
+    command
+}
+
+fn generate_producer_key(dir: &Path) -> (PathBuf, String) {
+    let secret_file = dir.join("producer.secret");
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args(["evidence", "keygen", "--secret-file"])
+        .arg(&secret_file)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let public_key = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("Public key: "))
+        .unwrap()
+        .to_owned();
+    (secret_file, public_key)
+}
+
+fn sign_file(subject: &Path, secret_file: &Path, produced_at: Option<&str>) -> Value {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));
+    command
+        .args(["evidence", "sign"])
+        .arg(subject)
+        .args(["--key-file"])
+        .arg(secret_file)
+        .args(["--producer-key-id", PRODUCER_KEY_ID]);
+    if let Some(produced_at) = produced_at {
+        command.args(["--produced-at", produced_at]);
+    }
+    let output = command.args(["--json"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn write_signature(path: &Path, subject: &Path, secret_file: &Path, produced_at: Option<&str>) {
+    let signature = sign_file(subject, secret_file, produced_at);
+    fs::write(path, serde_json::to_vec_pretty(&signature).unwrap()).unwrap();
+}
+
 fn succeeds(output: Output) -> Output {
     assert!(
         output.status.success(),
@@ -87,6 +155,15 @@ fn only_llvm_file(dir: &Path) -> PathBuf {
         dir.display()
     );
     paths.into_iter().next().unwrap()
+}
+
+fn build_clamp_sidecar(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let input = write_input(dir, "clamp.mm", CLAMP_SOURCE);
+    let output_base = dir.join("clamp");
+    succeeds(run_build(&input, &output_base, true));
+    let artifact = only_llvm_file(dir);
+    let sidecar = artifact.with_extension("semantic-contract.json");
+    (input, artifact, sidecar)
 }
 
 fn assert_keys(value: &Value, expected: &[&str]) {
@@ -500,4 +577,296 @@ fn recheck_bounds_deeply_nested_source_before_contract_extraction() {
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr)
         .contains("source outside semantic-contract sidecar profile"));
+}
+
+#[test]
+fn accept_sidecar_emits_exact_unsigned_json_and_text_descriptors() {
+    let dir = tempfile::tempdir().unwrap();
+    let (source, artifact, sidecar) = build_clamp_sidecar(dir.path());
+    let sidecar_bytes = fs::read(&sidecar).unwrap();
+    let artifact_bytes = fs::read(&artifact).unwrap();
+    let contracts = extract_pure_i64_module_contracts(
+        CLAMP_SOURCE,
+        "clamp.mm",
+        None,
+        RefinedAdmission::CompositeV24,
+    )
+    .unwrap();
+
+    let output = sidecar_accept_command(&sidecar, &source, &artifact, true)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let descriptor: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_keys(
+        &descriptor,
+        &[
+            "schema_version",
+            "sidecar_schema_version",
+            "sidecar_fingerprint",
+            "artifact_sha256",
+            "atoms",
+            "acceptance",
+            "accepted",
+            "scope",
+            "checks_performed",
+            "checks_not_performed",
+        ],
+    );
+    assert_eq!(
+        descriptor["schema_version"],
+        "mumei.semantic-contract-sidecar-acceptance/v1"
+    );
+    assert_eq!(
+        descriptor["sidecar_schema_version"],
+        "mumei.semantic-contract-sidecar/v1"
+    );
+    assert_eq!(
+        descriptor["sidecar_fingerprint"],
+        format!("{:x}", Sha256::digest(&sidecar_bytes))
+    );
+    assert_eq!(
+        descriptor["artifact_sha256"],
+        format!("{:x}", Sha256::digest(&artifact_bytes))
+    );
+    assert_eq!(
+        descriptor["atoms"],
+        serde_json::to_value(
+            contracts
+                .iter()
+                .map(|contract| contract.atom.clone())
+                .collect::<Vec<_>>()
+        )
+        .unwrap()
+    );
+    assert_eq!(descriptor["acceptance"], "evaluated");
+    assert_eq!(descriptor["accepted"], true);
+    assert_eq!(
+        descriptor["scope"],
+        "semantic_contract_sidecar_hash_binding_and_fresh_source_obligations"
+    );
+    assert_eq!(
+        descriptor["checks_performed"],
+        serde_json::json!([
+            "sidecar_shape",
+            "artifact_hash_binding",
+            "contract_fresh_extraction",
+            "module_obligations_unsat"
+        ])
+    );
+    assert_eq!(
+        descriptor["checks_not_performed"],
+        serde_json::json!([
+            "producer_authenticity",
+            "record_freshness",
+            "source_to_llvm_correspondence",
+            "artifact_semantics",
+            "parser_encoder_solver_correctness",
+            "grade_promotion",
+            "lean_kernel_checks"
+        ])
+    );
+    assert!(descriptor.get("producer_signature").is_none());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains(dir.path().to_str().unwrap()));
+    let key_positions: Vec<_> = [
+        "schema_version",
+        "sidecar_schema_version",
+        "sidecar_fingerprint",
+        "artifact_sha256",
+        "atoms",
+        "acceptance",
+        "accepted",
+        "scope",
+        "checks_performed",
+        "checks_not_performed",
+    ]
+    .iter()
+    .map(|key| stdout.find(&format!("\"{key}\":")).unwrap())
+    .collect();
+    assert!(key_positions.windows(2).all(|pair| pair[0] < pair[1]));
+
+    let output = sidecar_accept_command(&sidecar, &source, &artifact, false)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        b"Semantic-contract sidecar accepted: shape valid, artifact hash bound, contracts match fresh extraction, module obligations unsat.\n\
+Acceptance scope excludes producer authenticity, record freshness, source-to-LLVM correspondence, artifact semantics, grade and final-executable assurance.\n"
+    );
+}
+
+#[test]
+fn accept_sidecar_binds_the_producer_signature_to_sidecar_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (source, artifact, sidecar) = build_clamp_sidecar(dir.path());
+    let (secret, public) = generate_producer_key(dir.path());
+    let signature = dir.path().join("signature.json");
+    write_signature(&signature, &sidecar, &secret, None);
+
+    let mut command = sidecar_accept_command(&sidecar, &source, &artifact, true);
+    command
+        .args(["--signature"])
+        .arg(&signature)
+        .args(["--producer-key", &public])
+        .args(["--expected-producer-key", PRODUCER_KEY_ID]);
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let descriptor: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(descriptor["accepted"], true);
+    assert!(descriptor["checks_performed"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("producer_signature_binding".to_owned())));
+    let binding = &descriptor["producer_signature"];
+    assert_eq!(binding["signature_valid"], true);
+    assert_eq!(binding["subject_bound"], true);
+    assert_eq!(binding["key_pinned"], true);
+    assert!(binding.get("produced_at_signed").is_none());
+}
+
+#[test]
+fn accept_sidecar_applies_signature_envelope_freshness_without_record_timestamp() {
+    let dir = tempfile::tempdir().unwrap();
+    let (source, artifact, sidecar) = build_clamp_sidecar(dir.path());
+    let (secret, public) = generate_producer_key(dir.path());
+    let signature = dir.path().join("signature.json");
+    write_signature(&signature, &sidecar, &secret, Some(SIGNED_AT));
+
+    let mut command = sidecar_accept_command(&sidecar, &source, &artifact, true);
+    command
+        .args(["--signature"])
+        .arg(&signature)
+        .args(["--producer-key", &public])
+        .args(["--expected-producer-key", PRODUCER_KEY_ID])
+        .args(["--reference-time", REFERENCE_TIME])
+        .args(["--max-age-seconds", "172800"]);
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let descriptor: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(descriptor["accepted"], true);
+    assert!(!descriptor["checks_not_performed"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("record_freshness".to_owned())));
+    assert_eq!(descriptor["producer_signature"]["envelope_fresh"], true);
+    assert!(descriptor["producer_signature"]
+        .get("produced_at_signed")
+        .is_none());
+}
+
+#[test]
+fn accept_sidecar_rejects_a_signature_over_different_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (source, artifact, sidecar) = build_clamp_sidecar(dir.path());
+    let (secret, public) = generate_producer_key(dir.path());
+    let other_subject = write_input(dir.path(), "other.json", "different bytes");
+    let signature = dir.path().join("signature.json");
+    write_signature(&signature, &other_subject, &secret, None);
+
+    let mut command = sidecar_accept_command(&sidecar, &source, &artifact, true);
+    command
+        .args(["--signature"])
+        .arg(&signature)
+        .args(["--producer-key", &public])
+        .args(["--expected-producer-key", PRODUCER_KEY_ID]);
+    let output = command.output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let descriptor: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(descriptor["accepted"], false);
+    assert_eq!(descriptor["producer_signature"]["subject_bound"], false);
+}
+
+#[test]
+fn accept_sidecar_refutes_a_freshly_extracted_false_postcondition() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = write_input(dir.path(), "f.mm", REFUTED_SOURCE);
+    let artifact = dir.path().join("unrelated-artifact.ll");
+    fs::write(&artifact, b"not interpreted as LLVM IR\n").unwrap();
+    let artifact_bytes = fs::read(&artifact).unwrap();
+    let contracts = extract_pure_i64_module_contracts(
+        REFUTED_SOURCE,
+        "f.mm",
+        None,
+        RefinedAdmission::CompositeV24,
+    )
+    .unwrap();
+    let sidecar_value = serde_json::json!({
+        "schema_version": "mumei.semantic-contract-sidecar/v1",
+        "semantic_contract_version": SEMANTIC_CONTRACT_VERSION,
+        "artifact": {
+            "kind": "llvm-ir",
+            "file_name": "unrelated-artifact.ll",
+            "sha256": format!("{:x}", Sha256::digest(&artifact_bytes)),
+        },
+        "artifact_binding": "sha256_of_emitted_file_not_correspondence",
+        "correspondence": "unchecked",
+        "contracts": serde_json::to_value(contracts).unwrap(),
+    });
+    let sidecar = dir.path().join("f.semantic-contract.json");
+    fs::write(&sidecar, serde_json::to_vec(&sidecar_value).unwrap()).unwrap();
+
+    let output = sidecar_accept_command(&sidecar, &source, &artifact, true)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn accept_sidecar_rejects_a_tampered_artifact_without_descriptor() {
+    let dir = tempfile::tempdir().unwrap();
+    let (source, artifact, sidecar) = build_clamp_sidecar(dir.path());
+    let mut artifact_bytes = fs::read(&artifact).unwrap();
+    artifact_bytes.push(b' ');
+    fs::write(&artifact, artifact_bytes).unwrap();
+
+    let output = sidecar_accept_command(&sidecar, &source, &artifact, true)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("artifact differs from sidecar hash binding"));
+}
+
+#[test]
+fn accept_sidecar_rejects_invalid_signature_options_before_source_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, _, sidecar) = build_clamp_sidecar(dir.path());
+    let signature = dir.path().join("signature.json");
+    let missing_source = dir.path().join("missing.mm");
+    let missing_artifact = dir.path().join("missing.ll");
+
+    let output = sidecar_accept_command(&sidecar, &missing_source, &missing_artifact, true)
+        .args(["--signature"])
+        .arg(signature)
+        .args(["--producer-key", "invalid"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid producer public key"));
 }

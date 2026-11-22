@@ -473,6 +473,28 @@ pub(crate) enum EvidenceCommand {
         #[arg(long, default_value_t = mumei_core::source_evidence::MAX_RESOURCE_LIMIT.to_string(), allow_hyphen_values = true)]
         solver_resource_limit: String,
     },
+    /// Evaluate a semantic-contract sidecar's hash binding and fresh source obligations into a bounded acceptance descriptor
+    AcceptSidecar {
+        /// Regular semantic-contract sidecar JSON (at most 4 MiB)
+        sidecar: String,
+        /// Separate regular source file (at most 65,536 bytes); the saved label is never opened
+        #[arg(long)]
+        source: String,
+        /// Separate regular LLVM IR artifact (at most 16 MiB); hash-bound only
+        #[arg(long)]
+        artifact: String,
+        /// Emit a static acceptance descriptor, not reusable Evidence or a certificate
+        #[arg(long)]
+        json: bool,
+        /// Solver timeout in milliseconds (1..=10000)
+        #[arg(long, default_value_t = mumei_core::source_evidence::MAX_TIMEOUT_MS.to_string(), allow_hyphen_values = true)]
+        solver_timeout: String,
+        /// Solver resource units (1..=1000000); zero/unlimited is rejected
+        #[arg(long, default_value_t = mumei_core::source_evidence::MAX_RESOURCE_LIMIT.to_string(), allow_hyphen_values = true)]
+        solver_resource_limit: String,
+        #[command(flatten)]
+        signature: SignatureArgs,
+    },
     /// Evaluate representation plus fresh same-profile source consistency into a bounded acceptance descriptor
     AcceptSource {
         /// One regular common Evidence JSON record (at most 65,536 bytes), not a Native envelope/certificate

@@ -627,6 +627,17 @@ This diagnostic does not establish producer authenticity, source-to-LLVM
 correspondence, artifact semantics or acceptance; correspondence remains
 unchecked.
 
+`mumei evidence accept-sidecar <SIDECAR> --source <SRC> --artifact <LL>`
+emits a bounded acceptance descriptor after the same fresh extraction,
+artifact-hash check and module-obligation sweep. An optional producer signature
+binds the exact sidecar bytes using the existing signature-binding rules; it
+does not by itself establish producer authenticity. The descriptor records
+that source-to-LLVM correspondence, artifact semantics, parser/encoder/solver
+correctness, grade promotion and Lean-kernel checks remain unperformed.
+`mumei evidence sign` accepts subjects up to 65,536 bytes, so sidecars larger
+than 64 KiB cannot be signed with that command even though sidecar consumers
+accept files up to 4 MiB.
+
 An optional `requested_target_triple` is a caller request, never a binding to
 emitted code or a capability/availability claim. `None` serializes as null. The
 existing LLVM-IR emitter does not bind a target triple in the emitted module;
@@ -647,9 +658,9 @@ The real CLI integration regression uses the clamp fixture to:
 
 These native observations are finite regression evidence, not universal LLVM
 translation validation or binary correctness. Correspondence remains explicitly
-unchecked even when they pass. General obligation decomposition, production
-sidecar emission/consumer acceptance, stable IR contracts and formal translation
-correspondence remain open C02/C03/C08/C09 work.
+unchecked even when they pass. General obligation decomposition, stable IR
+contracts and formal translation correspondence remain open C02/C03/C08/C09
+work.
 
 ```bash
 cargo test -p mumei-core semantic_contract --lib
