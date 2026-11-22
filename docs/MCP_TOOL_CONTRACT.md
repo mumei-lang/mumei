@@ -43,7 +43,7 @@ Source: `mcp_server.py` in the mumei repository.
 ## `mumei-agent`
 
 Source: `/home/ubuntu/repos/mumei-agent/agent/mcp_server.py`.
-Agent table is exact against mumei-agent origin/develop at commit `a706a416dd2563c01dab69033291552cd221eebc`.
+Agent table is exact against mumei-agent origin/develop at commit `ddda440fdff7ef77c3cd468dfd00af95e12f9680`.
 
 | Tool | Arguments | Documented return keys |
 | --- | --- | --- |
