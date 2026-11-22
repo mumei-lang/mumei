@@ -12,6 +12,24 @@ requires: len(xs) > 0;
 ensures: result == xs[0];
 body: xs[0];
 
+atom length_only(xs: [i64]) -> i64
+requires: len(xs) > 0;
+ensures: result == len(xs);
+body: len(xs);
+
+atom read_only_builtin_on_field(s: S) -> i64
+requires: len(s.xs) > 0;
+ensures: result == len(s.xs);
+body: length_only(s.xs);
+
+atom read_only_builtin_on_shared_binding(s: S) -> i64
+requires: len(s.xs) > 0;
+ensures: result == len(s.xs);
+body: {
+    let v = s.xs;
+    length_only(v)
+};
+
 atom struct_field_length_remains_precise(s: S) -> i64
 requires: len(s.xs) == 2;
 ensures: result == 2;

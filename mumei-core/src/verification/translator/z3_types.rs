@@ -613,6 +613,24 @@ pub(crate) fn array_shared_key(name: &str) -> String {
     format!("{ARRAY_SHARED_PREFIX}{name}")
 }
 
+pub(crate) fn is_read_only_array_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "len"
+            | "matches"
+            | "match_regex"
+            | "re_match"
+            | "starts_with"
+            | "ends_with"
+            | "contains"
+            | "not_contains"
+            | "is_empty"
+            | "index_of"
+            | "substr"
+            | "char_at"
+    )
+}
+
 pub(crate) fn is_array_shared(env: &Env<'_>, name: &str) -> bool {
     env.get(&array_shared_key(name))
         .is_some_and(is_shared_marker_value)
@@ -1567,10 +1585,13 @@ fn call_may_store_arg(
     depth: u8,
 ) -> bool {
     let fqn = callee_name.replace('.', "::");
-    match module_env
+    let callee = module_env
         .get_atom(callee_name)
-        .or_else(|| module_env.get_atom(&fqn))
-    {
+        .or_else(|| module_env.get_atom(&fqn));
+    if callee.is_none() && is_read_only_array_builtin(callee_name) {
+        return false;
+    }
+    match callee {
         Some(callee) => callee.params.get(arg_index).is_none_or(|p| {
             atom_stores_to_array_depth(module_env, callee, &p.name, visited, depth + 1)
         }),

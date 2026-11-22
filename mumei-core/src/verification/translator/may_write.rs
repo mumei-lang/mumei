@@ -8,7 +8,9 @@
 use super::super::support::*;
 use super::super::*;
 use super::*;
-use crate::verification::translator::z3_types::{atom_stores_to_array, stmt_stores_to_var};
+use crate::verification::translator::z3_types::{
+    atom_stores_to_array, is_read_only_array_builtin, stmt_stores_to_var,
+};
 use std::collections::HashSet;
 
 /// The callee position of a call, as written at the call site.
@@ -48,6 +50,7 @@ pub(crate) fn callee_may_write_args(
             }
             match resolve_atom(module_env, name) {
                 Some(atom) => atom_may_write_args(module_env, atom, args),
+                None if is_read_only_array_builtin(name) => HashSet::new(),
                 None => all_var_args(args),
             }
         }
@@ -91,6 +94,7 @@ pub(crate) fn callee_may_write_arg_indices(
             }
             match resolve_atom(module_env, name) {
                 Some(atom) => atom_may_write_arg_indices(module_env, atom, args),
+                None if is_read_only_array_builtin(name) => HashSet::new(),
                 None => all_arg_indices(args),
             }
         }
