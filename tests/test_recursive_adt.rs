@@ -120,6 +120,18 @@ fn recursive_enum_payload_field_updates_are_sound() {
         }
     }
 }
+
+#[test]
+fn recursive_match_bindings_do_not_leak_enum_types_across_arms() {
+    for bitvec_i64 in [false, true] {
+        assert_verified(
+            &run_verify("test_recursive_adt_arm_enum_shadow.mm", bitvec_i64),
+            "test_recursive_adt_arm_enum_shadow.mm",
+            bitvec_i64,
+        );
+    }
+}
+
 #[test]
 fn recursive_datatype_codegen_keeps_the_clean_llvm_error() {
     let dir = tempfile::tempdir().expect("create recursive-ADT build directory");
