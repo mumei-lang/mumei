@@ -5769,6 +5769,162 @@ entry:
     }
 
     #[test]
+    fn mixed_class_stack_arguments_follow_declaration_order() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+
+        // Seven `i64` then nine `f64`: the seventh integer overflows
+        // into stack slot 0 and the ninth `f64` into slot 1.
+        let source_a = "atom ret_g_a(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, \
+            h: f64, i: f64, j: f64, k: f64, l: f64, m: f64, n: f64, o: f64, p: f64) \
+            -> i64 requires: true; ensures: true; body: { g };\n\
+            atom ret_p_a(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, \
+            h: f64, i: f64, j: f64, k: f64, l: f64, m: f64, n: f64, o: f64, p: f64) \
+            -> f64 requires: true; ensures: true; body: { p };";
+        let models_a =
+            encode_pure_i64_module(source_a, &context, true, RefinedAdmission::CompositeV23)
+                .unwrap();
+        let ret_g_a = models_a
+            .iter()
+            .find(|m| m.function_name == "ret_g_a")
+            .unwrap();
+        let ret_p_a = models_a
+            .iter()
+            .find(|m| m.function_name == "ret_p_a")
+            .unwrap();
+        assert!(supports_signature(ret_g_a));
+        assert!(supports_signature(ret_p_a));
+
+        // Nine `f64` then seven `i64` — the reversed overflow order:
+        // the ninth `f64` takes slot 0 and the seventh integer slot 1.
+        let source_b = "atom ret_i_b(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, \
+            h: f64, i: f64, j: i64, k: i64, l: i64, m: i64, n: i64, o: i64, p: i64) \
+            -> f64 requires: true; ensures: true; body: { i };\n\
+            atom ret_p_b(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, \
+            h: f64, i: f64, j: i64, k: i64, l: i64, m: i64, n: i64, o: i64, p: i64) \
+            -> i64 requires: true; ensures: true; body: { p };";
+        let models_b =
+            encode_pure_i64_module(source_b, &context, true, RefinedAdmission::CompositeV23)
+                .unwrap();
+        let ret_i_b = models_b
+            .iter()
+            .find(|m| m.function_name == "ret_i_b")
+            .unwrap();
+        let ret_p_b = models_b
+            .iter()
+            .find(|m| m.function_name == "ret_p_b")
+            .unwrap();
+        assert!(supports_signature(ret_i_b));
+        assert!(supports_signature(ret_p_b));
+
+        let check = |ir: &str, name: &str, model: &PureI64Body<'_>| {
+            let (address, bytes, targets) = compiled_function_with_targets(ir, name);
+            let disassembly = disassemble(&bytes, address)
+                .unwrap()
+                .iter()
+                .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+                .collect::<Vec<_>>()
+                .join("\n");
+            println!("{name} disassembly:\n{disassembly}");
+            assert!(
+                disassembly.contains("(%rsp)"),
+                "expected a stack-operand access:\n{disassembly}"
+            );
+            check_function(&bytes, address, model, &targets, &context)
+        };
+
+        // Both overflow orders verify against their own models —
+        // slot order follows declaration order, not per-class order.
+        assert_eq!(
+            check(
+                r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @ret_g_a(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, double %h, double %i, double %j, double %k, double %l, double %m, double %n, double %o, double %p) {
+entry:
+  ret i64 %g
+}
+"#,
+                "ret_g_a",
+                ret_g_a,
+            ),
+            FunctionOutcome::Equivalent
+        );
+        assert_eq!(
+            check(
+                r#"target triple = "x86_64-unknown-linux-gnu"
+define double @ret_p_a(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, double %h, double %i, double %j, double %k, double %l, double %m, double %n, double %o, double %p) {
+entry:
+  ret double %p
+}
+"#,
+                "ret_p_a",
+                ret_p_a,
+            ),
+            FunctionOutcome::Equivalent
+        );
+        assert_eq!(
+            check(
+                r#"target triple = "x86_64-unknown-linux-gnu"
+define double @ret_i_b(double %a, double %b, double %c, double %d, double %e, double %f, double %g, double %h, double %i, i64 %j, i64 %k, i64 %l, i64 %m, i64 %n, i64 %o, i64 %p) {
+entry:
+  ret double %i
+}
+"#,
+                "ret_i_b",
+                ret_i_b,
+            ),
+            FunctionOutcome::Equivalent
+        );
+        assert_eq!(
+            check(
+                r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @ret_p_b(double %a, double %b, double %c, double %d, double %e, double %f, double %g, double %h, double %i, i64 %j, i64 %k, i64 %l, i64 %m, i64 %n, i64 %o, i64 %p) {
+entry:
+  ret i64 %p
+}
+"#,
+                "ret_p_b",
+                ret_p_b,
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        // Cross-class slot reads fail closed: the INTEGER `movq` load
+        // of slot 0 is checked against the order-B model whose slot 0
+        // holds the spilled `f64` leaf `i` — class mismatch, not a
+        // bound to a wrong input.
+        assert_eq!(
+            check(
+                r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @ret_g_a(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, double %h, double %i, double %j, double %k, double %l, double %m, double %n, double %o, double %p) {
+entry:
+  ret i64 %g
+}
+"#,
+                "ret_g_a",
+                ret_i_b,
+            ),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+        // And an SSE `movsd` load of slot 0 against the order-A model
+        // whose slot 0 holds the spilled integer `g`.
+        assert_eq!(
+            check(
+                r#"target triple = "x86_64-unknown-linux-gnu"
+define double @ret_i_b(double %a, double %b, double %c, double %d, double %e, double %f, double %g, double %h, double %i, i64 %j, i64 %k, i64 %l, i64 %m, i64 %n, i64 %o, i64 %p) {
+entry:
+  ret double %i
+}
+"#,
+                "ret_i_b",
+                ret_g_a,
+            ),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+    }
+
+    #[test]
     fn struct_signature_limits_fail_closed() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
