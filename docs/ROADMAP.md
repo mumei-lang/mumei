@@ -3109,8 +3109,9 @@ semantics are not checked. The x86-64 integer-register
 convention and callee-saved preservation are assumed, not verified. The C
 stack-argument slice supports up to 16 arguments under an assumed convention:
 incoming argument `k >= 7` is at entry-relative `%rsp + 8*(k-6)`, and outgoing
-argument `k >= 7` is at call-time `%rsp + 8*(k-7)`. Only 64-bit `movq`/`addq`
-incoming reads and modeled outgoing `movq`/`pushq` stores (sign-extended
+argument `k >= 7` is at call-time `%rsp + 8*(k-7)`. Only 64-bit `movq` loads and binary
+(`addq`/`subq`/`imulq`/`andq`/`orq`/`xorq`/`cmpq`/`testq`) incoming reads and modeled
+outgoing `movq`/`pushq` stores (sign-extended
 immediate or register source) are supported; the incoming area is read-only. The
 `main` wrapper, CRT/startup
 code, loader, libc and runtime are not covered. Full object-code TV remains
