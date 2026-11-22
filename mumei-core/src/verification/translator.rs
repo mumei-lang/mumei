@@ -63,46 +63,48 @@ mod tests {
 
     #[test]
     fn test_array_element_sort_from_type_uses_lowered_types() {
+        let module_env = crate::verification::ModuleEnv::new();
         assert_eq!(
-            array_element_sort_from_type("f64", false),
+            array_element_sort_from_type("f64", &module_env, false),
             ArrayElementSort::Real
         );
         assert_eq!(
-            array_element_sort_from_type("bool", false),
+            array_element_sort_from_type("bool", &module_env, false),
             ArrayElementSort::Bool
         );
         assert_eq!(
-            array_element_sort_from_type("i64", false),
+            array_element_sort_from_type("i64", &module_env, false),
             ArrayElementSort::Int
         );
         assert_eq!(
-            array_element_sort_from_type("Str", false),
+            array_element_sort_from_type("Str", &module_env, false),
             ArrayElementSort::Str
         );
         // `[[T]]` elements are arrays themselves — no scalar sort exists.
         assert_eq!(
-            array_element_sort_from_type("[f64]", false),
+            array_element_sort_from_type("[f64]", &module_env, false),
             ArrayElementSort::Nested
         );
         assert_eq!(
-            array_element_sort_from_type("[i64]", false),
+            array_element_sort_from_type("[i64]", &module_env, false),
             ArrayElementSort::Nested
         );
     }
 
     #[test]
     fn test_array_element_sort_from_type_ieee754_uses_float() {
+        let module_env = crate::verification::ModuleEnv::new();
         assert_eq!(
-            array_element_sort_from_type("f64", true),
+            array_element_sort_from_type("f64", &module_env, true),
             ArrayElementSort::Float
         );
         // Non-`f64` element types are unaffected by the IEEE 754 flag.
         assert_eq!(
-            array_element_sort_from_type("i64", true),
+            array_element_sort_from_type("i64", &module_env, true),
             ArrayElementSort::Int
         );
         assert_eq!(
-            array_element_sort_from_type("bool", true),
+            array_element_sort_from_type("bool", &module_env, true),
             ArrayElementSort::Bool
         );
     }

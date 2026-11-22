@@ -247,20 +247,8 @@ fn havoc_vars<'a>(
                     BV::fresh_const(ctx, &fresh_name, width).into()
                 }
                 z3::SortKind::Array => {
-                    // Fresh `Int -> Elem` array const — `array_domain/range`
-                    // Sorts borrow the temporary, so lift only the (Copy)
-                    // range kind and rebuild through `z3_array_for_sort`.
                     let root = old.as_array().map(|a| array_root_ast(&a));
-                    let range = old.get_sort().array_range().map(|s| s.kind());
-                    let elem_sort = match range {
-                        Some(z3::SortKind::Real) => ArrayElementSort::Real,
-                        Some(z3::SortKind::FloatingPoint) => ArrayElementSort::Float,
-                        Some(z3::SortKind::Bool) => ArrayElementSort::Bool,
-                        Some(z3::SortKind::Seq) => ArrayElementSort::Str,
-                        Some(z3::SortKind::Array) => ArrayElementSort::Nested,
-                        _ => ArrayElementSort::Int,
-                    };
-                    let fresh_arr: Dynamic = z3_array_for_sort(ctx, &fresh_name, elem_sort).into();
+                    let fresh_arr = super::z3_types::z3_fresh_const_like(ctx, &fresh_name, old);
                     // Aliases (`let b = a`, sibling `__z3_arr_` slots) share
                     // the same backing root — rebind them too or their reads
                     // keep answering with the pre-loop entry const.
@@ -2206,7 +2194,7 @@ pub(crate) fn stmt_to_z3<'a>(
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
             rebind_struct_binding_slots(vc, var, &val, env, solver_opt);
-            wire_array_slots(vc, var, Some(value), &val, env, solver_opt);
+            wire_array_slots(vc, var, Some(value), &val, env, solver_opt)?;
             if shared {
                 super::z3_types::mark_array_shared(ctx, env, var);
             }
@@ -2269,7 +2257,7 @@ pub(crate) fn stmt_to_z3<'a>(
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
             rebind_struct_binding_slots(vc, var, &val, env, solver_opt);
-            wire_array_slots(vc, var, Some(value), &val, env, solver_opt);
+            wire_array_slots(vc, var, Some(value), &val, env, solver_opt)?;
             if shared {
                 super::z3_types::mark_array_shared(ctx, env, var);
             }
@@ -2661,13 +2649,10 @@ pub(crate) fn stmt_to_z3<'a>(
                     };
                     for field in &resource_def.state {
                         let key = format!("{resource}.{}", field.name);
-                        let value = param_z3_value(
-                            ctx,
+                        let value = crate::verification::support::datatype::param_z3_value_for_vc(
+                            vc,
                             &format!("{key}#acq{acquire_id}"),
                             Some(&field.ty),
-                            vc.module_env,
-                            vc.ieee754_f64,
-                            vc.bitvec_i64,
                         );
                         env.insert(key, value);
                     }

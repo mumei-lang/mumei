@@ -453,17 +453,116 @@ pub(crate) fn array_elem_llvm_type<'a>(
     context: &'a Context,
     type_name: &str,
     module_env: &ModuleEnv,
-) -> Option<inkwell::types::BasicTypeEnum<'a>> {
+) -> Result<Option<inkwell::types::BasicTypeEnum<'a>>, MumeiError> {
     let base = module_env.resolve_base_type(type_name);
-    let inner = match lower(&base) {
-        LoweredType::Array(inner) => *inner,
-        _ => return None,
+    let inner_name = if let Some(inner) = base
+        .strip_prefix("[]<")
+        .and_then(|inner| inner.strip_suffix('>'))
+    {
+        inner.trim()
+    } else if base.starts_with('[') && base.ends_with(']') {
+        base[1..base.len() - 1].trim()
+    } else {
+        return Ok(None);
     };
-    Some(match inner {
-        LoweredType::F64 => context.f64_type().into(),
-        LoweredType::Str => context.ptr_type(inkwell::AddressSpace::default()).into(),
-        _ => context.i64_type().into(),
-    })
+    let inner_base = module_env.resolve_base_type(inner_name);
+    let inner = lower(&inner_base);
+    let LoweredType::Other(enum_base) = &inner else {
+        return Ok(Some(match inner {
+            LoweredType::F64 => context.f64_type().into(),
+            LoweredType::Str => context.ptr_type(inkwell::AddressSpace::default()).into(),
+            _ => context.i64_type().into(),
+        }));
+    };
+    if let Some(enum_def) = module_env.get_enum(enum_base) {
+        fn has_array_payload(
+            type_name: &str,
+            module_env: &ModuleEnv,
+            visiting: &mut std::collections::HashSet<String>,
+        ) -> bool {
+            let base = module_env.resolve_base_type(type_name);
+            match lower(&base) {
+                LoweredType::Array(_) => true,
+                LoweredType::Other(name) => {
+                    if let Some(enum_def) = module_env.get_enum(&name) {
+                        if enum_def.is_recursive
+                            || !enum_def.type_params.is_empty()
+                            || !visiting.insert(enum_def.name.clone())
+                        {
+                            return true;
+                        }
+                        let has_array = enum_def.variants.iter().any(|variant| {
+                            variant
+                                .field_types
+                                .iter()
+                                .any(|field| has_array_payload(&field.name, module_env, visiting))
+                        });
+                        visiting.remove(&enum_def.name);
+                        has_array
+                    } else if let Some(struct_def) = module_env.get_struct(&name) {
+                        if !visiting.insert(struct_def.name.clone()) {
+                            return true;
+                        }
+                        let has_array = struct_def
+                            .fields
+                            .iter()
+                            .any(|field| has_array_payload(&field.type_name, module_env, visiting));
+                        visiting.remove(&struct_def.name);
+                        has_array
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            }
+        }
+        if enum_def.is_recursive
+            || !enum_def.type_params.is_empty()
+            || has_array_payload(enum_base, module_env, &mut std::collections::HashSet::new())
+        {
+            return Err(MumeiError::codegen(format!(
+                "array element enum '{inner_base}' has an unsupported recursive, generic, or array-bearing payload"
+            )));
+        }
+        for slot in 0..enum_def
+            .variants
+            .iter()
+            .map(|variant| variant.field_types.len())
+            .max()
+            .unwrap_or(0)
+        {
+            let mut has_str = false;
+            let mut has_f64 = false;
+            for variant in &enum_def.variants {
+                if let Some(field) = variant.field_types.get(slot) {
+                    match lower(&module_env.resolve_base_type(&field.name)) {
+                        LoweredType::Str => has_str = true,
+                        LoweredType::F64 => has_f64 = true,
+                        _ => {}
+                    }
+                }
+            }
+            if has_str && has_f64 {
+                return Err(MumeiError::codegen(format!(
+                    "array element enum '{inner_base}' has an unsupported mixed Str/f64 payload slot"
+                )));
+            }
+        }
+        Ok(Some(resolve_param_type(
+            context,
+            Some(&inner_base),
+            module_env,
+        )))
+    } else if let Some(generic_base) = inner_base.split('<').next() {
+        if module_env.get_enum(generic_base).is_some() {
+            return Err(MumeiError::codegen(format!(
+                "array element enum '{inner_base}' has an unresolved generic instantiation"
+            )));
+        }
+        Ok(Some(context.i64_type().into()))
+    } else {
+        Ok(Some(context.i64_type().into()))
+    }
 }
 
 /// パラメータの LLVM 型を解決する

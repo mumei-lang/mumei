@@ -640,8 +640,6 @@ fn havoc_written_struct_fields<'a>(
 pub(crate) fn seed_env<'a>(vc: &VCtx<'a>, atom: &Atom) -> Env<'a> {
     let ctx = vc.ctx;
     let module_env = vc.module_env;
-    let ieee754_f64 = vc.ieee754_f64;
-    let bitvec_i64 = vc.bitvec_i64;
     let mut env: Env<'a> = HashMap::new();
     env.insert("true".to_string(), Bool::from_bool(ctx, true).into());
     env.insert("false".to_string(), Bool::from_bool(ctx, false).into());
@@ -664,15 +662,7 @@ pub(crate) fn seed_env<'a>(vc: &VCtx<'a>, atom: &Atom) -> Env<'a> {
             param_z3_value_for_vc(vc, "result", atom.return_type.as_deref()),
         );
     }
-    seed_tuple_result_components(
-        ctx,
-        &mut env,
-        "result",
-        atom.return_type.as_deref(),
-        module_env,
-        ieee754_f64,
-        bitvec_i64,
-    );
+    seed_tuple_result_components(vc, &mut env, "result", atom.return_type.as_deref());
     // 構造体を返す atom: `result.<field>` を param と対称にシンボル化する
     if let Some(sdef) = atom
         .return_type

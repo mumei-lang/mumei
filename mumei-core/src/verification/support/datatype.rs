@@ -383,11 +383,7 @@ fn field_leaf_sorts<'a>(
         };
         if let Some(element_type) = base.strip_prefix("array:") {
             let index = Sort::int(vc.ctx);
-            let range = super::super::translator::z3_types::z3_element_sort(
-                vc.ctx,
-                element_type,
-                vc.ieee754_f64,
-            );
+            let range = super::super::translator::z3_types::z3_element_sort(vc, element_type);
             out.push((name, Sort::array(vc.ctx, &index, &range)));
             continue;
         }
@@ -1536,6 +1532,14 @@ pub(crate) fn param_z3_value_for_vc<'a>(
     name: &str,
     type_name: Option<&str>,
 ) -> Dynamic<'a> {
+    if type_name.is_some_and(|ty| ty.starts_with('[') && ty.ends_with(']')) {
+        let element_type = super::super::translator::z3_types::array_element_type_from_annotation(
+            type_name,
+            vc.module_env,
+        );
+        let range = super::super::translator::z3_types::z3_element_sort(vc, &element_type);
+        return z3::ast::Array::new_const(vc.ctx, name, &Sort::int(vc.ctx), &range).into();
+    }
     if let Some(type_name) = type_name {
         if let Some((sort, _)) = datatype_sort_for_type(vc, type_name) {
             return Datatype::new_const(vc.ctx, name, &sort.sort).into();

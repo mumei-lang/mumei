@@ -495,6 +495,25 @@ pub(crate) fn compile_hir_stmt<'a>(
                 )?;
                 array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
                 variables.insert(var.clone(), len_val);
+                let array_type = ty.clone().or_else(|| {
+                    elements
+                        .first()
+                        .and_then(|element| {
+                            super::expr_emit::infer_struct_type_name(element, var_types, module_env)
+                        })
+                        .filter(|element_type| {
+                            module_env
+                                .get_enum(&super::expr_emit::resolve_named_type(
+                                    module_env,
+                                    element_type,
+                                ))
+                                .is_some()
+                        })
+                        .map(|element_type| format!("[{element_type}]"))
+                });
+                if let Some(array_type) = array_type {
+                    var_types.insert(var.clone(), array_type);
+                }
                 if var_types
                     .get(var.as_str())
                     .is_some_and(|mark| mark.starts_with(LAMBDA_MARK))
@@ -524,6 +543,11 @@ pub(crate) fn compile_hir_stmt<'a>(
             if let HirExpr::Variable(src) = value.as_ref() {
                 if let Some(&(len_val, elem_ty, data_ptr)) = array_ptrs.get(src.as_str()) {
                     array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
+                    if let Some(array_type) = var_types.get(src.as_str()).cloned() {
+                        if array_type.starts_with('[') || array_type.starts_with("[]<") {
+                            var_types.insert(var.clone(), array_type);
+                        }
+                    }
                     // A `Str` (`pure-i64-composite/v13`, `i8` cells) keeps
                     // its `*i8` pointer as the bound value — concat and
                     // extern uses need it — while integer arrays expose
@@ -573,6 +597,12 @@ pub(crate) fn compile_hir_stmt<'a>(
             let declared_base = ty
                 .as_deref()
                 .map(|ty_name| resolve_named_type(module_env, ty_name));
+            if declared_base
+                .as_deref()
+                .is_some_and(|base| base.starts_with('[') || base.starts_with("[]<"))
+            {
+                var_types.insert(var.clone(), declared_base.clone().unwrap());
+            }
             let val = if matches!(declared_base.as_deref(), Some("i128") | Some("u128")) {
                 wide_int_cast(
                     builder,

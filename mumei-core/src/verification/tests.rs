@@ -4426,15 +4426,7 @@ fn test_tuple_result_indexing_uses_typed_components() {
         local_int_types: Default::default(),
     };
     let mut env: Env = HashMap::new();
-    seed_tuple_result_components(
-        &ctx,
-        &mut env,
-        "result",
-        Some("(u64, bool)"),
-        &module_env,
-        false,
-        false,
-    );
+    seed_tuple_result_components(&vc, &mut env, "result", Some("(u64, bool)"));
 
     let bool_clause = expr_to_z3(
         &vc,
