@@ -1514,7 +1514,13 @@ obligation vocabulary has no Real/String sorts. `u64`/`usize`/`isize`
 leaves join at `mumei.pure-i64-composite/v10` (the same admission the
 literal signature leaves need): `usize` folds to the `u64` domain,
 `isize` to `i64`, and alias predicates on a `u64` base compare
-unsigned exactly like a literal `u64` parameter's clauses. The `where`
+unsigned exactly like a literal `u64` parameter's clauses.
+`i128`/`u128` leaves join at `mumei.pure-i64-composite/v21` (v22
+inside enum payloads): the alias parameter flattens to the same two
+64-bit input slots the literal leaf takes, and its predicates apply
+to the combined 128-bit operand — unsigned for `u128`, signed for
+`i128` — under the same tag-conditional domain convention every enum
+payload leaf uses. The `where`
 predicate must check as `Bool` over its declared operand under the
 existing `expression_kind` gate, with no calls admitted inside it.
 Duplicate type names and a type named like an atom are rejected, so

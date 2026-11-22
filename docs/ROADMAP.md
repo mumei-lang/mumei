@@ -3547,7 +3547,11 @@ rejected. `u64`/`usize`/`isize` leaves additionally require
 `mumei.pure-i64-composite/v10` — the same gate the literal signature
 leaves carry — and fold like them (`usize`→`u64`, `isize`→`i64`); their
 predicates compare unsigned exactly as a literal `u64` parameter's
-clauses do. Each alias's predicates fold into the obligations the module
+clauses do. `i128`/`u128` leaves require
+`mumei.pure-i64-composite/v21` (`v22` inside enum payloads): the alias
+flattens to the literal leaf's two-slot shape and its predicates apply
+to the combined 128-bit operand under the same signedness and the same
+tag-conditional domain. Each alias's predicates fold into the obligations the module
 already proves: parameters strengthen the signature domain established
 at every call site, and results strengthen the postcondition the callee
 guarantees. Recheckers dispatch on the pinned profile name, so every
