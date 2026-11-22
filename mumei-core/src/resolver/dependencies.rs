@@ -126,7 +126,14 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                 let mut ctx = ResolverContext::new();
                 ctx.allow_lean_verified = allow_lean_verified;
                 ctx.strict_imports = strict_imports;
-                resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
+                resolve_imports_recursive(
+                    &items,
+                    dep_base_dir,
+                    &mut ctx,
+                    &mut cache,
+                    module_env,
+                    entry_path.to_str(),
+                )?;
                 if persist_cache {
                     save_cache(&cache_path, &cache);
                 }
@@ -240,7 +247,14 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                 let mut ctx = ResolverContext::new();
                 ctx.allow_lean_verified = allow_lean_verified;
                 ctx.strict_imports = strict_imports;
-                resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
+                resolve_imports_recursive(
+                    &items,
+                    dep_base_dir,
+                    &mut ctx,
+                    &mut cache,
+                    module_env,
+                    entry_path.to_str(),
+                )?;
                 if persist_cache {
                     save_cache(&cache_path, &cache);
                 }
@@ -313,6 +327,7 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                         &mut ctx,
                         &mut cache,
                         module_env,
+                        entry_path.to_str(),
                     )?;
                     if persist_cache {
                         save_cache(&cache_path, &cache);

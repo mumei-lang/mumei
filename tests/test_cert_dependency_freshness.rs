@@ -2005,6 +2005,22 @@ fn imported_unused_module_resource_invalidates_cached_verify() {
     );
 
     module_resource_freshness_sources(&fixture, 5);
+    let changed_certificate = verify_cert(&fixture, &certificate, &a_source, false);
+    let changed_certificate_text = output_text(&changed_certificate);
+    assert_eq!(
+        changed_certificate.status.code(),
+        Some(0),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("g: dependency_changed"),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("resource:counter"),
+        "{changed_certificate_text}"
+    );
+
     let changed_verify = fixture.verify(&a_source, &[]);
     let changed_verify_text = output_text(&changed_verify);
     assert!(
@@ -2087,4 +2103,88 @@ fn strict_import_keeps_resource_free_module_certificate_proven() {
         !imported_text.contains("dependency_unchecked"),
         "{imported_text}"
     );
+}
+
+#[test]
+fn strict_import_tracks_resources_from_nested_import_closure() {
+    let fixture = Fixture::new();
+    let b_dir = fixture.root.join("b");
+    let c_dir = fixture.root.join("c");
+    let a_dir = fixture.root.join("a");
+    for dir in [&a_dir, &b_dir, &c_dir] {
+        std::fs::create_dir(dir).expect("create module directory");
+    }
+    let b_source = b_dir.join("b.mm");
+    let c_source = c_dir.join("c.mm");
+    let a_source = a_dir.join("a.mm");
+    let b_certificate = b_dir.join(".proof-cert.json");
+    let c_certificate = c_dir.join(".proof-cert.json");
+
+    std::fs::write(
+        &b_source,
+        "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;\n\
+         trusted atom b_fn(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("write B with resource");
+    std::fs::write(
+        &c_source,
+        "import \"../b/b.mm\";\n\
+         atom c_fn(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("write C importing B");
+    assert_success(
+        &fixture.certify(&b_source, &b_certificate),
+        "certify trusted B",
+    );
+    assert_success(
+        &fixture.certify(&c_source, &c_certificate),
+        "certify C standalone with B imported",
+    );
+    let standalone_c = verify_cert(&fixture, &c_certificate, &c_source, false);
+    let standalone_c_text = output_text(&standalone_c);
+    assert_success(&standalone_c, "check standalone C certificate");
+    assert!(
+        standalone_c_text.contains("c_fn: proven"),
+        "{standalone_c_text}"
+    );
+
+    std::fs::write(
+        &a_source,
+        "import \"../b/b.mm\";\n\
+         import \"../c/c.mm\";\n\
+         atom main(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: c_fn(x);\n",
+    )
+    .expect("write importer of C");
+    let unchanged = fixture.verify(&a_source, &["--strict-imports"]);
+    assert_success(&unchanged, "strictly import unchanged C and B");
+
+    std::fs::write(
+        &b_source,
+        "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 5;\n\
+         trusted atom b_fn(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("change B resource invariant");
+    let changed = fixture.verify(&a_source, &["--strict-imports"]);
+    let changed_text = output_text(&changed);
+    assert!(
+        !changed.status.success(),
+        "strict import unexpectedly accepted stale C certificate\n{changed_text}"
+    );
+    assert!(
+        changed_text.contains("dependency_changed"),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("resource:counter"), "{changed_text}");
 }

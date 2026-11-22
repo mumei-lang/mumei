@@ -411,6 +411,14 @@ pub(crate) fn merge_module_env(
     target.impls.extend(source.impls);
     target.verified_cache.extend(source.verified_cache);
     target.resources.extend(source.resources);
+    target.resource_origins.extend(source.resource_origins);
+    for (file, imports) in source.import_closure {
+        target
+            .import_closure
+            .entry(file)
+            .or_default()
+            .extend(imports);
+    }
     target.effects.extend(source.effects);
     target.effect_defs.extend(source.effect_defs);
     target.capability_defs.extend(source.capability_defs);

@@ -353,10 +353,11 @@ Effect values use the same field hashing as the proof hash's
 type, and raw predicate; struct values cover its fields, field constraints,
 and invariants. Resource values cover the resource name, priority, mode, state
 fields, and invariant for declared or body-acquired resources.
-Every module resource definition is part of the proof hash because
-initial-state and state-shadowing checks run for every atom; `resource:`
-dependency keys cover only declared or acquired resources because imported
-certificates are checked in the importer's accumulated environment.
+Root-module atoms also key every resource in the resolved module environment;
+imported atoms key every resource defined in their source module and its
+transitive imports, excluding unrelated sibling imports. Every module resource
+definition is part of the proof hash because initial-state and state-shadowing
+checks run for every atom.
 Enum keys pin variant names, payload field names and types for enums used
 directly in an atom's signature. The proof hash covers every refined-type
 definition in the module.
