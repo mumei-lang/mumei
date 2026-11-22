@@ -183,11 +183,15 @@ pub(crate) fn lambda_may_write_args(
             let Expr::Lambda { params, body, .. } = expr else {
                 return out;
             };
+            let lambda_params = params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect::<Vec<_>>();
             for (i, arg) in args.iter().enumerate() {
                 let (Expr::Variable(var), Some(param)) = (arg, params.get(i)) else {
                     continue;
                 };
-                if stmt_stores_to_var(module_env, body, &param.name) {
+                if stmt_stores_to_var(module_env, body, &param.name, &lambda_params) {
                     out.insert(var.clone());
                 }
             }
@@ -195,7 +199,7 @@ pub(crate) fn lambda_may_write_args(
                 if params.iter().any(|p| p.name == *name) {
                     continue;
                 }
-                if stmt_stores_to_var(module_env, body, name) {
+                if stmt_stores_to_var(module_env, body, name, &lambda_params) {
                     out.insert(name.clone());
                 }
             }
@@ -221,12 +225,18 @@ fn lambda_may_write_arg_indices(
             let Expr::Lambda { params, body, .. } = expr else {
                 return HashSet::new();
             };
+            let lambda_params = params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect::<Vec<_>>();
             args.iter()
                 .enumerate()
                 .filter_map(|(i, _)| {
                     params
                         .get(i)
-                        .filter(|param| stmt_stores_to_var(module_env, body, &param.name))
+                        .filter(|param| {
+                            stmt_stores_to_var(module_env, body, &param.name, &lambda_params)
+                        })
                         .map(|_| i)
                 })
                 .collect()

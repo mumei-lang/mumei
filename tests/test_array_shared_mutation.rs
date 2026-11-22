@@ -41,7 +41,7 @@ fn verify_json(output: &Output) -> Value {
 
 #[test]
 fn shared_composite_array_mutations_are_rejected_in_both_integer_modes() {
-    const EXPECTED_FAILURES: [(&str, &str); 15] = [
+    const EXPECTED_FAILURES: [(&str, &str); 16] = [
         ("struct_field_local_alias", "v"),
         ("struct_parameter_field_alias", "v"),
         ("enum_pattern_then_field_read", "ys"),
@@ -57,6 +57,7 @@ fn shared_composite_array_mutations_are_rejected_in_both_integer_modes() {
         ("loop_shared_marker_survives_loop", "v"),
         ("shared_store_inside_while", "v"),
         ("mutating_field_access_call", "s.xs"),
+        ("local_builtin_shadow_is_rejected", "s.xs"),
     ];
 
     for bitvec_i64 in [false, true] {

@@ -210,3 +210,25 @@ atom mutating_field_access_call(s: S) -> i64
 requires: len(s.xs) > 0;
 ensures: true;
 body: write_array(s.xs);
+
+atom locally_shadowed_builtin_writer(xs: [i64]) -> i64
+requires: len(xs) > 0;
+ensures: result == 0;
+body: {
+    let ys = [1];
+    let is_empty = |ys: [i64]| {
+        ys[0] = 9;
+        0
+    };
+    is_empty(xs)
+};
+
+atom local_builtin_shadow_is_rejected(a: [i64]) -> i64
+requires: len(a) == 1 && a[0] == 1;
+ensures: result == 1;
+body: {
+    let s = S { xs: a };
+    locally_shadowed_builtin_writer(s.xs);
+    let w = s.xs;
+    w[0]
+};
