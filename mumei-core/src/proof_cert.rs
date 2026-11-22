@@ -867,6 +867,60 @@ mod tests {
     }
 
     #[test]
+    fn verify_certificate_in_env_tracks_nested_generic_enum_payload_types() {
+        let source = "struct P { value: i64 }\n\
+                      enum Opt<T> { Some(v: T), Nothing }\n\
+                      enum W { A(o: Opt<P>), B }\n\
+                      atom read(value: W) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: 0;\n";
+        let (cert, root, _) = signature_type_dependency_fixture(source, "read");
+        let dependency_hashes = cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(dependency_hashes.contains_key("enum:W"));
+        assert!(dependency_hashes.contains_key("enum:Opt"));
+        assert!(dependency_hashes.contains_key("struct:P"));
+
+        let changed_source = source.replace("P { value: i64 }", "P { value: bool }");
+        let (_, _, changed_env) = signature_type_dependency_fixture(&changed_source, "read");
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+        assert_eq!(check[0].changed_dependencies, vec!["struct:P"]);
+    }
+
+    #[test]
+    fn verify_certificate_in_env_tracks_generic_arguments_in_parameter_type_refs() {
+        let source = "struct P { value: i64 }\n\
+                      enum Opt<T> { Some(v: T), Nothing }\n\
+                      atom read(value: Opt<P>) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: 0;\n";
+        let (_, mut root, env) = signature_type_dependency_fixture(source, "read");
+        root.params[0].type_name = Some("Opt".to_string());
+        let mut results = HashMap::new();
+        results.insert(
+            root.name.clone(),
+            (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+        );
+        let cert = generate_certificate("test.mm", &[&root], &results, &env, None, None, None);
+        let dependency_hashes = cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(dependency_hashes.contains_key("struct:P"));
+
+        let changed_source = source.replace("P { value: i64 }", "P { value: bool }");
+        let (_, _, changed_env) = signature_type_dependency_fixture(&changed_source, "read");
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+        assert_eq!(check[0].changed_dependencies, vec!["struct:P"]);
+    }
+
+    #[test]
     fn verify_certificate_in_env_tracks_generic_signature_arguments() {
         let source = "struct P { value: i64 }\n\
                       enum Opt<T> { Some(v: T), Nothing }\n\

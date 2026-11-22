@@ -1,3 +1,4 @@
+use crate::ast::TypeRef;
 use crate::parser::ast::Atom;
 use crate::verification::ModuleEnv;
 use serde::{Deserialize, Serialize};
@@ -916,8 +917,8 @@ fn compute_dependency_hashes_with_names(
         }
         for param in &atom.params {
             if let Some(type_ref) = &param.type_ref {
-                collect_signature_type_names(
-                    &type_ref.name,
+                collect_signature_type_ref_names(
+                    type_ref,
                     &mut pending_type_names,
                     &atom_type_params,
                 );
@@ -960,6 +961,11 @@ fn compute_dependency_hashes_with_names(
                         &mut pending_type_names,
                         &bound_params,
                     );
+                    collect_signature_type_ref_names(
+                        &field.type_ref,
+                        &mut pending_type_names,
+                        &bound_params,
+                    );
                 }
             }
             if let Some(enum_def) = module_env.enums.get(&name) {
@@ -967,8 +973,8 @@ fn compute_dependency_hashes_with_names(
                 let bound_params = enum_def.type_params.iter().cloned().collect::<HashSet<_>>();
                 for variant in &enum_def.variants {
                     for field_type in &variant.field_types {
-                        collect_signature_type_names(
-                            &field_type.name,
+                        collect_signature_type_ref_names(
+                            field_type,
                             &mut pending_type_names,
                             &bound_params,
                         );
@@ -1065,6 +1071,17 @@ fn collect_signature_type_names(
         }
     }
     collect_signature_type_names(&arguments[argument_start..], names, bound_params);
+}
+
+fn collect_signature_type_ref_names(
+    type_ref: &TypeRef,
+    names: &mut Vec<String>,
+    bound_params: &HashSet<String>,
+) {
+    collect_signature_type_names(&type_ref.name, names, bound_params);
+    for type_arg in &type_ref.type_args {
+        collect_signature_type_ref_names(type_arg, names, bound_params);
+    }
 }
 
 fn compute_dependency_hash_for_callee(atom: &Atom, module_env: &ModuleEnv) -> String {
