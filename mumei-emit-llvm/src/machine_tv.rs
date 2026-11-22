@@ -1187,8 +1187,16 @@ fn lift<'ctx>(
                 let [source] = operands.as_slice() else {
                     return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
                 };
-                let Some(value) = register_value(source, &state.registers, 64) else {
-                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                // `pushq` accepts a register or an immediate. x86-64 `push imm`
+                // sign-extends an imm8/imm32 to 64 bits, matching the sign
+                // extension convention used for `movq $imm, mem` stores.
+                let value = if let Some(immediate) = source.strip_prefix('$') {
+                    let immediate = parse_integer(immediate)
+                        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+                    BV::from_i64(context, i64::from(immediate as u32 as i32), 64)
+                } else {
+                    register_value(source, &state.registers, 64)
+                        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?
                 };
                 if !adjust_rsp(
                     &mut state.registers,
@@ -4245,6 +4253,10 @@ entry:
 
     #[test]
     fn llvm17_x86_disassembler_is_available() {
+        for i in disassemble(&[0x6a, 0x08, 0x6a, 0x07, 0x48, 0x83, 0xc4, 0x10, 0xc3], 0).unwrap() {
+            eprintln!("DBG {:?} {:?}", i.mnemonic, i.operands);
+        }
+
         let instructions = disassemble(&[0xb8, 7, 0, 0, 0, 0xc3], 0).unwrap();
         assert_eq!(instructions.len(), 2);
         assert_eq!(instructions[0].offset, 0);
@@ -8778,6 +8790,110 @@ entry:
         assert_eq!(
             check_function(&[0xc3], 0, &too_many_model, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("argument_count")
+        );
+    }
+
+    #[test]
+    fn pushed_immediate_outgoing_stack_arguments_match_and_validate() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let eight_source = "atom eight_args(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64 requires: true; ensures: true; body: { a + b + c + d + e + f + g + h };";
+        let caller_source = format!(
+            "{eight_source}\n\
+            atom calls_eight(x: i64) -> i64 requires: true; ensures: true; \
+            body: {{ eight_args(x, 2, 3, 4, 5, 6, 7, 8) }};"
+        );
+        let caller_model = source_model_named(&caller_source, "calls_eight", &context);
+        // Two outgoing stack arguments encoded as `pushq $imm`: LLVM picks
+        // pushes over `movq $imm, disp(%rsp)` stores when more than one
+        // outgoing word is live.
+        let caller_bytes = [
+            0x50, // pushq %rax
+            0xbe, 0x02, 0x00, 0x00, 0x00, // movl $2, %esi
+            0xba, 0x03, 0x00, 0x00, 0x00, // movl $3, %edx
+            0xb9, 0x04, 0x00, 0x00, 0x00, // movl $4, %ecx
+            0x41, 0xb8, 0x05, 0x00, 0x00, 0x00, // movl $5, %r8d
+            0x41, 0xb9, 0x06, 0x00, 0x00, 0x00, // movl $6, %r9d
+            0x6a, 0x08, // pushq $8
+            0x6a, 0x07, // pushq $7
+            0xe8, 0x00, 0x00, 0x00, 0x00, // callq eight_args
+            0x48, 0x83, 0xc4, 0x10, // addq $16, %rsp
+            0x59, // popq %rcx
+            0xc3, // retq
+        ];
+        let call_targets = BTreeMap::from([(
+            33u64,
+            CallTarget {
+                name: "eight_args".into(),
+                relocation_kind: CallRelocationKind::ElfX86_64Plt32,
+                relocation_size: 32,
+                addend: -4,
+            },
+        )]);
+        assert_eq!(
+            check_function(&caller_bytes, 0, &caller_model, &call_targets, &context),
+            FunctionOutcome::Equivalent
+        );
+
+        // A mismatched pushed immediate is a real divergence, not a profile
+        // gap: the callee would read the wrong argument word.
+        let mut wrong_outgoing_argument = caller_bytes;
+        wrong_outgoing_argument[31] = 0x09;
+        assert_eq!(
+            check_function(
+                &wrong_outgoing_argument,
+                0,
+                &caller_model,
+                &call_targets,
+                &context
+            ),
+            FunctionOutcome::Different
+        );
+
+        // x86-64 `push imm` sign-extends to 64 bits: a pushed $-1 is the
+        // argument value -1, not 0xffffffff.
+        let negative_source = format!(
+            "{eight_source}\n\
+            atom calls_eight_negative(x: i64) -> i64 requires: true; ensures: true; \
+            body: {{ eight_args(x, 2, 3, 4, 5, 6, -1, -2) }};"
+        );
+        let negative_model = source_model_named(&negative_source, "calls_eight_negative", &context);
+        let negative_bytes = [
+            0x50, // pushq %rax
+            0xbe, 0x02, 0x00, 0x00, 0x00, // movl $2, %esi
+            0xba, 0x03, 0x00, 0x00, 0x00, // movl $3, %edx
+            0xb9, 0x04, 0x00, 0x00, 0x00, // movl $4, %ecx
+            0x41, 0xb8, 0x05, 0x00, 0x00, 0x00, // movl $5, %r8d
+            0x41, 0xb9, 0x06, 0x00, 0x00, 0x00, // movl $6, %r9d
+            0x6a, 0xfe, // pushq $-2
+            0x6a, 0xff, // pushq $-1
+            0xe8, 0x00, 0x00, 0x00, 0x00, // callq eight_args
+            0x48, 0x83, 0xc4, 0x10, // addq $16, %rsp
+            0x59, // popq %rcx
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&negative_bytes, 0, &negative_model, &call_targets, &context),
+            FunctionOutcome::Equivalent
+        );
+
+        // A memory-source push (`pushq disp(%rsp)`) is still outside the
+        // profile.
+        let memory_push = [
+            0x50, // pushq %rax
+            0xff, 0x34, 0x24, // pushq (%rsp)
+            0xc3, // retq
+        ];
+        let no_arg_model = source_model_named(
+            "atom no_args() -> i64 requires: true; ensures: true; body: { 0 };",
+            "no_args",
+            &context,
+        );
+        assert_eq!(
+            check_function(&memory_push, 0, &no_arg_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
         );
     }
 
