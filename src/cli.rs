@@ -601,7 +601,7 @@ pub(crate) enum EvidenceCommand {
         /// 64-char lowercase-hex ed25519 producer public key
         #[arg(long, requires = "signature")]
         producer_key: Option<String>,
-        /// Pin the declared producer key id
+        /// Pin the unsigned producer key id to the supplied key; required for registry/revocation checks
         #[arg(long, requires = "signature")]
         expected_producer_key: Option<String>,
         /// Declared RFC 3339 reference time for freshness and registry checks
@@ -610,8 +610,8 @@ pub(crate) enum EvidenceCommand {
         /// Maximum envelope age in seconds
         #[arg(long, requires_all = ["signature", "reference_time"])]
         max_age_seconds: Option<u64>,
-        /// Regular mumei.producer-key-registry/v1 file (at most 65,536 bytes)
-        #[arg(long, requires_all = ["signature", "reference_time"])]
+        /// Regular mumei.producer-key-registry/v1 file (at most 65,536 bytes); requires a pinned producer key id
+        #[arg(long, requires_all = ["signature", "reference_time", "expected_producer_key"])]
         key_registry: Option<String>,
         /// Regular mumei.producer-signature/v1 registry signature file
         #[arg(long, requires_all = ["signature", "key_registry", "registry_key"])]
@@ -619,8 +619,8 @@ pub(crate) enum EvidenceCommand {
         /// 64-char lowercase-hex ed25519 registry root public key
         #[arg(long, requires_all = ["signature", "key_registry", "registry_signature"])]
         registry_key: Option<String>,
-        /// Regular mumei.key-revocation-list/v1 file (at most 65,536 bytes)
-        #[arg(long, requires = "signature")]
+        /// Regular mumei.key-revocation-list/v1 file (at most 65,536 bytes); requires a pinned producer key id
+        #[arg(long, requires_all = ["signature", "expected_producer_key"])]
         revocation_list: Option<String>,
         /// Regular mumei.producer-signature/v1 revocation-list signature file
         #[arg(long, requires_all = ["signature", "revocation_list", "revocation_key"])]

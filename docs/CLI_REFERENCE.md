@@ -342,13 +342,13 @@ Usage: mumei evidence accept [OPTIONS] [INPUT]
 | `--json` | false | — | Emit a static mumei.evidence-acceptance/v1 descriptor, not reusable Evidence or a certificate |
 | `--signature <SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 envelope file (at most 65,536 bytes) |
 | `--producer-key <PRODUCER_KEY>` | — | — | 64-char lowercase-hex ed25519 producer public key |
-| `--expected-producer-key <EXPECTED_PRODUCER_KEY>` | — | — | Pin the declared producer key id |
+| `--expected-producer-key <EXPECTED_PRODUCER_KEY>` | — | — | Pin the unsigned producer key id to the supplied key; required for registry/revocation checks |
 | `--reference-time <REFERENCE_TIME>` | — | — | Declared RFC 3339 reference time for freshness and registry checks |
 | `--max-age-seconds <MAX_AGE_SECONDS>` | — | — | Maximum envelope age in seconds |
-| `--key-registry <KEY_REGISTRY>` | — | — | Regular mumei.producer-key-registry/v1 file (at most 65,536 bytes) |
+| `--key-registry <KEY_REGISTRY>` | — | — | Regular mumei.producer-key-registry/v1 file (at most 65,536 bytes); requires a pinned producer key id |
 | `--registry-signature <REGISTRY_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 registry signature file |
 | `--registry-key <REGISTRY_KEY>` | — | — | 64-char lowercase-hex ed25519 registry root public key |
-| `--revocation-list <REVOCATION_LIST>` | — | — | Regular mumei.key-revocation-list/v1 file (at most 65,536 bytes) |
+| `--revocation-list <REVOCATION_LIST>` | — | — | Regular mumei.key-revocation-list/v1 file (at most 65,536 bytes); requires a pinned producer key id |
 | `--revocation-signature <REVOCATION_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 revocation-list signature file |
 | `--revocation-key <REVOCATION_KEY>` | — | — | 64-char lowercase-hex ed25519 revocation root public key |
 

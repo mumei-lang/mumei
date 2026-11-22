@@ -546,6 +546,38 @@ fn revoked_key_rejects_even_when_revocation_list_signature_is_valid() {
 }
 
 #[test]
+fn relabeled_revoked_key_requires_and_fails_the_producer_key_id_pin() {
+    let fixture = fixture(Some("2024-02-01T00:00:00Z"));
+    rewrite_json(&fixture.revocation_list, |revocation| {
+        revocation["revoked_keys"] = json!([PRODUCER_KEY_ID]);
+    });
+    resign_revocation_list(&fixture);
+    rewrite_json(&fixture.signature, |envelope| {
+        envelope["producer_key_id"] = json!("relabeled-key");
+    });
+
+    let mut unpinned = signature_command(&fixture, true);
+    unpinned
+        .args(["--revocation-list"])
+        .arg(&fixture.revocation_list);
+    let output = run_command(unpinned);
+    assert_failure_without_descriptor(&output);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--expected-producer-key"));
+
+    let mut pinned = signature_command(&fixture, true);
+    pinned
+        .args(["--expected-producer-key", PRODUCER_KEY_ID])
+        .args(["--revocation-list"])
+        .arg(&fixture.revocation_list);
+    let output = run_command(pinned);
+    assert_eq!(output.status.code(), Some(1));
+    let descriptor = accepted_value(&output);
+    assert_eq!(descriptor["verdict"], "rejected");
+    assert_eq!(descriptor["producer_signature"]["signature_valid"], true);
+    assert_eq!(descriptor["producer_signature"]["key_pinned"], false);
+}
+
+#[test]
 fn nonmatching_json_object_envelope_is_a_failed_binding_not_an_input_error() {
     let fixture = fixture(Some("2024-02-01T00:00:00Z"));
     rewrite_json(&fixture.signature, |envelope| {
@@ -623,6 +655,13 @@ fn dependency_violations_fail_without_a_descriptor() {
     let mut reference_time_without_signature = accept_command(&fixture, true);
     reference_time_without_signature.args(["--reference-time", REFERENCE_TIME]);
     assert_failure_without_descriptor(&run_command(reference_time_without_signature));
+
+    let mut registry_without_key_pin = signature_command(&fixture, true);
+    registry_without_key_pin
+        .args(["--reference-time", REFERENCE_TIME])
+        .args(["--key-registry"])
+        .arg(&fixture.registry);
+    assert_failure_without_descriptor(&run_command(registry_without_key_pin));
 }
 
 #[test]
@@ -635,6 +674,7 @@ fn duplicate_registry_keys_are_malformed_anchors() {
     .unwrap();
     let mut command = signature_command(&fixture, true);
     command
+        .args(["--expected-producer-key", PRODUCER_KEY_ID])
         .args(["--reference-time", REFERENCE_TIME])
         .args(["--key-registry"])
         .arg(&fixture.registry);

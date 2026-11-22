@@ -521,9 +521,11 @@ root-key revocation and producer attestation remain open.
 `--requirement` and `--requirement-list` routes. It checks the raw record-byte
 digest, Ed25519 signature and subject binding, with optional producer-key
 pinning, declared-reference freshness, registry-window checks and signed
-registry/revocation documents. A false supplied check rejects the acceptance;
-signature evidence cannot promote an otherwise rejected or inconclusive
-requirement. The declared reference time is not authenticated, and
+registry/revocation documents. Because `producer_key_id` is unsigned,
+registry and revocation checks require `--expected-producer-key` to bind that
+label to the supplied producer public key. A false supplied check rejects the
+acceptance; signature evidence cannot promote an otherwise rejected or
+inconclusive requirement. The declared reference time is not authenticated, and
 producer-time authenticity, clock authenticity, key rotation, root-key
 revocation, `accept-list` binding and `accept-source` binding remain open.
 Malformed anchor documents and public-key encodings fail closed; an object

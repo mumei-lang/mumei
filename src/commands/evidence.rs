@@ -636,6 +636,12 @@ fn validate_signature_options(options: SignatureOptions<'_>) -> Result<(), &'sta
     if options.producer_key.is_none() {
         return Err("--signature requires --producer-key");
     }
+    if options.key_registry.is_some() && options.expected_producer_key.is_none() {
+        return Err("--key-registry requires --expected-producer-key");
+    }
+    if options.revocation_list.is_some() && options.expected_producer_key.is_none() {
+        return Err("--revocation-list requires --expected-producer-key");
+    }
     if options.max_age_seconds.is_some() && options.reference_time.is_none() {
         return Err("--max-age-seconds requires --reference-time");
     }
