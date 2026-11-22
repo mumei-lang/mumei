@@ -512,7 +512,8 @@ pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
                             && leaves.iter().all(|is_double| !*is_double))
                 }
                 Some(count) => {
-                    (1..=MAX_AGGREGATE_LEAF_COUNT).contains(count) && leaves.len() == *count
+                    (1..=MAX_AGGREGATE_ARGUMENT_LEAF_COUNT).contains(count)
+                        && leaves.len() == *count
                 }
             });
     let result_shape_supported = match model.result_shape {
@@ -563,6 +564,14 @@ fn wide_composite_values(model: &PureI64Body<'_>) -> bool {
 }
 
 const MAX_AGGREGATE_LEAF_COUNT: usize = 4;
+// Struct arguments (parameters and direct-call arguments) may carry up to
+// eight leaves: LLVM aggregate lowering flattens them leaf-by-leaf into the
+// scalar argument sequence, and the per-class register preflight already
+// bounds them to six INTEGER leaves (`rdi`-`r9`) or eight SSE leaves
+// (`xmm0`-`xmm7`), so eight covers the largest register-resident struct.
+// Result aggregates stay at MAX_AGGREGATE_LEAF_COUNT: four-`i64` results
+// already need a hidden sret pointer, which this model rejects.
+const MAX_AGGREGATE_ARGUMENT_LEAF_COUNT: usize = 8;
 const INTEGER_RESULT_REGISTERS: [usize; 3] = [0, 2, 1];
 const FLOAT_RESULT_REGISTER_COUNT: usize = 2;
 
@@ -597,7 +606,7 @@ fn call_site_shapes_are_consistent(site: &CallSite<'_>) -> bool {
         } = shape
         {
             if *has_enum
-                || !(1..=MAX_AGGREGATE_LEAF_COUNT).contains(leaf_count)
+                || !(1..=MAX_AGGREGATE_ARGUMENT_LEAF_COUNT).contains(leaf_count)
                 || *has_f64 != leaf_doubles.iter().any(|is_double| *is_double)
             {
                 return false;
@@ -2802,14 +2811,17 @@ fn lift_stack_argument_add<'ctx>(
     Ok(())
 }
 
-fn call_value_shape_supported(shape: CallValueShape) -> bool {
+fn call_value_shape_supported_with_leaf_bound(
+    shape: CallValueShape,
+    aggregate_leaf_bound: usize,
+) -> bool {
     match shape {
         CallValueShape::Scalar { leaf_count } => matches!(leaf_count, 1 | 2),
         CallValueShape::Struct {
             leaf_count,
             has_enum: false,
             ..
-        } => (1..=MAX_AGGREGATE_LEAF_COUNT).contains(&leaf_count),
+        } => (1..=aggregate_leaf_bound).contains(&leaf_count),
         CallValueShape::Enum { .. } | CallValueShape::Struct { .. } => false,
     }
 }
@@ -2819,13 +2831,15 @@ fn call_site_has_unsupported_composite_shape(site: &CallSite<'_>) -> bool {
         matches!(
             shape,
             CallValueShape::Struct { .. } | CallValueShape::Enum { .. }
-        ) && !call_value_shape_supported(shape)
+        ) && !call_value_shape_supported_with_leaf_bound(shape, MAX_AGGREGATE_ARGUMENT_LEAF_COUNT)
     }) || (matches!(
         site.result_shape,
         CallValueShape::Struct { .. } | CallValueShape::Enum { .. }
-    ) && (!call_value_shape_supported(site.result_shape)
-        || (matches!(site.result_shape, CallValueShape::Struct { .. })
-            && !aggregate_result_register_classes_supported(&site.result_leaf_doubles))))
+    ) && (!call_value_shape_supported_with_leaf_bound(
+        site.result_shape,
+        MAX_AGGREGATE_LEAF_COUNT,
+    ) || (matches!(site.result_shape, CallValueShape::Struct { .. })
+        && !aggregate_result_register_classes_supported(&site.result_leaf_doubles))))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2906,12 +2920,13 @@ fn lift_call<'ctx>(
         CallValueShape::Struct { .. } | CallValueShape::Enum { .. }
     );
     if call_site.has_composite_arguments_or_result != has_composite_shape
-        || call_site
-            .argument_shapes
-            .iter()
-            .copied()
-            .any(|shape| !call_value_shape_supported(shape))
-        || !call_value_shape_supported(call_site.result_shape)
+        || call_site.argument_shapes.iter().copied().any(|shape| {
+            !call_value_shape_supported_with_leaf_bound(shape, MAX_AGGREGATE_ARGUMENT_LEAF_COUNT)
+        })
+        || !call_value_shape_supported_with_leaf_bound(
+            call_site.result_shape,
+            MAX_AGGREGATE_LEAF_COUNT,
+        )
     {
         return Err(FunctionOutcome::OutsideProfile("call_arguments"));
     }
@@ -5651,6 +5666,254 @@ entry:
         assert_eq!(
             check_function(&[0xc3], 0, &after_five, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("argument_count")
+        );
+    }
+
+    #[test]
+    fn wide_struct_parameters_and_call_arguments_match_codegen() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "struct P5 { a: i64, b: i64, c: i64, d: i64, e: i64 }\n\
+            atom sum5(p: P5) -> i64 requires: true; ensures: true; body: { p.a + p.b + p.c + p.d + p.e };\n\
+            atom main5() -> i64 requires: true; ensures: true; body: { sum5(P5 { a: 1, b: 2, c: 3, d: 4, e: 5 }) };";
+        let sum5_model = source_model_named_with_admission(
+            source,
+            "sum5",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let main5_model = source_model_named_with_admission(
+            source,
+            "main5",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert_eq!(sum5_model.param_shapes, vec![Some(5)]);
+        assert!(supports_signature(&sum5_model));
+        let five_integer_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @sum5({ i64, i64, i64, i64, i64 } %p) {
+entry:
+  %a = extractvalue { i64, i64, i64, i64, i64 } %p, 0
+  %b = extractvalue { i64, i64, i64, i64, i64 } %p, 1
+  %c = extractvalue { i64, i64, i64, i64, i64 } %p, 2
+  %d = extractvalue { i64, i64, i64, i64, i64 } %p, 3
+  %e = extractvalue { i64, i64, i64, i64, i64 } %p, 4
+  %ab = add i64 %a, %b
+  %abc = add i64 %ab, %c
+  %abcd = add i64 %abc, %d
+  %result = add i64 %abcd, %e
+  ret i64 %result
+}
+define i64 @sum5_swapped({ i64, i64, i64, i64, i64 } %p) {
+entry:
+  %a = extractvalue { i64, i64, i64, i64, i64 } %p, 0
+  %b = extractvalue { i64, i64, i64, i64, i64 } %p, 1
+  %c = extractvalue { i64, i64, i64, i64, i64 } %p, 2
+  %d = extractvalue { i64, i64, i64, i64, i64 } %p, 3
+  %e = extractvalue { i64, i64, i64, i64, i64 } %p, 4
+  %ab = add i64 %a, %e
+  %abc = add i64 %ab, %c
+  %abcd = add i64 %abc, %d
+  %result = add i64 %abcd, %e
+  ret i64 %result
+}
+define i64 @main5() {
+entry:
+  %p0 = insertvalue { i64, i64, i64, i64, i64 } undef, i64 1, 0
+  %p1 = insertvalue { i64, i64, i64, i64, i64 } %p0, i64 2, 1
+  %p2 = insertvalue { i64, i64, i64, i64, i64 } %p1, i64 3, 2
+  %p3 = insertvalue { i64, i64, i64, i64, i64 } %p2, i64 4, 3
+  %p4 = insertvalue { i64, i64, i64, i64, i64 } %p3, i64 5, 4
+  %result = call i64 @sum5({ i64, i64, i64, i64, i64 } %p4)
+  ret i64 %result
+}
+"#;
+        let (sum5_address, sum5_bytes, sum5_targets) =
+            compiled_function_with_targets(five_integer_ir, "sum5");
+        let sum5_disassembly = disassemble(&sum5_bytes, sum5_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("five-i64 aggregate parameter disassembly:\n{sum5_disassembly}");
+        assert_eq!(
+            check_function(
+                &sum5_bytes,
+                sum5_address,
+                &sum5_model,
+                &sum5_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+        let (swapped_address, swapped_bytes, swapped_targets) =
+            compiled_function_with_targets(five_integer_ir, "sum5_swapped");
+        assert_eq!(
+            check_function(
+                &swapped_bytes,
+                swapped_address,
+                &sum5_model,
+                &swapped_targets,
+                &context
+            ),
+            FunctionOutcome::Different
+        );
+        let (main5_address, main5_bytes, main5_targets) =
+            compiled_function_with_targets(five_integer_ir, "main5");
+        let main5_disassembly = disassemble(&main5_bytes, main5_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("five-i64 aggregate call disassembly:\n{main5_disassembly}");
+        assert_eq!(
+            check_function(
+                &main5_bytes,
+                main5_address,
+                &main5_model,
+                &main5_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let six_f64_source = "struct F6 { a: f64, b: f64, c: f64, d: f64, e: f64, f: f64 }\n\
+            atom sumf6(p: F6) -> f64 requires: true; ensures: true; body: { p.a + p.b + p.c + p.d + p.e + p.f };\n\
+            atom lastf6(p: F6) -> f64 requires: true; ensures: true; body: { p.f };";
+        let sumf6_model = source_model_named_with_admission(
+            six_f64_source,
+            "sumf6",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        // The six-leaf fadd chain sits at the solver budget edge and returns
+        // Unknown (fail-closed), so the gate admission is asserted only.
+        assert!(supports_signature(&sumf6_model));
+        let lastf6_model = source_model_named_with_admission(
+            six_f64_source,
+            "lastf6",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let six_f64_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define double @lastf6({ double, double, double, double, double, double } %p) {
+entry:
+  %f = extractvalue { double, double, double, double, double, double } %p, 5
+  ret double %f
+}
+"#;
+        let (lastf6_address, lastf6_bytes, lastf6_targets) =
+            compiled_function_with_targets(six_f64_ir, "lastf6");
+        let lastf6_disassembly = disassemble(&lastf6_bytes, lastf6_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("six-f64 aggregate tail-leaf disassembly:\n{lastf6_disassembly}");
+        assert_eq!(
+            check_function(
+                &lastf6_bytes,
+                lastf6_address,
+                &lastf6_model,
+                &lastf6_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let mixed_eight_source =
+            "struct M8 { a: i64, x: f64, b: i64, y: f64, c: i64, z: f64, d: i64, w: f64 }\n\
+            atom lasti8(p: M8) -> i64 requires: true; ensures: true; body: { p.d };\n\
+            atom lastf8(p: M8) -> f64 requires: true; ensures: true; body: { p.w };\n\
+            atom fwd8(p: M8) -> i64 requires: true; ensures: true; body: { lasti8(p) };";
+        let lasti8_model = source_model_named_with_admission(
+            mixed_eight_source,
+            "lasti8",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let lastf8_model = source_model_named_with_admission(
+            mixed_eight_source,
+            "lastf8",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let fwd8_model = source_model_named_with_admission(
+            mixed_eight_source,
+            "fwd8",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let mixed_eight_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+declare i64 @lasti8({ i64, double, i64, double, i64, double, i64, double })
+define i64 @lasti8_body({ i64, double, i64, double, i64, double, i64, double } %p) {
+entry:
+  %d = extractvalue { i64, double, i64, double, i64, double, i64, double } %p, 6
+  ret i64 %d
+}
+define double @lastf8({ i64, double, i64, double, i64, double, i64, double } %p) {
+entry:
+  %w = extractvalue { i64, double, i64, double, i64, double, i64, double } %p, 7
+  ret double %w
+}
+define i64 @fwd8({ i64, double, i64, double, i64, double, i64, double } %p) {
+entry:
+  %r = call i64 @lasti8({ i64, double, i64, double, i64, double, i64, double } %p)
+  ret i64 %r
+}
+"#;
+        for (name, model) in [
+            ("lasti8_body", &lasti8_model),
+            ("lastf8", &lastf8_model),
+            ("fwd8", &fwd8_model),
+        ] {
+            let (address, bytes, targets) = compiled_function_with_targets(mixed_eight_ir, name);
+            let disassembly = disassemble(&bytes, address)
+                .unwrap()
+                .iter()
+                .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+                .collect::<Vec<_>>()
+                .join("\n");
+            println!("mixed eight-leaf {name} disassembly:\n{disassembly}");
+            assert_eq!(
+                check_function(&bytes, address, model, &targets, &context),
+                FunctionOutcome::Equivalent,
+                "{name}"
+            );
+        }
+
+        let seven_integer_source =
+            "struct P7 { a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64 }\n\
+            atom sum7(p: P7) -> i64 requires: true; ensures: true; body: { p.a + p.b };";
+        let sum7_model = source_model_named_with_admission(
+            seven_integer_source,
+            "sum7",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(supports_signature(&sum7_model));
+        assert_eq!(
+            check_function(&[0xc3], 0, &sum7_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("argument_count")
+        );
+
+        let nine_leaf_source = "struct P9 { a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64 }\n\
+            atom sum9(p: P9) -> i64 requires: true; ensures: true; body: { p.a + p.i };";
+        let sum9_model = source_model_named_with_admission(
+            nine_leaf_source,
+            "sum9",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(!supports_signature(&sum9_model));
+        assert_eq!(
+            check_function(&[0xc3], 0, &sum9_model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_signature")
         );
     }
 
