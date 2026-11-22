@@ -3247,8 +3247,17 @@ pub(crate) fn expr_to_z3<'a>(
                         }
                         // 引数を評価
                         let mut arg_vals = Vec::new();
-                        for arg in args {
-                            arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
+                        let mut arg_leaf_snapshots = Vec::new();
+                        for (index, arg) in args.iter().enumerate() {
+                            let value = expr_to_z3(vc, arg, env, solver_opt)?;
+                            let param_type = callee
+                                .params
+                                .get(index)
+                                .and_then(|param| param.type_name.as_deref());
+                            arg_leaf_snapshots.push(super::z3_types::snapshot_struct_array_leaves(
+                                vc, env, arg, &value, param_type,
+                            )?);
+                            arg_vals.push(value);
                         }
                         let recursive_instance = vc.is_instantiating_contract(&callee.name);
                         // The unconstrained recursive result only weakens assumptions.
@@ -3272,13 +3281,14 @@ pub(crate) fn expr_to_z3<'a>(
                                 alias_struct_fields(&mut call_env, &param.name, val);
                                 // 配列引数: `__z3_arr_`/`len_`/要素型スロットを
                                 // callee パラメータ名で配線（リテラルは len 実値）。
-                                wire_array_slots(
+                                super::z3_types::wire_array_slots_with_struct_leaf_snapshot(
                                     vc,
                                     &param.name,
                                     args.get(i),
                                     val,
                                     &mut call_env,
                                     solver_opt,
+                                    arg_leaf_snapshots.get(i).and_then(Option::as_ref),
                                 )?;
                             }
                         }
@@ -6180,8 +6190,17 @@ pub(crate) fn expr_to_z3<'a>(
                     }
                     // 引数を Z3 で評価
                     let mut arg_vals = Vec::new();
-                    for arg in args {
-                        arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
+                    let mut arg_leaf_snapshots = Vec::new();
+                    for (index, arg) in args.iter().enumerate() {
+                        let value = expr_to_z3(vc, arg, env, solver_opt)?;
+                        let param_type = callee_atom
+                            .params
+                            .get(index)
+                            .and_then(|param| param.type_name.as_deref());
+                        arg_leaf_snapshots.push(super::z3_types::snapshot_struct_array_leaves(
+                            vc, env, arg, &value, param_type,
+                        )?);
+                        arg_vals.push(value);
                     }
                     let recursive_instance = vc.is_instantiating_contract(&callee_atom.name);
                     vc.reject_quantifier_dependent_call(callee_name, &arg_vals)?;
@@ -6201,13 +6220,14 @@ pub(crate) fn expr_to_z3<'a>(
                         if let Some(arg_val) = arg_vals.get(i) {
                             call_env.insert(param.name.clone(), arg_val.clone());
                             alias_struct_fields(&mut call_env, &param.name, arg_val);
-                            wire_array_slots(
+                            super::z3_types::wire_array_slots_with_struct_leaf_snapshot(
                                 vc,
                                 &param.name,
                                 args.get(i),
                                 arg_val,
                                 &mut call_env,
                                 solver_opt,
+                                arg_leaf_snapshots.get(i).and_then(Option::as_ref),
                             )?;
                         }
                     }
@@ -7270,8 +7290,21 @@ fn apply_local_lambda<'a>(
     // Arguments evaluate in the caller's env (call-by-value) before the
     // param bindings overwrite anything.
     let mut arg_vals = Vec::with_capacity(args.len());
-    for arg in args {
-        arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
+    let mut arg_leaf_snapshots = Vec::with_capacity(args.len());
+    for (index, arg) in args.iter().enumerate() {
+        let value = expr_to_z3(vc, arg, env, solver_opt)?;
+        let param_type = params
+            .get(index)
+            .and_then(|param| param.type_ref.as_ref())
+            .map(|type_ref| type_ref.display_name());
+        arg_leaf_snapshots.push(super::z3_types::snapshot_struct_array_leaves(
+            vc,
+            env,
+            arg,
+            &value,
+            param_type.as_deref(),
+        )?);
+        arg_vals.push(value);
     }
     reject_shared_array_mutating_call_args(vc, CalleeRef::Expr(expr), args, &arg_vals, env)?;
 
@@ -7283,13 +7316,14 @@ fn apply_local_lambda<'a>(
         super::z3_types::clear_array_shared(vc.ctx, &mut call_env, &param.name);
         call_env.insert(param.name.clone(), arg_vals[i].clone());
         alias_struct_fields(&mut call_env, &param.name, &arg_vals[i]);
-        wire_array_slots(
+        super::z3_types::wire_array_slots_with_struct_leaf_snapshot(
             vc,
             &param.name,
             args.get(i),
             &arg_vals[i],
             &mut call_env,
             solver_opt,
+            arg_leaf_snapshots.get(i).and_then(Option::as_ref),
         )?;
     }
 

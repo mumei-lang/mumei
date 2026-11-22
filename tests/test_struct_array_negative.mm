@@ -3,6 +3,11 @@ enum E {
     B
 }
 
+enum Choice {
+    C,
+    D
+}
+
 struct P {
     x: i64,
     y: i64
@@ -37,6 +42,110 @@ atom mk_array_with_eleven() -> [P]
 requires: true;
 ensures: len(result) == 1 && result[0].x == 11;
 body: [P { x: 11, y: 11 }];
+
+atom mk_one() -> [P]
+requires: true;
+ensures: len(result) == 1 && result[0].x == 1;
+body: [P { x: 1, y: 0 }];
+
+atom mk_two() -> [P]
+requires: true;
+ensures: len(result) == 1 && result[0].x == 2;
+body: [P { x: 2, y: 0 }];
+
+atom require_second_one(qs: [P], b: [P]) -> bool
+requires: len(qs) > 0 && len(b) > 0 && b[0].x == 1;
+ensures: result == true;
+body: true;
+
+atom require_first_two(a: [P], b: [P]) -> bool
+requires: len(a) > 0 && len(b) > 0 && a[0].x == 2;
+ensures: result == true;
+body: true;
+
+atom call_block_param_shadow(xs: [P]) -> bool
+requires: len(xs) > 0 && xs[0].x == 1;
+ensures: result == true;
+body: require_second_one(xs, {
+    let qs = mk_two();
+    qs
+});
+
+atom call_two_block_args() -> bool
+requires: true;
+ensures: result == true;
+body: require_first_two({
+    let qs = mk_one();
+    qs
+}, {
+    let qs = mk_two();
+    qs
+});
+
+atom call_if_param_shadow(xs: [P], c: bool) -> bool
+requires: len(xs) > 0 && xs[0].x == 1;
+ensures: result == true;
+body: require_second_one(xs, if c {
+    let qs = mk_two();
+    qs
+} else {
+    let qs = mk_two();
+    qs
+});
+
+atom call_two_if_args(c: bool, d: bool) -> bool
+requires: true;
+ensures: result == true;
+body: require_first_two(if c {
+    let qs = mk_one();
+    qs
+} else {
+    let qs = mk_one();
+    qs
+}, if d {
+    let qs = mk_two();
+    qs
+} else {
+    let qs = mk_two();
+    qs
+});
+
+atom call_match_param_shadow(xs: [P], c: Choice) -> bool
+requires: len(xs) > 0 && xs[0].x == 1;
+ensures: result == true;
+body: require_second_one(xs, match c {
+    Choice::C => {
+        let qs = mk_two();
+        qs
+    },
+    Choice::D => {
+        let qs = mk_two();
+        qs
+    }
+});
+
+atom call_two_match_args(c: Choice, d: Choice) -> bool
+requires: true;
+ensures: result == true;
+body: require_first_two(match c {
+    Choice::C => {
+        let qs = mk_one();
+        qs
+    },
+    Choice::D => {
+        let qs = mk_one();
+        qs
+    }
+}, match d {
+    Choice::C => {
+        let qs = mk_two();
+        qs
+    },
+    Choice::D => {
+        let qs = mk_two();
+        qs
+    }
+});
 
 atom stale_read(ps: [P]) -> i64
 requires: len(ps) > 1 && ps[1].x == 3;

@@ -40,6 +40,45 @@ requires: true;
 ensures: len(result) == 1 && result[0].x == 11;
 body: [P { x: 11, y: 0 }];
 
+atom mk_one_for_snapshot() -> [P]
+requires: true;
+ensures: len(result) == 1 && result[0].x == 1;
+body: [P { x: 1, y: 0 }];
+
+atom mk_two_for_snapshot() -> [P]
+requires: true;
+ensures: len(result) == 1 && result[0].x == 2;
+body: [P { x: 2, y: 0 }];
+
+atom require_second_snapshot(qs: [P], b: [P]) -> bool
+requires: len(qs) > 0 && len(b) > 0 && qs[0].x == 1 && b[0].x == 2;
+ensures: result == true;
+body: true;
+
+atom require_ordered_snapshot(first: [P], second: [P]) -> bool
+requires: len(first) > 0 && len(second) > 0 && first[0].x == 1 && second[0].x == 2;
+ensures: result == true;
+body: true;
+
+atom block_param_snapshot(xs: [P]) -> bool
+requires: len(xs) > 0 && xs[0].x == 1;
+ensures: result == true;
+body: require_second_snapshot(xs, {
+    let qs = mk_two_for_snapshot();
+    qs
+});
+
+atom two_block_snapshot_args() -> bool
+requires: true;
+ensures: result == true;
+body: require_ordered_snapshot({
+    let qs = mk_one_for_snapshot();
+    qs
+}, {
+    let qs = mk_two_for_snapshot();
+    qs
+});
+
 atom struct_array_block_result() -> i64
 requires: true;
 ensures: result == 11;

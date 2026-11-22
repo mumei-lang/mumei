@@ -1274,6 +1274,78 @@ pub(crate) fn z3_dynamic_array<'a>(vc: &VCtx<'a>, name: &str, env: &Env<'a>) -> 
         .unwrap_or_else(|| z3_array_for_name(vc, name))
 }
 
+pub(crate) struct StructArrayLeafSnapshot<'a> {
+    element_type: String,
+    arrays: HashMap<String, Array<'a>>,
+}
+
+pub(crate) fn snapshot_struct_array_leaves<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    expression: &Expr,
+    value: &Dynamic<'a>,
+    declared_array_type: Option<&str>,
+) -> MumeiResult<Option<StructArrayLeafSnapshot<'a>>> {
+    let element_type = declared_array_type
+        .map(str::trim)
+        .filter(|type_name| type_name.starts_with('[') && type_name.ends_with(']'))
+        .map(|type_name| array_element_type_from_annotation(Some(type_name), vc.module_env))
+        .or_else(|| array_element_type_from_expr(vc, expression));
+    let Some(element_type) = element_type else {
+        return Ok(None);
+    };
+    if array_element_sort_from_type(&element_type, vc.module_env, vc.ieee754_f64)
+        != ArrayElementSort::Struct
+    {
+        return Ok(None);
+    }
+    validate_array_element_type(vc, &element_type)?;
+    if value.as_array().is_none() {
+        return Ok(None);
+    }
+    let leaves = struct_array_leaf_types(&element_type, vc.module_env).ok_or_else(|| {
+        MumeiError::type_error(format!(
+            "array element struct '{element_type}' must have only scalar leaves"
+        ))
+    })?;
+    static SNAPSHOT_UID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let snapshot_id = SNAPSHOT_UID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut arrays = HashMap::with_capacity(leaves.len());
+    for (path, leaf_type) in leaves {
+        let range = z3_element_sort(vc, &leaf_type);
+        let array =
+            if let Some(array) = struct_array_leaf_for_expr(vc, env, expression, value, &path, 0) {
+                array
+            } else {
+                match expression {
+                    Expr::Variable(source) => {
+                        struct_array_leaf_array(vc, source, &path, &leaf_type, env)
+                    }
+                    Expr::ArrayLit(_) => {
+                        return Err(MumeiError::type_error(format!(
+                            "struct array literal is missing leaf '{path}'"
+                        )))
+                    }
+                    _ => z3_fresh_array_for_range(
+                        vc.ctx,
+                        &format!("__struct_arr_arg_snapshot#{snapshot_id}#{path}"),
+                        &range,
+                    ),
+                }
+            };
+        if array.get_sort().array_range() != Some(range) {
+            return Err(MumeiError::type_error(format!(
+                "struct array argument leaf '{path}' has an incompatible sort"
+            )));
+        }
+        arrays.insert(path, array);
+    }
+    Ok(Some(StructArrayLeafSnapshot {
+        element_type,
+        arrays,
+    }))
+}
+
 /// Wire a name-bound array value into the tracking slots reads and stores
 /// consult: `__z3_arr_<name>` carries the Z3 array, `len_<name>` the length
 /// (concrete for a `[e0, …]` literal, the source's `len` for a `var` alias, a
@@ -1287,6 +1359,19 @@ pub(crate) fn wire_array_slots<'a>(
     val: &Dynamic<'a>,
     env: &mut Env<'a>,
     solver_opt: Option<&Solver<'a>>,
+) -> MumeiResult<()> {
+    wire_array_slots_with_struct_leaf_snapshot(vc, name, value, val, env, solver_opt, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn wire_array_slots_with_struct_leaf_snapshot<'a>(
+    vc: &VCtx<'a>,
+    name: &str,
+    value: Option<&Expr>,
+    val: &Dynamic<'a>,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+    leaf_snapshot: Option<&StructArrayLeafSnapshot<'a>>,
 ) -> MumeiResult<()> {
     // For `var` sources the live array is the tracked `__z3_arr_<src>` chain —
     // `env[src]` is only the base const, and `src[i] = v` stores never rewrite
@@ -1343,8 +1428,9 @@ pub(crate) fn wire_array_slots<'a>(
     let len = array_len_for_expr(vc, env, value, &arr_dyn, solver_opt);
     register_array_value_len(env, &arr, len.clone());
     env.insert(array_len_key(name), len);
-    let elem_ty = value
-        .and_then(|value| array_element_type_from_expr(vc, value))
+    let elem_ty = leaf_snapshot
+        .map(|snapshot| snapshot.element_type.clone())
+        .or_else(|| value.and_then(|value| array_element_type_from_expr(vc, value)))
         .unwrap_or(elem_ty);
     validate_array_element_type(vc, &elem_ty)?;
     vc.local_array_elem_types
@@ -1353,29 +1439,43 @@ pub(crate) fn wire_array_slots<'a>(
     if let Some(leaves) = struct_array_leaf_types(&elem_ty, vc.module_env) {
         for (path, leaf_type) in leaves {
             let key = struct_array_leaf_key(name, &path);
-            let leaf_array = match value {
-                Some(Expr::Variable(source)) => {
-                    struct_array_leaf_array(vc, source, &path, &leaf_type, env)
+            let leaf_array = if let Some(snapshot) = leaf_snapshot {
+                snapshot.arrays.get(&path).cloned().ok_or_else(|| {
+                    MumeiError::type_error(format!(
+                        "struct array argument is missing leaf snapshot '{path}'"
+                    ))
+                })?
+            } else {
+                match value {
+                    Some(Expr::Variable(source)) => {
+                        struct_array_leaf_array(vc, source, &path, &leaf_type, env)
+                    }
+                    Some(Expr::ArrayLit(_)) => {
+                        let source = array_root_name(&arr).ok_or_else(|| {
+                            MumeiError::type_error("struct array literal has no carrier root")
+                        })?;
+                        env.get(&struct_array_leaf_key(&source, &path))
+                            .and_then(|value| value.as_array())
+                            .ok_or_else(|| {
+                                MumeiError::type_error(format!(
+                                    "struct array literal is missing leaf '{path}'"
+                                ))
+                            })?
+                    }
+                    Some(expression) => {
+                        struct_array_leaf_for_expr(vc, env, expression, &arr_dyn, &path, 0)
+                            .unwrap_or_else(|| {
+                                z3_fresh_array_for_range(
+                                    vc.ctx,
+                                    &key,
+                                    &z3_element_sort(vc, &leaf_type),
+                                )
+                            })
+                    }
+                    None => {
+                        z3_fresh_array_for_range(vc.ctx, &key, &z3_element_sort(vc, &leaf_type))
+                    }
                 }
-                Some(Expr::ArrayLit(_)) => {
-                    let source = array_root_name(&arr).ok_or_else(|| {
-                        MumeiError::type_error("struct array literal has no carrier root")
-                    })?;
-                    env.get(&struct_array_leaf_key(&source, &path))
-                        .and_then(|value| value.as_array())
-                        .ok_or_else(|| {
-                            MumeiError::type_error(format!(
-                                "struct array literal is missing leaf '{path}'"
-                            ))
-                        })?
-                }
-                Some(expression) => {
-                    struct_array_leaf_for_expr(vc, env, expression, &arr_dyn, &path, 0)
-                        .unwrap_or_else(|| {
-                            z3_fresh_array_for_range(vc.ctx, &key, &z3_element_sort(vc, &leaf_type))
-                        })
-                }
-                None => z3_fresh_array_for_range(vc.ctx, &key, &z3_element_sort(vc, &leaf_type)),
             };
             env.insert(key, leaf_array.into());
         }

@@ -140,6 +140,24 @@ fn unsupported_or_unjustified_struct_array_uses_fail_closed_errors() {
                 "missing expected type error for {atom} (bitvec={bitvec_i64}):\n{payload:#}"
             );
         }
+        for atom in [
+            "call_block_param_shadow",
+            "call_two_block_args",
+            "call_if_param_shadow",
+            "call_two_if_args",
+            "call_match_param_shadow",
+            "call_two_match_args",
+        ] {
+            assert!(
+                diagnostics.iter().any(|entry| {
+                    entry["atom"] == atom
+                        && entry["message"].as_str().is_some_and(|message| {
+                            message.contains("precondition (requires) not satisfied")
+                        })
+                }),
+                "missing expected call-site precondition failure for {atom} (bitvec={bitvec_i64}):\n{payload:#}"
+            );
+        }
         assert!(
             diagnostics.iter().any(|entry| {
                 entry["atom"] == "shared_field_array"
