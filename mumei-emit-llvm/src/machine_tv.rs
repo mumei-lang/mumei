@@ -1398,6 +1398,28 @@ fn lift<'ctx>(
                     &arguments,
                     context,
                 )?;
+            } else if instruction.mnemonic.as_str() == "movsd"
+                && model_has_f64_leaves(model)
+                && split_operands(&instruction.operands)
+                    .get(1)
+                    .is_some_and(|destination| destination.contains('('))
+            {
+                let operands = split_operands(&instruction.operands);
+                let destination = operands
+                    .get(1)
+                    .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+                if should_use_allocated_frame_memory(
+                    destination,
+                    &state,
+                    allocated_frame_memory_mode,
+                )? {
+                    // An SSE scalar store into the allocated frame
+                    // region has no modeled path: writing only `stack`
+                    // while integer loads read `frame_memory` would
+                    // silently drop the write, so fail closed.
+                    return Err(FunctionOutcome::OutsideProfile("frame_memory_bounds"));
+                }
+                lift_stack_store_sse(instruction, &mut state)?;
             } else if matches!(instruction.mnemonic.as_str(), "addq" | "subq")
                 && split_operands(&instruction.operands)
                     .get(1)
@@ -2470,6 +2492,47 @@ fn lift_stack_store<'ctx>(
     Ok(())
 }
 
+/// Stores the low 64 bits of an XMM register to `N(%rsp)` — the form
+/// LLVM uses to write a spilled outgoing `f64` call argument (and to
+/// spill a live `f64` across a call). Same slot bounds as
+/// `lift_stack_store`: the destination must sit inside the current
+/// frame between `rsp` and the caller's argument area.
+fn lift_stack_store_sse<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let Some(source_index) = parse_xmm_register(source) else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    if !state.rsp_is_known {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let entry_offset = rsp_memory_entry_offset(destination, state.rsp_offset)?;
+    if state.rsp_offset % 8 != 0
+        || entry_offset >= 0
+        || entry_offset < state.rsp_offset
+        || entry_offset % 8 != 0
+    {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let value = state.xmm_registers[source_index].extract(63, 0);
+    if let Some((_, stack_value)) = state
+        .stack
+        .iter_mut()
+        .find(|(stack_slot, _)| *stack_slot == entry_offset)
+    {
+        *stack_value = value;
+    } else {
+        state.stack.push((entry_offset, value));
+    }
+    state.outgoing_cleanup_slots.remove(&entry_offset);
+    Ok(())
+}
+
 fn is_incoming_stack_argument_operand(operand: &str, rsp_offset: i64) -> bool {
     rsp_memory_entry_offset(operand, rsp_offset).is_ok_and(|entry_offset| entry_offset > 0)
 }
@@ -2908,13 +2971,16 @@ fn call_site_has_unsupported_composite_shape(site: &CallSite<'_>) -> bool {
         && !aggregate_result_register_classes_supported(&site.result_leaf_doubles))))
 }
 
-// Resolves an INTEGER call-argument leaf that spilled past `rdi`-`r9` to the
-// stack slot the caller must have written, and records the slot in
-// `outgoing_slots` so a non-tail call can discard it afterwards. Scalar and
-// aggregate INTEGER leaves share this path because `expand` lowering flattens
-// both into the same argument sequence.
-fn spilled_integer_call_argument<'ctx>(
-    integer_argument_index: usize,
+// Resolves a call-argument leaf of either class that spilled to the
+// outgoing argument stack: the caller must have written the leaf at
+// `rsp_offset + 8 * stack_argument_index`, where the ordinal counts
+// overflowing leaves of both classes in declaration order (the same
+// layout the incoming side models). The slot is recorded in
+// `outgoing_slots` so a non-tail call can discard it afterwards.
+// Scalar and aggregate leaves share this path because `expand`
+// lowering flattens both into the same argument sequence.
+fn spilled_call_argument<'ctx>(
+    stack_argument_index: usize,
     rsp_is_known: bool,
     rsp_offset: i64,
     stack: &[(i64, BV<'ctx>)],
@@ -2923,7 +2989,6 @@ fn spilled_integer_call_argument<'ctx>(
     if !rsp_is_known || rsp_offset % 8 != 0 {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    let stack_argument_index = integer_argument_index - ARGUMENT_REGISTERS.len();
     let word_index = i64::try_from(stack_argument_index)
         .map_err(|_| FunctionOutcome::OutsideProfile("call_arguments"))?;
     let Some(stack_slot) = word_index
@@ -3045,9 +3110,6 @@ fn lift_call<'ctx>(
     if tail_call && float_argument_count > 0 {
         return Err(FunctionOutcome::OutsideProfile("call_arguments"));
     }
-    if float_argument_count > FLOAT_ARGUMENT_REGISTER_COUNT {
-        return Err(FunctionOutcome::OutsideProfile("argument_count"));
-    }
     let integer_argument_count = call_site.args.len() - float_argument_count;
     if tail_call && integer_argument_count > ARGUMENT_REGISTERS.len() {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
@@ -3055,6 +3117,7 @@ fn lift_call<'ctx>(
     let mut outgoing_slots = BTreeSet::new();
     let mut integer_argument_index = 0usize;
     let mut float_argument_index = 0usize;
+    let mut stack_argument_index = 0usize;
     let mut leaf_index = 0usize;
     for shape in &call_site.argument_shapes {
         let leaf_count = shape.leaf_count();
@@ -3067,24 +3130,36 @@ fn lift_call<'ctx>(
                 else {
                     return Err(FunctionOutcome::OutsideProfile("call_arguments"));
                 };
-                let float_leaf_count = leaf_doubles.iter().filter(|is_double| **is_double).count();
-                if float_leaf_count > 0
-                    && float_argument_index.saturating_add(float_leaf_count)
-                        > FLOAT_ARGUMENT_REGISTER_COUNT
-                {
-                    return Err(FunctionOutcome::OutsideProfile("argument_count"));
-                }
                 for (leaf_offset, is_double) in leaf_doubles.iter().enumerate() {
                     let argument = &call_site.args[leaf_index + leaf_offset];
                     if *is_double {
-                        let register = xmm_registers[float_argument_index].extract(63, 0);
-                        call_state
-                            .argument_obligations
-                            .push(f64_values_match(context, argument, &register));
-                        call_state
-                            .exact_f64_argument_obligations
-                            .push(argument._eq(&register));
-                        float_argument_index += 1;
+                        if float_argument_index < FLOAT_ARGUMENT_REGISTER_COUNT {
+                            let register = xmm_registers[float_argument_index].extract(63, 0);
+                            call_state
+                                .argument_obligations
+                                .push(f64_values_match(context, argument, &register));
+                            call_state
+                                .exact_f64_argument_obligations
+                                .push(argument._eq(&register));
+                            float_argument_index += 1;
+                        } else {
+                            let stack_argument = spilled_call_argument(
+                                stack_argument_index,
+                                rsp_is_known,
+                                rsp_offset,
+                                stack,
+                                &mut outgoing_slots,
+                            )?;
+                            call_state.argument_obligations.push(f64_values_match(
+                                context,
+                                argument,
+                                &stack_argument,
+                            ));
+                            call_state
+                                .exact_f64_argument_obligations
+                                .push(argument._eq(&stack_argument));
+                            stack_argument_index += 1;
+                        }
                     } else if let Some(register_index) =
                         ARGUMENT_REGISTERS.get(integer_argument_index)
                     {
@@ -3093,8 +3168,8 @@ fn lift_call<'ctx>(
                             .push(argument._eq(&registers[*register_index]));
                         integer_argument_index += 1;
                     } else {
-                        let stack_argument = spilled_integer_call_argument(
-                            integer_argument_index,
+                        let stack_argument = spilled_call_argument(
+                            stack_argument_index,
                             rsp_is_known,
                             rsp_offset,
                             stack,
@@ -3104,6 +3179,7 @@ fn lift_call<'ctx>(
                             .argument_obligations
                             .push(argument._eq(&stack_argument));
                         integer_argument_index += 1;
+                        stack_argument_index += 1;
                     }
                 }
             }
@@ -3134,17 +3210,33 @@ fn lift_call<'ctx>(
             CallValueShape::Scalar { .. } => {
                 let argument = &call_site.args[leaf_index];
                 if call_site.arg_leaf_doubles[leaf_index] {
-                    let Some(register) = xmm_registers.get(float_argument_index) else {
-                        return Err(FunctionOutcome::OutsideProfile("argument_count"));
-                    };
-                    let register = register.extract(63, 0);
-                    call_state
-                        .argument_obligations
-                        .push(f64_values_match(context, argument, &register));
-                    call_state
-                        .exact_f64_argument_obligations
-                        .push(argument._eq(&register));
-                    float_argument_index += 1;
+                    if float_argument_index < FLOAT_ARGUMENT_REGISTER_COUNT {
+                        let register = xmm_registers[float_argument_index].extract(63, 0);
+                        call_state
+                            .argument_obligations
+                            .push(f64_values_match(context, argument, &register));
+                        call_state
+                            .exact_f64_argument_obligations
+                            .push(argument._eq(&register));
+                        float_argument_index += 1;
+                    } else {
+                        let stack_argument = spilled_call_argument(
+                            stack_argument_index,
+                            rsp_is_known,
+                            rsp_offset,
+                            stack,
+                            &mut outgoing_slots,
+                        )?;
+                        call_state.argument_obligations.push(f64_values_match(
+                            context,
+                            argument,
+                            &stack_argument,
+                        ));
+                        call_state
+                            .exact_f64_argument_obligations
+                            .push(argument._eq(&stack_argument));
+                        stack_argument_index += 1;
+                    }
                 } else if let Some(register_index) = ARGUMENT_REGISTERS.get(integer_argument_index)
                 {
                     call_state
@@ -3152,8 +3244,8 @@ fn lift_call<'ctx>(
                         .push(argument._eq(&registers[*register_index]));
                     integer_argument_index += 1;
                 } else {
-                    let stack_argument = spilled_integer_call_argument(
-                        integer_argument_index,
+                    let stack_argument = spilled_call_argument(
+                        stack_argument_index,
                         rsp_is_known,
                         rsp_offset,
                         stack,
@@ -3163,6 +3255,7 @@ fn lift_call<'ctx>(
                         .argument_obligations
                         .push(argument._eq(&stack_argument));
                     integer_argument_index += 1;
+                    stack_argument_index += 1;
                 }
             }
         }
@@ -5925,6 +6018,128 @@ entry:
     }
 
     #[test]
+    fn f64_call_argument_beyond_xmm7_spills_to_the_argument_stack() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "atom callee9(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, \
+            h: f64, i: f64) -> f64 requires: true; ensures: true; body: { i };\n\
+            atom caller9(x: f64) -> f64 requires: true; ensures: true; \
+            body: { callee9(x, x, x, x, x, x, x, x, x) };\n\
+            atom callee16(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, \
+            h: f64, i: f64, j: f64, k: f64, l: f64, m: f64, n: f64, o: f64, p: f64) \
+            -> f64 requires: true; ensures: true; body: { p };\n\
+            atom caller16(x: f64, y: i64) -> f64 requires: true; ensures: true; \
+            body: { callee16(y, y, y, y, y, y, y, x, x, x, x, x, x, x, x, x) };";
+        let models =
+            encode_pure_i64_module(source, &context, true, RefinedAdmission::CompositeV23).unwrap();
+        let caller9 = models
+            .iter()
+            .find(|m| m.function_name == "caller9")
+            .unwrap();
+        let caller16 = models
+            .iter()
+            .find(|m| m.function_name == "caller16")
+            .unwrap();
+        assert!(supports_signature(caller9));
+        assert!(supports_signature(caller16));
+
+        // LLVM writes the ninth `f64` call argument to the outgoing
+        // argument stack with `movsd %xmm, N(%rsp)`.
+        let caller9_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+declare double @callee9(double, double, double, double, double, double, double, double, double)
+define double @caller9(double %x) {
+entry:
+  %r = call double @callee9(double %x, double %x, double %x, double %x, double %x, double %x, double %x, double %x, double %x)
+  ret double %r
+}
+"#;
+        let (caller9_address, caller9_bytes, caller9_targets) =
+            compiled_function_with_targets(caller9_ir, "caller9");
+        let caller9_disassembly = disassemble(&caller9_bytes, caller9_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("caller9 disassembly:\n{caller9_disassembly}");
+        assert!(
+            caller9_disassembly.contains("movsd"),
+            "expected a movsd outgoing stack store:\n{caller9_disassembly}"
+        );
+        assert_eq!(
+            check_function(
+                &caller9_bytes,
+                caller9_address,
+                caller9,
+                &caller9_targets,
+                &context,
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        // A mixed call puts the seventh integer and the ninth `f64`
+        // into adjacent stack slots in declaration order — an integer
+        // `mov` store followed by the `movsd` store.
+        let caller16_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+declare double @callee16(i64, i64, i64, i64, i64, i64, i64, double, double, double, double, double, double, double, double, double)
+define double @caller16(double %x, i64 %y) {
+entry:
+  %r = call double @callee16(i64 %y, i64 %y, i64 %y, i64 %y, i64 %y, i64 %y, i64 %y, double %x, double %x, double %x, double %x, double %x, double %x, double %x, double %x, double %x)
+  ret double %r
+}
+"#;
+        let (caller16_address, caller16_bytes, caller16_targets) =
+            compiled_function_with_targets(caller16_ir, "caller16");
+        let caller16_disassembly = disassemble(&caller16_bytes, caller16_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("caller16 disassembly:\n{caller16_disassembly}");
+        assert!(
+            caller16_disassembly.contains("movsd"),
+            "expected a movsd outgoing stack store:\n{caller16_disassembly}"
+        );
+        assert_eq!(
+            check_function(
+                &caller16_bytes,
+                caller16_address,
+                caller16,
+                &caller16_targets,
+                &context,
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        // The same bytes checked against a model that expects the
+        // spilled `f64` argument to differ are refuted, not merely
+        // unmatched.
+        let wrong = "atom caller9(x: f64) -> f64 requires: true; ensures: true; \
+            body: { callee9(x, x, x, x, x, x, x, x, x + x) };\n\
+            atom callee9(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, \
+            h: f64, i: f64) -> f64 requires: true; ensures: true; body: { i };";
+        let wrong_models =
+            encode_pure_i64_module(wrong, &context, true, RefinedAdmission::CompositeV23).unwrap();
+        let wrong_caller = wrong_models
+            .iter()
+            .find(|m| m.function_name == "caller9")
+            .unwrap();
+        assert_eq!(
+            check_function(
+                &caller9_bytes,
+                caller9_address,
+                wrong_caller,
+                &caller9_targets,
+                &context,
+            ),
+            FunctionOutcome::Different
+        );
+    }
+
+    #[test]
     fn struct_signature_limits_fail_closed() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
@@ -6052,6 +6267,35 @@ entry:
         assert_eq!(
             check_function(&[0xc3], 0, &after_five, &BTreeMap::new(), &context),
             FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn movsd_store_into_allocated_frame_memory_fails_closed() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "atom idf(x: f64) -> f64 requires: true; ensures: true; body: { x };";
+        let mut model = source_model_named_with_admission(
+            source,
+            "idf",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        model.bounded_memory = true;
+        // subq $0x10,%rsp; movsd %xmm0,0x8(%rsp); movq (%rsp,%rcx,8),%rax;
+        // retq — the SSE scalar store lands inside the allocated frame
+        // region, which has no modeled path (the integer load reads
+        // `frame_memory`, not the outgoing-argument `stack`), so the
+        // function must fail closed rather than silently drop the write.
+        let bytes = [
+            0x48, 0x83, 0xec, 0x10, 0xf2, 0x0f, 0x11, 0x44, 0x24, 0x08, 0x48, 0x8b, 0x04, 0xcc,
+            0xc3,
+        ];
+        assert_eq!(
+            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("frame_memory_bounds")
         );
     }
 
@@ -7797,6 +8041,10 @@ entry:
             result_leaf_doubles: vec![true],
             guard: Bool::from_bool(&context, true),
         });
+        // The ninth `f64` call argument now spills to the stack; a
+        // machine that never wrote the slot cannot be equivalent, so
+        // the honest failure is `call_arguments` rather than the old
+        // `argument_count` admission bound.
         assert_eq!(
             check_function(
                 &mixed_call,
@@ -7805,7 +8053,7 @@ entry:
                 &helper_call_targets(&[1]),
                 &context,
             ),
-            FunctionOutcome::OutsideProfile("argument_count")
+            FunctionOutcome::OutsideProfile("call_arguments")
         );
     }
 

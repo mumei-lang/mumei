@@ -2036,15 +2036,19 @@ profile because integer PF is not modeled. Agent consumers must adopt the
 three f64 check names.
 Scalar f64 parameters and f64 leaves in admitted struct parameters and
 direct-call arguments use `xmm0`–`xmm7`, independently of the integer
-argument registers; integer overflow arguments continue in stack slots
-indexed among integer arguments only. Call arguments first use NaN-aware f64
+argument registers; overflow arguments of both classes continue in one stack
+area laid out in declaration order. Call arguments first use NaN-aware f64
 equality alongside exact integer equality and output matching. A second query
 must prove that every machine f64 argument's low 64 bits exactly equal the
 source argument bits under the same path assumptions.
 This admits pass-through f64 calls without assuming that a callee ignores NaN
 payloads; a computed f64 argument whose exact NaN bits cannot be proved, or an
-f64 tail call, remains outside the profile as `call_arguments`. More than eight
-f64 call arguments are outside the profile as `argument_count`. f64 call
+f64 tail call, remains outside the profile as `call_arguments`. f64 call
+arguments past `xmm7` spill onto the outgoing argument stack in declaration
+order shared with integer overflow arguments; the caller must write each
+spilled `f64` leaf with a `movsd %xmm, N(%rsp)` store, and the stored slot
+carries the same NaN-aware and exact-bit obligations as a register argument.
+f64 call
 results remain supported and are bound from the low 64 bits of `xmm0`. When an
 equivalent function has an f64 leaf, including inside a struct or a call shape,
 `register_convention_assumed` names the XMM argument/result registers with
@@ -2067,9 +2071,7 @@ zeroed) or directly as an SSE memory operand
 source); an INTEGER instruction reading an f64 slot, or an SSE
 instruction reading an integer slot, fails closed. Aggregates with
 seventeen or more leaves fail closed (`argument_count` for function
-parameters, `call_arguments` for direct-call arguments), and outgoing
-call arguments that overflow still fail closed — more than eight f64 call
-arguments remain `argument_count`. The source admission fragment already
+parameters, `call_arguments` for direct-call arguments). The source admission fragment already
 rejects struct declarations wider than sixteen leaves, so these checks
 fire only on hand-written object inputs, not compiler output.
 
