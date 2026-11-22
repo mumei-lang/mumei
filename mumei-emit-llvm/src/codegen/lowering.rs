@@ -4,7 +4,9 @@ use inkwell::module::Module;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValueEnum, FunctionValue};
 use inkwell::AddressSpace;
+use mumei_core::ast::TypeRef;
 use mumei_core::lowering::{lower, LoweredType};
+use mumei_core::parser::parse_type_ref;
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 
 pub(crate) fn array_struct_type(context: &Context) -> inkwell::types::StructType<'_> {
@@ -18,74 +20,123 @@ pub(crate) fn array_struct_type(context: &Context) -> inkwell::types::StructType
 pub(crate) type ArrayPtr<'a> = (BasicValueEnum<'a>, BasicTypeEnum<'a>, BasicValueEnum<'a>);
 
 pub(crate) fn type_cycle_path(module_env: &ModuleEnv, type_name: &str) -> Option<Vec<String>> {
-    fn visit(
-        module_env: &ModuleEnv,
-        type_name: &str,
-        owner: Option<&str>,
-        path: &mut Vec<String>,
-        completed: &mut std::collections::HashSet<String>,
-    ) -> Option<Vec<String>> {
+    fn parse_type_name(type_name: &str) -> TypeRef {
         let type_name = type_name.trim();
-        let type_name = if type_name == "Self" {
-            owner?
-        } else {
-            type_name
-        };
-        let base = module_env.resolve_base_type(type_name);
-        let array_element = base
+        if let Some(inner) = type_name
             .strip_prefix("[]<")
             .and_then(|inner| inner.strip_suffix('>'))
-            .or_else(|| {
-                base.strip_prefix('[')
-                    .and_then(|inner| inner.strip_suffix(']'))
-            });
-        if let Some(element) = array_element {
+        {
+            TypeRef::array(parse_type_ref(inner))
+        } else {
+            parse_type_ref(type_name)
+        }
+    }
+
+    fn contains_unbound_type_param(
+        type_ref: &TypeRef,
+        type_params: &[String],
+        substitutions: &std::collections::HashMap<String, TypeRef>,
+    ) -> bool {
+        (type_params.iter().any(|param| param == &type_ref.name)
+            && !substitutions.contains_key(&type_ref.name))
+            || type_ref
+                .type_args
+                .iter()
+                .any(|arg| contains_unbound_type_param(arg, type_params, substitutions))
+    }
+
+    fn visit(
+        module_env: &ModuleEnv,
+        type_ref: &TypeRef,
+        owner: Option<&TypeRef>,
+        path: &mut Vec<(String, String)>,
+        completed: &mut std::collections::HashSet<String>,
+    ) -> Option<Vec<String>> {
+        let type_ref = if type_ref.name == "Self" {
+            owner?.clone()
+        } else {
+            type_ref.clone()
+        };
+        let type_name = type_ref.display_name();
+        let base = module_env.resolve_base_type(&type_name);
+        let type_ref = if base == type_name {
+            type_ref
+        } else {
+            parse_type_name(&base)
+        };
+        if let Some(element) = type_ref.array_element_type() {
             return visit(module_env, element, owner, path, completed);
         }
 
-        let name = base
-            .split('<')
-            .next()
-            .unwrap_or(base.as_str())
-            .trim()
-            .to_string();
-        let enum_def = module_env.get_enum(&name);
-        let struct_def = module_env.get_struct(&name);
+        let name = type_ref.name.clone();
+        let display_name = type_ref.display_name();
+        let enum_def = module_env
+            .get_enum(&display_name)
+            .or_else(|| module_env.get_enum(&name));
+        let struct_def = module_env
+            .get_struct(&display_name)
+            .or_else(|| module_env.get_struct(&name));
         if enum_def.is_none() && struct_def.is_none() {
             return None;
         }
-        if let Some(index) = path.iter().position(|entry| entry == &name) {
-            let mut cycle = path[index..].to_vec();
-            cycle.push(name);
+        if let Some(index) = path.iter().position(|(entry, _)| entry == &name) {
+            let mut cycle: Vec<String> = path[index..]
+                .iter()
+                .map(|(_, display_name)| display_name.clone())
+                .collect();
+            cycle.push(display_name);
             return Some(cycle);
         }
-        if completed.contains(&name) {
+        if completed.contains(&display_name) {
             return None;
         }
 
-        path.push(name.clone());
-        let cycle = if let Some(enum_def) = enum_def {
-            enum_def
-                .variants
-                .iter()
-                .flat_map(|variant| variant.field_types.iter())
-                .find_map(|field| visit(module_env, &field.name, Some(&name), path, completed))
-        } else if let Some(struct_def) = struct_def {
-            struct_def
-                .fields
-                .iter()
-                .find_map(|field| visit(module_env, &field.type_name, Some(&name), path, completed))
+        let (type_params, fields): (&[String], Vec<TypeRef>) = if let Some(enum_def) = enum_def {
+            (
+                &enum_def.type_params,
+                enum_def
+                    .variants
+                    .iter()
+                    .flat_map(|variant| variant.field_types.iter())
+                    .map(|field| TypeRef::simple(&field.name))
+                    .collect(),
+            )
         } else {
-            None
+            let struct_def = struct_def?;
+            (
+                &struct_def.type_params,
+                struct_def
+                    .fields
+                    .iter()
+                    .map(|field| field.type_ref.clone())
+                    .collect(),
+            )
         };
+        let substitutions: std::collections::HashMap<String, TypeRef> = type_params
+            .iter()
+            .zip(type_ref.type_args.iter())
+            .map(|(param, arg)| (param.clone(), arg.clone()))
+            .collect();
+        path.push((name, display_name.clone()));
+        for field in fields {
+            let field = field.substitute(&substitutions);
+            if contains_unbound_type_param(&field, type_params, &substitutions) {
+                continue;
+            }
+            if let Some(cycle) = visit(module_env, &field, Some(&type_ref), path, completed) {
+                path.pop();
+                return Some(cycle);
+            }
+        }
         path.pop();
-        completed.insert(name);
-        cycle
+        completed.insert(display_name);
+        None
     }
 
+    let type_ref = parse_type_name(type_name);
     visit(
         module_env,
-        type_name,
+        &type_ref,
         None,
         &mut Vec::new(),
         &mut std::collections::HashSet::new(),

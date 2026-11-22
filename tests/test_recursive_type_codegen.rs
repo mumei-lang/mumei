@@ -91,6 +91,24 @@ fn non_recursive_shared_enum_fields_still_build() {
 }
 
 #[test]
+fn non_recursive_generic_struct_instantiation_still_builds() {
+    let (_dir, output) = run_build("test_recursive_generic_struct_acyclic.mm", "llvm-ir");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "a concrete generic field must not be treated as a recursive type:\n{stdout}\n{stderr}"
+    );
+}
+
+#[test]
+fn recursive_generic_struct_instantiation_fails_cleanly() {
+    let fixture = "test_recursive_generic_struct_cycle.mm";
+    let (_dir, output) = run_build(fixture, "llvm-ir");
+    assert_clean_recursive_type_error(&output, fixture, "llvm-ir");
+}
+
+#[test]
 fn mutual_struct_enum_cycle_remains_verifiable() {
     let (_dir, copied) = copy_fixture("test_recursive_enum_mutual_struct.mm");
     let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
