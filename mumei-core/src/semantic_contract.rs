@@ -11430,6 +11430,16 @@ fn source_expr<'ctx>(
             // per flattened slot — the tag, then each shared payload
             // slot — and the site records their `aggregate_value`.
             if let Some((enum_name, variants)) = call_returns.result_enum(name) {
+                // The tag leaf is always INTEGER; payload leaves carry
+                // the kinds the layout reports — an `f64` payload leaf
+                // comes back in an SSE slot like a struct leaf.
+                let mut result_leaf_doubles = vec![false];
+                result_leaf_doubles.extend(
+                    call_returns
+                        .enum_layout_leaf_kinds(variants)
+                        .iter()
+                        .map(|kind| *kind == ScalarKind::F64),
+                );
                 let slots = (0..=call_returns.enum_layout_leaf_count(variants))
                     .map(|i| {
                         call_field_decl(ctx, name, applied.len(), i)
@@ -11451,7 +11461,7 @@ fn source_expr<'ctx>(
                     result_shape: CallValueShape::Enum {
                         leaf_count: slots.len(),
                     },
-                    result_leaf_doubles: vec![false; slots.len()],
+                    result_leaf_doubles,
                     guard: guard.clone(),
                 });
                 return Ok(SourceValue::Enum {

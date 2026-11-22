@@ -2137,12 +2137,15 @@ This is an assumption about that LLVM lowering, not a validated ABI. Function-
 signature and direct-call aggregates used as parameters or call arguments with
 seventeen or more leaves, or as results outside the admitted shapes —
 register-resident within the per-class budgets, or four-to-sixteen-leaf sret
-— remain outside the profile. Enum-valued direct-call results in modules
-with f64 features remain fail-closed as `call_arguments` because their source
-call model does not retain per-leaf SSE classes. Outside f64 modules, enum
-call results share the register-resident and `sret` paths struct call
-results use — a four-to-sixteen-leaf all-INTEGER enum result comes back
-through the caller's `sret` buffer, tag leaf included.
+— remain outside the profile. Enum call results share the
+register-resident and `sret` paths struct call results use — the tag
+leaf is always INTEGER and each payload leaf reports its own class, so
+a four-to-sixteen-leaf enum result whose INTEGER leaves overflow comes
+back through the caller's `sret` buffer (`f64` payload leaves as
+`movsd` bit patterns), while results that still fit the per-class
+register budgets stay register-resident. Enum results whose SSE leaves
+overflow the two SSE slots keep reaching for the x87 register and stay
+fail-closed.
 Local struct values inside a body are not subject to this aggregate limit
 because the source model flattens them. i128/u128 leaves inside aggregate
 parameters, call arguments and aggregate results flatten into the same
