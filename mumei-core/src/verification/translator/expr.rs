@@ -1567,9 +1567,12 @@ pub(crate) fn fixed_width_int_type(vc: &VCtx, expr: &Expr) -> Option<&'static st
                 .resolve_base_type(atom.return_type.as_deref()?);
             fixed_width_int(&base).map(|(ty, _, _)| ty)
         }
-        Expr::BinaryOp(l, Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Rem, r) => {
-            fixed_width_int_type(vc, l).or_else(|| fixed_width_int_type(vc, r))
-        }
+        Expr::BinaryOp(
+            l,
+            Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Rem | Op::BitAnd | Op::BitOr | Op::BitXor,
+            r,
+        ) => fixed_width_int_type(vc, l).or_else(|| fixed_width_int_type(vc, r)),
+        Expr::BinaryOp(l, Op::Shl | Op::Shr, _) => fixed_width_int_type(vc, l),
         Expr::IfThenElse {
             then_branch,
             else_branch,
