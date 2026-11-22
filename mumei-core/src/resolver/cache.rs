@@ -867,6 +867,15 @@ pub fn compute_dependency_hashes(
     compute_dependency_hashes_with_names(atom, module_env, false)
 }
 
+pub(crate) fn resource_dependency_hash(name: &str, module_env: &ModuleEnv) -> Option<String> {
+    let resource = module_env.get_resource(name)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"|resource:");
+    hasher.update(name.as_bytes());
+    hash_resource_definition(&mut hasher, resource);
+    Some(format!("{:x}", hasher.finalize()))
+}
+
 pub(crate) fn compute_legacy_dependency_hashes(
     atom: &crate::parser::Atom,
     module_env: &ModuleEnv,
@@ -1096,15 +1105,8 @@ fn compute_dependency_hashes_with_names(
             hashes.insert(format!("enum:{name}"), format!("{:x}", hasher.finalize()));
         }
         for name in resource_names {
-            if let Some(resource) = module_env.get_resource(&name) {
-                let mut hasher = Sha256::new();
-                hasher.update(b"|resource:");
-                hasher.update(name.as_bytes());
-                hash_resource_definition(&mut hasher, resource);
-                hashes.insert(
-                    format!("resource:{name}"),
-                    format!("{:x}", hasher.finalize()),
-                );
+            if let Some(hash) = resource_dependency_hash(&name, module_env) {
+                hashes.insert(format!("resource:{name}"), hash);
             }
         }
     }

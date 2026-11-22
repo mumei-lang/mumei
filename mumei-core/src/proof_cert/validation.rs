@@ -259,6 +259,17 @@ pub fn verify_certificate_in_env(
                                     current.entry(key).or_insert(hash);
                                 }
                             }
+                            for key in expected.keys() {
+                                if !current.contains_key(key) {
+                                    if let Some(name) = key.strip_prefix("resource:") {
+                                        if let Some(hash) =
+                                            crate::resolver::resource_dependency_hash(name, env)
+                                        {
+                                            current.insert(key.clone(), hash);
+                                        }
+                                    }
+                                }
+                            }
                             for (key, hash) in expected {
                                 match current.get(key) {
                                     Some(current_hash) if current_hash != hash => {
@@ -507,6 +518,112 @@ pub fn get_required_lowering_rules(logic_fragment_tags: &[String]) -> Vec<String
     rules.sort();
     rules.dedup();
     rules
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::{self, Item};
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn expected_resource_keys_are_resolved_from_the_environment() {
+        let mut atom = parser::parse_module(
+            "atom c_fn() -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: 0;",
+        )
+        .into_iter()
+        .find_map(|item| match item {
+            Item::Atom(atom) => Some(atom),
+            _ => None,
+        })
+        .expect("parse C atom");
+        atom.spec_metadata
+            .insert("source_file".to_string(), "/c.mm".to_string());
+
+        let resource = parser::parse_module(
+            "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;",
+        )
+        .into_iter()
+        .find_map(|item| match item {
+            Item::ResourceDef(resource) => Some(resource),
+            _ => None,
+        })
+        .expect("parse B resource");
+        let mut env = ModuleEnv::default();
+        env.register_resource_with_origin(&resource, Some("/b.mm"));
+        env.import_closure
+            .insert("/c.mm".to_string(), BTreeSet::new());
+
+        let resource_hash =
+            crate::resolver::resource_dependency_hash("counter", &env).expect("resource hash");
+        let content_hash = compute_atom_content_hash_for_version(
+            super::super::generation::CERTIFICATE_VERSION,
+            &atom,
+        )
+        .expect("current atom hash");
+        let certificate = |hash: &str| {
+            serde_json::from_value(serde_json::json!({
+                "version": super::super::generation::CERTIFICATE_VERSION,
+                "timestamp": "",
+                "z3_version": "",
+                "file": "/c.mm",
+                "atoms": [{
+                    "name": "c_fn",
+                    "z3_check_result": "unsat",
+                    "content_hash": content_hash,
+                    "status": "verified",
+                    "dependency_hashes": {
+                        "resource:counter": hash
+                    }
+                }]
+            }))
+            .expect("deserialize certificate")
+        };
+
+        let matching = certificate(&resource_hash);
+        let matching_check = verify_certificate_in_env(&matching, &[&atom], false, Some(&env));
+        assert_eq!(matching_check[0].status, status::CERTIFICATE_PROVEN);
+
+        let changed = certificate("changed-resource-hash");
+        let changed_check = verify_certificate_in_env(&changed, &[&atom], false, Some(&env));
+        assert_eq!(
+            changed_check[0].status,
+            status::CERTIFICATE_DEPENDENCY_CHANGED
+        );
+        assert_eq!(
+            changed_check[0].changed_dependencies,
+            vec!["resource:counter".to_string()]
+        );
+
+        let missing: ProofCertificate = serde_json::from_value(serde_json::json!({
+            "version": super::super::generation::CERTIFICATE_VERSION,
+            "timestamp": "",
+            "z3_version": "",
+            "file": "/c.mm",
+            "atoms": [{
+                "name": "c_fn",
+                "z3_check_result": "unsat",
+                "content_hash": content_hash,
+                "status": "verified",
+                "dependency_hashes": {
+                    "resource:missing": "expected-hash"
+                }
+            }]
+        }))
+        .expect("deserialize certificate with unknown resource");
+        let missing_check = verify_certificate_in_env(&missing, &[&atom], false, Some(&env));
+        assert_eq!(
+            missing_check[0].status,
+            status::CERTIFICATE_DEPENDENCY_UNCHECKED
+        );
+        assert_eq!(
+            missing_check[0].unchecked_dependencies,
+            vec!["resource:missing".to_string()]
+        );
+    }
 }
 
 pub fn validate_certificate_translator_versions(cert: &ProofCertificate) -> Result<(), String> {
