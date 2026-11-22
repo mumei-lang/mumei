@@ -87,6 +87,29 @@ fn assert_success(output: &Output) {
     );
 }
 
+fn assert_observation_context(descriptor: &serde_json::Value, pin_envelope: &str) {
+    assert_eq!(
+        descriptor["invocation"],
+        serde_json::json!({
+            "argv": [],
+            "stdin": "closed",
+            "timeout_ms": 30000,
+            "channel_cap_bytes": 65536,
+            "environment": "empty",
+            "working_directory": "executable_directory",
+        })
+    );
+    assert_eq!(
+        descriptor["host"],
+        serde_json::json!({
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "family": std::env::consts::FAMILY,
+        })
+    );
+    assert_eq!(descriptor["pin_envelope"], pin_envelope);
+}
+
 fn build(root: &Path) -> (std::path::PathBuf, std::path::PathBuf, String) {
     let source = root.join("source.mm");
     let bundle = root.join("bundle");
@@ -1230,6 +1253,7 @@ fn exit_status_acceptance_emits_the_observation_descriptor() {
     assert_success(&accept);
     let descriptor: serde_json::Value = serde_json::from_slice(&accept.stdout).unwrap();
     assert_eq!(descriptor["accepted"], true);
+    assert_observation_context(&descriptor, "recorded");
     assert!(
         descriptor["checks_performed"]
             .as_array()
@@ -1344,6 +1368,7 @@ fn stdout_acceptance_emits_the_observation_descriptor() {
     assert_success(&accept);
     let descriptor: serde_json::Value = serde_json::from_slice(&accept.stdout).unwrap();
     assert_eq!(descriptor["accepted"], true);
+    assert_observation_context(&descriptor, "recorded");
     assert!(
         descriptor["checks_performed"]
             .as_array()
@@ -1380,6 +1405,7 @@ fn stdout_acceptance_emits_the_observation_descriptor() {
     // A pinless record cannot be accepted this way — inconclusive.
     let mut record: serde_json::Value =
         serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+    let fresh_record = record.clone();
     record["link_build"]
         .as_object_mut()
         .unwrap()
@@ -1395,6 +1421,26 @@ fn stdout_acceptance_emits_the_observation_descriptor() {
         &native_bundle::sha256(&bytes),
     ]);
     assert_eq!(pinless.status.code(), Some(3));
+
+    let mut legacy_record = fresh_record;
+    legacy_record["link_build"]
+        .as_object_mut()
+        .unwrap()
+        .remove("observation_envelope");
+    let bytes = serde_json::to_vec(&legacy_record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    let legacy = cli(&[
+        "native-bundle",
+        "accept-stdout",
+        bundle.to_str().unwrap(),
+        source.to_str().unwrap(),
+        "--expected-build-id",
+        &native_bundle::sha256(&bytes),
+        "--json",
+    ]);
+    assert_success(&legacy);
+    let legacy_descriptor: serde_json::Value = serde_json::from_slice(&legacy.stdout).unwrap();
+    assert_observation_context(&legacy_descriptor, "unrecorded");
 }
 
 #[test]
@@ -1765,9 +1811,7 @@ fn stderr_acceptance_emits_the_observation_descriptor() {
     assert_success(&accept);
     let descriptor: serde_json::Value = serde_json::from_slice(&accept.stdout).unwrap();
     assert_eq!(descriptor["accepted"], true);
-    assert!(descriptor.get("invocation").is_none());
-    assert!(descriptor.get("host").is_none());
-    assert!(descriptor.get("pin_envelope").is_none());
+    assert_observation_context(&descriptor, "recorded");
     assert!(
         descriptor["checks_performed"]
             .as_array()
@@ -5637,6 +5681,9 @@ fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
     );
     assert_eq!(descriptor["acceptance"], "evaluated");
     assert_eq!(descriptor["accepted"], true);
+    assert!(descriptor.get("invocation").is_none());
+    assert!(descriptor.get("host").is_none());
+    assert!(descriptor.get("pin_envelope").is_none());
     assert_eq!(
         descriptor["scope"],
         "native_bundle_object_machine_code_translation_correspondence"

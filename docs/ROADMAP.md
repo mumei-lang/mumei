@@ -3052,7 +3052,10 @@ per-channel and runtime-observation recheck/accept commands. The record
 now optionally pins `link_build.observation_envelope`; pins from a
 different envelope are not compared, so runtime rechecks are inconclusive
 (exit 3). Legacy records without the field are still compared and report
-`pin_envelope: "unrecorded"`. The Agent
+`pin_envelope: "unrecorded"`.
+Per-channel `accept-*` JSON descriptors also carry `invocation`, `host` and
+`pin_envelope`; none of these properties is covered by
+`runtime_observation_semantics`. The Agent
 `native-observations-accept` route (mumei-agent#1039) now performs this
 check from the descriptor; its acceptance rests on Core's exit code and
 input recheck, and it does not validate the Core-reported envelope. See the [runtime-observation acceptance

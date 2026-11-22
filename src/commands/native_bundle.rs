@@ -951,6 +951,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                         family,
                         canonical_argv_compared,
                         expected_exit_status,
+                        pin_envelope,
                         stage,
                         ..
                     } = recheck;
@@ -983,7 +984,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                                         json,
                                         acceptance,
                                         None,
-                                        None,
+                                        Some(pin_envelope),
                                         &mut std::io::stdout().lock(),
                                     )
                                     .map(|_| ())
@@ -1158,6 +1159,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                         family,
                         canonical_argv_compared,
                         expected_stdout_sha256,
+                        pin_envelope,
                         stage,
                         ..
                     } = recheck;
@@ -1190,7 +1192,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                                         json,
                                         acceptance,
                                         None,
-                                        None,
+                                        Some(pin_envelope),
                                         &mut std::io::stdout().lock(),
                                     )
                                     .map(|_| ())
@@ -1230,6 +1232,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                         family,
                         canonical_argv_compared,
                         expected_stderr_sha256,
+                        pin_envelope,
                         stage,
                         ..
                     } = recheck;
@@ -1262,7 +1265,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                                         json,
                                         acceptance,
                                         None,
-                                        None,
+                                        Some(pin_envelope),
                                         &mut std::io::stdout().lock(),
                                     )
                                     .map(|_| ())
@@ -1529,6 +1532,13 @@ struct NativeAcceptance {
     text: &'static str,
 }
 
+const OBSERVATION_ACCEPTANCE_CHECKS: &[&str] = &[
+    "os_exit_status_observation",
+    "os_stdout_observation",
+    "os_stderr_observation",
+    "runtime_observation_semantics",
+];
+
 const EVIDENCE_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
     scope: "native_bundle_identity_source_llvm_and_saved_evidence_consistency",
     performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "saved_evidence_consistency"],
@@ -1752,7 +1762,8 @@ fn write_native_acceptance(
         });
         if acceptance
             .performed
-            .contains(&"runtime_observation_semantics")
+            .iter()
+            .any(|check| OBSERVATION_ACCEPTANCE_CHECKS.contains(check))
         {
             value["invocation"] = observation_invocation_envelope();
             value["host"] = observation_host();
@@ -5798,14 +5809,27 @@ entry:
     }
 
     #[test]
-    fn observation_envelope_and_host_are_only_in_runtime_observation_acceptance() {
-        let runtime_acceptances = [
+    fn observation_envelope_and_host_are_in_observation_acceptances() {
+        let observation_acceptances = [
+            &MULTIFILE_EXIT_STATUS_ACCEPTANCE,
+            &MULTIFILE_EXIT_STATUS_ACCEPTANCE_ARGV_UNPINNED,
+            &EXIT_STATUS_ACCEPTANCE,
+            &EXIT_STATUS_ACCEPTANCE_ARGV_UNPINNED,
+            &MULTIFILE_STDOUT_ACCEPTANCE,
+            &MULTIFILE_STDOUT_ACCEPTANCE_ARGV_UNPINNED,
+            &STDOUT_ACCEPTANCE,
+            &STDOUT_ACCEPTANCE_ARGV_UNPINNED,
+            &MULTIFILE_STDERR_ACCEPTANCE,
+            &MULTIFILE_STDERR_ACCEPTANCE_ARGV_UNPINNED,
+            &STDERR_ACCEPTANCE,
+            &STDERR_ACCEPTANCE_ARGV_UNPINNED,
             &MULTIFILE_RUNTIME_OBSERVATION_ACCEPTANCE,
             &MULTIFILE_RUNTIME_OBSERVATION_ACCEPTANCE_ARGV_UNPINNED,
             &RUNTIME_OBSERVATION_ACCEPTANCE,
             &RUNTIME_OBSERVATION_ACCEPTANCE_ARGV_UNPINNED,
         ];
-        for acceptance in runtime_acceptances {
+        assert_eq!(observation_acceptances.len(), 16);
+        for acceptance in observation_acceptances {
             let mut json_output = Vec::new();
             write_native_acceptance(
                 Outcome::EquivalentWithinProfile,
@@ -5838,9 +5862,12 @@ entry:
         }
 
         for acceptance in [
-            &STDOUT_ACCEPTANCE,
-            &EXIT_STATUS_ACCEPTANCE,
+            &EVIDENCE_ACCEPTANCE,
+            &MULTIFILE_EVIDENCE_ACCEPTANCE,
+            &MULTIFILE_ARTIFACT_ACCEPTANCE,
+            &MULTIFILE_ARTIFACT_ACCEPTANCE_ARGV_UNPINNED,
             &ARTIFACT_ACCEPTANCE,
+            &ARTIFACT_ACCEPTANCE_ARGV_UNPINNED,
         ] {
             let mut json_output = Vec::new();
             write_native_acceptance(
@@ -5848,13 +5875,14 @@ entry:
                 true,
                 acceptance,
                 None,
-                None,
+                Some("recorded"),
                 &mut json_output,
             )
             .unwrap();
             let descriptor: serde_json::Value = serde_json::from_slice(&json_output).unwrap();
             assert!(descriptor.get("invocation").is_none());
             assert!(descriptor.get("host").is_none());
+            assert!(descriptor.get("pin_envelope").is_none());
 
             let mut text_output = Vec::new();
             write_native_acceptance(
@@ -5862,12 +5890,27 @@ entry:
                 false,
                 acceptance,
                 None,
-                None,
+                Some("recorded"),
                 &mut text_output,
             )
             .unwrap();
             assert_eq!(text_output, acceptance.text.as_bytes());
         }
+
+        let mut unpinned_output = Vec::new();
+        write_native_acceptance(
+            Outcome::EquivalentWithinProfile,
+            true,
+            &STDERR_ACCEPTANCE,
+            None,
+            None,
+            &mut unpinned_output,
+        )
+        .unwrap();
+        let unpinned: serde_json::Value = serde_json::from_slice(&unpinned_output).unwrap();
+        assert_eq!(unpinned["invocation"], observation_invocation_envelope());
+        assert_eq!(unpinned["host"], observation_host());
+        assert!(unpinned.get("pin_envelope").is_none());
     }
 
     #[test]
