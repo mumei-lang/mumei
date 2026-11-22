@@ -2593,7 +2593,7 @@ fn lift_stack_wide_move<'ctx>(
         state.xmm_registers[register_index] = high.concat(&low);
         return Ok(());
     }
-    if high_offset >= 0 || entry_offset < state.rsp_offset {
+    if high_offset >= 0 || entry_offset < state.rsp_offset || entry_offset % 8 != 0 {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
     let value = state.xmm_registers[register_index].clone();
