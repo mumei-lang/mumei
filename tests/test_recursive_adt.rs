@@ -122,6 +122,49 @@ fn recursive_enum_payload_field_updates_are_sound() {
 }
 
 #[test]
+fn recursive_datatypes_support_finite_enum_and_struct_payloads() {
+    for bitvec_i64 in [false, true] {
+        assert_verified(
+            &run_verify(
+                "test_recursive_adt_composite_payload_positive.mm",
+                bitvec_i64,
+            ),
+            "test_recursive_adt_composite_payload_positive.mm",
+            bitvec_i64,
+        );
+        assert_rejected(
+            &run_verify(
+                "test_recursive_adt_composite_payload_false_claim.mm",
+                bitvec_i64,
+            ),
+            "test_recursive_adt_composite_payload_false_claim.mm",
+            "Postcondition",
+            bitvec_i64,
+        );
+        assert_rejected(
+            &run_verify(
+                "test_recursive_adt_struct_payload_write_stale.mm",
+                bitvec_i64,
+            ),
+            "test_recursive_adt_struct_payload_write_stale.mm",
+            "Postcondition",
+            bitvec_i64,
+        );
+        for name in [
+            "test_recursive_adt_nested_array_payload_negative.mm",
+            "test_recursive_adt_recursive_enum_payload_negative.mm",
+        ] {
+            assert_rejected(
+                &run_verify(name, bitvec_i64),
+                name,
+                "not a finite ADT",
+                bitvec_i64,
+            );
+        }
+    }
+}
+
+#[test]
 fn recursive_match_bindings_do_not_leak_enum_types_across_arms() {
     for bitvec_i64 in [false, true] {
         assert_verified(

@@ -206,6 +206,31 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                                     leaf_types,
                                     &leaf_values,
                                 );
+                                let recursive_payload = enum_def.is_some_and(|edef| {
+                                    datatype::is_self_recursive_adt(edef, vc.module_env)
+                                        && edef.variants[variant_idx]
+                                            .field_types
+                                            .get(i)
+                                            .is_some_and(|field_type| {
+                                                !datatype::is_direct_self_field(
+                                                    edef,
+                                                    field_type,
+                                                    vc.module_env,
+                                                )
+                                            })
+                                });
+                                if recursive_payload {
+                                    for ((_, base), (_, value)) in leaf_types.iter().zip(&leaves) {
+                                        let domain = if base.starts_with("enum:") {
+                                            datatype::enum_value_leaf_domain(vc, value)
+                                        } else {
+                                            datatype::scalar_int_leaf_domain(vc, base, value)
+                                        };
+                                        if let Some(domain) = domain {
+                                            solver.assert(&is_v.implies(&domain));
+                                        }
+                                    }
+                                }
                             }
                             let handle = crate::verification::translator::fresh_struct_handle(
                                 ctx, &sdef.name,
@@ -262,10 +287,32 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                                 && !datatype::is_direct_self_field(edef, field_type, vc.module_env)
                             {
                                 let type_name = datatype::payload_field_type_name(field_type);
-                                if let Some(domain) =
-                                    datatype::scalar_int_leaf_domain(vc, &type_name, &field_sym)
+                                if let Some(leaf_types) =
+                                    datatype::field_leaf_types(&type_name, vc.module_env)
                                 {
-                                    solver.assert(&is_v.implies(&domain));
+                                    for (offset, (_, base)) in leaf_types.iter().enumerate() {
+                                        let leaf = if offset == 0 {
+                                            Some(field_sym.clone())
+                                        } else {
+                                            datatype::variant_selector_apply(
+                                                &sort,
+                                                variant_idx,
+                                                off + offset,
+                                                target,
+                                            )
+                                        };
+                                        let Some(leaf) = leaf else {
+                                            continue;
+                                        };
+                                        let domain = if base.starts_with("enum:") {
+                                            datatype::enum_value_leaf_domain(vc, &leaf)
+                                        } else {
+                                            datatype::scalar_int_leaf_domain(vc, base, &leaf)
+                                        };
+                                        if let Some(domain) = domain {
+                                            solver.assert(&is_v.implies(&domain));
+                                        }
+                                    }
                                 }
                             }
                         }

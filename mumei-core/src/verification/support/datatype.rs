@@ -2,7 +2,7 @@
 //! direct-self-recursive enums (`Z3_DATATYPE_SORT`).
 //!
 //! Finite non-generic enums with supported payload leaves, and non-generic
-//! direct-self-recursive enums with a base variant and only scalar/self
+//! direct-self-recursive enums with a base variant and finite non-self
 //! payloads, are lowered to native Z3 datatypes. Other enums, mutual cycles,
 //! and recursion through structs or arrays keep the Int-tag path. Native
 //! variants become constructors with `is-<Variant>` testers and selectors of
@@ -34,7 +34,7 @@ use crate::verification::types::{Env, MumeiError, MumeiResult};
 const MAX_ENUM_PAYLOAD_NEST: u8 = 8;
 
 /// `true` when `enum_def` is finite + non-recursive and every payload
-/// flattens to supported scalar leaves
+/// flattens to supported leaves
 /// (a declared *struct* payload whose direct fields are all scalar also
 /// counts: its leaves flatten into the constructor, mirroring the trusted
 /// verifier's `pure-i64-composite/v18` layout; a payload field typed as
@@ -76,10 +76,16 @@ pub(crate) fn is_self_recursive_adt(enum_def: &EnumDef, module_env: &ModuleEnv) 
         return false;
     }
 
+    let mut memo = FiniteFuelMemo::default();
     enum_def.variants.iter().all(|variant| {
         variant.field_types.iter().all(|field| {
             is_direct_self_field(enum_def, field, module_env)
-                || field_is_scalar(&payload_field_type_name(field), module_env)
+                || field_is_finite_payload(
+                    &payload_field_type_name(field),
+                    module_env,
+                    MAX_ENUM_PAYLOAD_NEST,
+                    &mut memo,
+                )
         })
     })
 }
@@ -114,12 +120,20 @@ fn is_finite_adt_fueled(
         && !enum_def.variants.is_empty()
         && enum_def.variants.iter().all(|variant| {
             variant.field_types.iter().all(|field| {
-                field_leaf_types_fueled(&payload_field_type_name(field), module_env, fuel, memo)
-                    .is_some()
+                field_is_finite_payload(&payload_field_type_name(field), module_env, fuel, memo)
             })
         });
     memo.insert(key, finite);
     finite
+}
+
+fn field_is_finite_payload(
+    field_type: &str,
+    module_env: &ModuleEnv,
+    fuel: u8,
+    memo: &mut FiniteFuelMemo,
+) -> bool {
+    field_leaf_types_fueled(field_type, module_env, fuel, memo).is_some()
 }
 
 /// The `(leaf_name, leaf_base_type)` pairs a payload field contributes to
