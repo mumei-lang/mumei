@@ -721,11 +721,11 @@ mod tests {
     }
 
     #[test]
-    fn enum_signature_proof_hash_is_unchanged() {
+    fn enum_signature_proof_hash_matches_current_policy() {
         let (_, root, env) = enum_dependency_fixture("enum E { A(v: i64), B }");
         assert_eq!(
             crate::resolver::compute_proof_hash(&root, &env),
-            "620a93c48c9100f2220013d4fe1d9b6242c1984279f712db62e0dda1a1ca4b3d"
+            "dece130044961c62523480ba03a0508e4d0957a023a0996459edf629b49891d3"
         );
     }
 

@@ -1,27 +1,26 @@
-//! Plan 10 / P10-C: native Z3 `Datatype` sorts for finite, non-recursive
-//! enums (`Z3_DATATYPE_SORT`).
+//! Plan 10 / P10-C: native Z3 `Datatype` sorts for finite enums and bounded
+//! direct-self-recursive enums (`Z3_DATATYPE_SORT`).
 //!
-//! A mumei `enum` that is not marked `is_recursive` by the parser (no `Self`
-//! payload), is not generic (`type_params` is empty — `Option<T>` stays out
-//! until a monomorphisation layer exists), and whose payload fields all
-//! resolve to `i64`/`i32`/`u64`/`u32`/`f64`/`Str`/`bool` through
-//! `resolve_base_type` (fields that are other enums, structs, or arrays keep
-//! the enum on the Int-tag path) is lowered to a real Z3 datatype: variants
-//! become constructors with `is-<Variant>` testers and per-field selectors of
-//! the *correct* sort (a `Str` payload projects as a Z3 `String`, not as an
-//! Int tag). Width-narrowed integer leaves (`u64`/`u32`/`i32`) land on `Int`
-//! — [`enum_value_leaf_domain`] bounds them to their declared width at every
-//! introduction point, mirroring the `u64`-param domain asserts.
+//! Finite non-generic enums with supported payload leaves, and non-generic
+//! direct-self-recursive enums with a base variant and only scalar/self
+//! payloads, are lowered to native Z3 datatypes. Other enums, mutual cycles,
+//! and recursion through structs or arrays keep the Int-tag path. Native
+//! variants become constructors with `is-<Variant>` testers and selectors of
+//! the *correct* sort (a `Str` payload projects as a Z3 `String`, not an Int
+//! tag). In default Int mode, width-narrowed integer leaves
+//! (`u64`/`u32`/`i32`) land on `Int` — [`enum_value_leaf_domain`] bounds them
+//! to their declared width at every introduction point.
 //!
-//! Recursive enums keep the Int-tag encoding and the `inductive_data_type`
-//! fragment tag (Lean 4 delegation boundary).
+//! Unsupported recursive enums keep the Int-tag encoding and the
+//! `inductive_data_type` fragment tag (Lean 4 delegation boundary).
 
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use z3::ast::{Ast, Bool, Datatype, Dynamic, Int};
+use z3::ast::{Ast, Bool, Datatype, Dynamic, Int, BV};
 use z3::{Context, DatatypeAccessor, DatatypeSort, Solver, Sort};
 
+use crate::ast::TypeRef;
 use crate::lowering::{lower, LoweredType};
 use crate::parser::ast::{EnumDef, Expr, Stmt};
 use crate::verification::module_env::ModuleEnv;
@@ -51,6 +50,42 @@ pub(crate) fn is_finite_adt(enum_def: &EnumDef, module_env: &ModuleEnv) -> bool 
         MAX_ENUM_PAYLOAD_NEST,
         &mut FiniteFuelMemo::default(),
     )
+}
+
+pub(crate) fn is_direct_self_field(
+    enum_def: &EnumDef,
+    field_type: &TypeRef,
+    module_env: &ModuleEnv,
+) -> bool {
+    field_type.type_args.is_empty()
+        && (field_type.name == "Self"
+            || module_env.resolve_base_type(&field_type.display_name()) == enum_def.name)
+}
+
+pub(crate) fn is_self_recursive_adt(enum_def: &EnumDef, module_env: &ModuleEnv) -> bool {
+    if !enum_def.type_params.is_empty()
+        || enum_def.name.contains('<')
+        || enum_def.variants.is_empty()
+        || !enum_def.variants.iter().any(|variant| {
+            !variant
+                .field_types
+                .iter()
+                .any(|field| is_direct_self_field(enum_def, field, module_env))
+        })
+    {
+        return false;
+    }
+
+    enum_def.variants.iter().all(|variant| {
+        variant.field_types.iter().all(|field| {
+            is_direct_self_field(enum_def, field, module_env)
+                || field_is_scalar(&payload_field_type_name(field), module_env)
+        })
+    })
+}
+
+pub(crate) fn uses_datatype_sort(enum_def: &EnumDef, module_env: &ModuleEnv) -> bool {
+    is_finite_adt(enum_def, module_env) || is_self_recursive_adt(enum_def, module_env)
 }
 
 /// Memoized `is_finite_adt_fueled` answers keyed by `(enum_name, fuel)`.
@@ -435,11 +470,18 @@ pub(crate) fn payload_leaf_range(
     let variant = enum_def.variants.get(variant_idx)?;
     let mut offset = 0;
     for (i, field_type) in variant.field_types.iter().enumerate() {
-        let leaves = field_leaf_types(&payload_field_type_name(field_type), module_env)?;
         if i == field_idx {
+            if is_direct_self_field(enum_def, field_type, module_env) {
+                return Some((offset, 1));
+            }
+            let leaves = field_leaf_types(&payload_field_type_name(field_type), module_env)?;
             return Some((offset, leaves.len()));
         }
-        offset += leaves.len();
+        if is_direct_self_field(enum_def, field_type, module_env) {
+            offset += 1;
+        } else {
+            offset += field_leaf_types(&payload_field_type_name(field_type), module_env)?.len();
+        }
     }
     None
 }
@@ -465,37 +507,49 @@ fn int_leaf_bound<'a>(ctx: &'a Context, base: &str, v: &Int<'a>) -> Option<Bool<
     Some(Bool::and(ctx, &[&v.ge(&lo), &v.le(&hi)]))
 }
 
+fn bitvec_leaf_bound<'a>(ctx: &'a Context, base: &str, v: &BV<'a>) -> Option<Bool<'a>> {
+    match base {
+        "u32" => Some(v.bvule(&BV::from_u64(ctx, u64::from(u32::MAX), 64))),
+        "i32" => {
+            let lo = BV::from_i64(ctx, i64::from(i32::MIN), 64);
+            let hi = BV::from_i64(ctx, i64::from(i32::MAX), 64);
+            Some(Bool::and(ctx, &[&v.bvsge(&lo), &v.bvsle(&hi)]))
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn scalar_int_leaf_domain<'a>(
     vc: &VCtx<'a>,
     type_name: &str,
     value: &Dynamic<'a>,
 ) -> Option<Bool<'a>> {
     let base = vc.module_env.resolve_base_type(type_name);
-    let int = value.as_int()?;
-    int_leaf_bound(vc.ctx, &base, &int)
+    if let Some(int) = value.as_int() {
+        return int_leaf_bound(vc.ctx, &base, &int);
+    }
+    value
+        .as_bv()
+        .and_then(|bv| bitvec_leaf_bound(vc.ctx, &base, &bv))
 }
 
 /// `value` is an enum datatype constant: the conjunction holding every
 /// `u64`/`u32`/`i32` payload leaf inside its declared width, gated on the
 /// variant that owns it (`is_V(value) => bounds_V`). The widened
-/// `field_is_scalar` set lands these leaves on `Int` — unbounded, they
-/// admit values the ABI cannot produce (a negative `u64`), the same gap
-/// `u64` params needed an explicit domain assert for. `None` when `value`
-/// is not a finite-ADT enum constant, every leaf is domain-exact, or the
-/// run is `bitvec_i64` — a `BV(64)` leaf accepts every 64-bit pattern,
-/// and narrower-width BV domains are the separate gap the direct
-/// `u32`/`i32` params already carry.
+/// `field_is_scalar` set lands these leaves on `Int` in default mode —
+/// unbounded, they admit values the ABI cannot produce (a negative `u64`),
+/// the same gap `u64` params needed an explicit domain assert for. In
+/// `bitvec_i64` mode, `u32` and `i32` leaves are constrained to their
+/// zero/sign-extended 32-bit domains. `None` when `value` is not a supported
+/// enum datatype constant or every payload leaf is domain-exact.
 pub(crate) fn enum_value_leaf_domain<'a>(vc: &VCtx<'a>, value: &Dynamic<'a>) -> Option<Bool<'a>> {
-    if vc.bitvec_i64 {
-        return None;
-    }
     let dt = value.as_datatype()?;
     let target_sort = dt.get_sort();
     // A datatype const's `decl()` names the constant, not its sort — pin
     // the enum by comparing sorts, the same probe
     // `variant_tester_condition` uses.
     let enum_def = vc.module_env.enums.values().find(|e| {
-        is_finite_adt(e, vc.module_env)
+        uses_datatype_sort(e, vc.module_env)
             && enum_datatype_sort(vc, e)
                 .map(|s| s.sort == target_sort)
                 .unwrap_or(false)
@@ -533,6 +587,10 @@ fn enum_leaf_domain_for<'a>(
         let mut accessor_idx = 0usize;
         let mut bounds: Vec<Bool> = Vec::new();
         for field in &variant.field_types {
+            if is_direct_self_field(enum_def, field, vc.module_env) {
+                accessor_idx += 1;
+                continue;
+            }
             for (_leaf_name, base) in
                 field_leaf_types(&payload_field_type_name(field), vc.module_env)?
             {
@@ -554,9 +612,8 @@ fn enum_leaf_domain_for<'a>(
                             bounds.push(bound);
                         }
                     }
-                } else if let Some(bound) = sel
-                    .and_then(|sel| sel.as_int())
-                    .and_then(|sel| int_leaf_bound(vc.ctx, base.as_str(), &sel))
+                } else if let Some(bound) =
+                    sel.and_then(|sel| scalar_int_leaf_domain(vc, base.as_str(), &sel))
                 {
                     *budget = budget.saturating_sub(1);
                     bounds.push(bound);
@@ -624,7 +681,7 @@ pub(crate) fn enum_datatype_sort<'a>(
     vc: &VCtx<'a>,
     enum_def: &EnumDef,
 ) -> Option<Rc<DatatypeSort<'a>>> {
-    if !is_finite_adt(enum_def, vc.module_env) {
+    if !uses_datatype_sort(enum_def, vc.module_env) {
         return None;
     }
     if let Some(sort) = vc.enum_sorts.borrow().get(&enum_def.name) {
@@ -633,19 +690,24 @@ pub(crate) fn enum_datatype_sort<'a>(
     let mut builder = z3::DatatypeBuilder::new(vc.ctx, enum_def.name.as_str());
     for variant in &enum_def.variants {
         let mut names = Vec::new();
-        let mut sorts = Vec::new();
+        let mut accessors = Vec::new();
         for (i, field_type) in variant.field_types.iter().enumerate() {
-            for (name, sort) in
-                field_leaf_sorts(vc, &variant.name, i, &payload_field_type_name(field_type))?
-            {
-                names.push(name);
-                sorts.push(sort);
+            if is_direct_self_field(enum_def, field_type, vc.module_env) {
+                names.push(format!("{}_{}", variant.name, i));
+                accessors.push(DatatypeAccessor::Datatype(enum_def.name.clone().into()));
+            } else {
+                for (name, sort) in
+                    field_leaf_sorts(vc, &variant.name, i, &payload_field_type_name(field_type))?
+                {
+                    names.push(name);
+                    accessors.push(DatatypeAccessor::Sort(sort));
+                }
             }
         }
         let fields: Vec<(&str, DatatypeAccessor)> = names
             .iter()
-            .zip(sorts)
-            .map(|(n, s)| (n.as_str(), DatatypeAccessor::Sort(s)))
+            .zip(accessors)
+            .map(|(n, accessor)| (n.as_str(), accessor))
             .collect();
         builder = builder.variant(variant.name.as_str(), fields);
     }
@@ -656,9 +718,9 @@ pub(crate) fn enum_datatype_sort<'a>(
     Some(sort)
 }
 
-/// Resolves `type_name` to `(DatatypeSort, &EnumDef)` when it names a finite
-/// ADT — used by `param_z3_value` to declare enum-typed parameters as real
-/// datatype constants.
+/// Resolves `type_name` to `(DatatypeSort, &EnumDef)` when it names an enum
+/// with a native datatype sort — used by `param_z3_value` to declare enum
+/// parameters as datatype constants.
 pub(crate) fn datatype_sort_for_type<'a>(
     vc: &VCtx<'a>,
     type_name: &str,
@@ -743,12 +805,21 @@ pub(crate) fn resolve_enum_ctor<'a>(
 /// consume per-argument leaf snapshots so later arguments cannot change them.
 fn expand_ctor_args<'a>(
     vc: &VCtx<'a>,
+    enum_def: &EnumDef,
     variant: &crate::parser::ast::EnumVariant,
     args: &[Dynamic<'a>],
     payload_snapshots: &[Option<PayloadSnapshot<'a>>],
 ) -> MumeiResult<Vec<Dynamic<'a>>> {
     let mut leaves: Vec<Dynamic> = Vec::new();
     for (i, arg) in args.iter().enumerate() {
+        if variant
+            .field_types
+            .get(i)
+            .is_some_and(|field| is_direct_self_field(enum_def, field, vc.module_env))
+        {
+            leaves.push(arg.clone());
+            continue;
+        }
         let field_type = payload_field_type_name(&variant.field_types[i]);
         let base = vc.module_env.resolve_base_type(&field_type);
         let Some(field_leaves) = field_leaf_types(&field_type, vc.module_env) else {
@@ -801,13 +872,18 @@ pub(crate) struct PayloadSnapshot<'a> {
 /// expects `BV(64)`, and applying it raw panics inside Z3.
 fn ctor_leaf_sorts<'a>(vc: &VCtx<'a>, enum_def: &EnumDef, idx: usize) -> Option<Vec<Sort<'a>>> {
     let variant = enum_def.variants.get(idx)?;
+    let self_sort = enum_datatype_sort(vc, enum_def)?.sort.clone();
     let mut sorts = Vec::new();
     for (i, ft) in variant.field_types.iter().enumerate() {
-        sorts.extend(
-            field_leaf_sorts(vc, &variant.name, i, &payload_field_type_name(ft))?
-                .into_iter()
-                .map(|(_, s)| s),
-        );
+        if is_direct_self_field(enum_def, ft, vc.module_env) {
+            sorts.push(self_sort.clone());
+        } else {
+            sorts.extend(
+                field_leaf_sorts(vc, &variant.name, i, &payload_field_type_name(ft))?
+                    .into_iter()
+                    .map(|(_, s)| s),
+            );
+        }
     }
     Some(sorts)
 }
@@ -853,7 +929,7 @@ pub(crate) fn enum_ctor_apply_leaves<'a>(
 /// `Enum::Variant(args)` / `Variant(args)` construction — applies the
 /// variant's Z3 constructor to `args` (already lowered, at the declared
 /// arity; composite payload fields expand to their leaves). Returns `None`
-/// when the name does not resolve to a finite-ADT variant or the arity is
+/// when the name does not resolve to a native-datatype variant or the arity is
 /// wrong — callers then keep the previous behaviour (unknown/atom call).
 pub(crate) fn enum_ctor_apply<'a>(
     vc: &VCtx<'a>,
@@ -871,13 +947,19 @@ pub(crate) fn enum_ctor_apply<'a>(
     if enum_def.variants[idx].fields.len() != args.len() {
         return Ok(None);
     }
-    let leaf_args = expand_ctor_args(vc, &enum_def.variants[idx], args, payload_snapshots)?;
+    let leaf_args = expand_ctor_args(
+        vc,
+        enum_def,
+        &enum_def.variants[idx],
+        args,
+        payload_snapshots,
+    )?;
     Ok(enum_ctor_apply_leaves(vc, enum_def, idx, &leaf_args))
 }
 
 /// Tester predicate `is-<Variant>(target)` for a `Datatype`-sorted match
 /// target. Returns `(sort, tester_bool, variant_idx, enum_def)`, or `None` when no
-/// finite ADT owns `variant_name` on `target`'s sort. When several enums
+/// supported ADT owns `variant_name` on `target`'s sort. When several enums
 /// share the variant name, the one whose datatype sort matches `target`'s
 /// wins — the name-only `find_enum_by_variant` scan would pick the wrong
 /// enum for colliding names.
@@ -1535,7 +1617,7 @@ fn infer_stmt_enum_name(vc: &VCtx, stmt: &Stmt) -> Option<String> {
 }
 
 /// `param_z3_value`, but enum-typed names lower to real `Datatype` constants
-/// when the type is a finite ADT. All scalar/array behaviour is delegated to
+/// when the type has a native datatype sort. All scalar/array behaviour is delegated to
 /// `param_z3_value` unchanged.
 pub(crate) fn param_z3_value_for_vc<'a>(
     vc: &VCtx<'a>,
