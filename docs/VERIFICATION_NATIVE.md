@@ -1805,14 +1805,19 @@ tail calls are outside the profile. Functions containing both
 conditional branches and calls use the per-path guarded call matching
 described below. A small abstract stack handles register `pushq`/`popq`,
 immediate `%rsp` adjustments, and outgoing stack-argument setup using
-`pushq` or `movq` register/immediate stores to `off(%rsp)`.
+`pushq` or `movq` register/immediate stores to `off(%rsp)`; `pushq` may
+also read an incoming stack-argument slot or a recorded frame slot
+directly, the form LLVM uses to forward a spilled argument to a callee.
 For up to 16 integer parameters/call arguments, the assumed convention places
 incoming argument `k >= 7` at entry-relative offset `+8*(k-6)` from `%rsp`,
 and outgoing argument `k >= 7` at call-time offset `+8*(k-7)`. This is an
 assumption, not an ABI claim. The incoming return-address/argument area is
 read-only. Only 64-bit `movq` loads and `addq`/`subq`/`imulq`/`andq`/`orq`/`xorq`/`cmpq`/`testq`
 source reads from aligned, declared incoming slots are supported; other memory
-forms and invalid slots remain outside the profile. Writes to entry-relative offsets `>= 0` and tail calls
+forms and invalid slots remain outside the profile. Loads from frame slots
+below the caller's argument area read back only values the function itself
+stored there on the same path (register spill and reload); unrecorded offsets
+stay closed. Writes to entry-relative offsets `>= 0` and tail calls
 with more than six arguments are outside the profile. Outgoing stack-argument
 slots are discarded after a call, so later memory reads from them fail closed.
 `%spl` byte writes are modeled, but make the stack pointer untrackable, so a

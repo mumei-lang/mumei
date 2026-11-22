@@ -3112,7 +3112,9 @@ incoming argument `k >= 7` is at entry-relative `%rsp + 8*(k-6)`, and outgoing
 argument `k >= 7` is at call-time `%rsp + 8*(k-7)`. Only 64-bit `movq` loads and binary
 (`addq`/`subq`/`imulq`/`andq`/`orq`/`xorq`/`cmpq`/`testq`) incoming reads and modeled
 outgoing `movq`/`pushq` stores (sign-extended
-immediate or register source) are supported; the incoming area is read-only. The
+immediate, register, or incoming-argument/memory source) are supported; the incoming area is read-only.
+Frame slots inside the current frame read back the value the function
+recorded storing there (register spill/reload). The
 `main` wrapper, CRT/startup
 code, loader, libc and runtime are not covered. Full object-code TV remains
 the deeper endpoint.

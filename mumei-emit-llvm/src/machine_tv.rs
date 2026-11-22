@@ -1220,13 +1220,18 @@ fn lift<'ctx>(
                 let [source] = operands.as_slice() else {
                     return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
                 };
-                // `pushq` accepts a register or an immediate. x86-64 `push imm`
-                // sign-extends an imm8/imm32 to 64 bits, matching the sign
-                // extension convention used for `movq $imm, mem` stores.
+                // `pushq` accepts a register, an immediate, or a memory
+                // source — LLVM forwards an incoming stack argument to a
+                // callee's overflow area with `pushq N(%rsp)` directly.
+                // x86-64 `push imm` sign-extends an imm8/imm32 to 64
+                // bits, matching the sign extension convention used for
+                // `movq $imm, mem` stores.
                 let value = if let Some(immediate) = source.strip_prefix('$') {
                     let immediate = parse_integer(immediate)
                         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
                     BV::from_i64(context, i64::from(immediate as u32 as i32), 64)
+                } else if source.contains('(') {
+                    stack_memory_source(source, &state, &stack_argument_leaves, &arguments, false)?
                 } else {
                     register_value(source, &state.registers, 64)
                         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?
@@ -2814,6 +2819,52 @@ fn lift_allocated_frame_memory_load<'ctx>(
     Ok(())
 }
 
+/// A `N(%rsp)` load inside the current frame (entry offset `<= 0`):
+/// the value the function itself stored at that slot — a register or
+/// XMM spill written by `movq`/`movsd`/`pushq`. Reads the recorded
+/// `stack` entry only; an unrecorded offset stays closed, and offsets
+/// the outgoing-argument cleanup dropped after a call are already
+/// absent from `stack` so post-call reads keep failing.
+fn frame_stack_slot<'ctx>(
+    operand: &str,
+    state: &MachineState<'ctx>,
+) -> Result<Option<BV<'ctx>>, FunctionOutcome> {
+    if state.rsp_offset % 8 != 0 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let entry_offset = rsp_memory_entry_offset(operand, state.rsp_offset)?;
+    if entry_offset >= 0 || entry_offset % 8 != 0 || entry_offset < state.rsp_offset {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    Ok(state
+        .stack
+        .iter()
+        .find(|(stack_slot, _)| *stack_slot == entry_offset)
+        .map(|(_, value)| value.clone()))
+}
+
+/// The value an `N(%rsp)` memory source carries: an incoming
+/// stack-argument leaf above the frame, else a value the function
+/// stored inside the frame this path recorded.
+fn stack_memory_source<'ctx>(
+    operand: &str,
+    state: &MachineState<'ctx>,
+    stack_argument_leaves: &[(usize, bool)],
+    arguments: &[BV<'ctx>],
+    want_double: bool,
+) -> Result<BV<'ctx>, FunctionOutcome> {
+    match incoming_stack_argument(
+        operand,
+        state.rsp_offset,
+        stack_argument_leaves,
+        arguments,
+        want_double,
+    ) {
+        Ok(value) => Ok(value),
+        Err(outcome) => frame_stack_slot(operand, state)?.ok_or(outcome),
+    }
+}
+
 fn lift_stack_argument_move<'ctx>(
     instruction: &Instruction,
     state: &mut MachineState<'ctx>,
@@ -2827,13 +2878,7 @@ fn lift_stack_argument_move<'ctx>(
     if !state.rsp_is_known {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    let value = incoming_stack_argument(
-        source,
-        state.rsp_offset,
-        stack_argument_leaves,
-        arguments,
-        false,
-    )?;
+    let value = stack_memory_source(source, state, stack_argument_leaves, arguments, false)?;
     let (register_index, width) = parse_register(destination)
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
     if width != 64
@@ -2865,13 +2910,7 @@ fn lift_stack_argument_sse<'ctx>(
     if !state.rsp_is_known {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    let value = incoming_stack_argument(
-        source,
-        state.rsp_offset,
-        stack_argument_leaves,
-        arguments,
-        true,
-    )?;
+    let value = stack_memory_source(source, state, stack_argument_leaves, arguments, true)?;
     let Some(destination_index) = parse_xmm_register(destination) else {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     };
@@ -2947,9 +2986,9 @@ fn lift_stack_argument_binary<'ctx>(
     } else {
         destination
     };
-    let slot = incoming_stack_argument(
+    let slot = stack_memory_source(
         slot_operand,
-        state.rsp_offset,
+        state,
         stack_argument_leaves,
         arguments,
         false,
@@ -10290,6 +10329,54 @@ entry:
         ];
         assert_eq!(
             check("g", &write_incoming),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+    }
+
+    #[test]
+    fn frame_stack_spill_slots_reload_recorded_values() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model_named(
+            "atom f(a: i64, b: i64) -> i64 requires: true; ensures: true; body: { a + b };",
+            "f",
+            &context,
+        );
+        // subq $8,%rsp; movq %rdi,(%rsp); movq (%rsp),%rax;
+        // addq %rsi,%rax; addq $8,%rsp; retq — a register spill and its
+        // reload carry the recorded stack value through the frame slot.
+        let spill_bytes = [
+            0x48, 0x83, 0xec, 0x08, 0x48, 0x89, 0x3c, 0x24, 0x48, 0x8b, 0x04, 0x24, 0x48, 0x01,
+            0xf0, 0x48, 0x83, 0xc4, 0x08, 0xc3,
+        ];
+        assert_eq!(
+            check_function(&spill_bytes, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+
+        // A different model ({ a - b }) must not verify against the
+        // same spill bytes.
+        let sub_model = source_model_named(
+            "atom f(a: i64, b: i64) -> i64 requires: true; ensures: true; body: { a - b };",
+            "f",
+            &context,
+        );
+        assert_eq!(
+            check_function(&spill_bytes, 0, &sub_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Different
+        );
+
+        // An unrecorded frame slot stays closed.
+        let unwritten = [
+            0x48, 0x83, 0xec, 0x08, // subq $8, %rsp
+            0x48, 0x8b, 0x04, 0x24, // movq (%rsp), %rax
+            0x48, 0x83, 0xc4, 0x08, // addq $8, %rsp
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&unwritten, 0, &model, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("unsupported_instruction")
         );
     }
