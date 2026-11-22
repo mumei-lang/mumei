@@ -214,8 +214,20 @@ fn machine_tv_model_uses_wide_composite_aggregate(
                 )
             }) || matches!(
                 call_site.result_shape,
-                semantic_contract::CallValueShape::Struct { leaf_count, .. }
-                    if leaf_count > 2
+                semantic_contract::CallValueShape::Struct {
+                    leaf_count,
+                    has_enum: false,
+                    ..
+                } if leaf_count > 2
+                    // An all-INTEGER call result of four to sixteen
+                    // leaves comes back through the caller's `sret`
+                    // buffer — modeled, not an assumed memory-class ABI.
+                    && !((4..=16).contains(&leaf_count)
+                        && call_site.result_leaf_doubles.len() == leaf_count
+                        && call_site
+                            .result_leaf_doubles
+                            .iter()
+                            .all(|is_double| !*is_double))
             )
         })
 }
