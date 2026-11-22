@@ -65,6 +65,17 @@ pub(crate) fn run(command: EvidenceCommand) {
             requirement,
             requirement_list,
             json,
+            signature,
+            producer_key,
+            expected_producer_key,
+            reference_time,
+            max_age_seconds,
+            key_registry,
+            registry_signature,
+            registry_key,
+            revocation_list,
+            revocation_signature,
+            revocation_key,
         } => (
             accept(
                 input.as_deref().map(Path::new),
@@ -72,6 +83,19 @@ pub(crate) fn run(command: EvidenceCommand) {
                 json,
                 requirement.as_deref().map(Path::new),
                 requirement_list.as_deref().map(Path::new),
+                SignatureOptions {
+                    signature: signature.as_deref().map(Path::new),
+                    producer_key: producer_key.as_deref(),
+                    expected_producer_key: expected_producer_key.as_deref(),
+                    reference_time: reference_time.as_deref(),
+                    max_age_seconds,
+                    key_registry: key_registry.as_deref().map(Path::new),
+                    registry_signature: registry_signature.as_deref().map(Path::new),
+                    registry_key: registry_key.as_deref(),
+                    revocation_list: revocation_list.as_deref().map(Path::new),
+                    revocation_signature: revocation_signature.as_deref().map(Path::new),
+                    revocation_key: revocation_key.as_deref(),
+                },
                 &mut output,
             ),
             if requirement_list.is_some() {
@@ -528,14 +552,245 @@ fn declared_adapter_gate(
     }
 }
 
+#[derive(Clone, Copy)]
+struct SignatureOptions<'a> {
+    signature: Option<&'a Path>,
+    producer_key: Option<&'a str>,
+    expected_producer_key: Option<&'a str>,
+    reference_time: Option<&'a str>,
+    max_age_seconds: Option<u64>,
+    key_registry: Option<&'a Path>,
+    registry_signature: Option<&'a Path>,
+    registry_key: Option<&'a str>,
+    revocation_list: Option<&'a Path>,
+    revocation_signature: Option<&'a Path>,
+    revocation_key: Option<&'a str>,
+}
+
+struct SignatureAcceptance {
+    binding: producer_signature::SignatureBinding,
+    max_age_checked: bool,
+    full_authenticity_chain: bool,
+}
+
+fn narrowed_verdict(
+    original: Verdict,
+    signature_acceptance: Option<&SignatureAcceptance>,
+) -> Verdict {
+    if signature_acceptance.is_some_and(|acceptance| !acceptance.binding.failed_fields().is_empty())
+    {
+        Verdict::Rejected
+    } else {
+        original
+    }
+}
+
+fn attach_signature_fields(
+    descriptor: &mut serde_json::Value,
+    signature_acceptance: &SignatureAcceptance,
+) -> Result<(), &'static str> {
+    let binding = serde_json::to_value(&signature_acceptance.binding)
+        .map_err(|_| "cannot encode producer signature binding")?;
+    let object = descriptor
+        .as_object_mut()
+        .ok_or("cannot encode producer signature binding")?;
+    object.insert("producer_signature".to_owned(), binding);
+
+    let performed = object
+        .get_mut("checks_performed")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or("cannot encode producer signature binding")?;
+    performed.push(serde_json::json!("producer_signature_binding"));
+
+    let not_performed = object
+        .get_mut("checks_not_performed")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or("cannot encode producer signature binding")?;
+    if signature_acceptance.max_age_checked {
+        not_performed.retain(|check| check.as_str() != Some("record_freshness"));
+    }
+    if signature_acceptance.full_authenticity_chain {
+        not_performed.retain(|check| check.as_str() != Some("producer_authenticity"));
+    }
+    Ok(())
+}
+
+fn validate_signature_options(options: SignatureOptions<'_>) -> Result<(), &'static str> {
+    let other_options = options.producer_key.is_some()
+        || options.expected_producer_key.is_some()
+        || options.reference_time.is_some()
+        || options.max_age_seconds.is_some()
+        || options.key_registry.is_some()
+        || options.registry_signature.is_some()
+        || options.registry_key.is_some()
+        || options.revocation_list.is_some()
+        || options.revocation_signature.is_some()
+        || options.revocation_key.is_some();
+    if options.signature.is_none() {
+        return if other_options {
+            Err("producer signature options require --signature")
+        } else {
+            Ok(())
+        };
+    }
+    if options.producer_key.is_none() {
+        return Err("--signature requires --producer-key");
+    }
+    if options.key_registry.is_some() && options.expected_producer_key.is_none() {
+        return Err("--key-registry requires --expected-producer-key");
+    }
+    if options.revocation_list.is_some() && options.expected_producer_key.is_none() {
+        return Err("--revocation-list requires --expected-producer-key");
+    }
+    if options.max_age_seconds.is_some() && options.reference_time.is_none() {
+        return Err("--max-age-seconds requires --reference-time");
+    }
+    if options.key_registry.is_some() && options.reference_time.is_none() {
+        return Err("--key-registry requires --reference-time");
+    }
+    if options.reference_time.is_some()
+        && options.key_registry.is_none()
+        && options.max_age_seconds.is_none()
+    {
+        return Err("--reference-time requires --key-registry or --max-age-seconds");
+    }
+    if options.registry_signature.is_some() != options.registry_key.is_some() {
+        return Err("--registry-signature and --registry-key must be supplied together");
+    }
+    if options.registry_signature.is_some() && options.key_registry.is_none() {
+        return Err("--registry-signature requires --key-registry");
+    }
+    if options.revocation_signature.is_some() != options.revocation_key.is_some() {
+        return Err("--revocation-signature and --revocation-key must be supplied together");
+    }
+    if options.revocation_signature.is_some() && options.revocation_list.is_none() {
+        return Err("--revocation-signature requires --revocation-list");
+    }
+    Ok(())
+}
+
+fn read_signature_envelope(path: &Path) -> Result<serde_json::Value, &'static str> {
+    let bytes = super::input::read_regular(path, MAX_INPUT_BYTES as u64)?;
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| "invalid producer signature envelope")?;
+    if !envelope.is_object() {
+        return Err("producer signature envelope must be a JSON object");
+    }
+    Ok(envelope)
+}
+
+fn load_signature_acceptance(
+    options: SignatureOptions<'_>,
+    evidence_fingerprint: &str,
+) -> Result<Option<SignatureAcceptance>, &'static str> {
+    validate_signature_options(options)?;
+    let Some(signature_path) = options.signature else {
+        return Ok(None);
+    };
+    let producer_key = options
+        .producer_key
+        .ok_or("--signature requires --producer-key")?;
+    if producer_signature::decode_public_key_hex(producer_key).is_none() {
+        return Err("invalid producer public key");
+    }
+    if options.expected_producer_key.is_some_and(str::is_empty) {
+        return Err("--expected-producer-key must not be empty");
+    }
+    let reference_time = options
+        .reference_time
+        .map(|value| {
+            verification_evidence::rfc3339_instant(value)
+                .ok_or("--reference-time must be an RFC 3339 timestamp")
+        })
+        .transpose()?;
+
+    let envelope = read_signature_envelope(signature_path)?;
+
+    let registry_bytes = options
+        .key_registry
+        .map(|path| super::input::read_regular(path, MAX_INPUT_BYTES as u64))
+        .transpose()?;
+    let registry = registry_bytes
+        .as_deref()
+        .map(producer_signature::parse_key_registry)
+        .transpose()
+        .map_err(|_| "invalid producer key registry")?;
+    let registry_digest = registry_bytes
+        .as_deref()
+        .map(producer_signature::subject_digest);
+
+    let registry_signature = options
+        .registry_signature
+        .map(read_signature_envelope)
+        .transpose()?;
+    if options
+        .registry_key
+        .is_some_and(|key| producer_signature::decode_public_key_hex(key).is_none())
+    {
+        return Err("invalid registry public key");
+    }
+
+    let revocation_bytes = options
+        .revocation_list
+        .map(|path| super::input::read_regular(path, MAX_INPUT_BYTES as u64))
+        .transpose()?;
+    let revocation_list = revocation_bytes
+        .as_deref()
+        .map(producer_signature::parse_revocation_list)
+        .transpose()
+        .map_err(|_| "invalid key-revocation list")?;
+    let revocation_digest = revocation_bytes
+        .as_deref()
+        .map(producer_signature::subject_digest);
+
+    let revocation_signature = options
+        .revocation_signature
+        .map(read_signature_envelope)
+        .transpose()?;
+    if options
+        .revocation_key
+        .is_some_and(|key| producer_signature::decode_public_key_hex(key).is_none())
+    {
+        return Err("invalid revocation public key");
+    }
+
+    let binding = producer_signature::verify_binding(producer_signature::SignatureBindingInput {
+        envelope: &envelope,
+        evidence_fingerprint,
+        producer_key_hex: producer_key,
+        expected_producer_key: options.expected_producer_key,
+        reference_time,
+        max_age_seconds: options.max_age_seconds,
+        key_registry: registry.as_ref(),
+        registry_digest: registry_digest.as_deref(),
+        registry_signature: registry_signature.as_ref(),
+        registry_key_hex: options.registry_key,
+        revocation_list: revocation_list.as_ref(),
+        revocation_digest: revocation_digest.as_deref(),
+        revocation_signature: revocation_signature.as_ref(),
+        revocation_key_hex: options.revocation_key,
+    });
+    Ok(Some(SignatureAcceptance {
+        binding,
+        max_age_checked: options.max_age_seconds.is_some(),
+        full_authenticity_chain: options.expected_producer_key.is_some()
+            && options.key_registry.is_some()
+            && options.registry_signature.is_some()
+            && options.revocation_list.is_some()
+            && options.revocation_signature.is_some(),
+    }))
+}
+
 fn accept(
     input: Option<&Path>,
     stdin: bool,
     json: bool,
     requirement: Option<&Path>,
     requirement_list: Option<&Path>,
+    signature_options: SignatureOptions<'_>,
     output: &mut impl Write,
 ) -> Result<i32, &'static str> {
+    validate_signature_options(signature_options)?;
     let record_bytes = match (input, stdin) {
         (Some(path), false) => super::input::read_regular(path, MAX_INPUT_BYTES as u64)?,
         (None, true) => super::input::read_stdin(MAX_INPUT_BYTES as u64)?,
@@ -543,6 +798,8 @@ fn accept(
     };
     let record = verification_evidence::decode(&record_bytes)
         .map_err(|_| "invalid evidence representation")?;
+    let evidence_fingerprint = producer_signature::subject_digest(&record_bytes);
+    let signature_acceptance = load_signature_acceptance(signature_options, &evidence_fingerprint)?;
     match (requirement, requirement_list) {
         (Some(requirement), None) => {
             let requirement_bytes =
@@ -555,6 +812,7 @@ fn accept(
                 &requirement,
                 &requirement_bytes,
                 json,
+                signature_acceptance.as_ref(),
                 output,
             )
         }
@@ -575,6 +833,7 @@ fn accept(
                     pin_name: "evidence_fingerprint",
                     fingerprint: format!("{:x}", Sha256::digest(record_bytes)),
                     schema_version: SCHEMA_VERSION,
+                    signature_acceptance: signature_acceptance.as_ref(),
                 },
                 json,
                 output,
@@ -590,24 +849,26 @@ fn accept_single(
     requirement: &evidence_acceptance::Requirement,
     requirement_bytes: &[u8],
     json: bool,
+    signature_acceptance: Option<&SignatureAcceptance>,
     output: &mut impl Write,
 ) -> Result<i32, &'static str> {
     let evaluation = evidence_acceptance::evaluate(requirement, record);
-    let code = match evaluation.verdict {
+    let verdict = narrowed_verdict(evaluation.verdict, signature_acceptance);
+    let code = match verdict {
         Verdict::Accepted => 0,
         Verdict::Rejected => 1,
         Verdict::Inconclusive => 3,
     };
     let descriptor = if json {
         use sha2::{Digest, Sha256};
-        let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        let mut body = serde_json::json!({
             "schema_version": evidence_acceptance::ACCEPTANCE_SCHEMA,
             "evidence_schema_version": SCHEMA_VERSION,
             "requirement_schema_version": evidence_acceptance::REQUIREMENT_SCHEMA,
             "requirement_fingerprint": format!("{:x}", Sha256::digest(requirement_bytes)),
             "evidence_fingerprint": format!("{:x}", Sha256::digest(record_bytes)),
             "acceptance": "evaluated",
-            "verdict": evaluation.verdict.as_str(),
+            "verdict": verdict.as_str(),
             "checks": evaluation
                 .checks
                 .iter()
@@ -618,8 +879,12 @@ fn accept_single(
                 "historical_execution", "record_freshness",
                 "independent_model_correspondence", "artifact_semantics",
                 "tool_execution", "grade_promotion"],
-        }))
-        .map_err(|_| "cannot encode evidence acceptance descriptor")?;
+        });
+        if let Some(signature_acceptance) = signature_acceptance {
+            attach_signature_fields(&mut body, signature_acceptance)?;
+        }
+        let mut bytes = serde_json::to_vec_pretty(&body)
+            .map_err(|_| "cannot encode evidence acceptance descriptor")?;
         bytes.push(b'\n');
         bytes
     } else {
@@ -633,14 +898,32 @@ fn accept_single(
             .iter()
             .filter(|check| check.outcome == "indeterminate")
             .count();
-        format!(
-            "Evidence acceptance: {} ({} check(s) failed, {} indeterminate).\n\
+        if let Some(signature_acceptance) = signature_acceptance {
+            let failed_signature_fields = signature_acceptance.binding.failed_fields();
+            format!(
+                "Evidence acceptance: {} ({} check(s) failed, {} indeterminate).\n\
+Producer signature: {}\n\
+Scope: declared-requirement normalization over the record's representation only; producer authenticity is checked only with the full key-registry/revocation chain and record freshness only with --max-age-seconds; no claim truth, independent correspondence, artifact semantics, tool execution or grade promotion checked.\n",
+                verdict.as_str(),
+                failed,
+                open,
+                if failed_signature_fields.is_empty() {
+                    "bound".to_owned()
+                } else {
+                    format!("failed ({})", failed_signature_fields.join(", "))
+                },
+            )
+            .into_bytes()
+        } else {
+            format!(
+                "Evidence acceptance: {} ({} check(s) failed, {} indeterminate).\n\
 Scope: declared-requirement normalization over the record's representation only; no claim truth, producer authenticity, freshness, independent correspondence, artifact semantics, tool execution or grade promotion checked.\n",
-            evaluation.verdict.as_str(),
-            failed,
-            open,
-        )
-        .into_bytes()
+                verdict.as_str(),
+                failed,
+                open,
+            )
+            .into_bytes()
+        }
     };
     output
         .write_all(&descriptor)
@@ -719,6 +1002,7 @@ fn accept_list(
                     pin_name: "list_fingerprint",
                     fingerprint: format!("{:x}", Sha256::digest(list_bytes)),
                     schema_version: verification_evidence::LIST_SCHEMA_VERSION,
+                    signature_acceptance: None,
                 },
                 json,
                 output,
@@ -736,10 +1020,11 @@ struct RequirementListEnvelope {
 /// Which field the conjunctive descriptor pins the evaluated evidence
 /// under — a single record (`evidence_fingerprint`) or a list envelope
 /// (`list_fingerprint`), with its declared schema version.
-struct ConjunctiveEvidence {
+struct ConjunctiveEvidence<'a> {
     pin_name: &'static str,
     fingerprint: String,
     schema_version: &'static str,
+    signature_acceptance: Option<&'a SignatureAcceptance>,
 }
 
 /// One requirement's conjunctive outcome: its arbitrated verdict, its
@@ -897,17 +1182,18 @@ fn accept_list_conjunctive(
     per_requirement: &[RequirementOutcome],
     consistency: &verification_evidence::ConsistencyReport,
     requirement_list_bytes: &[u8],
-    evidence: ConjunctiveEvidence,
+    evidence: ConjunctiveEvidence<'_>,
     json: bool,
     output: &mut impl Write,
 ) -> Result<i32, &'static str> {
+    let verdict = narrowed_verdict(verdict, evidence.signature_acceptance);
     let code = match verdict {
         Verdict::Accepted => 0,
         Verdict::Rejected => 1,
         Verdict::Inconclusive => 3,
     };
     let descriptor = if json {
-        let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        let mut body = serde_json::json!({
             "schema_version": "mumei.evidence-requirement-list-acceptance/v1",
             "evidence_schema_version": evidence.schema_version,
             "requirement_schema_version": evidence_acceptance::REQUIREMENT_LIST_SCHEMA,
@@ -953,8 +1239,12 @@ fn accept_list_conjunctive(
                 "historical_execution", "record_freshness",
                 "independent_model_correspondence", "artifact_semantics",
                 "tool_execution", "grade_promotion"],
-        }))
-        .map_err(|_| "cannot encode evidence acceptance descriptor")?;
+        });
+        if let Some(signature_acceptance) = evidence.signature_acceptance {
+            attach_signature_fields(&mut body, signature_acceptance)?;
+        }
+        let mut bytes = serde_json::to_vec_pretty(&body)
+            .map_err(|_| "cannot encode evidence acceptance descriptor")?;
         bytes.push(b'\n');
         bytes
     } else {
@@ -966,21 +1256,46 @@ fn accept_list_conjunctive(
             .iter()
             .filter(|(verdict, ..)| *verdict == Verdict::Rejected)
             .count();
-        format!(
-            "Evidence requirement list acceptance: {} ({} requirement(s): {} accepted, {} rejected, {} inconclusive; {}).\n\
+        if let Some(signature_acceptance) = evidence.signature_acceptance {
+            let failed_signature_fields = signature_acceptance.binding.failed_fields();
+            format!(
+                "Evidence requirement list acceptance: {} ({} requirement(s): {} accepted, {} rejected, {} inconclusive; {}).\n\
+Producer signature: {}\n\
+Scope: declared-requirement normalization over each record's representation plus cross-record pin agreement and a conjunctive requirement fold; producer authenticity is checked only with the full key-registry/revocation chain and record freshness only with --max-age-seconds; no claim truth, independent correspondence, artifact semantics, tool execution or grade promotion checked.\n",
+                verdict.as_str(),
+                per_requirement.len(),
+                accepted,
+                rejected,
+                per_requirement.len() - accepted - rejected,
+                if consistency.consistent {
+                    "no consistency conflicts".to_owned()
+                } else {
+                    format!("{} consistency conflict(s)", consistency.conflict_count)
+                },
+                if failed_signature_fields.is_empty() {
+                    "bound".to_owned()
+                } else {
+                    format!("failed ({})", failed_signature_fields.join(", "))
+                },
+            )
+            .into_bytes()
+        } else {
+            format!(
+                "Evidence requirement list acceptance: {} ({} requirement(s): {} accepted, {} rejected, {} inconclusive; {}).\n\
 Scope: declared-requirement normalization over each record's representation plus cross-record pin agreement and a conjunctive requirement fold; no claim truth, producer authenticity, freshness, independent correspondence, artifact semantics, tool execution or grade promotion checked.\n",
-            verdict.as_str(),
-            per_requirement.len(),
-            accepted,
-            rejected,
-            per_requirement.len() - accepted - rejected,
-            if consistency.consistent {
-                "no consistency conflicts".to_owned()
-            } else {
-                format!("{} consistency conflict(s)", consistency.conflict_count)
-            },
-        )
-        .into_bytes()
+                verdict.as_str(),
+                per_requirement.len(),
+                accepted,
+                rejected,
+                per_requirement.len() - accepted - rejected,
+                if consistency.consistent {
+                    "no consistency conflicts".to_owned()
+                } else {
+                    format!("{} consistency conflict(s)", consistency.conflict_count)
+                },
+            )
+            .into_bytes()
+        }
     };
     output
         .write_all(&descriptor)

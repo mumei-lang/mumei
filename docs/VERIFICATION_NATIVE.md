@@ -514,8 +514,22 @@ asserts no key or producer authenticity, freshness, revocation, claim truth
 or acceptance, and it is not Evidence, a certificate or a receipt.
 Representation contract:
 [`schema/producer-signature.schema.json`](../schema/producer-signature.schema.json).
-Verifying an envelope against a pinned public key is the consumer side; key
-distribution, revocation and attestation remain open.
+Verifying against a pinned public key is the consumer side; key distribution,
+root-key revocation and producer attestation remain open.
+
+`mumei evidence accept` adds opt-in detached signature binding on its
+`--requirement` and `--requirement-list` routes. It checks the raw record-byte
+digest, Ed25519 signature and subject binding, with optional producer-key
+pinning, declared-reference freshness, registry-window checks and signed
+registry/revocation documents. Because `producer_key_id` is unsigned,
+registry and revocation checks require `--expected-producer-key` to bind that
+label to the supplied producer public key. A false supplied check rejects the
+acceptance; signature evidence cannot promote an otherwise rejected or
+inconclusive requirement. The declared reference time is not authenticated, and
+producer-time authenticity, clock authenticity, key rotation, root-key
+revocation, `accept-list` binding and `accept-source` binding remain open.
+Malformed anchor documents and public-key encodings fail closed; an object
+envelope with a nonmatching closed shape is reported as a failed binding.
 
 ## 5. Minimal semantic contract (C03)
 

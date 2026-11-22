@@ -601,3 +601,40 @@ fn produced_at_is_optional_and_strictly_rfc3339() {
         RepresentationError::InvalidValue
     );
 }
+
+#[test]
+fn rfc3339_instants_apply_offsets_and_bound_nanosecond_precision() {
+    assert_eq!(rfc3339_instant("1970-01-01T00:00:00Z"), Some((0, 0)));
+    assert_eq!(
+        rfc3339_instant("1969-12-31T23:59:59Z"),
+        Some((-1_000_000_000, -1_000_000_000))
+    );
+    assert_eq!(
+        rfc3339_instant("2024-02-29T09:00:00Z"),
+        rfc3339_instant("2024-02-29T18:00:00+09:00")
+    );
+
+    let base = rfc3339_instant("2024-02-29T00:00:00Z").unwrap().0;
+    let exact = rfc3339_instant("2024-02-29T00:00:00.123456789Z").unwrap();
+    assert_eq!(exact, (base + 123_456_789, base + 123_456_789));
+
+    let bounded = rfc3339_instant("2024-02-29T00:00:00.1234567891Z").unwrap();
+    assert_eq!(bounded, (base + 123_456_789, base + 123_456_790));
+    assert_eq!(
+        rfc3339_instant("2024-02-29T00:00:00.123456789000000000000Z"),
+        Some((base + 123_456_789, base + 123_456_789))
+    );
+    assert_eq!(
+        rfc3339_instant("2024-02-29T00:00:00.123456789000000000001Z"),
+        Some((base + 123_456_789, base + 123_456_790))
+    );
+}
+
+#[test]
+fn rfc3339_instants_reject_impossible_calendar_dates_and_leap_seconds() {
+    assert!(rfc3339_instant("2024-02-29T00:00:00Z").is_some());
+    assert!(rfc3339_instant("2023-02-29T00:00:00Z").is_none());
+    assert!(rfc3339_instant("2024-02-30T00:00:00Z").is_none());
+    assert!(rfc3339_instant("2024-02-29T00:00:60Z").is_none());
+    assert!(rfc3339_instant("0000-01-01T00:00:00Z").is_none());
+}
