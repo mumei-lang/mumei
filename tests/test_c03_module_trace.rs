@@ -142,6 +142,13 @@ fn is_full_proof(certificate: &Value, name: &str) -> bool {
     atom["status"] == "verified" && atom["z3_check_result"] == "unsat"
 }
 
+fn certificate_is_full_proof(path: &Path, name: &str) -> bool {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|certificate| is_full_proof(&certificate, name))
+}
+
 #[test]
 fn unsupported_specification_clauses_fail_closed_instead_of_weakening() {
     let dir = tempfile::tempdir().unwrap();
@@ -184,14 +191,25 @@ fn unsupported_specification_clauses_fail_closed_instead_of_weakening() {
         );
 
         if index == 0 {
-            let helper_is_full_proof = std::fs::read(&certificate_path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                .is_some_and(|certificate| is_full_proof(&certificate, "helper"));
             assert!(
-                !helper_is_full_proof || !output.status.success(),
+                !output.status.success(),
+                "unsupported helper ensures must fail verify"
+            );
+            assert!(
+                !certificate_is_full_proof(&certificate_path, "helper"),
                 "unsupported helper ensures were presented as a full proof"
             );
+        } else if index == 1 {
+            assert!(
+                !output.status.success(),
+                "unsupported main requires must fail verify"
+            );
+            assert!(
+                !certificate_is_full_proof(&certificate_path, "main"),
+                "unsupported main requires were presented as a full proof"
+            );
+        } else {
+            // The verifier accepts this float clause; only extraction fails closed.
         }
     }
 }
