@@ -50,6 +50,43 @@ impl Drop for LocalArrayElementTypeGuard<'_> {
     }
 }
 
+struct LocalIntTypeGuard<'a> {
+    types: &'a std::cell::RefCell<std::collections::HashMap<String, &'static str>>,
+    name: String,
+    previous: Option<&'static str>,
+}
+
+impl<'a> LocalIntTypeGuard<'a> {
+    fn for_refined_operand(
+        vc: &'a VCtx<'_>,
+        decl: &crate::parser::ast::RefinedType,
+    ) -> Option<Self> {
+        let base = vc.module_env.resolve_base_type(&decl._base_type);
+        let int_type = fixed_width_int(&base).map(|(ty, _, _)| ty)?;
+        let name = decl.operand.clone();
+        let previous = vc
+            .local_int_types
+            .borrow_mut()
+            .insert(name.clone(), int_type);
+        Some(Self {
+            types: &vc.local_int_types,
+            name,
+            previous,
+        })
+    }
+}
+
+impl Drop for LocalIntTypeGuard<'_> {
+    fn drop(&mut self) {
+        let mut types = self.types.borrow_mut();
+        if let Some(previous) = self.previous.take() {
+            types.insert(self.name.clone(), previous);
+        } else {
+            types.remove(&self.name);
+        }
+    }
+}
+
 fn field_access_chain_text(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Variable(name) => Some(name.clone()),
@@ -675,7 +712,9 @@ fn constant_call_antecedent<'a>(
             let mut refinement_env = call_env.clone();
             refinement_env.insert(decl.operand.clone(), arg.clone());
             let predicate_ast = parse_expression(&decl.predicate_raw);
-            let predicate_value = expr_to_z3(vc, &predicate_ast, &mut refinement_env, None).ok()?;
+            let predicate_value =
+                refined_predicate_to_z3(vc, decl, &predicate_ast, &mut refinement_env, None)
+                    .ok()?;
             terms.push(predicate_value.as_bool()?);
         }
     }
@@ -2832,6 +2871,17 @@ fn read_struct_array_field<'a>(
     Ok(Some(selected))
 }
 
+pub(crate) fn refined_predicate_to_z3<'a>(
+    vc: &VCtx<'a>,
+    decl: &crate::parser::ast::RefinedType,
+    expr: &Expr,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> DynResult<'a> {
+    let _guard = LocalIntTypeGuard::for_refined_operand(vc, decl);
+    expr_to_z3(vc, expr, env, solver_opt)
+}
+
 pub(crate) fn expr_to_z3<'a>(
     vc: &VCtx<'a>,
     expr: &Expr,
@@ -3678,10 +3728,14 @@ pub(crate) fn expr_to_z3<'a>(
                                         let mut local_env = call_env.clone();
                                         local_env.insert(decl.operand.clone(), arg_z3.clone());
                                         let pred_ast = parse_expression(&decl.predicate_raw);
-                                        let Some(pred_bool) =
-                                            expr_to_z3(vc, &pred_ast, &mut local_env, None)?
-                                                .as_bool()
-                                        else {
+                                        let Some(pred_bool) = refined_predicate_to_z3(
+                                            vc,
+                                            decl,
+                                            &pred_ast,
+                                            &mut local_env,
+                                            None,
+                                        )?
+                                        .as_bool() else {
                                             continue;
                                         };
                                         if vc.cover_obligations.is_some() {
@@ -4094,10 +4148,14 @@ pub(crate) fn expr_to_z3<'a>(
                                         let mut local_env = call_env.clone();
                                         local_env.insert(decl.operand.clone(), result_z3.clone());
                                         let pred_ast = parse_expression(&decl.predicate_raw);
-                                        let Some(pred_bool) =
-                                            expr_to_z3(vc, &pred_ast, &mut local_env, None)?
-                                                .as_bool()
-                                        else {
+                                        let Some(pred_bool) = refined_predicate_to_z3(
+                                            vc,
+                                            decl,
+                                            &pred_ast,
+                                            &mut local_env,
+                                            None,
+                                        )?
+                                        .as_bool() else {
                                             continue;
                                         };
                                         if let Some(solver) = solver_opt {
@@ -4427,10 +4485,14 @@ pub(crate) fn expr_to_z3<'a>(
                                         let mut local_env = env.clone();
                                         local_env.insert(decl.operand.clone(), arg_z3.clone());
                                         let predicate_ast = parse_expression(&decl.predicate_raw);
-                                        let Some(pred_bool) =
-                                            expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
-                                                .as_bool()
-                                        else {
+                                        let Some(pred_bool) = refined_predicate_to_z3(
+                                            vc,
+                                            decl,
+                                            &predicate_ast,
+                                            &mut local_env,
+                                            None,
+                                        )?
+                                        .as_bool() else {
                                             continue;
                                         };
                                         if vc.cover_obligations.is_some() {
@@ -5772,10 +5834,14 @@ pub(crate) fn expr_to_z3<'a>(
                                     let mut local_env = arm_env.clone();
                                     local_env.insert(decl.operand.clone(), bound.clone());
                                     let predicate_ast = parse_expression(&decl.predicate_raw);
-                                    let Some(predicate_z3) =
-                                        expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
-                                            .as_bool()
-                                    else {
+                                    let Some(predicate_z3) = refined_predicate_to_z3(
+                                        vc,
+                                        decl,
+                                        &predicate_ast,
+                                        &mut local_env,
+                                        None,
+                                    )?
+                                    .as_bool() else {
                                         continue;
                                     };
                                     solver.assert(&arm_cond.implies(&predicate_z3));
@@ -6436,9 +6502,14 @@ pub(crate) fn expr_to_z3<'a>(
                                     let mut local_env = call_env.clone();
                                     local_env.insert(decl.operand.clone(), arg_z3.clone());
                                     let pred_ast = parse_expression(&decl.predicate_raw);
-                                    let Some(pred_bool) =
-                                        expr_to_z3(vc, &pred_ast, &mut local_env, None)?.as_bool()
-                                    else {
+                                    let Some(pred_bool) = refined_predicate_to_z3(
+                                        vc,
+                                        decl,
+                                        &pred_ast,
+                                        &mut local_env,
+                                        None,
+                                    )?
+                                    .as_bool() else {
                                         continue;
                                     };
                                     solver.push();
@@ -6681,9 +6752,14 @@ pub(crate) fn expr_to_z3<'a>(
                                     let mut local_env = call_env.clone();
                                     local_env.insert(decl.operand.clone(), result_z3.clone());
                                     let pred_ast = parse_expression(&decl.predicate_raw);
-                                    let Some(pred_bool) =
-                                        expr_to_z3(vc, &pred_ast, &mut local_env, None)?.as_bool()
-                                    else {
+                                    let Some(pred_bool) = refined_predicate_to_z3(
+                                        vc,
+                                        decl,
+                                        &pred_ast,
+                                        &mut local_env,
+                                        None,
+                                    )?
+                                    .as_bool() else {
                                         continue;
                                     };
                                     if let Some(solver) = solver_opt {

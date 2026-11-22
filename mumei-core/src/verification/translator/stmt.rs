@@ -1834,7 +1834,8 @@ fn enum_field_assign<'a>(
                     let predicate_ast =
                         normalize_comparison_chains(parse_expression(&decl.predicate_raw));
                     let Some(predicate) =
-                        expr_to_z3(vc, &predicate_ast, &mut local_env, None)?.as_bool()
+                        refined_predicate_to_z3(vc, decl, &predicate_ast, &mut local_env, None)?
+                            .as_bool()
                     else {
                         continue;
                     };

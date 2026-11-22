@@ -79,7 +79,7 @@ pub(crate) fn apply_refinement_constraint<'a>(
         local_env.insert(decl.operand.clone(), var_z3.clone());
 
         let predicate_ast = parse_expression(&decl.predicate_raw);
-        let predicate_z3 = expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
+        let predicate_z3 = refined_predicate_to_z3(vc, decl, &predicate_ast, &mut local_env, None)?
             .as_bool()
             .ok_or(
                 MumeiError::type_error_at(
