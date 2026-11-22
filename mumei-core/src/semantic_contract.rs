@@ -1189,31 +1189,6 @@ fn binder_scalar_type(type_name: Option<&str>, refined: &RefinedEnv) -> &'static
 /// its v3 name only when some atom uses a struct value (a struct
 /// result, literal, `let` or call-result read).
 #[allow(clippy::too_many_arguments)]
-fn inferred_i64_return_atoms(items: &[Item], admission: RefinedAdmission) -> BTreeSet<String> {
-    if !admission.admits_inferred_i64_returns() {
-        return BTreeSet::new();
-    }
-    items
-        .iter()
-        .filter_map(|item| {
-            let Item::Atom(atom) = item else {
-                return None;
-            };
-            (atom.return_type.is_none()
-                && crate::mir::infer_atom_return_type(atom).as_deref() == Some("i64"))
-            .then(|| atom.name.clone())
-        })
-        .collect()
-}
-
-fn effective_return_type(atom: &Atom, inferred_i64_return: bool) -> Option<&str> {
-    if inferred_i64_return {
-        Some("i64")
-    } else {
-        atom.return_type.as_deref()
-    }
-}
-
 /// Whether the admitted module declares a `u64`-family leaf anywhere —
 /// `u64` itself, `usize` or `isize`, as a parameter, a result, a struct
 /// field (instantiated decls included, since monomorphization leaves
@@ -1268,6 +1243,33 @@ fn uses_u64_leaves(items: &[Item], inferred_i64_returns: &BTreeSet<String>) -> b
         }
         _ => false,
     })
+}
+
+/// Returns atom names whose omitted return types infer to `i64`.
+fn inferred_i64_return_atoms(items: &[Item], admission: RefinedAdmission) -> BTreeSet<String> {
+    if !admission.admits_inferred_i64_returns() {
+        return BTreeSet::new();
+    }
+    items
+        .iter()
+        .filter_map(|item| {
+            let Item::Atom(atom) = item else {
+                return None;
+            };
+            (atom.return_type.is_none()
+                && crate::mir::infer_atom_return_type(atom).as_deref() == Some("i64"))
+            .then(|| atom.name.clone())
+        })
+        .collect()
+}
+
+/// Returns an atom's declared or compiler-inferred result type.
+fn effective_return_type(atom: &Atom, inferred_i64_return: bool) -> Option<&str> {
+    if inferred_i64_return {
+        Some("i64")
+    } else {
+        atom.return_type.as_deref()
+    }
 }
 
 /// Whether a declared leaf type name resolves to a 128-bit scalar —
