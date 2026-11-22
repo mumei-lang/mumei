@@ -85,7 +85,12 @@ fn unsupported_or_unjustified_struct_array_uses_fail_closed_errors() {
         let diagnostics = payload["diagnostics"]
             .as_array()
             .unwrap_or_else(|| panic!("verify JSON has no diagnostics array:\n{payload:#}"));
-        for atom in ["stale_read", "unconstrained_field", "independent_fields"] {
+        for atom in [
+            "stale_read",
+            "unconstrained_field",
+            "independent_fields",
+            "shadowed_fresh_array_bindings",
+        ] {
             assert!(
                 diagnostics.iter().any(|entry| {
                     entry["atom"] == atom

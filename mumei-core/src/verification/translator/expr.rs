@@ -4461,7 +4461,7 @@ pub(crate) fn expr_to_z3<'a>(
                     .collect::<Result<Vec<_>, _>>()?;
                 for (path, leaf_type) in leaves {
                     let key = super::z3_types::struct_array_leaf_key(&name, &path);
-                    let mut leaf_array = super::z3_types::z3_array_for_range(
+                    let mut leaf_array = super::z3_types::z3_fresh_array_for_range(
                         ctx,
                         &key,
                         &super::z3_types::z3_element_sort(vc, &leaf_type),

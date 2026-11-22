@@ -75,6 +75,22 @@ requires: len(values) > 0;
 ensures: true;
 body: values[0].value;
 
+atom fresh_array(x: i64) -> [P]
+requires: true;
+ensures: len(result) == 1 && result[0].x == x;
+body: [P { x: x, y: 0 }];
+
+atom shadowed_fresh_array_bindings(a: i64, b: i64, c: bool, d: bool) -> i64
+requires: true;
+ensures: result == 7;
+body: {
+    let qs = if c { fresh_array(a) } else { fresh_array(a) };
+    let first = qs[0].x;
+    let qs = if d { fresh_array(b) } else { fresh_array(b) };
+    let second = qs[0].x;
+    first - second + 7
+};
+
 atom nested_struct_array(values: [[P]]) -> i64
 requires: len(values) > 0;
 ensures: true;

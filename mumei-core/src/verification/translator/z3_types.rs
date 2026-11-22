@@ -395,9 +395,38 @@ pub(crate) fn struct_array_leaf_array<'a>(
     if let Some(array) = env.get(&key).and_then(|value| value.as_array()) {
         return array;
     }
-    let array = z3_array_for_range(vc.ctx, &key, &z3_element_sort(vc, leaf_type));
+    let array = z3_fresh_array_for_range(vc.ctx, &key, &z3_element_sort(vc, leaf_type));
     env.insert(key, array.clone().into());
     array
+}
+
+pub(crate) fn seed_struct_array_param_leaves<'a>(
+    vc: &VCtx<'a>,
+    name: &str,
+    type_name: Option<&str>,
+    env: &mut Env<'a>,
+) {
+    let Some(type_name) = type_name.filter(|ty| ty.starts_with('[') && ty.ends_with(']')) else {
+        return;
+    };
+    let element_type = array_element_type_from_annotation(Some(type_name), vc.module_env);
+    if array_element_sort_from_type(&element_type, vc.module_env, vc.ieee754_f64)
+        != ArrayElementSort::Struct
+    {
+        return;
+    }
+    let Some(leaves) = struct_array_leaf_types(&element_type, vc.module_env) else {
+        return;
+    };
+    vc.local_array_elem_types
+        .borrow_mut()
+        .insert(name.to_string(), element_type.clone());
+    for (path, leaf_type) in leaves {
+        let key = struct_array_leaf_key(name, &path);
+        env.entry(key.clone()).or_insert_with(|| {
+            z3_fresh_array_for_range(vc.ctx, &key, &z3_element_sort(vc, &leaf_type)).into()
+        });
+    }
 }
 
 pub(crate) fn validate_enum_array_element_type(
@@ -1342,10 +1371,10 @@ pub(crate) fn wire_array_slots<'a>(
                 }
                 Some(Expr::Call(_, _)) => {
                     call_result_struct_array(vc, &arr, &path).unwrap_or_else(|| {
-                        z3_array_for_range(vc.ctx, &key, &z3_element_sort(vc, &leaf_type))
+                        z3_fresh_array_for_range(vc.ctx, &key, &z3_element_sort(vc, &leaf_type))
                     })
                 }
-                _ => z3_array_for_range(vc.ctx, &key, &z3_element_sort(vc, &leaf_type)),
+                _ => z3_fresh_array_for_range(vc.ctx, &key, &z3_element_sort(vc, &leaf_type)),
             };
             env.insert(key, leaf_array.into());
         }
@@ -1741,7 +1770,7 @@ pub(crate) fn call_result_struct_arrays<'a>(
         .into_iter()
         .map(|(path, leaf_type)| {
             let key = struct_array_leaf_key(result_name, &path);
-            let array = z3_array_for_range(vc.ctx, &key, &z3_element_sort(vc, &leaf_type));
+            let array = z3_fresh_array_for_range(vc.ctx, &key, &z3_element_sort(vc, &leaf_type));
             (path, array)
         })
         .collect())
@@ -1923,6 +1952,14 @@ pub(crate) fn z3_array_for_range<'a>(
     range: &z3::Sort<'a>,
 ) -> Array<'a> {
     Array::new_const(ctx, name, &z3::Sort::int(ctx), range)
+}
+
+pub(crate) fn z3_fresh_array_for_range<'a>(
+    ctx: &'a Context,
+    prefix: &str,
+    range: &z3::Sort<'a>,
+) -> Array<'a> {
+    Array::fresh_const(ctx, prefix, &z3::Sort::int(ctx), range)
 }
 
 pub(crate) fn z3_fresh_const_like<'a>(
