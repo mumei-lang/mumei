@@ -39,6 +39,23 @@ atom main() -> i64
         7
     }
 "#;
+const SINGLE_ATOM_EFFECT_MODULE: &str = r#"
+effect Door
+    states: [Closed, Open];
+    initial: Closed;
+    transition open: Closed -> Open;
+
+atom main() -> i64
+    effects: [Door];
+    effect_pre: { Door: Closed };
+    effect_post: { Door: Open };
+    requires: true;
+    ensures: result == 0;
+    body: {
+        perform Door.open;
+        0
+    }
+"#;
 const BRANCH: &str = "atom absd(x: i64, y: i64) -> i64 requires: x >= 0 && x <= 1000 && y >= 0 && y <= 1000; ensures: result >= 0; body: { if x > y { x - y } else { y - x } };\n\
 atom clamp(x: i64) -> i64 requires: true; ensures: result <= 10; body: { if x > 10 { 10 } else { x } };\n\
 atom pick(b: bool, x: i64) -> i64 requires: true; ensures: true; body: { if b { x } else { 0 } };\n\
@@ -315,6 +332,7 @@ fn repin(bundle: &Path, source: Option<&str>) -> String {
 fn recheck_object_reports_single_bundle_symbol_surface() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build(root.path());
+    assert_eq!(module_record(&bundle)["profile"], native_bundle::PROFILE);
 
     let text = recheck_object(&source, &bundle, &id, false);
     assert_success(&text);
@@ -6622,6 +6640,27 @@ fn module_bundle_with_stateful_effects_builds_as_v28_and_rechecks() {
     assert!(!recheck(&source, &bundle, &native_bundle::sha256(&bytes))
         .status
         .success());
+}
+
+#[test]
+fn single_atom_effect_module_routes_to_v28_and_rechecks() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), SINGLE_ATOM_EFFECT_MODULE);
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V28);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V25
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_eq!(
+        Command::new(bundle.join("program"))
+            .status()
+            .unwrap()
+            .code(),
+        Some(0)
+    );
 }
 
 #[test]

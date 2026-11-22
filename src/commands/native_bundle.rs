@@ -2057,7 +2057,10 @@ fn build(input: &Path, output: &Path) -> Result<(String, &'static str), BundleEr
         || items.iter().any(|item| {
             matches!(
                 item,
-                parser::Item::TypeDef(_) | parser::Item::StructDef(_) | parser::Item::EnumDef(_)
+                parser::Item::TypeDef(_)
+                    | parser::Item::StructDef(_)
+                    | parser::Item::EnumDef(_)
+                    | parser::Item::EffectDef(_)
             )
         })
     {
