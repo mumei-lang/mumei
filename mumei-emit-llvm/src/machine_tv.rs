@@ -548,25 +548,6 @@ pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
         })
         && !model.has_enum_composite_features
         && !model.has_enum_signature
-        && !wide_composite_values(model)
-}
-
-/// Composite *results* keep a 128-bit leaf fail-closed: an aggregate
-/// result either spills to the hidden `sret` pointer this model
-/// rejects or — for the two-eightbyte case — needs a paired
-/// `rax`/`rdx` composite read the result comparison does not model
-/// for a wide leaf yet. Composite *parameters* and call-site
-/// arguments are admitted: LLVM flattens each aggregate leaf — a
-/// 128-bit leaf becoming two consecutive INTEGER slots — into the
-/// same scalar argument sequence the signature's leaf slot list
-/// already describes (`pure-i64-composite/v21`).
-fn wide_composite_values(model: &PureI64Body<'_>) -> bool {
-    model.has_wide_scalar_features
-        && (model.result_shape.is_some()
-            || model
-                .call_sites
-                .iter()
-                .any(|site| matches!(site.result_shape, CallValueShape::Struct { .. })))
 }
 
 const MAX_AGGREGATE_LEAF_COUNT: usize = 4;
@@ -754,10 +735,11 @@ fn assert_path_equivalence_query<'ctx>(
         let matches = (0..leaf_count)
             .map(|leaf| {
                 let source_leaf = aggregate_leaf(&model_value, leaf_count, leaf);
+                let machine_leaf = &substituted_returns[leaf];
                 if model.result_leaf_doubles[leaf] {
-                    f64_values_match(context, &source_leaf, &substituted_returns[leaf])
+                    f64_values_match(context, &source_leaf, machine_leaf)
                 } else {
-                    source_leaf._eq(&substituted_returns[leaf])
+                    source_leaf._eq(machine_leaf)
                 }
             })
             .collect::<Vec<_>>();
@@ -6851,9 +6833,11 @@ entry:
             ),
             FunctionOutcome::Equivalent
         );
-        // A wide leaf inside an aggregate *result* stays outside the
-        // profile — that path still wants the `sret`/paired-rax-rdx
-        // composite read this model does not model for wide leaves.
+        // A wide leaf inside an aggregate *result* is admitted the
+        // same way: LLVM emits the result leaf-by-leaf into
+        // `rax`/`rdx`/`rcx`, and a 128-bit leaf contributes its low
+        // half before its high half — exactly the `[lo, hi]` slot
+        // order the source model uses.
         let mk_model = source_model_named_with_admission(
             "struct P { a: i64, b: i128 }\n\
              atom mk(x: i128) -> P requires: true; ensures: true; body: { P { a: 0, b: x } };",
@@ -6861,7 +6845,49 @@ entry:
             &context,
             RefinedAdmission::CompositeV21,
         );
-        assert!(!supports_signature(&mk_model));
+        assert_eq!(mk_model.result_shape, Some(3));
+        assert_eq!(mk_model.result_leaf_doubles, vec![false, false, false]);
+        assert!(supports_signature(&mk_model));
+        let ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i128 } @mk(i128 %x) {
+entry:
+  %p0 = insertvalue { i64, i128 } undef, i64 0, 0
+  %p1 = insertvalue { i64, i128 } %p0, i128 %x, 1
+  ret { i64, i128 } %p1
+}
+define { i64, i128 } @mk_wrong(i128 %x) {
+entry:
+  %lo = trunc i128 %x to i64
+  %shr = lshr i128 %x, 64
+  %hi = trunc i128 %shr to i64
+  %sw0 = zext i64 %lo to i128
+  %sw = shl i128 %sw0, 64
+  %hz = zext i64 %hi to i128
+  %b = or i128 %sw, %hz
+  %p0 = insertvalue { i64, i128 } undef, i64 0, 0
+  %p1 = insertvalue { i64, i128 } %p0, i128 %b, 1
+  ret { i64, i128 } %p1
+}
+"#;
+        let (mk_address, mk_bytes, mk_targets) = compiled_function_with_targets(ir, "mk");
+        assert_eq!(
+            check_function(&mk_bytes, mk_address, &mk_model, &mk_targets, &context),
+            FunctionOutcome::Equivalent
+        );
+        // Returning the wide leaf's halves swapped is a real
+        // counterexample, not a vacuous pass.
+        let (wrong_address, wrong_bytes, wrong_targets) =
+            compiled_function_with_targets(ir, "mk_wrong");
+        assert_eq!(
+            check_function(
+                &wrong_bytes,
+                wrong_address,
+                &mk_model,
+                &wrong_targets,
+                &context
+            ),
+            FunctionOutcome::Different
+        );
     }
 
     #[test]
