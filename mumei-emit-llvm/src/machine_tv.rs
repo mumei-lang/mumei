@@ -2843,6 +2843,41 @@ fn call_site_has_unsupported_composite_shape(site: &CallSite<'_>) -> bool {
         && !aggregate_result_register_classes_supported(&site.result_leaf_doubles))))
 }
 
+// Resolves an INTEGER call-argument leaf that spilled past `rdi`-`r9` to the
+// stack slot the caller must have written, and records the slot in
+// `outgoing_slots` so a non-tail call can discard it afterwards. Scalar and
+// aggregate INTEGER leaves share this path because `expand` lowering flattens
+// both into the same argument sequence.
+fn spilled_integer_call_argument<'ctx>(
+    integer_argument_index: usize,
+    rsp_is_known: bool,
+    rsp_offset: i64,
+    stack: &[(i64, BV<'ctx>)],
+    outgoing_slots: &mut BTreeSet<i64>,
+) -> Result<BV<'ctx>, FunctionOutcome> {
+    if !rsp_is_known || rsp_offset % 8 != 0 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let stack_argument_index = integer_argument_index - ARGUMENT_REGISTERS.len();
+    let word_index = i64::try_from(stack_argument_index)
+        .map_err(|_| FunctionOutcome::OutsideProfile("call_arguments"))?;
+    let Some(stack_slot) = word_index
+        .checked_mul(8)
+        .and_then(|offset| rsp_offset.checked_add(offset))
+    else {
+        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+    };
+    if stack_slot % 8 != 0 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let Some((_, stack_argument)) = stack.iter().find(|(candidate, _)| *candidate == stack_slot)
+    else {
+        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+    };
+    outgoing_slots.insert(stack_slot);
+    Ok(stack_argument.clone())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lift_call<'ctx>(
     instruction: &Instruction,
@@ -2993,31 +3028,16 @@ fn lift_call<'ctx>(
                             .push(argument._eq(&registers[*register_index]));
                         integer_argument_index += 1;
                     } else {
-                        if !rsp_is_known || rsp_offset % 8 != 0 {
-                            return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-                        }
-                        let stack_argument_index =
-                            integer_argument_index - ARGUMENT_REGISTERS.len();
-                        let word_index = i64::try_from(stack_argument_index)
-                            .map_err(|_| FunctionOutcome::OutsideProfile("call_arguments"))?;
-                        let Some(stack_slot) = word_index
-                            .checked_mul(8)
-                            .and_then(|offset| rsp_offset.checked_add(offset))
-                        else {
-                            return Err(FunctionOutcome::OutsideProfile("call_arguments"));
-                        };
-                        if stack_slot % 8 != 0 {
-                            return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-                        }
-                        let Some((_, stack_argument)) =
-                            stack.iter().find(|(candidate, _)| *candidate == stack_slot)
-                        else {
-                            return Err(FunctionOutcome::OutsideProfile("call_arguments"));
-                        };
+                        let stack_argument = spilled_integer_call_argument(
+                            integer_argument_index,
+                            rsp_is_known,
+                            rsp_offset,
+                            stack,
+                            &mut outgoing_slots,
+                        )?;
                         call_state
                             .argument_obligations
-                            .push(argument._eq(stack_argument));
-                        outgoing_slots.insert(stack_slot);
+                            .push(argument._eq(&stack_argument));
                         integer_argument_index += 1;
                     }
                 }
@@ -3067,30 +3087,16 @@ fn lift_call<'ctx>(
                         .push(argument._eq(&registers[*register_index]));
                     integer_argument_index += 1;
                 } else {
-                    if !rsp_is_known || rsp_offset % 8 != 0 {
-                        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-                    }
-                    let stack_argument_index = integer_argument_index - ARGUMENT_REGISTERS.len();
-                    let word_index = i64::try_from(stack_argument_index)
-                        .map_err(|_| FunctionOutcome::OutsideProfile("call_arguments"))?;
-                    let Some(stack_slot) = word_index
-                        .checked_mul(8)
-                        .and_then(|offset| rsp_offset.checked_add(offset))
-                    else {
-                        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
-                    };
-                    if stack_slot % 8 != 0 {
-                        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
-                    }
-                    let Some((_, stack_argument)) =
-                        stack.iter().find(|(candidate, _)| *candidate == stack_slot)
-                    else {
-                        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
-                    };
+                    let stack_argument = spilled_integer_call_argument(
+                        integer_argument_index,
+                        rsp_is_known,
+                        rsp_offset,
+                        stack,
+                        &mut outgoing_slots,
+                    )?;
                     call_state
                         .argument_obligations
-                        .push(argument._eq(stack_argument));
-                    outgoing_slots.insert(stack_slot);
+                        .push(argument._eq(&stack_argument));
                     integer_argument_index += 1;
                 }
             }
