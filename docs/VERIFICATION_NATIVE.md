@@ -1587,6 +1587,14 @@ the profile's i64 0/1 bitvector convention) and the call expression
 itself takes the callee's return kind, so `-> Flag` results stay
 boolean-typed through the call.
 
+The `mumei.pure-i64-composite/v24` source admission permits an atom
+without a declared return type only when compiler inference resolves
+its result to exactly `i64`; all other inferred types remain rejected.
+Its specification identity retains `return_type: null` and adds
+`inferred_return_type: "i64"`, and a module pins v24 only when an atom
+uses this rule. Native bundles do not yet pin v24 and continue to
+reject omitted return types.
+
 Nothing deeper is claimed: the fragment admitted by the profile grew,
 the guarantees did not — the same identity-plus-recheck scopes apply,
 with no optimizer/object/linker/runtime/ABI/final-executable semantics
