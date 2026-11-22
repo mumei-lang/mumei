@@ -3147,14 +3147,33 @@ fn object_symbol_surface(bytes: &[u8]) -> Result<ObjectSymbolSurface, ()> {
 }
 
 fn object_symbols_correspond(ir: &tv::IrFunctionSurface, object: &ObjectSymbolSurface) -> bool {
-    object.defined == ir.defined && object.undefined.is_subset(&ir.declared)
+    object.defined == ir.defined
+        && object
+            .undefined
+            .iter()
+            .all(|name| ir.declared.contains(name) || machine_tv::is_ti3_libcall(name))
 }
 
 fn object_call_edges_correspond(
     ir: &tv::IrFunctionSurface,
     object: &ObjectSymbolSurface,
 ) -> Option<bool> {
-    (ir.call_edges_checkable && object.call_edges_checkable).then(|| ir.calls == object.calls)
+    // compiler-rt `__*ti3` calls are injected by the backend for
+    // i128/u128 operators the IR spells as plain instructions, so they
+    // have no IR call edge; the machine-TV lifter models their effects
+    // instead. A ti3 edge that the same caller's IR call set names is a
+    // real edge (explicit call or user-defined function), so keep it.
+    let mut object_calls = object.calls.clone();
+    for (caller, callees) in object_calls.iter_mut() {
+        // A ti3 edge survives only when the same caller's IR call set
+        // names it — backend-injected calls have no such edge even
+        // when another function calls the helper explicitly.
+        let ir_callees = ir.calls.get(caller);
+        callees.retain(|name| {
+            !machine_tv::is_ti3_libcall(name) || ir_callees.is_some_and(|set| set.contains(name))
+        });
+    }
+    (ir.call_edges_checkable && object.call_edges_checkable).then(|| ir.calls == object_calls)
 }
 
 fn object_link_corresponds(
@@ -3309,7 +3328,19 @@ fn object_link_corresponds(
                 return Ok(None);
             };
             if !object_defined.contains(target_name) {
-                return Ok(None);
+                // A compiler-rt `__*ti3` reference stays checkable when
+                // the linked executable carries exactly one symbol of
+                // that name — the relocation must then resolve to it.
+                if !machine_tv::is_ti3_libcall(target_name) {
+                    return Ok(None);
+                }
+                let Some(candidates) = executable_symbols.get(target_name) else {
+                    return Ok(None);
+                };
+                if candidates.len() != 1 {
+                    return Ok(None);
+                }
+                executable_addresses.insert(target_name.to_owned(), candidates[0].0);
             }
             let Some(relative_offset) = offset.checked_sub(function.object_address) else {
                 return Ok(None);
@@ -5276,6 +5307,95 @@ mod tests {
             &ir,
             &object(&["main", "helper"], &["optional"])
         ));
+        // Backend-injected compiler-rt 128-bit helpers count as
+        // expected undefined symbols even though the IR never
+        // declares them; other undeclared references still fail.
+        assert!(object_symbols_correspond(
+            &ir,
+            &object(&["main", "helper"], &["__divti3", "__umodti3", "__multi3"])
+        ));
+        assert!(!object_symbols_correspond(
+            &ir,
+            &object(&["main", "helper"], &["__divti3", "undeclared"])
+        ));
+    }
+
+    #[test]
+    fn object_call_edges_correspond_ignores_ti3_libcall_edges() {
+        let ir = tv::IrFunctionSurface {
+            defined: BTreeSet::from(["div128".to_owned()]),
+            declared: BTreeSet::new(),
+            calls: BTreeMap::from([("div128".to_owned(), BTreeSet::new())]),
+            call_edges_checkable: true,
+        };
+        let object = ObjectSymbolSurface {
+            defined: ir.defined.clone(),
+            undefined: BTreeSet::from(["__udivti3".to_owned()]),
+            calls: BTreeMap::from([(
+                "div128".to_owned(),
+                BTreeSet::from(["__udivti3".to_owned()]),
+            )]),
+            call_targets: BTreeMap::new(),
+            call_edges_checkable: true,
+        };
+        assert_eq!(object_call_edges_correspond(&ir, &object), Some(true));
+
+        let undeclared_edge = ObjectSymbolSurface {
+            calls: BTreeMap::from([("div128".to_owned(), BTreeSet::from(["other".to_owned()]))]),
+            ..object.clone()
+        };
+        assert_eq!(
+            object_call_edges_correspond(&ir, &undeclared_edge),
+            Some(false)
+        );
+
+        // An IR that explicitly declares and calls `__udivti3` keeps
+        // its edge: stripping it would reject a correct object.
+        let explicit_ir = tv::IrFunctionSurface {
+            declared: BTreeSet::from(["__udivti3".to_owned()]),
+            calls: BTreeMap::from([(
+                "div128".to_owned(),
+                BTreeSet::from(["__udivti3".to_owned()]),
+            )]),
+            ..ir.clone()
+        };
+        assert_eq!(
+            object_call_edges_correspond(&explicit_ir, &object),
+            Some(true)
+        );
+
+        // When a different IR function calls the helper explicitly,
+        // this caller's injected edge is still stripped.
+        let other_caller_ir = tv::IrFunctionSurface {
+            defined: BTreeSet::from(["div128".to_owned(), "explicit".to_owned()]),
+            declared: BTreeSet::from(["__udivti3".to_owned()]),
+            calls: BTreeMap::from([
+                ("div128".to_owned(), BTreeSet::new()),
+                (
+                    "explicit".to_owned(),
+                    BTreeSet::from(["__udivti3".to_owned()]),
+                ),
+            ]),
+            call_edges_checkable: true,
+        };
+        let other_object = ObjectSymbolSurface {
+            defined: other_caller_ir.defined.clone(),
+            calls: BTreeMap::from([
+                (
+                    "div128".to_owned(),
+                    BTreeSet::from(["__udivti3".to_owned()]),
+                ),
+                (
+                    "explicit".to_owned(),
+                    BTreeSet::from(["__udivti3".to_owned()]),
+                ),
+            ]),
+            ..object.clone()
+        };
+        assert_eq!(
+            object_call_edges_correspond(&other_caller_ir, &other_object),
+            Some(true)
+        );
     }
 
     #[test]

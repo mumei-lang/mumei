@@ -3884,6 +3884,59 @@ fn lift_call<'ctx>(
         call_state.used_call_targets.insert(field_offset);
         return Ok(());
     }
+    // A callee named `__*ti3` that a remaining source call site
+    // resolves to is a user function, not compiler-rt — name matching
+    // alone cannot tell them apart, so the normal call path wins.
+    let target_is_source_callee = model
+        .call_sites
+        .iter()
+        .skip(call_state.call_index)
+        .any(|site| {
+            crate::translation_validation::native_function_name(&site.callee) == target.name
+        });
+    if let Some(operation) =
+        ti3_libcall_operation(&target.name).filter(|_| !target_is_source_callee)
+    {
+        // compiler-rt `__*ti3` helpers implement an i128/u128
+        // operation that the source model keeps as an expression, so
+        // no call site is consumed: apply the SysV pair convention
+        // (a in rsi:rdi, b in rcx:rdx, result in rdx:rax) directly.
+        if tail_call || !model.has_wide_scalar_features {
+            return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+        }
+        let dividend = registers[6].concat(&registers[7]);
+        let divisor = registers[1].concat(&registers[2]);
+        if !matches!(operation, Ti3Operation::Multiply) {
+            // A zero divisor traps in the helper just as `divq` does,
+            // so the same nonzero proof obligation applies.
+            let zero = BV::from_u64(context, 0, 128);
+            prove_division_safe(
+                model,
+                path_conditions,
+                arguments,
+                &divisor._eq(&zero).not(),
+                context,
+            )?;
+        }
+        let result = match operation {
+            Ti3Operation::SignedDivide => dividend.bvsdiv(&divisor),
+            Ti3Operation::SignedRemainder => dividend.bvsrem(&divisor),
+            Ti3Operation::UnsignedDivide => dividend.bvudiv(&divisor),
+            Ti3Operation::UnsignedRemainder => dividend.bvurem(&divisor),
+            Ti3Operation::Multiply => dividend.bvmul(&divisor),
+        };
+        apply_call_result_and_clobbers(
+            registers,
+            xmm_registers,
+            result,
+            false,
+            CallValueShape::Scalar { leaf_count: 2 },
+            &[false, false],
+            context,
+        )?;
+        call_state.used_call_targets.insert(field_offset);
+        return Ok(());
+    }
     let mut skipped_false_guard = false;
     let call_site = loop {
         let Some(call_site) = model.call_sites.get(call_state.call_index) else {
@@ -4145,6 +4198,33 @@ fn lift_call<'ctx>(
     Ok(())
 }
 
+enum Ti3Operation {
+    SignedDivide,
+    SignedRemainder,
+    UnsignedDivide,
+    UnsignedRemainder,
+    Multiply,
+}
+
+/// Whether `name` is a compiler-rt 128-bit helper the lifter models
+/// (`__divti3`, `__modti3`, `__udivti3`, `__umodti3`, `__multi3`). LLVM
+/// injects these symbols at codegen time, so they never appear in the
+/// IR's declared set.
+pub fn is_ti3_libcall(name: &str) -> bool {
+    ti3_libcall_operation(name).is_some()
+}
+
+fn ti3_libcall_operation(name: &str) -> Option<Ti3Operation> {
+    match name {
+        "__divti3" => Some(Ti3Operation::SignedDivide),
+        "__modti3" => Some(Ti3Operation::SignedRemainder),
+        "__udivti3" => Some(Ti3Operation::UnsignedDivide),
+        "__umodti3" => Some(Ti3Operation::UnsignedRemainder),
+        "__multi3" => Some(Ti3Operation::Multiply),
+        _ => None,
+    }
+}
+
 fn apply_call_result_and_clobbers<'ctx>(
     registers: &mut [BV<'ctx>],
     xmm_registers: &mut [BV<'ctx>],
@@ -4395,12 +4475,12 @@ fn call_guard_status<'ctx>(
 
 fn prove_division_safe<'ctx>(
     model: &PureI64Body<'ctx>,
-    state: &MachineState<'ctx>,
+    path_conditions: &[Bool<'ctx>],
     arguments: &[BV<'ctx>],
     safety: &Bool<'ctx>,
     context: &'ctx Context,
 ) -> Result<(), FunctionOutcome> {
-    let status = call_guard_status(model, safety, &state.path_conditions, arguments, context);
+    let status = call_guard_status(model, safety, path_conditions, arguments, context);
     if status == Some(true) {
         Ok(())
     } else {
@@ -4446,7 +4526,7 @@ fn lift_division<'ctx>(
                 .not();
                 prove_division_safe(
                     model,
-                    state,
+                    &state.path_conditions,
                     arguments,
                     &Bool::and(context, &[&nonzero, &overflow]),
                     context,
@@ -4462,7 +4542,7 @@ fn lift_division<'ctx>(
                 let fits = quotient._eq(&quotient_low.sign_ext(64));
                 prove_division_safe(
                     model,
-                    state,
+                    &state.path_conditions,
                     arguments,
                     &Bool::and(context, &[&nonzero, &fits]),
                     context,
@@ -4488,14 +4568,14 @@ fn lift_division<'ctx>(
                 context,
             ) == Some(true);
             if high_half_zero {
-                prove_division_safe(model, state, arguments, &nonzero, context)?;
+                prove_division_safe(model, &state.path_conditions, arguments, &nonzero, context)?;
                 let dividend = state.registers[0].clone();
                 state.registers[0] = dividend.bvudiv(&divisor);
                 state.registers[2] = dividend.bvurem(&divisor);
                 return Ok(());
             }
             let safety = Bool::and(context, &[&nonzero, &fits]);
-            prove_division_safe(model, state, arguments, &safety, context)?;
+            prove_division_safe(model, &state.path_conditions, arguments, &safety, context)?;
             state.registers[0] = quotient.extract(63, 0);
             state.registers[2] = remainder.extract(63, 0);
         }
@@ -4518,7 +4598,7 @@ fn lift_division<'ctx>(
             let nonzero = divisor._eq(&BV::from_u64(context, 0, 32)).not();
             prove_division_safe(
                 model,
-                state,
+                &state.path_conditions,
                 arguments,
                 &Bool::and(
                     context,
@@ -8955,15 +9035,18 @@ define i64 @after_five(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i128 %x) {
             check_function(&swapped_result, address, &model("copy"), &targets, &context,),
             FunctionOutcome::Different
         );
+        // The backend lowers `sdiv`/`udiv i128` to `__divti3`/`__udivti3`
+        // calls, which the lifter models by their SysV pair convention —
+        // no source call site is consumed.
         let (address, bytes, targets) = compiled_function_with_targets(ir, "divide");
         assert_eq!(
             check_function(&bytes, address, &model("divide"), &targets, &context),
-            FunctionOutcome::OutsideProfile("call_order")
+            FunctionOutcome::Equivalent
         );
         let (address, bytes, targets) = compiled_function_with_targets(ir, "udivide");
         assert_eq!(
             check_function(&bytes, address, &model("udivide"), &targets, &context),
-            FunctionOutcome::OutsideProfile("call_order")
+            FunctionOutcome::Equivalent
         );
         let (address, bytes, targets) = compiled_function_with_targets(ir, "after_five");
         // Seven flattened INTEGER leaves: `x.lo` stays in `r9` and only
@@ -12851,6 +12934,86 @@ entry:
                 &wrap_targets,
                 &context
             ),
+            FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn ti3_libcall_results_match_their_wide_operator() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "atom udiv128(a: u128, b: u128) -> u128 requires: b != 0; ensures: true; body: { a / b };\n\
+            atom urem128(a: u128, b: u128) -> u128 requires: b != 0; ensures: true; body: { a % b };";
+        let libcall = |name: &str| {
+            BTreeMap::from([(
+                1u64,
+                CallTarget {
+                    name: name.to_owned(),
+                    relocation_kind: CallRelocationKind::ElfX86_64Plt32,
+                    relocation_size: 32,
+                    addend: -4,
+                },
+            )])
+        };
+        // `callq <target>` + `retq`: the lifted result must equal the
+        // modeled 128-bit operator over the SysV register pairs. A
+        // single helper pair is checked — each equivalence spends
+        // solver budget on a 128-bit division query.
+        let call_ret = [0xe8, 0x00, 0x00, 0x00, 0x00, 0xc3];
+        let udiv_model = source_model_named_with_admission(
+            source,
+            "udiv128",
+            &context,
+            RefinedAdmission::CompositeV21,
+        );
+        assert!(udiv_model.has_wide_scalar_features);
+        assert_eq!(
+            check_function(&call_ret, 0, &udiv_model, &libcall("__udivti3"), &context),
+            FunctionOutcome::Equivalent
+        );
+        // Without wide scalar features the helpers stay fail-closed.
+        let narrow = source_model_named_with_admission(
+            "atom id(x: i64) -> i64 requires: true; ensures: true; body: { x };",
+            "id",
+            &context,
+            RefinedAdmission::CompositeV21,
+        );
+        assert!(!narrow.has_wide_scalar_features);
+        assert_eq!(
+            check_function(&call_ret, 0, &narrow, &libcall("__udivti3"), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+    }
+
+    #[test]
+    fn ti3_name_colliding_with_a_source_callee_uses_call_site_semantics() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "atom __udivti3(a: i64, b: i64) -> i64 requires: true; ensures: true; body: { 0 };\n\
+            atom caller(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { __udivti3(x, y) };";
+        let model = source_model_named(source, "caller", &context);
+        assert_eq!(model.call_sites.len(), 1);
+        // The object calls the user-defined `__udivti3`, not the
+        // compiler-rt helper: the call must consume the source call
+        // site instead of applying 128-bit division register-pair
+        // semantics, otherwise the lifted state would diverge from
+        // the site's result and reject a correct function.
+        let call_ret = [0xe8, 0x00, 0x00, 0x00, 0x00, 0xc3];
+        let target = BTreeMap::from([(
+            1u64,
+            CallTarget {
+                name: "__udivti3".to_owned(),
+                relocation_kind: CallRelocationKind::ElfX86_64Plt32,
+                relocation_size: 32,
+                addend: -4,
+            },
+        )]);
+        assert_eq!(
+            check_function(&call_ret, 0, &model, &target, &context),
             FunctionOutcome::Equivalent
         );
     }
