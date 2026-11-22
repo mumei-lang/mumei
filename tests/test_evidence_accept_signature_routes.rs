@@ -20,6 +20,7 @@ struct Fixture {
     requirement_list: PathBuf,
     producer_secret: PathBuf,
     producer_public: String,
+    root_secret: PathBuf,
     root_public: String,
     signature: PathBuf,
     registry: PathBuf,
@@ -177,6 +178,7 @@ fn fixture(record_time: Option<&str>) -> Fixture {
         requirement_list,
         producer_secret,
         producer_public,
+        root_secret,
         root_public,
         signature,
         registry,
@@ -411,6 +413,48 @@ fn accept_list_rejects_member_record_signatures_and_binds_requirement_list_route
         &descriptor["checks_performed"],
         "producer_signature_binding"
     ));
+}
+
+#[test]
+fn accept_list_v2_revocation_minimum_reports_current_version() {
+    let fixture = fixture(Some(RECORD_TIME));
+    let list = list_file(&fixture);
+    let mut revocation: Value =
+        serde_json::from_slice(&fs::read(&fixture.revocation_list).unwrap()).unwrap();
+    revocation["schema_version"] = json!("mumei.key-revocation-list/v2");
+    revocation["list_version"] = json!(4);
+    revocation["issued_at"] = json!("2024-02-01T00:00:00Z");
+    revocation["not_after"] = json!("2024-03-01T00:00:00Z");
+    fs::write(
+        &fixture.revocation_list,
+        serde_json::to_vec_pretty(&revocation).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        &fixture.revocation_signature,
+        serde_json::to_vec_pretty(&sign_file(
+            &fixture.revocation_list,
+            &fixture.root_secret,
+            "root-key",
+            None,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    write_signature(&fixture, &list, Some(LIST_TIME));
+    let mut command = full_chain(
+        accept_list_command(&list, &fixture.requirement, true),
+        &fixture,
+        &fixture.producer_public,
+    );
+    command.args(["--min-revocation-version", "4"]);
+    let output = run(command);
+    assert!(output.status.success());
+    let descriptor: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        descriptor["producer_signature"]["revocation_list_current"],
+        true
+    );
 }
 
 #[test]

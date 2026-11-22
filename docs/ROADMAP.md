@@ -2804,9 +2804,11 @@ claim.
 Opt-in detached-signature binding covers `mumei evidence accept` requirement
 routes, `accept-list` over raw list-envelope bytes, and `accept-source` over
 raw saved-record bytes. `produced_at_signed` reports that a producer signed the
-record's declared timestamp, not that the timestamp is true. Key rotation and
-root-key revocation (#886 deferred), revocation-list rollback (78a4), and clock
-authenticity remain open.
+record's declared timestamp, not that the timestamp is true. Revocation-list
+v2 adds a consumer-pinned minimum-version and declared-window check; because
+consumers are stateless, they must pin a minimum version or rely on `not_after`
+to limit replay. Key rotation and root-key revocation (#886 deferred), and
+clock authenticity remain open.
 
 The initial delivery documents ownership and minimal semantics, and adds a
 standalone evidence schema with synthetic positive/negative fixtures. Its schema

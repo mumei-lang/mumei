@@ -13,7 +13,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei` | 1 | Formally verified language: parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) |
 | `mumei evidence` | 0 | Check common Evidence representation or produce fresh scoped source Evidence; no proof acceptance |
 | `mumei evidence recheck-source` | 5 | Freshly recheck saved source Evidence with linked Z3 and caller-supplied source/budgets; not proof acceptance |
-| `mumei evidence accept-source` | 16 | Evaluate representation plus fresh same-profile source consistency into a bounded acceptance descriptor |
+| `mumei evidence accept-source` | 17 | Evaluate representation plus fresh same-profile source consistency into a bounded acceptance descriptor |
 | `mumei evidence verify-source` | 4 | Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance |
 | `mumei evidence sign` | 5 | Detachably sign a bounded record's raw bytes with a declared ed25519 key into a producer-signature envelope; binds the declared key id only |
 | `mumei evidence keygen` | 1 | Generate a fresh ed25519 producer keypair; writes the 64-char hex secret to a new file and prints only the public key |
@@ -21,8 +21,8 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei evidence check-schedule` | 2 | Core checks only the static representation and schedule consistency. A `selected` outcome names only a manifest-declared-success exit, never acceptance. `reported_outcome` is the adapter's manifest-declared self-report, never result polarity or a verdict. Manifest-declared argv, stdin and memory bounds are not attested by this record; embedded evidence_acceptance is carried, not re-judged. No adapter is executed and no grade is promoted. |
 | `mumei evidence check-adapter` | 2 | Core checks only the static representation and manifest consistency. Manifest-declared argv and stdin remain inert unless host policy opts in through allow_manifest_attempt_argv and allow_manifest_attempt_stdin; a host argv map takes precedence. Verdict markers describe an adapter self-report vocabulary, never a verdict. max_memory_mb is the adapter's declared ceiling: planning uses the smaller of it and the policy memory bound; a scheduled attempt uses it only when the host declares no memory bound. Core does not enforce it. No adapter is executed and no grade is promoted. |
 | `mumei evidence check-attempt-acceptance` | 2 | Core validates the closed representation and producer consistency of a scheduled evidence-check acceptance. `accepted` records the producer's binding of a declared check outcome to its current candidate, never Core Evidence acceptance. `candidate_match` is not rechecked because Core has no attempt-sequence snapshot. No Core check is rerun and no grade is promoted. |
-| `mumei evidence accept` | 15 | Normalize one declared requirement against one Evidence record into a bounded verdict; no tool execution or proof acceptance |
-| `mumei evidence accept-list` | 15 | Normalize one declared requirement against a bounded Evidence list envelope — per-record verdicts plus an aggregate; no tool execution or proof acceptance |
+| `mumei evidence accept` | 16 | Normalize one declared requirement against one Evidence record into a bounded verdict; no tool execution or proof acceptance |
+| `mumei evidence accept-list` | 16 | Normalize one declared requirement against a bounded Evidence list envelope — per-record verdicts plus an aggregate; no tool execution or proof acceptance |
 | `mumei evidence check-list` | 3 | Validate a bounded Evidence list envelope's representation — every record individually, not their truth or consistency |
 | `mumei evidence check-consistency` | 3 | Check a bounded Evidence list envelope's cross-record identity-pin agreement, not pin correctness or truth |
 | `mumei native-bundle` | 0 | Build/check a restricted native identity bundle (not artifact semantic proof) |
@@ -164,9 +164,10 @@ Usage: mumei evidence accept-source [OPTIONS] --source <SOURCE> <INPUT>
 | `--key-registry <KEY_REGISTRY>` | — | — | Regular mumei.producer-key-registry/v1 file (at most 65,536 bytes); requires a pinned producer key id |
 | `--registry-signature <REGISTRY_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 registry signature file |
 | `--registry-key <REGISTRY_KEY>` | — | — | 64-char lowercase-hex ed25519 registry root public key |
-| `--revocation-list <REVOCATION_LIST>` | — | — | Regular mumei.key-revocation-list/v1 file (at most 65,536 bytes); requires a pinned producer key id |
+| `--revocation-list <REVOCATION_LIST>` | — | — | Regular mumei.key-revocation-list/v1 or /v2 file (at most 65,536 bytes); requires a pinned producer key id |
 | `--revocation-signature <REVOCATION_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 revocation-list signature file |
 | `--revocation-key <REVOCATION_KEY>` | — | — | 64-char lowercase-hex ed25519 revocation root public key |
+| `--min-revocation-version <MIN_REVOCATION_VERSION>` | — | — | Minimum acceptable v2 revocation-list version; requires the list and reference time |
 
 ## `mumei evidence verify-source`
 
@@ -359,9 +360,10 @@ Usage: mumei evidence accept [OPTIONS] [INPUT]
 | `--key-registry <KEY_REGISTRY>` | — | — | Regular mumei.producer-key-registry/v1 file (at most 65,536 bytes); requires a pinned producer key id |
 | `--registry-signature <REGISTRY_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 registry signature file |
 | `--registry-key <REGISTRY_KEY>` | — | — | 64-char lowercase-hex ed25519 registry root public key |
-| `--revocation-list <REVOCATION_LIST>` | — | — | Regular mumei.key-revocation-list/v1 file (at most 65,536 bytes); requires a pinned producer key id |
+| `--revocation-list <REVOCATION_LIST>` | — | — | Regular mumei.key-revocation-list/v1 or /v2 file (at most 65,536 bytes); requires a pinned producer key id |
 | `--revocation-signature <REVOCATION_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 revocation-list signature file |
 | `--revocation-key <REVOCATION_KEY>` | — | — | 64-char lowercase-hex ed25519 revocation root public key |
+| `--min-revocation-version <MIN_REVOCATION_VERSION>` | — | — | Minimum acceptable v2 revocation-list version; requires the list and reference time |
 
 ## `mumei evidence accept-list`
 
@@ -395,9 +397,10 @@ Usage: mumei evidence accept-list [OPTIONS] [INPUT]
 | `--key-registry <KEY_REGISTRY>` | — | — | Regular mumei.producer-key-registry/v1 file (at most 65,536 bytes); requires a pinned producer key id |
 | `--registry-signature <REGISTRY_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 registry signature file |
 | `--registry-key <REGISTRY_KEY>` | — | — | 64-char lowercase-hex ed25519 registry root public key |
-| `--revocation-list <REVOCATION_LIST>` | — | — | Regular mumei.key-revocation-list/v1 file (at most 65,536 bytes); requires a pinned producer key id |
+| `--revocation-list <REVOCATION_LIST>` | — | — | Regular mumei.key-revocation-list/v1 or /v2 file (at most 65,536 bytes); requires a pinned producer key id |
 | `--revocation-signature <REVOCATION_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 revocation-list signature file |
 | `--revocation-key <REVOCATION_KEY>` | — | — | 64-char lowercase-hex ed25519 revocation root public key |
+| `--min-revocation-version <MIN_REVOCATION_VERSION>` | — | — | Minimum acceptable v2 revocation-list version; requires the list and reference time |
 
 ## `mumei evidence check-list`
 

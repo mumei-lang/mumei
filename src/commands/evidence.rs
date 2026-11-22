@@ -595,6 +595,7 @@ struct SignatureOptions<'a> {
     revocation_list: Option<&'a Path>,
     revocation_signature: Option<&'a Path>,
     revocation_key: Option<&'a str>,
+    min_revocation_version: Option<u64>,
 }
 
 fn signature_options(args: &SignatureArgs) -> SignatureOptions<'_> {
@@ -610,6 +611,7 @@ fn signature_options(args: &SignatureArgs) -> SignatureOptions<'_> {
         revocation_list: args.revocation_list.as_deref().map(Path::new),
         revocation_signature: args.revocation_signature.as_deref().map(Path::new),
         revocation_key: args.revocation_key.as_deref(),
+        min_revocation_version: args.min_revocation_version,
     }
 }
 
@@ -671,7 +673,8 @@ fn validate_signature_options(options: SignatureOptions<'_>) -> Result<(), &'sta
         || options.registry_key.is_some()
         || options.revocation_list.is_some()
         || options.revocation_signature.is_some()
-        || options.revocation_key.is_some();
+        || options.revocation_key.is_some()
+        || options.min_revocation_version.is_some();
     if options.signature.is_none() {
         return if other_options {
             Err("producer signature options require --signature")
@@ -688,6 +691,15 @@ fn validate_signature_options(options: SignatureOptions<'_>) -> Result<(), &'sta
     if options.revocation_list.is_some() && options.expected_producer_key.is_none() {
         return Err("--revocation-list requires --expected-producer-key");
     }
+    if options.min_revocation_version == Some(0) {
+        return Err("--min-revocation-version must be at least 1");
+    }
+    if options.min_revocation_version.is_some() && options.revocation_list.is_none() {
+        return Err("--min-revocation-version requires --revocation-list");
+    }
+    if options.min_revocation_version.is_some() && options.reference_time.is_none() {
+        return Err("--min-revocation-version requires --reference-time");
+    }
     if options.max_age_seconds.is_some() && options.reference_time.is_none() {
         return Err("--max-age-seconds requires --reference-time");
     }
@@ -697,8 +709,11 @@ fn validate_signature_options(options: SignatureOptions<'_>) -> Result<(), &'sta
     if options.reference_time.is_some()
         && options.key_registry.is_none()
         && options.max_age_seconds.is_none()
+        && options.min_revocation_version.is_none()
     {
-        return Err("--reference-time requires --key-registry or --max-age-seconds");
+        return Err(
+            "--reference-time requires --key-registry, --max-age-seconds, or --min-revocation-version",
+        );
     }
     if options.registry_signature.is_some() != options.registry_key.is_some() {
         return Err("--registry-signature and --registry-key must be supplied together");
@@ -786,6 +801,13 @@ fn load_signature_acceptance(
         .map(producer_signature::parse_revocation_list)
         .transpose()
         .map_err(|_| "invalid key-revocation list")?;
+    if options.min_revocation_version.is_some()
+        && revocation_list
+            .as_ref()
+            .is_some_and(|list| list.metadata.is_none())
+    {
+        return Err("--min-revocation-version requires a mumei.key-revocation-list/v2 document");
+    }
     let revocation_digest = revocation_bytes
         .as_deref()
         .map(producer_signature::subject_digest);
@@ -817,6 +839,7 @@ fn load_signature_acceptance(
         revocation_digest: revocation_digest.as_deref(),
         revocation_signature: revocation_signature.as_ref(),
         revocation_key_hex: options.revocation_key,
+        min_revocation_version: options.min_revocation_version,
     });
     Ok(Some(SignatureAcceptance {
         binding,
