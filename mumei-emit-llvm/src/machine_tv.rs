@@ -5782,27 +5782,110 @@ entry:
         );
 
         let six_f64_source = "struct F6 { a: f64, b: f64, c: f64, d: f64, e: f64, f: f64 }\n\
-            atom sumf6(p: F6) -> f64 requires: true; ensures: true; body: { p.a + p.b + p.c + p.d + p.e + p.f };";
+            atom sumf6(p: F6) -> f64 requires: true; ensures: true; body: { p.a + p.b + p.c + p.d + p.e + p.f };\n\
+            atom lastf6(p: F6) -> f64 requires: true; ensures: true; body: { p.f };";
         let sumf6_model = source_model_named_with_admission(
             six_f64_source,
             "sumf6",
             &context,
             RefinedAdmission::CompositeV23,
         );
-        // Admitted at the signature gate; the six-leaf fadd chain sits at the
-        // solver budget edge and returns Unknown (fail-closed), so no
-        // equivalence assertion here.
+        // The six-leaf fadd chain sits at the solver budget edge and returns
+        // Unknown (fail-closed), so the gate admission is asserted only.
         assert!(supports_signature(&sumf6_model));
-
-        let mixed_eight_source = "struct M8 { a: i64, x: f64, b: i64, y: f64, c: i64, z: f64, d: i64, w: f64 }\n\
-            atom summ8(p: M8) -> i64 requires: true; ensures: true; body: { p.a + p.b + p.c + p.d };";
-        let summ8_model = source_model_named_with_admission(
-            mixed_eight_source,
-            "summ8",
+        let lastf6_model = source_model_named_with_admission(
+            six_f64_source,
+            "lastf6",
             &context,
             RefinedAdmission::CompositeV23,
         );
-        assert!(supports_signature(&summ8_model));
+        let six_f64_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define double @lastf6({ double, double, double, double, double, double } %p) {
+entry:
+  %f = extractvalue { double, double, double, double, double, double } %p, 5
+  ret double %f
+}
+"#;
+        let (lastf6_address, lastf6_bytes, lastf6_targets) =
+            compiled_function_with_targets(six_f64_ir, "lastf6");
+        let lastf6_disassembly = disassemble(&lastf6_bytes, lastf6_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("six-f64 aggregate tail-leaf disassembly:\n{lastf6_disassembly}");
+        assert_eq!(
+            check_function(
+                &lastf6_bytes,
+                lastf6_address,
+                &lastf6_model,
+                &lastf6_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let mixed_eight_source =
+            "struct M8 { a: i64, x: f64, b: i64, y: f64, c: i64, z: f64, d: i64, w: f64 }\n\
+            atom lasti8(p: M8) -> i64 requires: true; ensures: true; body: { p.d };\n\
+            atom lastf8(p: M8) -> f64 requires: true; ensures: true; body: { p.w };\n\
+            atom fwd8(p: M8) -> i64 requires: true; ensures: true; body: { lasti8(p) };";
+        let lasti8_model = source_model_named_with_admission(
+            mixed_eight_source,
+            "lasti8",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let lastf8_model = source_model_named_with_admission(
+            mixed_eight_source,
+            "lastf8",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let fwd8_model = source_model_named_with_admission(
+            mixed_eight_source,
+            "fwd8",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let mixed_eight_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+declare i64 @lasti8({ i64, double, i64, double, i64, double, i64, double })
+define i64 @lasti8_body({ i64, double, i64, double, i64, double, i64, double } %p) {
+entry:
+  %d = extractvalue { i64, double, i64, double, i64, double, i64, double } %p, 6
+  ret i64 %d
+}
+define double @lastf8({ i64, double, i64, double, i64, double, i64, double } %p) {
+entry:
+  %w = extractvalue { i64, double, i64, double, i64, double, i64, double } %p, 7
+  ret double %w
+}
+define i64 @fwd8({ i64, double, i64, double, i64, double, i64, double } %p) {
+entry:
+  %r = call i64 @lasti8({ i64, double, i64, double, i64, double, i64, double } %p)
+  ret i64 %r
+}
+"#;
+        for (name, model) in [
+            ("lasti8_body", &lasti8_model),
+            ("lastf8", &lastf8_model),
+            ("fwd8", &fwd8_model),
+        ] {
+            let (address, bytes, targets) = compiled_function_with_targets(mixed_eight_ir, name);
+            let disassembly = disassemble(&bytes, address)
+                .unwrap()
+                .iter()
+                .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+                .collect::<Vec<_>>()
+                .join("\n");
+            println!("mixed eight-leaf {name} disassembly:\n{disassembly}");
+            assert_eq!(
+                check_function(&bytes, address, model, &targets, &context),
+                FunctionOutcome::Equivalent,
+                "{name}"
+            );
+        }
 
         let seven_integer_source =
             "struct P7 { a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64 }\n\
