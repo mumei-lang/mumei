@@ -428,6 +428,7 @@ pub(crate) enum Command {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum EvidenceCommand {
     /// Freshly recheck saved source Evidence with linked Z3 and caller-supplied source/budgets; not proof acceptance
     RecheckSource {
@@ -594,6 +595,39 @@ pub(crate) enum EvidenceCommand {
         /// Emit a static mumei.evidence-acceptance/v1 descriptor, not reusable Evidence or a certificate
         #[arg(long)]
         json: bool,
+        /// Regular mumei.producer-signature/v1 envelope file (at most 65,536 bytes)
+        #[arg(long, requires = "producer_key")]
+        signature: Option<String>,
+        /// 64-char lowercase-hex ed25519 producer public key
+        #[arg(long, requires = "signature")]
+        producer_key: Option<String>,
+        /// Pin the declared producer key id
+        #[arg(long, requires = "signature")]
+        expected_producer_key: Option<String>,
+        /// Declared RFC 3339 reference time for freshness and registry checks
+        #[arg(long, requires = "signature")]
+        reference_time: Option<String>,
+        /// Maximum envelope age in seconds
+        #[arg(long, requires_all = ["signature", "reference_time"])]
+        max_age_seconds: Option<u64>,
+        /// Regular mumei.producer-key-registry/v1 file (at most 65,536 bytes)
+        #[arg(long, requires_all = ["signature", "reference_time"])]
+        key_registry: Option<String>,
+        /// Regular mumei.producer-signature/v1 registry signature file
+        #[arg(long, requires_all = ["signature", "key_registry", "registry_key"])]
+        registry_signature: Option<String>,
+        /// 64-char lowercase-hex ed25519 registry root public key
+        #[arg(long, requires_all = ["signature", "key_registry", "registry_signature"])]
+        registry_key: Option<String>,
+        /// Regular mumei.key-revocation-list/v1 file (at most 65,536 bytes)
+        #[arg(long, requires = "signature")]
+        revocation_list: Option<String>,
+        /// Regular mumei.producer-signature/v1 revocation-list signature file
+        #[arg(long, requires_all = ["signature", "revocation_list", "revocation_key"])]
+        revocation_signature: Option<String>,
+        /// 64-char lowercase-hex ed25519 revocation root public key
+        #[arg(long, requires_all = ["signature", "revocation_list", "revocation_signature"])]
+        revocation_key: Option<String>,
     },
     /// Normalize one declared requirement against a bounded Evidence list envelope — per-record verdicts plus an aggregate; no tool execution or proof acceptance
     AcceptList {
