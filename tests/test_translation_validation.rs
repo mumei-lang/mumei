@@ -3078,6 +3078,7 @@ fn v26_array_parameter_abi_is_validated_and_unsupported_ir_fails_closed() {
     assert!(report
         .input_domain
         .ends_with("_with_read_only_i64_array_params_nonnegative_len"));
+    assert!(!report.input_domain.contains("bool_params"));
     assert!(ir.contains("define i64 @read_at({ i64, ptr }"));
     assert!(tv::validate_native_module(
         source,
@@ -3086,6 +3087,25 @@ fn v26_array_parameter_abi_is_validated_and_unsupported_ir_fails_closed() {
         RefinedAdmission::CompositeV25,
     )
     .is_err());
+
+    let mixed_source = "atom read_at(a: [i64], i: i64) -> i64 requires: true; ensures: true; body: { a[i] };\n\
+         atom select(flag: bool) -> i64 requires: true; ensures: true; body: { if flag { 1 } else { 0 } };\n\
+         atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };";
+    let mixed_items = parse_module_checked(mixed_source).unwrap();
+    let mixed_ir = emitted_module(&mixed_items);
+    let mixed_report = tv::validate_native_module(
+        mixed_source,
+        &mixed_ir,
+        Options::default(),
+        RefinedAdmission::CompositeV26,
+    )
+    .unwrap();
+    assert!(mixed_report
+        .input_domain
+        .contains("bool_params_restricted_to_0_or_1"));
+    assert!(mixed_report
+        .input_domain
+        .ends_with("_with_read_only_i64_array_params_nonnegative_len"));
 
     let replace_read_at = |llvm_ir: &str, replacement: &str| {
         let start = llvm_ir.find("define i64 @read_at(").unwrap();

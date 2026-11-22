@@ -6731,6 +6731,7 @@ fn array_parameter_module_builds_as_v29_and_machine_tv_is_inconclusive() {
     assert!(report
         .input_domain
         .ends_with("_with_read_only_i64_array_params_nonnegative_len"));
+    assert!(!report.input_domain.contains("bool_params"));
     assert_eq!(
         Command::new(bundle.join("program"))
             .status()

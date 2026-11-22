@@ -7500,8 +7500,10 @@ pub struct PureI64Body<'ctx> {
     /// parameter lowers to i64 carrying 0/1, so its entry is `input <=u 1`;
     /// an admitted subrange integer type (`i8`/`i16`/`i32`/`u8`/`u16`/`u32`)
     /// lowers to an i64 formal too, so its entries bound the input to the
-    /// type's range. Empty without such parameters.
+    /// type's range. Array-length domains are tracked separately.
     pub param_domain: Vec<Bool<'ctx>>,
+    /// Nonnegative-length constraints for read-only `[i64]` parameters.
+    pub array_len_domain: Vec<Bool<'ctx>>,
     /// True when a declared subrange integer parameter contributed to
     /// `param_domain` — a bool-only domain keeps its 0/1 report label,
     /// while any subrange bound reports the signature-bounded domain.
@@ -7592,6 +7594,7 @@ impl<'ctx> PureI64Body<'ctx> {
             definedness: Vec::new(),
             perform_definedness: Vec::new(),
             param_domain: Vec::new(),
+            array_len_domain: Vec::new(),
             subrange_params: false,
             refined_signature: false,
             composite_signature: false,
@@ -7976,15 +7979,8 @@ fn encode_atom_body<'ctx>(
     } else {
         value
     };
-    let param_domain = signature_domain(
-        &atom.name,
-        &atom.params,
-        &inputs,
-        context,
-        refined,
-        structs,
-        enums,
-    )?;
+    let param_domain = signature_domain(&atom.params, &inputs, context, refined, structs, enums)?;
+    let array_len_domain = array_param_len_domain(&atom.name, &atom.params, context);
     let subrange_params = slots.iter().any(|slot| {
         matches!(
             slot,
@@ -8094,6 +8090,7 @@ fn encode_atom_body<'ctx>(
         definedness,
         perform_definedness,
         param_domain,
+        array_len_domain,
         subrange_params,
         refined_signature,
         composite_signature,
@@ -8355,14 +8352,28 @@ fn signature_slots<'a>(
         .collect()
 }
 
-/// Bounds the declared signature places on each formal: `bool` and
+/// Nonnegative-length constraints for the atom's read-only `[i64]` parameters.
+fn array_param_len_domain<'ctx>(
+    atom_name: &str,
+    params: &[crate::parser::ast::Param],
+    context: &'ctx Context,
+) -> Vec<Bool<'ctx>> {
+    params
+        .iter()
+        .filter(|param| param.type_name.as_deref() == Some("[i64]"))
+        .map(|param| {
+            array_param_len(context, atom_name, &param.name).bvsge(&BV::from_u64(context, 0, 64))
+        })
+        .collect()
+}
+
+/// Bounds the declared scalar signature places on each formal: `bool` and
 /// subrange integer parameters lower to i64 formals carrying the type's
 /// range — `bool` restricts the input to {0, 1} (without it `b == true`
 /// would look different at `input = 5`) and `x: i32` checks only inputs
 /// in `[-2^31, 2^31)`. Shared between an atom's own body encoding (as
 /// `param_domain`) and a module call site's callee arguments.
 fn signature_domain<'ctx>(
-    atom_name: &str,
     params: &[crate::parser::ast::Param],
     inputs: &[BV<'ctx>],
     context: &'ctx Context,
@@ -8378,13 +8389,6 @@ fn signature_domain<'ctx>(
     // weighted arity `param_env` counts.
     if slots.iter().map(signature_slot_weight).sum::<usize>() != inputs.len() {
         return Err(SemanticContractError::Unsupported("source signature arity"));
-    }
-    for param in params
-        .iter()
-        .filter(|param| param.type_name.as_deref() == Some("[i64]"))
-    {
-        let len = array_param_len(context, atom_name, &param.name);
-        domain.push(len.bvsge(&BV::from_u64(context, 0, 64)));
     }
     // Tag-stack by nesting depth (`pure-i64-composite/v23`):
     // `enum_tags[d]` is the BV bound to the live enum tag at level `d`,
@@ -8965,6 +8969,7 @@ fn module_atom_obligations<'ctx>(
     let mut source_domain: Vec<Bool> = body
         .param_domain
         .iter()
+        .chain(body.array_len_domain.iter())
         .chain(body.definedness.iter())
         .cloned()
         .collect();
@@ -9116,7 +9121,6 @@ fn module_atom_obligations<'ctx>(
             callee_body.inputs.iter().zip(site.args.iter()).collect();
         let mut callee_precondition = vec![callee_requires];
         callee_precondition.extend(signature_domain(
-            &callee.name,
             &callee.params,
             &site.args,
             context,
@@ -9124,6 +9128,7 @@ fn module_atom_obligations<'ctx>(
             structs,
             enums,
         )?);
+        callee_precondition.extend(callee_body.array_len_domain.iter().cloned());
         callee_precondition.extend(
             callee_body
                 .definedness

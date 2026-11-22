@@ -929,6 +929,7 @@ unsafe fn compare_function<'ctx>(
     let src_terms: Vec<Bool> = model
         .param_domain
         .iter()
+        .chain(model.array_len_domain.iter())
         .chain(model.definedness.iter())
         .chain(model.call_result_bounds.iter())
         .cloned()
