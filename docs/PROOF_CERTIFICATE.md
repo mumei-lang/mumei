@@ -193,7 +193,7 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
 | `reused_from_store` | `bool` | Optional provenance flag, omitted unless this verified Z3 proof was reused from the local proof store. |
 | `proof_hash` | `String` | Dependency-aware hash from `compute_proof_hash()` — includes transitive callee signatures |
 | `dependencies` | `Vec<String>` | Direct callee atom names from `ModuleEnv.dependency_graph` |
-| `dependency_hashes` | `Option<BTreeMap<String, String>>` | Per-atom hashes for resolved transitive atom contracts, referenced effect definitions, and signature-referenced refined types / structs. New certificates store a map (including an empty map); absent maps in legacy certificates cannot establish dependency freshness. |
+| `dependency_hashes` | `Option<BTreeMap<String, String>>` | Per-atom hashes for resolved transitive atom contracts, referenced effect definitions, and signature-referenced refined types / structs / enums. New certificates store a map (including an empty map); absent maps in legacy certificates cannot establish dependency freshness. |
 | `effects` | `Vec<String>` | Declared effect names |
 | `requires` | `String` | Precondition contract text |
 | `ensures` | `String` | Postcondition contract text |
@@ -344,13 +344,17 @@ SHA-256(
 
 `dependency_hashes` is a separate freshness record; consumers must not compare
 or recompute `proof_hash` to decide whether dependencies are current. Its
-ordered keys use `atom:<name>`, `effect:<name>`, `type:<name>`, and
-`struct:<name>`. Atom values
+ordered keys use `atom:<name>`, `effect:<name>`, `type:<name>`, `struct:<name>`,
+and `enum:<name>`. Atom values
 hash the same contract bytes used by the corresponding `|dep:` proof-hash
 block. Effect values use the same field hashing as the proof hash's
 `|effect_def:` block. Type values cover the named refined type's operand, base
 type, and raw predicate; struct values cover its fields, field constraints,
 and invariants.
+Enum keys pin the variant list of enums used directly in an atom's signature.
+Legacy certificates without an `enum:<name>` key for such a signature are
+reported as `dependency_unchecked`; enums reached only through struct fields or
+bodies are not keyed.
 The dependency walk follows syntactic callees through atoms registered in the
 current `ModuleEnv`, independently of its dependency graph. Unresolved names
 are not recorded.

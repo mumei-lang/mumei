@@ -239,6 +239,59 @@ fn effect_dependency_source(transition: &str) -> String {
 }
 
 #[test]
+fn imported_enum_signature_change_is_a_dependency_change() {
+    let fixture = Fixture::new();
+    let source = fixture.root.join("a.mm");
+    let imported = fixture.root.join("b.mm");
+    let certificate = fixture.root.join("a.proof.json");
+    std::fs::write(&imported, "enum E { A(v: i64), B }\n").expect("write enum module");
+    std::fs::write(
+        &source,
+        "import \"./b.mm\";\n\
+         atom choose(e: E) -> i64\n\
+         requires: true;\n\
+         ensures: true;\n\
+         body: match e { E::A(v) => v, _ => 0 };\n",
+    )
+    .expect("write importing module");
+    assert_success(
+        &fixture.certify(&source, &certificate),
+        "certify enum signature",
+    );
+
+    let cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&certificate).unwrap()).expect("parse certificate");
+    let choose = cert
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "choose")
+        .expect("choose certificate");
+    let dependency_hashes = choose
+        .dependency_hashes
+        .as_ref()
+        .expect("generated dependency hashes");
+    assert!(dependency_hashes.contains_key("enum:E"));
+
+    let unchanged = verify_cert(&fixture, &certificate, &source, false);
+    let unchanged_text = output_text(&unchanged);
+    assert_eq!(unchanged.status.code(), Some(0), "{unchanged_text}");
+    assert!(
+        unchanged_text.contains("choose: proven"),
+        "{unchanged_text}"
+    );
+
+    std::fs::write(&imported, "enum E { A(v: i64), B, C }\n").expect("add an enum variant");
+    let changed = verify_cert(&fixture, &certificate, &source, false);
+    let changed_text = output_text(&changed);
+    assert_eq!(changed.status.code(), Some(0), "{changed_text}");
+    assert!(
+        changed_text.contains("choose: dependency_changed"),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("enum:E"), "{changed_text}");
+}
+
+#[test]
 fn stale_transitive_contract_is_rejected_and_claimbook_marks_drift() {
     let fixture = Fixture::new();
     let (a_source, b_source, c_source, a_cert, b_cert) = setup_modules(&fixture);

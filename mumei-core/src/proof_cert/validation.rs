@@ -272,7 +272,8 @@ pub fn verify_certificate_in_env(
                                 current
                                     .keys()
                                     .filter(|key| {
-                                        key.starts_with("effect:") && !expected.contains_key(*key)
+                                        (key.starts_with("effect:") || key.starts_with("enum:"))
+                                            && !expected.contains_key(*key)
                                     })
                                     .cloned(),
                             );
