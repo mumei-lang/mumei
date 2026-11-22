@@ -1197,6 +1197,7 @@ fn lift<'ctx>(
                         state.rsp_offset,
                         &mut state.outgoing_cleanup_slots,
                         &mut state.sret_call_buffers,
+                        state.frame_region,
                         state.rsp_is_known,
                         &state.path_conditions,
                         &arguments,
@@ -1268,6 +1269,7 @@ fn lift<'ctx>(
                     state.rsp_offset,
                     &mut state.outgoing_cleanup_slots,
                     &mut state.sret_call_buffers,
+                    state.frame_region,
                     state.rsp_is_known,
                     &state.path_conditions,
                     &arguments,
@@ -2684,10 +2686,12 @@ fn sret_call_memory_offset<'ctx>(
         return None;
     }
     let ast = state.registers[register_index].get_z3_ast();
+    // Newest record first: LLVM reuses one frame slot for consecutive
+    // `sret` buffers, and only the latest call's extent is live.
     state
         .sret_call_buffers
         .iter()
-        .position(|buffer| buffer.pointer.get_z3_ast() == ast)
+        .rposition(|buffer| buffer.pointer.get_z3_ast() == ast)
         .map(|index| (index, offset))
 }
 
@@ -3586,6 +3590,7 @@ fn lift_call<'ctx>(
     rsp_offset: i64,
     outgoing_cleanup_slots: &mut BTreeSet<i64>,
     sret_call_buffers: &mut Vec<SretCallBuffer<'ctx>>,
+    frame_region: Option<(i64, i64)>,
     rsp_is_known: bool,
     path_conditions: &[Bool<'ctx>],
     arguments: &[BV<'ctx>],
@@ -3851,7 +3856,7 @@ fn lift_call<'ctx>(
     }
     if !tail_call && !outgoing_slots.is_empty() {
         stack.retain(|(stack_slot, _)| !outgoing_slots.contains(stack_slot));
-        outgoing_cleanup_slots.extend(outgoing_slots);
+        outgoing_cleanup_slots.extend(outgoing_slots.iter().copied());
     }
     if let Some(leaf_count) = sret_call_leaf_count {
         apply_sret_call_result_and_clobbers(
@@ -3863,6 +3868,8 @@ fn lift_call<'ctx>(
             leaf_count,
             &call_site.result,
             sret_call_buffers,
+            &outgoing_slots,
+            frame_region,
             context,
         )?;
     } else {
@@ -3957,6 +3964,8 @@ fn apply_sret_call_result_and_clobbers<'ctx>(
     leaf_count: usize,
     result: &BV<'ctx>,
     sret_call_buffers: &mut Vec<SretCallBuffer<'ctx>>,
+    outgoing_slots: &BTreeSet<i64>,
+    frame_region: Option<(i64, i64)>,
     context: &'ctx Context,
 ) -> Result<(), FunctionOutcome> {
     if !rsp_is_known {
@@ -3972,6 +3981,31 @@ fn apply_sret_call_result_and_clobbers<'ctx>(
     let Some(base_offset) = rsp_offset.checked_add(buffer_delta) else {
         return Err(FunctionOutcome::OutsideProfile("call_arguments"));
     };
+    let Some(buffer_end) = leaf_count
+        .checked_mul(8)
+        .and_then(|bytes| i64::try_from(bytes).ok())
+        .and_then(|bytes| base_offset.checked_add(bytes))
+    else {
+        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+    };
+    // A buffer overlapping this call's outgoing stack-argument slots
+    // would let the callee's result stores overwrite bytes its own
+    // argument reads still resolve to — stay fail-closed.
+    if outgoing_slots
+        .range(base_offset..buffer_end)
+        .next()
+        .is_some()
+    {
+        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+    }
+    // A buffer overlapping the allocated frame region would leave leaf
+    // writes visible through `stack` while indexed array reads still
+    // resolve through `frame_memory` — the two views diverge.
+    if let Some((lo, hi)) = frame_region {
+        if base_offset < hi && buffer_end > lo {
+            return Err(FunctionOutcome::OutsideProfile("frame_memory_bounds"));
+        }
+    }
     for xmm_register in xmm_registers.iter_mut() {
         *xmm_register = BV::fresh_const(context, "machine_call_xmm_clobber", 128);
     }
