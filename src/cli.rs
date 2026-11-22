@@ -682,7 +682,7 @@ pub(crate) struct SignatureArgs {
     /// 64-char lowercase-hex ed25519 registry root public key
     #[arg(long, requires_all = ["signature", "key_registry", "registry_signature"])]
     pub(crate) registry_key: Option<String>,
-    /// Regular mumei.key-revocation-list/v1 file (at most 65,536 bytes); requires a pinned producer key id
+    /// Regular mumei.key-revocation-list/v1 or /v2 file (at most 65,536 bytes); requires a pinned producer key id
     #[arg(long, requires_all = ["signature", "expected_producer_key"])]
     pub(crate) revocation_list: Option<String>,
     /// Regular mumei.producer-signature/v1 revocation-list signature file
@@ -691,6 +691,19 @@ pub(crate) struct SignatureArgs {
     /// 64-char lowercase-hex ed25519 revocation root public key
     #[arg(long, requires_all = ["signature", "revocation_list", "revocation_signature"])]
     pub(crate) revocation_key: Option<String>,
+    /// Minimum acceptable v2 version; checks not_after and requires a root-signed list and reference time
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(u64).range(1..),
+        requires_all = [
+            "signature",
+            "revocation_list",
+            "revocation_signature",
+            "revocation_key",
+            "reference_time"
+        ]
+    )]
+    pub(crate) min_revocation_version: Option<u64>,
 }
 
 #[derive(Subcommand)]

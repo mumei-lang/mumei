@@ -186,13 +186,14 @@ fn non_rfc3339_produced_at_is_rejected() {
 struct BindingFixture {
     producer_public: String,
     root_public: String,
+    root_secret: String,
     envelope: Value,
     evidence_fingerprint: String,
     registry: ProducerKeyRegistry,
     registry_bytes: Vec<u8>,
     registry_digest: String,
     registry_signature: Value,
-    revoked: RevocationKeySet,
+    revoked: RevocationList,
     revocation_bytes: Vec<u8>,
     revocation_digest: String,
     revocation_signature: Value,
@@ -249,6 +250,7 @@ impl BindingFixture {
         Self {
             producer_public,
             root_public,
+            root_secret,
             envelope,
             evidence_fingerprint,
             registry,
@@ -280,6 +282,7 @@ impl BindingFixture {
             revocation_digest: Some(&self.revocation_digest),
             revocation_signature: Some(&self.revocation_signature),
             revocation_key_hex: Some(&self.root_public),
+            min_revocation_version: None,
         }
     }
 }
@@ -389,6 +392,59 @@ fn trust_anchor_parsers_validate_closed_shapes_and_reject_duplicate_keys() {
 }
 
 #[test]
+fn revocation_list_v2_parser_preserves_v1_and_returns_closed_metadata() {
+    let v1 = parse_revocation_list(
+        br#"{"schema_version":"mumei.key-revocation-list/v1","revoked_keys":["producer-a"]}"#,
+    )
+    .unwrap();
+    assert_eq!(v1.revoked_keys, BTreeSet::from(["producer-a".to_owned()]));
+    assert_eq!(v1.metadata, None);
+
+    let v2 = parse_revocation_list(
+        br#"{"schema_version":"mumei.key-revocation-list/v2","list_version":7,"issued_at":"2024-02-01T00:00:00Z","not_after":"2024-03-01T00:00:00Z","revoked_keys":["producer-a"]}"#,
+    )
+    .unwrap();
+    assert_eq!(v2.revoked_keys, BTreeSet::from(["producer-a".to_owned()]));
+    assert_eq!(
+        v2.metadata,
+        Some(RevocationMetadata {
+            list_version: 7,
+            issued_at: verification_evidence::rfc3339_instant("2024-02-01T00:00:00Z").unwrap(),
+            not_after: Some(
+                verification_evidence::rfc3339_instant("2024-03-01T00:00:00Z").unwrap()
+            ),
+        })
+    );
+
+    let no_expiry = parse_revocation_list(
+        br#"{"schema_version":"mumei.key-revocation-list/v2","list_version":1,"issued_at":"2024-02-01T00:00:00Z","revoked_keys":[]}"#,
+    )
+    .unwrap();
+    assert_eq!(no_expiry.metadata.unwrap().not_after, None);
+}
+
+#[test]
+fn revocation_list_v2_parser_rejects_invalid_versions_windows_and_shapes() {
+    for malformed in [
+        br#"{"schema_version":"mumei.key-revocation-list/v2","list_version":0,"issued_at":"2024-02-01T00:00:00Z","revoked_keys":[]}"#.as_slice(),
+        br#"{"schema_version":"mumei.key-revocation-list/v2","list_version":-1,"issued_at":"2024-02-01T00:00:00Z","revoked_keys":[]}"#.as_slice(),
+        br#"{"schema_version":"mumei.key-revocation-list/v2","list_version":1.0,"issued_at":"2024-02-01T00:00:00Z","revoked_keys":[]}"#.as_slice(),
+        br#"{"schema_version":"mumei.key-revocation-list/v2","list_version":true,"issued_at":"2024-02-01T00:00:00Z","revoked_keys":[]}"#.as_slice(),
+        br#"{"schema_version":"mumei.key-revocation-list/v2","list_version":1,"revoked_keys":[]}"#.as_slice(),
+        br#"{"schema_version":"mumei.key-revocation-list/v2","list_version":1,"issued_at":"2024-02-01T00:00:00Z","revoked_keys":[],"extra":true}"#.as_slice(),
+        br#"{"schema_version":"mumei.key-revocation-list/v2","list_version":1,"issued_at":"2024-03-01T00:00:00Z","not_after":"2024-02-01T00:00:00Z","revoked_keys":[]}"#.as_slice(),
+        br#"{"schema_version":"mumei.key-revocation-list/v2","list_version":1,"issued_at":"2024-02-30T00:00:00Z","revoked_keys":[]}"#.as_slice(),
+        br#"{"schema_version":"mumei.key-revocation-list/v2","list_version":1,"issued_at":"2024-02-01T00:00:00Z","not_after":null,"revoked_keys":[]}"#.as_slice(),
+        br#"{"schema_version":"mumei.key-revocation-list/v2","list_version":1,"list_version":2,"issued_at":"2024-02-01T00:00:00Z","revoked_keys":[]}"#.as_slice(),
+    ] {
+        assert_eq!(
+            parse_revocation_list(malformed),
+            Err(AnchorError::InvalidDocument)
+        );
+    }
+}
+
+#[test]
 fn signature_binding_emits_true_results_for_a_valid_complete_chain() {
     let fixture = BindingFixture::new();
     let binding = verify_binding(fixture.input());
@@ -405,11 +461,69 @@ fn signature_binding_emits_true_results_for_a_valid_complete_chain() {
     assert_eq!(binding.envelope_fresh, Some(true));
     assert_eq!(binding.registry_authentic, Some(true));
     assert_eq!(binding.revocation_list_authentic, Some(true));
+    assert_eq!(binding.revocation_list_current, None);
     assert!(binding.failed_fields().is_empty());
     assert_eq!(
         binding.checks_not_performed,
-        ["producer_time_authenticity", "clock_authenticity"]
+        [
+            "revocation_list_rollback",
+            "producer_time_authenticity",
+            "clock_authenticity"
+        ]
     );
+}
+
+#[test]
+fn current_v2_revocation_list_is_independent_of_a_mismatched_signature_envelope() {
+    let fixture = BindingFixture::new();
+    let revocation_bytes =
+        br#"{"schema_version":"mumei.key-revocation-list/v2","list_version":1,"issued_at":"2024-02-01T00:00:00Z","revoked_keys":[]}"#;
+    let revocation_list = parse_revocation_list(revocation_bytes).unwrap();
+    let revocation_digest = subject_digest(revocation_bytes);
+    let revocation_key = decode_secret_key(&fixture.root_secret).unwrap();
+    let revocation_signature =
+        serde_json::to_value(sign(revocation_bytes, &revocation_key, "root", None).unwrap())
+            .unwrap();
+    let mismatched_envelope = json!({
+        "schema_version": PRODUCER_SIGNATURE_SCHEMA,
+        "unexpected": true,
+    });
+
+    let mut input = fixture.input();
+    input.envelope = &mismatched_envelope;
+    input.revocation_list = Some(&revocation_list);
+    input.revocation_digest = Some(&revocation_digest);
+    input.revocation_signature = Some(&revocation_signature);
+    input.min_revocation_version = Some(1);
+    let binding = verify_binding(input);
+
+    assert!(!binding.envelope_match);
+    assert_eq!(binding.revocation_list_authentic, Some(true));
+    assert_eq!(binding.revocation_list_current, Some(true));
+    assert!(binding.failed_fields().contains(&"envelope_match"));
+    assert!(binding.failed_fields().contains(&"signature_valid"));
+}
+
+#[test]
+fn v2_revocation_list_current_requires_root_authenticity() {
+    let fixture = BindingFixture::new();
+    let revocation_bytes = br#"{"schema_version":"mumei.key-revocation-list/v2","list_version":1,"issued_at":"2024-02-01T00:00:00Z","revoked_keys":[]}"#;
+    let revocation_list = parse_revocation_list(revocation_bytes).unwrap();
+    let revocation_digest = subject_digest(revocation_bytes);
+    let mut invalid_signature = fixture.revocation_signature.clone();
+    invalid_signature["subject_digest"] = json!(revocation_digest);
+    invalid_signature["signature"] = json!("0".repeat(128));
+
+    let mut input = fixture.input();
+    input.revocation_list = Some(&revocation_list);
+    input.revocation_digest = Some(&revocation_digest);
+    input.revocation_signature = Some(&invalid_signature);
+    input.min_revocation_version = Some(1);
+    let binding = verify_binding(input);
+
+    assert_eq!(binding.revocation_list_authentic, Some(false));
+    assert_eq!(binding.revocation_list_current, Some(false));
+    assert!(binding.failed_fields().contains(&"revocation_list_current"));
 }
 
 #[test]
@@ -486,7 +600,10 @@ fn signature_binding_reports_each_failed_binding_check() {
     input.expected_producer_key = Some("other-producer");
     assert_eq!(verify_binding(input).key_pinned, Some(false));
 
-    let revoked = BTreeSet::from(["producer-a".to_owned()]);
+    let revoked = RevocationList {
+        revoked_keys: BTreeSet::from(["producer-a".to_owned()]),
+        metadata: None,
+    };
     let mut input = fixture.input();
     input.revocation_list = Some(&revoked);
     input.revocation_digest = None;
@@ -533,5 +650,5 @@ fn signature_binding_reports_each_failed_binding_check() {
     assert_eq!(binding.key_authentic, Some(false));
     assert_eq!(binding.envelope_fresh, Some(false));
     assert_eq!(binding.registry_authentic, Some(false));
-    assert_eq!(binding.revocation_list_authentic, Some(false));
+    assert_eq!(binding.revocation_list_authentic, Some(true));
 }

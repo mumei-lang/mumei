@@ -25,6 +25,7 @@ use zeroize::Zeroize;
 pub const PRODUCER_SIGNATURE_SCHEMA: &str = "mumei.producer-signature/v1";
 pub const PRODUCER_KEY_REGISTRY_SCHEMA: &str = "mumei.producer-key-registry/v1";
 pub const KEY_REVOCATION_LIST_SCHEMA: &str = "mumei.key-revocation-list/v1";
+pub const KEY_REVOCATION_LIST_V2_SCHEMA: &str = "mumei.key-revocation-list/v2";
 
 /// Closed envelope shape; `producer_key_id` is a caller-declared label the
 /// consumer pins separately — it is never derived from the key bytes.
@@ -178,6 +179,19 @@ pub type ProducerKeyRegistry = BTreeMap<String, RegistryEntry>;
 pub type RevocationKeySet = BTreeSet<String>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RevocationMetadata {
+    pub list_version: u64,
+    pub issued_at: (i128, i128),
+    pub not_after: Option<(i128, i128)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevocationList {
+    pub revoked_keys: RevocationKeySet,
+    pub metadata: Option<RevocationMetadata>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnchorError {
     InvalidDocument,
 }
@@ -238,26 +252,72 @@ pub fn parse_key_registry(bytes: &[u8]) -> Result<ProducerKeyRegistry, AnchorErr
     Ok(parsed)
 }
 
-pub fn parse_revocation_list(bytes: &[u8]) -> Result<RevocationKeySet, AnchorError> {
+pub fn parse_revocation_list(bytes: &[u8]) -> Result<RevocationList, AnchorError> {
     use crate::strict_json::{self, JsonValue};
 
     let value = strict_json::parse(bytes).map_err(|_| AnchorError::InvalidDocument)?;
     let object = strict_json::object(&value).map_err(|_| AnchorError::InvalidDocument)?;
-    strict_json::require_keys(object, &["schema_version", "revoked_keys"])
+    let schema_version = strict_json::string_field(object, "schema_version")
         .map_err(|_| AnchorError::InvalidDocument)?;
-    if strict_json::string_field(object, "schema_version")
-        .map_err(|_| AnchorError::InvalidDocument)?
-        != KEY_REVOCATION_LIST_SCHEMA
-    {
-        return Err(AnchorError::InvalidDocument);
-    }
+    let metadata = match schema_version {
+        KEY_REVOCATION_LIST_SCHEMA => {
+            strict_json::require_keys(object, &["schema_version", "revoked_keys"])
+                .map_err(|_| AnchorError::InvalidDocument)?;
+            None
+        }
+        KEY_REVOCATION_LIST_V2_SCHEMA => {
+            let required = [
+                "schema_version",
+                "list_version",
+                "issued_at",
+                "revoked_keys",
+            ];
+            if required.iter().any(|field| !object.contains_key(*field))
+                || object
+                    .keys()
+                    .any(|field| !required.contains(&field.as_str()) && field != "not_after")
+            {
+                return Err(AnchorError::InvalidDocument);
+            }
+            let list_version = strict_json::unsigned_field(object, "list_version")
+                .map_err(|_| AnchorError::InvalidDocument)?;
+            if list_version == 0 {
+                return Err(AnchorError::InvalidDocument);
+            }
+            let issued_at = verification_evidence::rfc3339_instant(
+                strict_json::string_field(object, "issued_at")
+                    .map_err(|_| AnchorError::InvalidDocument)?,
+            )
+            .ok_or(AnchorError::InvalidDocument)?;
+            let not_after = object
+                .contains_key("not_after")
+                .then(|| {
+                    strict_json::string_field(object, "not_after")
+                        .map_err(|_| AnchorError::InvalidDocument)
+                        .and_then(|value| {
+                            verification_evidence::rfc3339_instant(value)
+                                .ok_or(AnchorError::InvalidDocument)
+                        })
+                })
+                .transpose()?;
+            if not_after.is_some_and(|not_after| issued_at.0 > not_after.1) {
+                return Err(AnchorError::InvalidDocument);
+            }
+            Some(RevocationMetadata {
+                list_version,
+                issued_at,
+                not_after,
+            })
+        }
+        _ => return Err(AnchorError::InvalidDocument),
+    };
     let revoked = match strict_json::field(object, "revoked_keys")
         .map_err(|_| AnchorError::InvalidDocument)?
     {
         JsonValue::Array(revoked) => revoked,
         _ => return Err(AnchorError::InvalidDocument),
     };
-    let mut parsed = RevocationKeySet::new();
+    let mut revoked_keys = RevocationKeySet::new();
     for key_id in revoked {
         let JsonValue::String(key_id) = key_id else {
             return Err(AnchorError::InvalidDocument);
@@ -265,9 +325,12 @@ pub fn parse_revocation_list(bytes: &[u8]) -> Result<RevocationKeySet, AnchorErr
         if key_id.is_empty() {
             return Err(AnchorError::InvalidDocument);
         }
-        parsed.insert(key_id.clone());
+        revoked_keys.insert(key_id.clone());
     }
-    Ok(parsed)
+    Ok(RevocationList {
+        revoked_keys,
+        metadata,
+    })
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -295,6 +358,8 @@ pub struct SignatureBinding {
     pub registry_authentic: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revocation_list_authentic: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revocation_list_current: Option<bool>,
     pub checks_not_performed: Vec<&'static str>,
 }
 
@@ -318,6 +383,7 @@ impl SignatureBinding {
             ("produced_at_signed", self.produced_at_signed),
             ("registry_authentic", self.registry_authentic),
             ("revocation_list_authentic", self.revocation_list_authentic),
+            ("revocation_list_current", self.revocation_list_current),
         ] {
             if value == Some(false) {
                 failed.push(name);
@@ -340,10 +406,11 @@ pub struct SignatureBindingInput<'a> {
     pub registry_digest: Option<&'a str>,
     pub registry_signature: Option<&'a Value>,
     pub registry_key_hex: Option<&'a str>,
-    pub revocation_list: Option<&'a RevocationKeySet>,
+    pub revocation_list: Option<&'a RevocationList>,
     pub revocation_digest: Option<&'a str>,
     pub revocation_signature: Option<&'a Value>,
     pub revocation_key_hex: Option<&'a str>,
+    pub min_revocation_version: Option<u64>,
 }
 
 pub fn verify_binding(input: SignatureBindingInput<'_>) -> SignatureBinding {
@@ -366,15 +433,14 @@ pub fn verify_binding(input: SignatureBindingInput<'_>) -> SignatureBinding {
         matched && anchor_signature_valid(wrapper, input.registry_key_hex, input.registry_digest)
     });
     let revocation_list_authentic = input.revocation_signature.map(|wrapper| {
-        matched
-            && anchor_signature_valid(wrapper, input.revocation_key_hex, input.revocation_digest)
+        anchor_signature_valid(wrapper, input.revocation_key_hex, input.revocation_digest)
     });
 
     let key_not_revoked = input.revocation_list.map(|revoked| {
         let not_listed = matched
             && envelope["producer_key_id"]
                 .as_str()
-                .is_some_and(|key_id| !revoked.contains(key_id));
+                .is_some_and(|key_id| !revoked.revoked_keys.contains(key_id));
         not_listed && revocation_list_authentic.unwrap_or(true)
     });
     let key_authentic = input.key_registry.map(|registry| {
@@ -407,6 +473,19 @@ pub fn verify_binding(input: SignatureBindingInput<'_>) -> SignatureBinding {
             && subject_bound
             && envelope["produced_at"].as_str() == Some(timestamp)
     });
+    let revocation_list_current = input.revocation_list.and_then(|list| {
+        let metadata = list.metadata?;
+        let minimum_version = input.min_revocation_version?;
+        let reference_time = input.reference_time?;
+        Some(
+            metadata.issued_at.1 <= reference_time.0
+                && metadata
+                    .not_after
+                    .is_none_or(|not_after| not_after.0 >= reference_time.1)
+                && metadata.list_version >= minimum_version
+                && revocation_list_authentic == Some(true),
+        )
+    });
 
     let mut checks_not_performed = vec![
         "key_binding",
@@ -415,6 +494,7 @@ pub fn verify_binding(input: SignatureBindingInput<'_>) -> SignatureBinding {
         "key_revocation",
         "registry_authenticity",
         "revocation_list_authenticity",
+        "revocation_list_rollback",
         "producer_time_authenticity",
         "clock_authenticity",
     ];
@@ -436,6 +516,9 @@ pub fn verify_binding(input: SignatureBindingInput<'_>) -> SignatureBinding {
     if input.revocation_signature.is_some() {
         checks_not_performed.retain(|check| *check != "revocation_list_authenticity");
     }
+    if revocation_list_current.is_some() {
+        checks_not_performed.retain(|check| *check != "revocation_list_rollback");
+    }
     if produced_at_signed.is_some() {
         checks_not_performed.retain(|check| *check != "producer_time_authenticity");
     }
@@ -454,6 +537,7 @@ pub fn verify_binding(input: SignatureBindingInput<'_>) -> SignatureBinding {
         revocation_digest: input.revocation_digest.map(str::to_owned),
         registry_authentic,
         revocation_list_authentic,
+        revocation_list_current,
         checks_not_performed,
     }
 }

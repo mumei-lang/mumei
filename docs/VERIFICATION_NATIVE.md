@@ -536,10 +536,16 @@ declares the same string; it means “the producer signed this timestamp,” not
 “the timestamp is true.” The envelope stamp is unsigned, and the producer's
 clock is not authenticated. `accept-list` does not emit this check because its
 envelope stamp describes the list, not each record. Key rotation and root-key
-revocation (#886 deferred), revocation-list rollback (78a4), and clock
-authenticity remain open. Malformed anchor documents and public-key encodings
-fail closed; an object envelope with a nonmatching closed shape is reported as
-a failed binding.
+revocation (#886 deferred), and clock authenticity remain open. Revocation-list
+v2 documents carry a positive `list_version`, `issued_at`, and optional
+`not_after`; `--min-revocation-version` requires a root-signed list and checks
+the pinned minimum and declared time window, reporting
+`revocation_list_current`. This is a stateless check: replay protection holds
+only up to the consumer's pinned minimum version, and `not_after` (checked
+under the same flag) bounds how long an older signed list stays usable. V1
+lists remain usable without this check.
+Malformed anchor documents and public-key encodings fail closed; an object
+envelope with a nonmatching closed shape is reported as a failed binding.
 
 ## 5. Minimal semantic contract (C03)
 

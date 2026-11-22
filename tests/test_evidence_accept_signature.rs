@@ -237,6 +237,29 @@ fn run_command(mut command: Command) -> Output {
     command.output().unwrap()
 }
 
+fn write_v2_revocation_list(
+    fixture: &Fixture,
+    version: u64,
+    issued_at: &str,
+    not_after: Option<&str>,
+) {
+    let mut document = json!({
+        "schema_version": "mumei.key-revocation-list/v2",
+        "list_version": version,
+        "issued_at": issued_at,
+        "revoked_keys": [],
+    });
+    if let Some(not_after) = not_after {
+        document["not_after"] = json!(not_after);
+    }
+    fs::write(
+        &fixture.revocation_list,
+        serde_json::to_vec_pretty(&document).unwrap(),
+    )
+    .unwrap();
+    resign_revocation_list(fixture);
+}
+
 fn accepted_value(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
@@ -361,7 +384,11 @@ fn valid_full_chain_binds_signature_freshness_registry_and_revocation() {
     );
     assert_eq!(
         binding["checks_not_performed"],
-        json!(["producer_time_authenticity", "clock_authenticity"])
+        json!([
+            "revocation_list_rollback",
+            "producer_time_authenticity",
+            "clock_authenticity"
+        ])
     );
 }
 
@@ -385,6 +412,7 @@ fn signature_only_checks_subject_binding_but_leaves_authenticity_and_freshness_o
             "key_revocation",
             "registry_authenticity",
             "revocation_list_authenticity",
+            "revocation_list_rollback",
             "producer_time_authenticity",
             "clock_authenticity"
         ])
@@ -580,14 +608,24 @@ fn relabeled_revoked_key_requires_and_fails_the_producer_key_id_pin() {
 #[test]
 fn nonmatching_json_object_envelope_is_a_failed_binding_not_an_input_error() {
     let fixture = fixture(Some("2024-02-01T00:00:00Z"));
+    write_v2_revocation_list(
+        &fixture,
+        1,
+        "2024-02-01T00:00:00Z",
+        Some("2024-03-01T00:00:00Z"),
+    );
     rewrite_json(&fixture.signature, |envelope| {
         envelope["unexpected"] = json!(true);
     });
-    let output = run_command(full_chain_command(&fixture, true));
+    let mut command = full_chain_command(&fixture, true);
+    command.args(["--min-revocation-version", "1"]);
+    let output = run_command(command);
     assert_eq!(output.status.code(), Some(1));
     let descriptor = accepted_value(&output);
+    assert_eq!(descriptor["verdict"], "rejected");
     let binding = &descriptor["producer_signature"];
     assert_eq!(binding["envelope_match"], false);
+    assert_eq!(binding["revocation_list_current"], true);
     assert_eq!(binding["signature_valid"], false);
     assert!(binding.get("subject_digest").is_none());
     assert_eq!(binding["subject_bound"], false);
@@ -597,10 +635,10 @@ fn nonmatching_json_object_envelope_is_a_failed_binding_not_an_input_error() {
         "key_authentic",
         "envelope_fresh",
         "registry_authentic",
-        "revocation_list_authentic",
     ] {
         assert_eq!(binding[name], false, "{name}");
     }
+    assert_eq!(binding["revocation_list_authentic"], true);
 }
 
 #[test]
@@ -760,4 +798,122 @@ fn requirement_list_accept_path_attaches_signature_binding() {
     assert_eq!(descriptor["producer_signature"]["signature_valid"], true);
     assert_eq!(descriptor["producer_signature"]["key_authentic"], true);
     assert_eq!(descriptor["producer_signature"]["key_not_revoked"], true);
+}
+
+#[test]
+fn v2_revocation_list_version_window_and_rollback_checks() {
+    let current = fixture(Some("2024-02-01T00:00:00Z"));
+    write_v2_revocation_list(
+        &current,
+        3,
+        "2024-02-01T00:00:00Z",
+        Some("2024-03-01T00:00:00Z"),
+    );
+    let mut command = full_chain_command(&current, true);
+    command.args(["--min-revocation-version", "3"]);
+    let output = run_command(command);
+    assert!(output.status.success());
+    let binding = &accepted_value(&output)["producer_signature"];
+    assert_eq!(binding["revocation_list_current"], true);
+    assert!(!binding["checks_not_performed"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("revocation_list_rollback")));
+
+    for (version, issued_at, not_after) in [
+        (2, "2024-02-01T00:00:00Z", Some("2024-03-01T00:00:00Z")),
+        (3, "2024-02-03T00:00:00Z", Some("2024-03-01T00:00:00Z")),
+        (3, "2024-01-01T00:00:00Z", Some("2024-02-01T00:00:00Z")),
+    ] {
+        let replay = fixture(Some("2024-02-01T00:00:00Z"));
+        write_v2_revocation_list(&replay, version, issued_at, not_after);
+        let mut command = full_chain_command(&replay, true);
+        command.args(["--min-revocation-version", "3"]);
+        let output = run_command(command);
+        assert_eq!(output.status.code(), Some(1));
+        let descriptor = accepted_value(&output);
+        assert_eq!(descriptor["verdict"], "rejected");
+        assert_eq!(
+            descriptor["producer_signature"]["revocation_list_current"],
+            false
+        );
+        assert_eq!(descriptor["producer_signature"]["key_not_revoked"], true);
+    }
+
+    let invalid_root_signature = fixture(Some("2024-02-01T00:00:00Z"));
+    write_v2_revocation_list(
+        &invalid_root_signature,
+        3,
+        "2024-02-01T00:00:00Z",
+        Some("2024-03-01T00:00:00Z"),
+    );
+    rewrite_json(&invalid_root_signature.revocation_signature, |signature| {
+        signature["signature"] = json!("0".repeat(128));
+    });
+    let mut command = full_chain_command(&invalid_root_signature, true);
+    command.args(["--min-revocation-version", "3"]);
+    let output = run_command(command);
+    assert_eq!(output.status.code(), Some(1));
+    let descriptor = accepted_value(&output);
+    assert_eq!(descriptor["verdict"], "rejected");
+    assert_eq!(
+        descriptor["producer_signature"]["revocation_list_authentic"],
+        false
+    );
+    assert_eq!(
+        descriptor["producer_signature"]["revocation_list_current"],
+        false
+    );
+
+    let no_minimum = fixture(Some("2024-02-01T00:00:00Z"));
+    write_v2_revocation_list(
+        &no_minimum,
+        2,
+        "2024-02-01T00:00:00Z",
+        Some("2024-03-01T00:00:00Z"),
+    );
+    let output = run_command(full_chain_command(&no_minimum, true));
+    assert!(output.status.success());
+    let binding = &accepted_value(&output)["producer_signature"];
+    assert!(binding.get("revocation_list_current").is_none());
+    assert!(binding["checks_not_performed"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("revocation_list_rollback")));
+}
+
+#[test]
+fn min_revocation_version_dependencies_and_v1_rejection() {
+    let fixture = fixture(Some("2024-02-01T00:00:00Z"));
+    let mut v1 = full_chain_command(&fixture, true);
+    v1.args(["--min-revocation-version", "1"]);
+    let output = run_command(v1);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("--min-revocation-version requires a mumei.key-revocation-list/v2 document"));
+
+    let mut no_list = signature_command(&fixture, true);
+    no_list.args(["--min-revocation-version", "1"]);
+    assert_failure_without_descriptor(&run_command(no_list));
+    let mut no_reference = signature_command(&fixture, true);
+    no_reference
+        .args(["--expected-producer-key", PRODUCER_KEY_ID])
+        .args(["--revocation-list"])
+        .arg(&fixture.revocation_list)
+        .args(["--min-revocation-version", "1"]);
+    assert_failure_without_descriptor(&run_command(no_reference));
+
+    let mut unsigned_list = signature_command(&fixture, true);
+    unsigned_list
+        .args(["--expected-producer-key", PRODUCER_KEY_ID])
+        .args(["--reference-time", REFERENCE_TIME])
+        .args(["--revocation-list"])
+        .arg(&fixture.revocation_list)
+        .args(["--min-revocation-version", "1"]);
+    assert_failure_without_descriptor(&run_command(unsigned_list));
+
+    let mut zero = full_chain_command(&fixture, true);
+    zero.args(["--min-revocation-version", "0"]);
+    assert_failure_without_descriptor(&run_command(zero));
 }
