@@ -72,7 +72,9 @@ use std::path::Path;
 /// cached verdicts must be re-derived.
 /// Version 33 rejects calls where later argument evaluation may mutate an
 /// array root passed by an earlier argument, matching runtime buffer aliasing.
-pub const VERIFIER_POLICY_VERSION: u32 = 33;
+/// Version 34 uses recursive datatype selectors for scalar payload access and
+/// rejects writes that traverse a recursive self field.
+pub const VERIFIER_POLICY_VERSION: u32 = 35;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -3355,7 +3357,7 @@ body: { p.a };\n";
         let baseline = proof_hash_for(source, "g");
         assert_eq!(
             baseline,
-            "d61316a01e4088ecc63b423a4a1dd43435e863bf58766bc9bad958d6a9a4874b"
+            "eec27f31615e5f4a71df27a2fda5fc52dfee5052a8847a0367cda83fb3c3b764"
         );
         let changed = proof_hash_for(
             &source.replace(
@@ -3368,7 +3370,7 @@ body: { p.a };\n";
     }
 
     #[test]
-    fn effect_free_proof_hash_matches_policy_version_33() {
+    fn effect_free_proof_hash_matches_policy_version_35() {
         let source = "atom main(x: i64) -> i64\n\
                       requires: true;\n\
                       ensures: result == x;\n\
@@ -3377,7 +3379,7 @@ body: { p.a };\n";
 
         assert_eq!(
             hash,
-            "c6f6bc116ad3dc8c347bc1120b8333125da6184f1e637e374d37227fb6e9bec7"
+            "e3ec3238e34a7107da4730e8ac170f3c35a317e5b7369a9767e6464a3128cb21"
         );
         assert!(!dependency_hashes_for(source, "main")
             .keys()

@@ -2142,7 +2142,7 @@ fn enum_payload_field_read<'a>(
     let Some(enum_def) = enum_def else {
         return Ok(None);
     };
-    if !datatype::is_finite_adt(enum_def, vc.module_env)
+    if !datatype::uses_datatype_sort(enum_def, vc.module_env)
         || datatype::enum_datatype_sort(vc, enum_def).is_none()
     {
         return Ok(None);
@@ -2165,13 +2165,42 @@ fn enum_payload_field_read<'a>(
     let Some((variant_idx, field_idx)) = owner else {
         return Ok(None);
     };
-    let Some(field_type) = enum_def.variants[variant_idx]
-        .field_types
-        .get(field_idx)
-        .map(datatype::payload_field_type_name)
-    else {
+    let Some(field_type_ref) = enum_def.variants[variant_idx].field_types.get(field_idx) else {
         return Ok(None);
     };
+    if datatype::is_direct_self_field(enum_def, field_type_ref, vc.module_env) {
+        let Some((payload_offset, _)) =
+            datatype::payload_leaf_range(enum_def, vc.module_env, variant_idx, field_idx)
+        else {
+            return Ok(None);
+        };
+        let base = expr_to_z3(vc, &root, env, None)?;
+        let Some((sort, is_variant, resolved_idx, resolved_enum)) =
+            datatype::variant_tester_condition(vc, &base, &enum_def.variants[variant_idx].name)
+        else {
+            return Ok(None);
+        };
+        if resolved_idx != variant_idx || resolved_enum.name != enum_def.name {
+            return Ok(None);
+        }
+        let Some(selector) =
+            datatype::variant_selector_apply(&sort, variant_idx, payload_offset, &base)
+        else {
+            return Ok(None);
+        };
+        let Some(fresh) = super::z3_types::dynamic_fresh_const(
+            vc.ctx,
+            "__recursive_enum_payload_read",
+            &selector,
+        ) else {
+            return Ok(None);
+        };
+        let Some(value) = super::z3_types::dynamic_ite(&is_variant, &selector, &fresh) else {
+            return Ok(None);
+        };
+        return Ok(Some(value));
+    }
+    let field_type = datatype::payload_field_type_name(field_type_ref);
     let Some((payload_offset, payload_width)) =
         datatype::payload_leaf_range(enum_def, vc.module_env, variant_idx, field_idx)
     else {
@@ -2281,7 +2310,7 @@ fn enum_payload_field_read<'a>(
             let Some(outer_enum_def) = outer_enum_def else {
                 return Ok(None);
             };
-            if !datatype::is_finite_adt(outer_enum_def, vc.module_env)
+            if !datatype::uses_datatype_sort(outer_enum_def, vc.module_env)
                 || datatype::enum_datatype_sort(vc, outer_enum_def).is_none()
             {
                 return Ok(None);
@@ -2306,13 +2335,15 @@ fn enum_payload_field_read<'a>(
             let Some((outer_variant_idx, outer_field_idx)) = outer_owner else {
                 return Ok(None);
             };
-            let Some(outer_field_type) = outer_enum_def.variants[outer_variant_idx]
+            let Some(outer_field_type_ref) = outer_enum_def.variants[outer_variant_idx]
                 .field_types
                 .get(outer_field_idx)
-                .map(datatype::payload_field_type_name)
             else {
                 return Ok(None);
             };
+            let outer_self_field =
+                datatype::is_direct_self_field(outer_enum_def, outer_field_type_ref, vc.module_env);
+            let outer_field_type = datatype::payload_field_type_name(outer_field_type_ref);
             let Some((_, width)) = datatype::payload_leaf_range(
                 outer_enum_def,
                 vc.module_env,
@@ -2321,11 +2352,17 @@ fn enum_payload_field_read<'a>(
             ) else {
                 return Ok(None);
             };
-            let Some(leaves) = datatype::field_leaf_types(&outer_field_type, vc.module_env) else {
+            if width == 0 {
                 return Ok(None);
-            };
-            if width == 0 || leaves.len() != width {
-                return Ok(None);
+            }
+            if !outer_self_field {
+                let Some(leaves) = datatype::field_leaf_types(&outer_field_type, vc.module_env)
+                else {
+                    return Ok(None);
+                };
+                if leaves.len() != width {
+                    return Ok(None);
+                }
             }
             let outer_base = expr_to_z3(vc, outer_root, env, None)?;
             let Some((_, is_variant, resolved_idx, resolved_enum)) =
@@ -2413,7 +2450,7 @@ fn enum_payload_field_read<'a>(
         let Some(outer_enum_def) = outer_enum_def else {
             return Ok(None);
         };
-        if !datatype::is_finite_adt(outer_enum_def, vc.module_env)
+        if !datatype::uses_datatype_sort(outer_enum_def, vc.module_env)
             || datatype::enum_datatype_sort(vc, outer_enum_def).is_none()
         {
             return Ok(None);
@@ -2438,13 +2475,15 @@ fn enum_payload_field_read<'a>(
         let Some((outer_variant_idx, outer_field_idx)) = outer_owner else {
             return Ok(None);
         };
-        let Some(outer_field_type) = outer_enum_def.variants[outer_variant_idx]
+        let Some(outer_field_type_ref) = outer_enum_def.variants[outer_variant_idx]
             .field_types
             .get(outer_field_idx)
-            .map(datatype::payload_field_type_name)
         else {
             return Ok(None);
         };
+        let outer_self_field =
+            datatype::is_direct_self_field(outer_enum_def, outer_field_type_ref, vc.module_env);
+        let outer_field_type = datatype::payload_field_type_name(outer_field_type_ref);
         let Some((_, width)) = datatype::payload_leaf_range(
             outer_enum_def,
             vc.module_env,
@@ -2453,11 +2492,16 @@ fn enum_payload_field_read<'a>(
         ) else {
             return Ok(None);
         };
-        let Some(leaves) = datatype::field_leaf_types(&outer_field_type, vc.module_env) else {
+        if width == 0 {
             return Ok(None);
-        };
-        if width == 0 || leaves.len() != width {
-            return Ok(None);
+        }
+        if !outer_self_field {
+            let Some(leaves) = datatype::field_leaf_types(&outer_field_type, vc.module_env) else {
+                return Ok(None);
+            };
+            if leaves.len() != width {
+                return Ok(None);
+            }
         }
         let outer_base = expr_to_z3(vc, outer_root, env, Some(solver))?;
         let Some((_, is_variant, resolved_idx, resolved_enum)) = datatype::variant_tester_condition(
@@ -5560,7 +5604,9 @@ pub(crate) fn expr_to_z3<'a>(
             // Unsat であることを証明する。Sat なら網羅性欠如エラー。
             {
                 let mut arm_conditions: Vec<Bool> = Vec::new();
+                let enum_types_before_coverage = vc.local_enum_types.borrow().clone();
                 for arm in arms {
+                    *vc.local_enum_types.borrow_mut() = enum_types_before_coverage.clone();
                     // This coverage pass binds payload names only to make
                     // guards resolvable — the registrations must not leak
                     // past the arm: a payload `x` shadowing an outer `i64`
@@ -5577,6 +5623,7 @@ pub(crate) fn expr_to_z3<'a>(
                         Some(check_solver),
                         decl_hint.as_deref(),
                     )?;
+                    *vc.local_enum_types.borrow_mut() = enum_types_before_coverage.clone();
                     // ガード条件がある場合は AND で結合
                     let full_cond = if let Some(guard) = &arm.guard {
                         // The guard may name the arm's payload binders —
@@ -5585,6 +5632,7 @@ pub(crate) fn expr_to_z3<'a>(
                         let mut check_env = env.clone();
                         let mut check_bound: std::collections::HashSet<String> =
                             std::collections::HashSet::new();
+                        let enum_types_before_guard = vc.local_enum_types.borrow().clone();
                         pattern_bind_variables(
                             ctx,
                             &arm.pattern,
@@ -5598,6 +5646,7 @@ pub(crate) fn expr_to_z3<'a>(
                         let check_i64 = vc.check_i64_overflow.replace(false);
                         let guard_z3 = expr_to_z3(vc, guard, &mut check_env, None);
                         vc.check_i64_overflow.set(check_i64);
+                        *vc.local_enum_types.borrow_mut() = enum_types_before_guard;
                         let guard_z3 = guard_z3?
                             .as_bool()
                             .ok_or(MumeiError::type_error("Guard must be boolean"))?;
@@ -5606,8 +5655,10 @@ pub(crate) fn expr_to_z3<'a>(
                         cond
                     };
                     *vc.local_int_types.borrow_mut() = int_types_before_check;
+                    *vc.local_enum_types.borrow_mut() = enum_types_before_coverage.clone();
                     arm_conditions.push(full_cond);
                 }
+                *vc.local_enum_types.borrow_mut() = enum_types_before_coverage;
 
                 // 網羅性: ¬(P_1 ∨ ... ∨ P_n) が Unsat か？
                 let arm_refs: Vec<&Bool> = arm_conditions.iter().collect();
@@ -5687,9 +5738,11 @@ pub(crate) fn expr_to_z3<'a>(
             // map before each arm and after the match, mirroring the
             // per-arm `env.clone()` scoping below.
             let lambdas_before = vc.local_lambdas.borrow().clone();
+            let enum_types_before_arms = vc.local_enum_types.borrow().clone();
 
             for arm in arms.iter() {
                 *vc.local_lambdas.borrow_mut() = lambdas_before.clone();
+                *vc.local_enum_types.borrow_mut() = enum_types_before_arms.clone();
                 let mut arm_env = env.clone();
                 let int_types_before_arm = vc.local_int_types.borrow().clone();
                 let array_elem_types_before_arm = vc.local_array_elem_types.borrow().clone();
@@ -5827,6 +5880,7 @@ pub(crate) fn expr_to_z3<'a>(
                     }
                 }
                 *vc.local_array_elem_types.borrow_mut() = array_elem_types_before_arm;
+                *vc.local_enum_types.borrow_mut() = enum_types_before_arms.clone();
                 let body_val = body_val?;
                 *vc.local_int_types.borrow_mut() = int_types_before_arm.clone();
                 for key in arm_bound
@@ -5841,6 +5895,7 @@ pub(crate) fn expr_to_z3<'a>(
                 arm_results.push((full_cond.clone(), body_val));
                 accumulated_negations.push(full_cond.not());
             }
+            *vc.local_enum_types.borrow_mut() = enum_types_before_arms;
 
             // Fold the arm values into an ite chain from the last arm
             // outward: `ite(c_1, b_1, ite(c_2, b_2, ... b_n))`, and fold the
@@ -7012,7 +7067,10 @@ pub(crate) fn expr_to_z3<'a>(
             if let Expr::Variable(name) = inner_expr.as_ref() {
                 if !env.contains_key(name)
                     && vc.module_env.enums.contains_key(name)
-                    && datatype::is_finite_adt(vc.module_env.get_enum(name).unwrap(), vc.module_env)
+                    && datatype::uses_datatype_sort(
+                        vc.module_env.get_enum(name).unwrap(),
+                        vc.module_env,
+                    )
                 {
                     if let Some(value) = datatype::enum_ctor_apply(
                         vc,
