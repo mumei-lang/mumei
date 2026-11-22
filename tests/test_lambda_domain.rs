@@ -45,6 +45,10 @@ fn typed_lambda_domains_are_scoped_and_checked_at_invocation() {
                 "Call to 'call' argument 'x' may be outside the 'u32' domain",
             ),
             (
+                "tests/negative/test_lambda_shadow_domain.mm",
+                "precondition (requires) not satisfied at call site",
+            ),
+            (
                 "tests/negative/test_lambda_hof_domain.mm",
                 "Call to 'f' argument 'arg0' may be outside the 'u32' domain",
             ),

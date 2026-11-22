@@ -7868,11 +7868,21 @@ pub(crate) fn expr_to_z3<'a>(
             let array_elem_types_before = vc.local_array_elem_types.borrow().clone();
             let struct_types_before = vc.local_struct_types.borrow().clone();
             let enum_types_before = vc.local_enum_types.borrow().clone();
-            for p in params {
+            for (param_index, p) in params.iter().enumerate() {
                 super::z3_types::clear_array_shared(ctx, &mut lambda_env, &p.name);
                 let type_name = p.type_ref.as_ref().map(|ty| ty.display_name());
-                let p_sym = datatype::param_z3_value_for_vc(vc, &p.name, type_name.as_deref());
-                lambda_env.insert(p.name.clone(), p_sym);
+                let lambda_param_name = format!("__mumei_lambda_param_{lambda_id}_{param_index}");
+                let p_sym =
+                    datatype::param_z3_value_for_vc(vc, &lambda_param_name, type_name.as_deref());
+                lambda_env.insert(p.name.clone(), p_sym.clone());
+                lambda_env.remove(&format!("__z3_arr_{}", p.name));
+                lambda_env.remove(&super::z3_types::array_len_key(&p.name));
+                let struct_array_prefix = format!("__struct_arr#{}#", p.name);
+                lambda_env.retain(|key, _| !key.starts_with(&struct_array_prefix));
+                vc.local_int_types.borrow_mut().remove(&p.name);
+                vc.local_array_elem_types.borrow_mut().remove(&p.name);
+                vc.local_struct_types.borrow_mut().remove(&p.name);
+                vc.local_enum_types.borrow_mut().remove(&p.name);
                 let Some(type_ref) = p.type_ref.as_ref() else {
                     continue;
                 };
@@ -7885,6 +7895,15 @@ pub(crate) fn expr_to_z3<'a>(
                         .insert(p.name.clone(), int_type);
                 }
                 if let Some(element_type) = type_ref.array_element_type() {
+                    let length = super::z3_types::array_root_len_value(
+                        ctx,
+                        &mut lambda_env,
+                        &lambda_param_name,
+                        vc.bitvec_i64,
+                        None,
+                    );
+                    lambda_env.insert(super::z3_types::array_len_key(&p.name), length);
+                    lambda_env.insert(format!("__z3_arr_{}", p.name), p_sym.clone());
                     vc.local_array_elem_types
                         .borrow_mut()
                         .insert(p.name.clone(), element_type.display_name());
@@ -7893,7 +7912,7 @@ pub(crate) fn expr_to_z3<'a>(
                     super::struct_invariants::seed_struct_fields(
                         vc,
                         &mut lambda_env,
-                        &p.name,
+                        &lambda_param_name,
                         struct_def,
                     );
                     vc.local_struct_types
@@ -7938,6 +7957,15 @@ pub(crate) fn expr_to_z3<'a>(
                         continue;
                     };
                     let type_name = type_ref.display_name();
+                    if type_ref.array_element_type().is_some() {
+                        if let Some(length) =
+                            lambda_env.get(&super::z3_types::array_len_key(&p.name))
+                        {
+                            if let Some(nonneg) = super::z3_types::nonneg_constraint(ctx, length) {
+                                solver.assert(&nonneg);
+                            }
+                        }
+                    }
                     for (_, domain) in fixed_width_param_domains(
                         vc,
                         &p.name,
