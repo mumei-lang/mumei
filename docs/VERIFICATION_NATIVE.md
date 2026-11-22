@@ -609,6 +609,12 @@ certified. The HIR debug and MIR JSON `v0` fingerprints are opaque diagnostics,
 not a stable interchange format, cross-version cache key or equivalence proof.
 `compiler_version` alone is not an exact compiler/toolchain build identity.
 
+The serialized `transformations` list exposes each stage edge, its optional
+output identity and its validation status. Extraction validates none of these
+edges; the LLVM edge remains unchecked, while C09's opt-in
+`native-bundle recheck-llvm` is a separate check. Unsupported constructs still
+fail closed, and no edge is labeled lossy.
+
 An optional `requested_target_triple` is a caller request, never a binding to
 emitted code or a capability/availability claim. `None` serializes as null. The
 existing LLVM-IR emitter does not bind a target triple in the emitted module;

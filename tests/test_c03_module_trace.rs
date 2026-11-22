@@ -1,5 +1,6 @@
 use mumei_core::semantic_contract::{extract_pure_i64_module_contracts, RefinedAdmission};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -81,6 +82,20 @@ fn module_trace_binds_every_atom_from_specification_to_execution_target() {
             atom["translator_ir"]["theorem_goal"].as_str(),
             Some(contract.translator_ir.theorem_goal.as_str())
         );
+        let theorem_goal = atom["translator_ir"]["theorem_goal"].as_str().unwrap();
+        let theorem_goal_sha256 = format!("{:x}", Sha256::digest(theorem_goal.as_bytes()));
+        assert_eq!(
+            contract.transformations[0].output_identity.as_deref(),
+            Some(contract.specification_sha256.as_str())
+        );
+        assert_eq!(
+            contract.transformations[1].output_identity.as_deref(),
+            Some(contract.obligation_id.as_str())
+        );
+        assert_eq!(
+            contract.transformations[2].output_identity.as_deref(),
+            Some(theorem_goal_sha256.as_str())
+        );
     }
 
     succeeds(
@@ -114,6 +129,13 @@ fn module_trace_binds_every_atom_from_specification_to_execution_target() {
                 .iter()
                 .any(|path| { std::fs::read_to_string(path).unwrap().contains(&definition) }),
             "no emitted LLVM file contains {definition}"
+        );
+        let llvm_relation = contract.transformations.last().unwrap();
+        assert_eq!(llvm_relation.from, "hir");
+        assert_eq!(llvm_relation.output_identity, None);
+        assert_eq!(
+            llvm_relation.validation,
+            "unchecked_not_translation_validated"
         );
     }
 

@@ -21,6 +21,7 @@ use z3::{
 };
 
 pub const SEMANTIC_CONTRACT_VERSION: &str = "mumei.semantic-contract/v1";
+const LLVM_CORRESPONDENCE_STATUS: &str = "unchecked_not_translation_validated";
 pub const PURE_I64_PROFILE: &str = "mumei.pure-i64-comparison/v1";
 /// The wider source fragment checked inside the LLVM equivalence profile:
 /// the same scalar comparisons plus wrapping i64 add/sub/mul, total
@@ -524,6 +525,15 @@ pub struct NumericSemantics {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct TransformationRelation {
+    pub from: &'static str,
+    pub to: &'static str,
+    pub relation: &'static str,
+    pub output_identity: Option<String>,
+    pub validation: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SemanticContract {
     pub schema_version: &'static str,
     pub profile: &'static str,
@@ -548,6 +558,7 @@ pub struct SemanticContract {
     pub decomposition: &'static str,
     pub normalization: &'static str,
     pub correspondence: &'static str,
+    pub transformations: Vec<TransformationRelation>,
     pub assumptions: Vec<&'static str>,
     pub exclusions: Vec<&'static str>,
 }
@@ -1738,6 +1749,61 @@ fn atom_contract(
         .any(|p| struct_fields(p, structs).is_some() || enum_variants(p, enums).is_some());
     let hir = lower_atom_to_hir(&atom);
     let mir = lower_hir_to_mir(&hir);
+    let hir_identity = RepresentationIdentity {
+        encoding: "mumei.hir-body.debug/v0",
+        sha256: digest(format!("{:?}", hir.body).as_bytes()),
+    };
+    let mir_identity = RepresentationIdentity {
+        encoding: "mumei.mir-body.json/v0",
+        sha256: json_digest(&mir)?,
+    };
+    let obligation_id = format!("{}:postcondition:{}", atom.name, specification_sha256);
+    let translator_ir = build_translator_ir_metadata(&atom, cert_env);
+    let transformations = vec![
+        TransformationRelation {
+            from: "source_text",
+            to: "specification",
+            relation: "checked_parse_comparison_chains_to_conjunction",
+            output_identity: Some(specification_sha256.clone()),
+            validation: "disclosed_not_independently_validated",
+        },
+        TransformationRelation {
+            from: "specification",
+            to: "z3_obligation",
+            relation: "requires_implies_ensures_single_postcondition_obligation",
+            output_identity: Some(obligation_id.clone()),
+            validation: "not_executed_by_extractor",
+        },
+        TransformationRelation {
+            from: "specification",
+            to: "lean_theorem_goal",
+            relation: "translator_ir_lowering",
+            output_identity: Some(digest(translator_ir.theorem_goal.as_bytes())),
+            validation: "not_executed_by_extractor",
+        },
+        TransformationRelation {
+            from: "source_atom",
+            to: "hir",
+            relation: "existing_hir_lowering",
+            output_identity: Some(hir_identity.sha256.clone()),
+            validation: "compiler_local_fingerprint_not_equivalence",
+        },
+        TransformationRelation {
+            from: "hir",
+            to: "mir",
+            relation: "existing_mir_lowering",
+            output_identity: Some(mir_identity.sha256.clone()),
+            validation: "compiler_local_fingerprint_not_equivalence",
+        },
+        // The LLVM emitter lowers the HIR body; MIR is not on the emission path.
+        TransformationRelation {
+            from: "hir",
+            to: "llvm_ir",
+            relation: "existing_llvm_emitter",
+            output_identity: None,
+            validation: LLVM_CORRESPONDENCE_STATUS,
+        },
+    ];
     Ok(SemanticContract {
         schema_version: SEMANTIC_CONTRACT_VERSION,
         profile,
@@ -1746,7 +1812,7 @@ fn atom_contract(
         atom_content_hash: compute_atom_content_hash_v2(&atom),
         specification_sha256: specification_sha256.clone(),
         implementation_sha256: digest(atom.body_expr.as_bytes()),
-        obligation_id: format!("{}:postcondition:{}", atom.name, specification_sha256),
+        obligation_id,
         specification,
         source_span: atom.span.clone(),
         numeric_semantics: NumericSemantics {
@@ -1798,15 +1864,9 @@ fn atom_contract(
         },
         // HIR has no stable serialization. This v0 diagnostic fingerprint is
         // compiler-local, not a portable semantic IR or a cross-version cache key.
-        hir: RepresentationIdentity {
-            encoding: "mumei.hir-body.debug/v0",
-            sha256: digest(format!("{:?}", hir.body).as_bytes()),
-        },
-        mir: RepresentationIdentity {
-            encoding: "mumei.mir-body.json/v0",
-            sha256: json_digest(&mir)?,
-        },
-        translator_ir: build_translator_ir_metadata(&atom, cert_env),
+        hir: hir_identity,
+        mir: mir_identity,
+        translator_ir,
         translator_version: LEAN_TRANSLATOR_VERSION,
         bridge_lemma_hash: LEAN_BRIDGE_LEMMA_HASH,
         compiler_version: env!("CARGO_PKG_VERSION"),
@@ -1847,7 +1907,8 @@ fn atom_contract(
         decomposition: "no_common_obligation_decomposition",
         normalization:
             "checked_parser_comparison_chains_to_conjunction_not_independently_validated",
-        correspondence: "unchecked_not_translation_validated",
+        correspondence: LLVM_CORRESPONDENCE_STATUS,
+        transformations,
         assumptions: vec![if u64_leaves {
             "Inputs are representable signed 64-bit integers or declared unsigned 64-bit leaves; declared booleans carry 0/1."
         } else if allow_wrapping_arithmetic {
@@ -11552,6 +11613,76 @@ mod tests {
         extract_pure_i64_contract(source, "clamp.mm", Some(TARGET), false)
     }
 
+    fn assert_transformations(contract: &SemanticContract) {
+        let transformations = &contract.transformations;
+        assert_eq!(transformations.len(), 6);
+        assert_eq!(contract.decomposition, "no_common_obligation_decomposition");
+        assert_eq!(
+            contract.normalization,
+            "checked_parser_comparison_chains_to_conjunction_not_independently_validated"
+        );
+        assert_eq!(contract.correspondence, LLVM_CORRESPONDENCE_STATUS);
+        let theorem_goal_sha256 = digest(contract.translator_ir.theorem_goal.as_bytes());
+
+        let expected = [
+            (
+                "source_text",
+                "specification",
+                "checked_parse_comparison_chains_to_conjunction",
+                Some(contract.specification_sha256.as_str()),
+                "disclosed_not_independently_validated",
+            ),
+            (
+                "specification",
+                "z3_obligation",
+                "requires_implies_ensures_single_postcondition_obligation",
+                Some(contract.obligation_id.as_str()),
+                "not_executed_by_extractor",
+            ),
+            (
+                "specification",
+                "lean_theorem_goal",
+                "translator_ir_lowering",
+                Some(theorem_goal_sha256.as_str()),
+                "not_executed_by_extractor",
+            ),
+            (
+                "source_atom",
+                "hir",
+                "existing_hir_lowering",
+                Some(contract.hir.sha256.as_str()),
+                "compiler_local_fingerprint_not_equivalence",
+            ),
+            (
+                "hir",
+                "mir",
+                "existing_mir_lowering",
+                Some(contract.mir.sha256.as_str()),
+                "compiler_local_fingerprint_not_equivalence",
+            ),
+            (
+                "hir",
+                "llvm_ir",
+                "existing_llvm_emitter",
+                None,
+                LLVM_CORRESPONDENCE_STATUS,
+            ),
+        ];
+        for (transformation, (from, to, relation, output_identity, validation)) in
+            transformations.iter().zip(expected)
+        {
+            assert_eq!(transformation.from, from);
+            assert_eq!(transformation.to, to);
+            assert_eq!(transformation.relation, relation);
+            assert_eq!(transformation.output_identity.as_deref(), output_identity);
+            assert_eq!(transformation.validation, validation);
+        }
+        assert_eq!(
+            transformations[5].validation, contract.correspondence,
+            "LLVM relation validation must stay aligned with correspondence"
+        );
+    }
+
     #[test]
     fn extracts_typed_obligation_without_claiming_verification() {
         let contract = extract(SOURCE).unwrap();
@@ -11576,6 +11707,15 @@ mod tests {
         for field in ["verified", "result", "grade", "verification_status"] {
             assert!(json.get(field).is_none());
         }
+    }
+
+    #[test]
+    fn transformation_relations_bind_bounded_and_widened_contract_identities() {
+        let bounded = extract(SOURCE).unwrap();
+        let widened = extract_pure_i64_contract(SOURCE, "clamp.mm", Some(TARGET), true).unwrap();
+
+        assert_transformations(&bounded);
+        assert_transformations(&widened);
     }
 
     #[test]

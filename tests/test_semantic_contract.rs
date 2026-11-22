@@ -56,6 +56,23 @@ fn scalar_contract_connects_real_z3_certificate_and_llvm_generation_without_prom
     let certificate = dir.path().join("clamp.proof.json");
     std::fs::write(&source, SOURCE).unwrap();
     let contract = extract_pure_i64_contract(SOURCE, "clamp.mm", None, false).unwrap();
+    let contract_json = serde_json::to_value(&contract).unwrap();
+    let transformations = contract_json["transformations"].as_array().unwrap();
+    assert_eq!(transformations.len(), 6);
+    for transformation in transformations {
+        let mut keys: Vec<_> = transformation
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["from", "output_identity", "relation", "to", "validation"]
+        );
+    }
+    assert_eq!(transformations[5]["output_identity"], Value::Null);
 
     succeeds(
         Command::new(env!("CARGO_BIN_EXE_mumei"))
