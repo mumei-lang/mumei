@@ -916,6 +916,33 @@ fn admit_pure_i64_atoms(
             "expected at least one atom",
         ));
     }
+    if admission.admits_effects() {
+        let effect_names: BTreeSet<String> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::EffectDef(effect) => Some(effect.name.clone()),
+                _ => None,
+            })
+            .collect();
+        if items
+            .iter()
+            .any(|item| matches!(item, Item::Atom(atom) if effect_names.contains(&atom.name)))
+        {
+            return Err(SemanticContractError::Unsupported(
+                "effect name collides with an atom or type name",
+            ));
+        }
+        if items.iter().any(|item| match item {
+            Item::TypeDef(def) => effect_names.contains(&def.name),
+            Item::StructDef(def) => effect_names.contains(&def.name),
+            Item::EnumDef(def) => effect_names.contains(&def.name),
+            _ => false,
+        }) {
+            return Err(SemanticContractError::Unsupported(
+                "type name collides with an atom or effect name",
+            ));
+        }
+    }
     // v9: generic `struct` declarations are admitted by instantiation —
     // every concrete use is monomorphized into an ordinary declaration
     // before the profile gates see it. Generic atoms and enums stay
@@ -16418,6 +16445,10 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
             ),
             (
                 "type Vault = i64;\neffect Vault;\natom f(x: i64) -> i64 requires: true; ensures: true; body: x;",
+                "type name collides with an atom or effect name",
+            ),
+            (
+                "struct Box<T> { value: T }\neffect Box;\natom f(x: i64) -> i64 requires: true; ensures: true; body: x;",
                 "type name collides with an atom or effect name",
             ),
         ] {
