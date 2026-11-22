@@ -156,6 +156,43 @@ fn accepts_agent_fixtures_with_identical_file_and_stdin_diagnostics() {
 }
 
 #[test]
+fn accepts_optional_enforcement_and_rejects_mixed_presence() {
+    let mut selected: Value =
+        serde_json::from_str(include_str!("fixtures/attempt_schedule_selected.json"))
+            .expect("agent schedule fixture");
+    selected["attempts"][0]["enforcement"] = json!({
+        "environment": "minimal",
+        "network": "isolated",
+        "filesystem_write": "permitted",
+        "filesystem_read": "unenforced",
+        "process_spawn": "isolated",
+        "memory_bound_mb": null
+    });
+    let accepted = stdin_check(&json_bytes(&selected));
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+
+    let mut missing_enforcement_key = selected.clone();
+    missing_enforcement_key["attempts"][0]["enforcement"]
+        .as_object_mut()
+        .expect("enforcement object")
+        .remove("filesystem_read");
+    assert_invalid(
+        "missing enforcement key",
+        &json_bytes(&missing_enforcement_key),
+    );
+
+    let mut mixed: Value =
+        serde_json::from_str(include_str!("fixtures/attempt_schedule_exhausted.json"))
+            .expect("agent schedule fixture");
+    mixed["attempts"][0]["enforcement"] = selected["attempts"][0]["enforcement"].clone();
+    assert_invalid("mixed enforcement presence", &json_bytes(&mixed));
+}
+
+#[test]
 fn text_diagnostic_is_one_static_line() {
     let output = run(
         &["evidence", "check-schedule", "--stdin"],

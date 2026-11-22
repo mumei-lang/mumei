@@ -6316,7 +6316,12 @@ bounded, strict representation gate and schedule-consistency check to
 names only a manifest-declared-success exit, never acceptance.
 `reported_outcome` remains the adapter's self-report, not result polarity
 or a verdict. Manifest-declared argv/stdin/memory bounds are not attested;
-embedded `evidence_acceptance` is carried, not re-judged.
+embedded `evidence_acceptance` is carried, not re-judged. The optional
+`enforcement` field is an exact per-attempt object with `environment`,
+`network`, `filesystem_write`, `filesystem_read`, `process_spawn`, and
+`memory_bound_mb` keys when present, and must be present on every attempt or
+none; it is shape-checked only, not Evidence or a resource-enforcement
+attestation.
 
 Agent consumes it as the `evidence-check-schedule` route / MCP tool
 (mumei-agent #1054): one reserved attempt feeds the schedule bytes over
