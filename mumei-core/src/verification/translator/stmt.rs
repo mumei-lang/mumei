@@ -63,6 +63,53 @@ fn mark_call_store_args(
 ) {
     for var in callee_may_write_args(vc, callee, args, env) {
         out.insert(format!("__z3_arr_{var}"));
+        mark_all_struct_array_leaf_havoc(vc, env, &var, out);
+    }
+}
+
+fn mark_all_struct_array_leaf_havoc(
+    vc: &VCtx<'_>,
+    env: &Env<'_>,
+    name: &str,
+    out: &mut std::collections::HashSet<String>,
+) {
+    let mut aliases = std::collections::HashSet::from([name.to_string()]);
+    let array = env
+        .get(&format!("__z3_arr_{name}"))
+        .and_then(|value| value.as_array())
+        .or_else(|| env.get(name).and_then(|value| value.as_array()));
+    if let Some(array) = array {
+        let root = array_root_ast(&array);
+        aliases.extend(env.iter().filter_map(|(key, value)| {
+            key.strip_prefix("__z3_arr_").and_then(|alias| {
+                value
+                    .as_array()
+                    .is_some_and(|candidate| array_root_ast(&candidate) == root)
+                    .then(|| alias.to_string())
+            })
+        }));
+    }
+
+    for alias in aliases {
+        let mut element_type = super::z3_types::array_element_type_name(&alias, vc);
+        if super::z3_types::struct_array_leaf_types(&element_type, vc.module_env).is_none() {
+            if let Some(array) = env
+                .get(&format!("__z3_arr_{alias}"))
+                .and_then(|value| value.as_array())
+                .or_else(|| env.get(&alias).and_then(|value| value.as_array()))
+            {
+                element_type = super::z3_types::z3_range_type_name(&array.get_sort());
+            }
+        }
+        if let Some(leaves) = super::z3_types::struct_array_leaf_types(&element_type, vc.module_env)
+        {
+            out.insert(format!("__z3_arr_{alias}"));
+            out.extend(
+                leaves
+                    .into_iter()
+                    .map(|(path, _)| super::z3_types::struct_array_leaf_key(&alias, &path)),
+            );
+        }
     }
 }
 
@@ -92,6 +139,7 @@ fn collect_assigned_vars(
                 }
                 None => {
                     out.insert(var.clone());
+                    mark_all_struct_array_leaf_havoc(vc, env, var, out);
                 }
             }
             collect_expr_assigned_vars(env, vc, value, out, true);

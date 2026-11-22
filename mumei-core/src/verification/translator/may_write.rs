@@ -124,6 +124,136 @@ pub(crate) fn callee_may_write_arg_indices(
     }
 }
 
+pub(crate) fn stmt_may_write_array(vc: &VCtx<'_>, stmt: &Stmt, name: &str, env: &Env<'_>) -> bool {
+    let aliases = super::z3_types::array_aliases_in_stmt(stmt, name);
+    stmt_has_may_write_call(vc, stmt, env, &aliases)
+}
+
+fn stmt_has_may_write_call(
+    vc: &VCtx<'_>,
+    stmt: &Stmt,
+    env: &Env<'_>,
+    aliases: &HashSet<String>,
+) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            expr_has_may_write_call(vc, value, env, aliases)
+        }
+        Stmt::ArrayStore { index, value, .. } => {
+            expr_has_may_write_call(vc, index, env, aliases)
+                || expr_has_may_write_call(vc, value, env, aliases)
+        }
+        Stmt::Block(stmts, _) => stmts
+            .iter()
+            .any(|stmt| stmt_has_may_write_call(vc, stmt, env, aliases)),
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            expr_has_may_write_call(vc, cond, env, aliases)
+                || expr_has_may_write_call(vc, invariant, env, aliases)
+                || decreases
+                    .as_ref()
+                    .is_some_and(|expr| expr_has_may_write_call(vc, expr, env, aliases))
+                || stmt_has_may_write_call(vc, body, env, aliases)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            stmt_has_may_write_call(vc, body, env, aliases)
+        }
+        Stmt::TaskGroup { children, .. } => children
+            .iter()
+            .any(|child| stmt_has_may_write_call(vc, child, env, aliases)),
+        Stmt::Cancel { .. } => false,
+        Stmt::Expr(expr, _) => expr_has_may_write_call(vc, expr, env, aliases),
+    }
+}
+
+fn expr_has_may_write_call(
+    vc: &VCtx<'_>,
+    expr: &Expr,
+    env: &Env<'_>,
+    aliases: &HashSet<String>,
+) -> bool {
+    match expr {
+        Expr::Call(callee, args) => {
+            callee_may_write_args(vc, CalleeRef::Name(callee), args, env)
+                .iter()
+                .any(|name| aliases.contains(name))
+                || args
+                    .iter()
+                    .any(|arg| expr_has_may_write_call(vc, arg, env, aliases))
+        }
+        Expr::Perform {
+            operation, args, ..
+        } => {
+            callee_may_write_args(vc, CalleeRef::Name(operation), args, env)
+                .iter()
+                .any(|name| aliases.contains(name))
+                || args
+                    .iter()
+                    .any(|arg| expr_has_may_write_call(vc, arg, env, aliases))
+        }
+        Expr::CallRef { callee, args } => {
+            callee_may_write_args(vc, CalleeRef::Expr(callee), args, env)
+                .iter()
+                .any(|name| aliases.contains(name))
+                || expr_has_may_write_call(vc, callee, env, aliases)
+                || args
+                    .iter()
+                    .any(|arg| expr_has_may_write_call(vc, arg, env, aliases))
+        }
+        Expr::ArrayLit(elements) => elements
+            .iter()
+            .any(|element| expr_has_may_write_call(vc, element, env, aliases)),
+        Expr::ArrayAccess(_, index) => expr_has_may_write_call(vc, index, env, aliases),
+        Expr::BinaryOp(left, _, right) => {
+            expr_has_may_write_call(vc, left, env, aliases)
+                || expr_has_may_write_call(vc, right, env, aliases)
+        }
+        Expr::Block(stmt) => stmt_has_may_write_call(vc, stmt, env, aliases),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_has_may_write_call(vc, cond, env, aliases)
+                || stmt_has_may_write_call(vc, then_branch, env, aliases)
+                || stmt_has_may_write_call(vc, else_branch, env, aliases)
+        }
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| expr_has_may_write_call(vc, value, env, aliases)),
+        Expr::FieldAccess(inner, _) | Expr::Await { expr: inner } => {
+            expr_has_may_write_call(vc, inner, env, aliases)
+        }
+        Expr::Match { target, arms } => {
+            expr_has_may_write_call(vc, target, env, aliases)
+                || arms.iter().any(|arm| {
+                    arm.guard
+                        .as_deref()
+                        .is_some_and(|guard| expr_has_may_write_call(vc, guard, env, aliases))
+                        || stmt_has_may_write_call(vc, &arm.body, env, aliases)
+                })
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => {
+            stmt_has_may_write_call(vc, body, env, aliases)
+        }
+        Expr::ChanSend { channel, value } => {
+            expr_has_may_write_call(vc, channel, env, aliases)
+                || expr_has_may_write_call(vc, value, env, aliases)
+        }
+        Expr::ChanRecv { channel } => expr_has_may_write_call(vc, channel, env, aliases),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => false,
+    }
+}
+
 /// `mod.f` resolves as `mod::f` too, matching the runtime `Call` path.
 fn resolve_atom<'m>(module_env: &'m ModuleEnv, name: &str) -> Option<&'m crate::parser::Atom> {
     module_env

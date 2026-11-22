@@ -663,6 +663,17 @@ fn havoc_written_struct_array_fields<'a>(
         ) else {
             continue;
         };
+        if body.rebinds_name(&param.name)
+            || crate::verification::translator::may_write::stmt_may_write_array(
+                vc,
+                body,
+                &param.name,
+                env,
+            )
+        {
+            crate::verification::translator::z3_types::havoc_array_name(vc, &param.name, env);
+            continue;
+        }
         for write in body.array_store_targets(&param.name) {
             let paths: Vec<String> = if let Some(path) = &write.field_path {
                 vec![path.join("_")]

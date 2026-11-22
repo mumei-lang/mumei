@@ -2440,7 +2440,7 @@ fn stmt_stores_to_array(
     stmt_stores_to_array_with_aliases(module_env, stmt, &aliases, bound_names, visited, depth)
 }
 
-fn array_aliases_in_stmt(stmt: &Stmt, name: &str) -> std::collections::HashSet<String> {
+pub(crate) fn array_aliases_in_stmt(stmt: &Stmt, name: &str) -> std::collections::HashSet<String> {
     let mut aliases = std::collections::HashSet::new();
     aliases.insert(name.to_string());
     loop {

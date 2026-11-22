@@ -604,3 +604,79 @@ fn struct_array_postcondition_havoc_preserves_untouched_indices() {
         );
     }
 }
+
+#[test]
+fn mixed_struct_array_field_store_and_call_reject_stale_leaf_claims() {
+    for bitvec_i64 in [false, true] {
+        let output = run_verify("test_struct_array_mixed_call_havoc_negative.mm", bitvec_i64);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "a writing call after a field store must havoc the other leaves (bitvec={bitvec_i64}):\n{stdout}\n{stderr}"
+        );
+        let payload = verify_json(&output);
+        let diagnostics = payload["diagnostics"]
+            .as_array()
+            .expect("diagnostics array");
+        for atom in [
+            "mixed_field_store_and_writer_stale_read",
+            "mixed_alias_field_store_and_writer_stale_read",
+        ] {
+            assert!(
+                diagnostics.iter().any(|entry| {
+                    entry["atom"] == atom
+                        && entry["message"]
+                            .as_str()
+                            .is_some_and(|message| message.contains("Postcondition"))
+                }),
+                "expected the stale postcondition to fail for {atom} (bitvec={bitvec_i64}):\n{payload:#}"
+            );
+        }
+        assert!(
+            diagnostics.iter().any(|entry| {
+                    entry["atom"] == "call_havoc_prevents_spec_ensures_unsat"
+                        && entry["failure_type"] == "postcondition_violated"
+                }),
+            "call-written array facts must be havoced during spec validation (bitvec={bitvec_i64}):\n{payload:#}"
+        );
+    }
+}
+
+#[test]
+fn struct_array_call_havoc_and_field_only_loop_preserve_expected_facts() {
+    for bitvec_i64 in [false, true] {
+        let output = run_verify("test_struct_array_call_havoc_positive.mm", bitvec_i64);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "field-only loops must preserve unchanged leaf facts (bitvec={bitvec_i64}):\n{stdout}\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn whole_element_store_and_writing_call_reject_stale_leaf_claims() {
+    for bitvec_i64 in [false, true] {
+        let output = run_verify("test_struct_array_whole_element_call_havoc.mm", bitvec_i64);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "whole-element stores followed by writing calls must not preserve stale leaves (bitvec={bitvec_i64}):\n{stdout}\n{stderr}"
+        );
+        let payload = verify_json(&output);
+        assert!(
+            payload["diagnostics"].as_array().is_some_and(|diagnostics| {
+                diagnostics.iter().any(|entry| {
+                    entry["atom"] == "whole_element_store_and_writer_stale_read"
+                        && entry["message"]
+                            .as_str()
+                            .is_some_and(|message| message.contains("Postcondition"))
+                })
+            }),
+            "expected the whole-element stale postcondition to fail (bitvec={bitvec_i64}):\n{payload:#}"
+        );
+    }
+}
