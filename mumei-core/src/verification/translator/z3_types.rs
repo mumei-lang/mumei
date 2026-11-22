@@ -2897,19 +2897,29 @@ pub(crate) fn coerce_array_store_value<'a>(
     array: &str,
     value: Dynamic<'a>,
 ) -> DynResult<'a> {
-    validate_array_element_type(vc, &array_element_type_name(array, vc))?;
+    let element_type = array_element_type_name(array, vc);
+    validate_array_element_type(vc, &element_type)?;
     let sort = array_element_sort(array, vc);
     if sort == ArrayElementSort::Enum {
-        let expected = z3_element_sort(vc, &array_element_type_name(array, vc));
-        if value.get_sort() != expected {
-            return Err(MumeiError::type_error(format!(
-                "Array store value has enum sort {}, expected {}",
-                value.get_sort(),
-                expected
-            )));
-        }
+        check_enum_array_store_type(vc, &element_type, &value)?;
     }
     coerce_to_array_elem_sort(vc, sort, &value)
+}
+
+pub(crate) fn check_enum_array_store_type(
+    vc: &VCtx<'_>,
+    element_type: &str,
+    value: &Dynamic<'_>,
+) -> Result<(), MumeiError> {
+    let expected = z3_element_sort(vc, element_type);
+    if value.get_sort() != expected {
+        return Err(MumeiError::type_error(format!(
+            "Array store value has enum sort {}, expected {}",
+            value.get_sort(),
+            expected
+        )));
+    }
+    Ok(())
 }
 
 /// Coerce `value` to the given array element sort (the name-keyed version

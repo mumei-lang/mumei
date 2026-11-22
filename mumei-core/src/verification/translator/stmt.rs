@@ -2423,6 +2423,9 @@ pub(crate) fn stmt_to_z3<'a>(
                     vc.ieee754_f64,
                 );
                 let field_value = super::z3_types::coerce_to_array_elem_sort(vc, sort, &val)?;
+                if sort == super::z3_types::ArrayElementSort::Enum {
+                    super::z3_types::check_enum_array_store_type(vc, leaf_type, &field_value)?;
+                }
                 let prior_env_keys: std::collections::HashSet<String> =
                     env.keys().cloned().collect();
                 let prior_struct_types: std::collections::HashSet<String> =

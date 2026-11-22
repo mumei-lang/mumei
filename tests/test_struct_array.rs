@@ -411,6 +411,100 @@ fn enum_struct_array_false_claims_and_unsupported_shapes_fail() {
 }
 
 #[test]
+fn array_store_rhs_is_evaluated_before_index() {
+    for bitvec_i64 in [false, true] {
+        let output = run_verify("test_array_store_evaluation_order.mm", bitvec_i64);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "array-store evaluation order must verify (bitvec={bitvec_i64}):\n{stdout}\n{stderr}"
+        );
+        let payload = verify_json(&output);
+        assert_eq!(
+            payload["ensures_outcomes"][0]["outcome"], "proved",
+            "array-store evaluation-order result was not proved (bitvec={bitvec_i64}):\n{payload:#}"
+        );
+    }
+
+    let (dir, copied) = copy_fixture("test_array_store_evaluation_order.mm");
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("run")
+        .arg(copied)
+        .current_dir(dir.path())
+        .output()
+        .expect("run array-store evaluation-order fixture");
+    assert_eq!(
+        output.status.code(),
+        Some(63),
+        "native array-store order should return the verified result:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn struct_array_field_store_reuses_contract_validation() {
+    for bitvec_i64 in [false, true] {
+        let output = run_verify("test_struct_array_field_contract_negative.mm", bitvec_i64);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "field store must reject a broken refined field contract (bitvec={bitvec_i64}):\n{stdout}\n{stderr}"
+        );
+        assert!(
+            !stdout.contains("panicked") && !stderr.contains("panicked"),
+            "field contract violation must fail without panicking:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains("predicate violated") || stderr.contains("predicate violated"),
+            "field contract failure should identify the violated predicate:\n{stdout}\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn struct_array_field_store_is_havoced_for_postconditions() {
+    for bitvec_i64 in [false, true] {
+        let output = run_verify("test_struct_array_field_havoc_positive.mm", bitvec_i64);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "postcondition after enum field store should verify (bitvec={bitvec_i64}):\n{stdout}\n{stderr}"
+        );
+        let payload = verify_json(&output);
+        assert_eq!(
+            payload["status"], "success",
+            "enum field-store postcondition did not verify (bitvec={bitvec_i64}):\n{payload:#}"
+        );
+    }
+}
+
+#[test]
+fn struct_array_field_store_rejects_mismatched_enum_type() {
+    for bitvec_i64 in [false, true] {
+        let output = run_verify("test_struct_array_enum_mismatch_negative.mm", bitvec_i64);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "field store with a mismatched enum type must fail (bitvec={bitvec_i64}):\n{stdout}\n{stderr}"
+        );
+        assert!(
+            !stdout.contains("panicked") && !stderr.contains("panicked"),
+            "mismatched enum type must be a normal diagnostic:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains("enum sort") && stdout.contains("expected")
+                || stderr.contains("enum sort") && stderr.contains("expected"),
+            "mismatched enum type should report the expected enum sort:\n{stdout}\n{stderr}"
+        );
+    }
+}
+
+#[test]
 fn native_enum_struct_array_element_store_read_and_match_returns_12() {
     let (dir, copied) = copy_fixture("test_struct_array_enum_codegen.mm");
     let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
