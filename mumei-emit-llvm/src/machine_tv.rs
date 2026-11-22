@@ -1609,15 +1609,21 @@ fn lift<'ctx>(
                 } else if memory_is_destination {
                     // A 16-byte store through a register-held `sret`
                     // pointer — LLVM vectorizes buffer-to-buffer
-                    // forwarding of memory-class results this way.
-                    if sret_memory_offset(memory, &state).is_some() {
+                    // forwarding of memory-class results this way. Both
+                    // halves must land inside the result buffer, like
+                    // the scalar `movq` bound above.
+                    if sret_memory_offset(memory, &state).is_some_and(|offset| {
+                        sret_leaf_count.is_some_and(|leaf_count| offset + 8 < 8 * leaf_count as i64)
+                    }) {
                         lift_sret_wide_store(instruction, &mut state)?;
                     } else if sret_call_memory_offset(memory, &state).is_some() {
                         lift_sret_call_wide_store(instruction, &mut state)?;
                     } else {
                         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
                     }
-                } else if sret_memory_offset(memory, &state).is_some() {
+                } else if sret_memory_offset(memory, &state).is_some_and(|offset| {
+                    sret_leaf_count.is_some_and(|leaf_count| offset + 8 < 8 * leaf_count as i64)
+                }) {
                     lift_sret_wide_load(instruction, &mut state, context)?;
                 } else if sret_call_memory_offset(memory, &state).is_some() {
                     lift_sret_call_wide_load(instruction, &mut state, context)?;
