@@ -565,13 +565,14 @@ fn wide_composite_values(model: &PureI64Body<'_>) -> bool {
 
 const MAX_AGGREGATE_LEAF_COUNT: usize = 4;
 // Struct arguments (parameters and direct-call arguments) may carry up to
-// eight leaves: LLVM aggregate lowering flattens them leaf-by-leaf into the
-// scalar argument sequence, and the per-class register preflight already
-// bounds them to six INTEGER leaves (`rdi`-`r9`) or eight SSE leaves
-// (`xmm0`-`xmm7`), so eight covers the largest register-resident struct.
+// sixteen leaves: LLVM aggregate lowering flattens them leaf-by-leaf into the
+// scalar argument sequence regardless of size, INTEGER leaves past `rdi`-`r9`
+// spilling onto the argument stack like scalars. Sixteen keeps each leaf a
+// bounded solver term without admitting the unbounded leaf counts of truly
+// huge aggregates; beyond it signatures stay fail-closed.
 // Result aggregates stay at MAX_AGGREGATE_LEAF_COUNT: four-`i64` results
 // already need a hidden sret pointer, which this model rejects.
-const MAX_AGGREGATE_ARGUMENT_LEAF_COUNT: usize = 8;
+const MAX_AGGREGATE_ARGUMENT_LEAF_COUNT: usize = 16;
 const INTEGER_RESULT_REGISTERS: [usize; 3] = [0, 2, 1];
 const FLOAT_RESULT_REGISTER_COUNT: usize = 2;
 
@@ -6012,11 +6013,76 @@ entry:
             &context,
             RefinedAdmission::CompositeV23,
         );
-        assert!(!supports_signature(&sum9_model));
+        // Nine INTEGER leaves fit inside the sixteen-leaf bound now that
+        // spilled leaves share the scalar stack-argument path.
+        assert!(supports_signature(&sum9_model));
         assert_eq!(
             check_function(&[0xc3], 0, &sum9_model, &BTreeMap::new(), &context),
-            FunctionOutcome::OutsideProfile("unsupported_signature")
+            FunctionOutcome::Different
         );
+
+        let sixteen_leaf_source = "struct P16 { a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, n: i64, o: i64, p: i64 }\n\
+            atom first_last(p: P16) -> i64 requires: true; ensures: true; body: { p.a + p.p };\n\
+            atom main16() -> i64 requires: true; ensures: true; body: { first_last(P16 { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8, i: 9, j: 10, k: 11, l: 12, m: 13, n: 14, o: 15, p: 16 }) };";
+        let sixteen_models = |name| {
+            source_model_named_with_admission(
+                sixteen_leaf_source,
+                name,
+                &context,
+                RefinedAdmission::CompositeV23,
+            )
+        };
+        let sixteen_leaf_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @first_last({ i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p) {
+entry:
+  %a = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p, 0
+  %q = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p, 15
+  %r = add i64 %a, %q
+  ret i64 %r
+}
+define i64 @main16() {
+entry:
+  %p0 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } undef, i64 1, 0
+  %p1 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p0, i64 2, 1
+  %p2 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p1, i64 3, 2
+  %p3 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p2, i64 4, 3
+  %p4 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p3, i64 5, 4
+  %p5 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p4, i64 6, 5
+  %p6 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p5, i64 7, 6
+  %p7 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p6, i64 8, 7
+  %p8 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p7, i64 9, 8
+  %p9 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p8, i64 10, 9
+  %p10 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p9, i64 11, 10
+  %p11 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p10, i64 12, 11
+  %p12 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p11, i64 13, 12
+  %p13 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p12, i64 14, 13
+  %p14 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p13, i64 15, 14
+  %p15 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p14, i64 16, 15
+  %r = call i64 @first_last({ i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } %p15)
+  ret i64 %r
+}
+"#;
+        for name in ["first_last", "main16"] {
+            let model = sixteen_models(name);
+            assert!(supports_signature(&model), "{name}");
+            let (address, bytes, targets) = compiled_function_with_targets(sixteen_leaf_ir, name);
+            assert_eq!(
+                check_function(&bytes, address, &model, &targets, &context),
+                FunctionOutcome::Equivalent,
+                "{name}"
+            );
+        }
+
+        // Past the bound — and past the admission fragment's own 16-leaf
+        // flattening limit — aggregates stay fail-closed.
+        assert!(!call_value_shape_supported_with_leaf_bound(
+            CallValueShape::Struct {
+                leaf_count: MAX_AGGREGATE_ARGUMENT_LEAF_COUNT + 1,
+                has_enum: false,
+                has_f64: false,
+            },
+            MAX_AGGREGATE_ARGUMENT_LEAF_COUNT,
+        ));
     }
 
     #[test]
