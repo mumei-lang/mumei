@@ -37,6 +37,7 @@ use std::path::Path;
 #[cfg(test)]
 pub(crate) use cache::compute_hash;
 pub(crate) use cache::compute_legacy_dependency_hashes;
+pub(crate) use cache::resource_dependency_hash;
 #[cfg(test)]
 pub(crate) use imports::{
     check_cert_for_atom, mark_dependency_atoms_with_cert, register_imported_items,

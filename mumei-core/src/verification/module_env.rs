@@ -168,6 +168,10 @@ pub struct ModuleEnv {
     /// リソース定義（非同期安全性検証用）
     /// リソース名 → (優先度, アクセスモード)
     pub resources: HashMap<String, ResourceDef>,
+    /// Registered resource name → source file that defined it.
+    pub resource_origins: HashMap<String, Option<String>>,
+    /// Source file → transitive imported source files.
+    pub import_closure: HashMap<String, std::collections::BTreeSet<String>>,
     /// エフェクト定義（副作用検証用）
     /// エフェクト名 → EffectDef
     pub effects: HashMap<String, EffectDef>,
@@ -538,8 +542,18 @@ impl ModuleEnv {
 
     /// リソース定義を登録する
     pub fn register_resource(&mut self, resource_def: &ResourceDef) {
+        self.register_resource_with_origin(resource_def, None);
+    }
+
+    pub fn register_resource_with_origin(
+        &mut self,
+        resource_def: &ResourceDef,
+        origin: Option<&str>,
+    ) {
         self.resources
             .insert(resource_def.name.clone(), resource_def.clone());
+        self.resource_origins
+            .insert(resource_def.name.clone(), origin.map(str::to_string));
     }
 
     /// リソース定義を取得する

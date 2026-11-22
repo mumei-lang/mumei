@@ -867,6 +867,15 @@ pub fn compute_dependency_hashes(
     compute_dependency_hashes_with_names(atom, module_env, false)
 }
 
+pub(crate) fn resource_dependency_hash(name: &str, module_env: &ModuleEnv) -> Option<String> {
+    let resource = module_env.get_resource(name)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"|resource:");
+    hasher.update(name.as_bytes());
+    hash_resource_definition(&mut hasher, resource);
+    Some(format!("{:x}", hasher.finalize()))
+}
+
 pub(crate) fn compute_legacy_dependency_hashes(
     atom: &crate::parser::Atom,
     module_env: &ModuleEnv,
@@ -901,6 +910,22 @@ fn compute_dependency_hashes_with_names(
             &mut pending_type_names,
         );
         collect_acquired_resource_names_stmt(&body, &mut resource_names);
+        let source_file = atom.spec_metadata.get("source_file");
+        let imported_files =
+            source_file.and_then(|source_file| module_env.import_closure.get(source_file));
+        if let (Some(source_file), Some(imported_files)) = (source_file, imported_files) {
+            for (name, origin) in &module_env.resource_origins {
+                if origin
+                    .as_deref()
+                    .is_some_and(|origin| origin == source_file || imported_files.contains(origin))
+                {
+                    resource_names.insert(name.clone());
+                }
+            }
+        } else {
+            // Top-level atoms are source-attributed too; only imported files have tracked closures.
+            resource_names.extend(module_env.resources.keys().cloned());
+        }
     }
     let mut pending = dependency_callees(atom, module_env, legacy_names)
         .into_iter()
@@ -1080,15 +1105,8 @@ fn compute_dependency_hashes_with_names(
             hashes.insert(format!("enum:{name}"), format!("{:x}", hasher.finalize()));
         }
         for name in resource_names {
-            if let Some(resource) = module_env.get_resource(&name) {
-                let mut hasher = Sha256::new();
-                hasher.update(b"|resource:");
-                hasher.update(name.as_bytes());
-                hash_resource_definition(&mut hasher, resource);
-                hashes.insert(
-                    format!("resource:{name}"),
-                    format!("{:x}", hasher.finalize()),
-                );
+            if let Some(hash) = resource_dependency_hash(&name, module_env) {
+                hashes.insert(format!("resource:{name}"), hash);
             }
         }
     }
@@ -2870,10 +2888,78 @@ body: { p.a };\n";
         let after_source = before_source.replace("counter.value >= 0", "counter.value >= 5");
 
         assert_ne!(env_and_hash(before_source), env_and_hash(&after_source));
-        for source in [before_source, after_source.as_str()] {
-            assert!(dependency_hashes_for(source, "main")
-                .keys()
-                .all(|key| !key.starts_with("resource:")));
+        assert_ne!(
+            dependency_hash_for(before_source, "main", "resource:counter"),
+            dependency_hash_for(&after_source, "main", "resource:counter")
+        );
+    }
+
+    #[test]
+    fn resource_dependency_keys_follow_atom_source_import_closure() {
+        let items = parse_module(
+            "resource own { value: i64 } priority: 1 mode: exclusive invariant: own.value >= 0;\n\
+             resource imported { value: i64 } priority: 1 mode: exclusive invariant: imported.value >= 0;\n\
+             resource transitive { value: i64 } priority: 1 mode: exclusive invariant: transitive.value >= 0;\n\
+             resource sibling { value: i64 } priority: 1 mode: exclusive invariant: sibling.value >= 0;\n\
+             resource unknown { value: i64 } priority: 1 mode: exclusive invariant: unknown.value >= 0;",
+        );
+        let mut module_env = ModuleEnv::default();
+        for item in items {
+            if let Item::ResourceDef(resource) = item {
+                let origin = match resource.name.as_str() {
+                    "own" => "/c.mm",
+                    "imported" => "/b.mm",
+                    "transitive" => "/d.mm",
+                    "sibling" => "/sibling.mm",
+                    "unknown" => "/outside.mm",
+                    _ => unreachable!("unexpected resource"),
+                };
+                module_env.register_resource_with_origin(&resource, Some(origin));
+            }
+        }
+        module_env.import_closure.insert(
+            "/c.mm".to_string(),
+            ["/b.mm".to_string(), "/d.mm".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        let mut atom = parse_module(
+            "atom main() -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: 0;",
+        )
+        .into_iter()
+        .find_map(|item| match item {
+            Item::Atom(atom) => Some(atom),
+            _ => None,
+        })
+        .expect("parse main atom");
+        atom.spec_metadata
+            .insert("source_file".to_string(), "/c.mm".to_string());
+
+        let hashes = compute_dependency_hashes(&atom, &module_env);
+        assert!(hashes.contains_key("resource:own"));
+        assert!(hashes.contains_key("resource:imported"));
+        assert!(hashes.contains_key("resource:transitive"));
+        assert!(!hashes.contains_key("resource:sibling"));
+        assert!(!hashes.contains_key("resource:unknown"));
+
+        let mut declared = atom.clone();
+        declared.resources.push("sibling".to_string());
+        assert!(compute_dependency_hashes(&declared, &module_env).contains_key("resource:sibling"));
+
+        atom.spec_metadata.remove("source_file");
+        let root_hashes = compute_dependency_hashes(&atom, &module_env);
+        for name in ["own", "imported", "transitive", "sibling", "unknown"] {
+            assert!(root_hashes.contains_key(&format!("resource:{name}")));
+        }
+
+        atom.spec_metadata
+            .insert("source_file".to_string(), "/root.mm".to_string());
+        let annotated_root_hashes = compute_dependency_hashes(&atom, &module_env);
+        for name in ["own", "imported", "transitive", "sibling", "unknown"] {
+            assert!(annotated_root_hashes.contains_key(&format!("resource:{name}")));
         }
     }
 

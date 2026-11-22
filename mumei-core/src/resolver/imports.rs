@@ -86,7 +86,7 @@ pub fn resolve_imports_with_full_options_and_persistence(
     let mut ctx = ResolverContext::new();
     ctx.strict_imports = strict_imports;
     ctx.allow_lean_verified = allow_lean_verified;
-    resolve_imports_recursive(items, base_dir, &mut ctx, &mut cache, module_env)?;
+    resolve_imports_recursive(items, base_dir, &mut ctx, &mut cache, module_env, None)?;
     if persist_cache {
         save_cache(&cache_path, &cache);
     }
@@ -138,6 +138,7 @@ pub fn resolve_prelude_with_persistence(
         &mut ctx,
         &mut cache,
         module_env,
+        prelude_path.to_str(),
     )?;
     if persist_cache {
         save_cache(&cache_path, &cache);
@@ -342,8 +343,22 @@ pub(crate) fn verify_import_certificate(
     module_env: &ModuleEnv,
     strict_imports: bool,
 ) -> Option<CertificateResults> {
+    let mut attributed_items = items.to_vec();
+    if let Some(source_file) = source_file.to_str() {
+        for item in &mut attributed_items {
+            match item {
+                Item::Atom(atom) => *atom = with_source_file(atom, source_file),
+                Item::ImplBlock(impl_block) => {
+                    for method in &mut impl_block.methods {
+                        *method = with_source_file(method, source_file);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     let mut qualified_methods: Vec<parser::Atom> = Vec::new();
-    let atom_refs = collect_atom_refs_with_methods(items, &mut qualified_methods);
+    let atom_refs = collect_atom_refs_with_methods(&attributed_items, &mut qualified_methods);
 
     // 1. & 2. Local certificate in the module directory.
     let cert_candidates = [
@@ -593,7 +608,15 @@ pub(crate) fn resolve_imports_recursive(
     ctx: &mut ResolverContext,
     cache: &mut VerificationCache,
     module_env: &mut ModuleEnv,
+    source_file: Option<&str>,
 ) -> MumeiResult<()> {
+    if let Some(source_file) = source_file {
+        module_env
+            .import_closure
+            .entry(source_file.to_string())
+            .or_default();
+    }
+
     for item in items {
         if let Item::Import(import_decl) = item {
             let resolved_path = resolve_path(&import_decl.path, base_dir)?;
@@ -604,8 +627,10 @@ pub(crate) fn resolve_imports_recursive(
                     import_decl.span.clone(),
                 ));
             }
+            let imported_source_file = resolved_path.to_str();
             // 既にロード済みならスキップ
             if ctx.loaded.contains_key(&resolved_path) {
+                record_import_closure(module_env, source_file, imported_source_file);
                 continue;
             }
             // ロード中としてマーク
@@ -635,7 +660,15 @@ pub(crate) fn resolve_imports_recursive(
             let imported_items = parser::parse_module(&source);
             let import_base_dir = resolved_path.parent().unwrap_or(Path::new("."));
             // 再帰的にインポートを解決（インポートされたモジュール内の import も処理）
-            resolve_imports_recursive(&imported_items, import_base_dir, ctx, cache, module_env)?;
+            resolve_imports_recursive(
+                &imported_items,
+                import_base_dir,
+                ctx,
+                cache,
+                module_env,
+                imported_source_file,
+            )?;
+            record_import_closure(module_env, source_file, imported_source_file);
             // インポートされたモジュールの定義を ModuleEnv に登録
             let alias_prefix = import_decl.alias.as_deref();
             register_imported_items_with_source(
@@ -817,6 +850,28 @@ pub(crate) fn resolve_imports_recursive(
     }
     Ok(())
 }
+
+fn record_import_closure(
+    module_env: &mut ModuleEnv,
+    source_file: Option<&str>,
+    imported_file: Option<&str>,
+) {
+    let (Some(source_file), Some(imported_file)) = (source_file, imported_file) else {
+        return;
+    };
+    let transitive_imports = module_env
+        .import_closure
+        .get(imported_file)
+        .cloned()
+        .unwrap_or_default();
+    let imports = module_env
+        .import_closure
+        .entry(source_file.to_string())
+        .or_default();
+    imports.insert(imported_file.to_string());
+    imports.extend(transitive_imports);
+}
+
 /// `spec_metadata` key recording the import alias an `alias::name` registration
 /// was prefixed with, so consumers can recover the name the defining module
 /// (and its certificate) uses without guessing which `::` segments are the
@@ -889,7 +944,9 @@ pub(crate) fn register_imported_items_with_source(
                 // トレイトは FQN 登録不要（トレイト名はグローバルに一意と仮定）
             }
             Item::ImplDef(impl_def) => module_env.register_impl(impl_def),
-            Item::ResourceDef(resource_def) => module_env.register_resource(resource_def),
+            Item::ResourceDef(resource_def) => {
+                module_env.register_resource_with_origin(resource_def, source_file)
+            }
             Item::Import(_) => {
                 // 再帰的に処理済み
             }
@@ -962,7 +1019,7 @@ pub(crate) fn register_imported_alias_names(
             Item::ResourceDef(resource_def) => {
                 let mut fqn_resource = resource_def.clone();
                 fqn_resource.name = format!("{}::{}", alias, resource_def.name);
-                module_env.register_resource(&fqn_resource);
+                module_env.register_resource_with_origin(&fqn_resource, None);
             }
             Item::EffectDef(effect_def) => {
                 let mut fqn_effect = effect_def.clone();
