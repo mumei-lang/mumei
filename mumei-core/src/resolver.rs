@@ -54,6 +54,7 @@ pub use cache::{
 pub use dependencies::{
     resolve_manifest_dependencies, resolve_manifest_dependencies_with_full_options,
     resolve_manifest_dependencies_with_full_options_and_persistence,
+    resolve_manifest_dependencies_with_full_options_persistence_and_source,
     resolve_manifest_dependencies_with_options,
 };
 pub use imports::{

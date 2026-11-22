@@ -2434,3 +2434,99 @@ fn strict_import_tracks_unrefined_struct_and_enum_definitions() {
         "{changed_text}"
     );
 }
+
+#[test]
+fn manifest_dependency_definitions_stay_in_root_dependency_keys() {
+    // Manifest-only dependencies load into the root file's module environment
+    // just like `import` statements do, so an unused definition there still
+    // gates the consumer's verification. Recording the root import closure
+    // must not drop its key — otherwise the certificate stays stale-proven.
+    let fixture = Fixture::new();
+    let dep_dir = fixture.root.join("dep");
+    let consumer_dir = fixture.root.join("consumer");
+    std::fs::create_dir_all(dep_dir.join("src")).expect("create dep source directory");
+    std::fs::create_dir_all(consumer_dir.join("src")).expect("create consumer source directory");
+
+    std::fs::write(
+        dep_dir.join("mumei.toml"),
+        "[package]\nname = \"dep_pkg\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("write dep manifest");
+    let dep_main = dep_dir.join("src/main.mm");
+    let dep_source = |predicate: &str| {
+        format!(
+            "type Limit = i64 where {predicate};\n\
+             atom dep_fn(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n"
+        )
+    };
+    std::fs::write(&dep_main, dep_source("v >= 0")).expect("write dep source");
+
+    std::fs::write(
+        consumer_dir.join("mumei.toml"),
+        format!(
+            "[package]\nname = \"consumer_pkg\"\nversion = \"0.1.0\"\n\n[dependencies]\ndep_pkg = {{ path = \"{}\" }}\n",
+            dep_dir.display()
+        ),
+    )
+    .expect("write consumer manifest");
+    std::fs::write(
+        consumer_dir.join("src/main.mm"),
+        "atom main(x: i64) -> i64\n  requires: true;\n  ensures: result == x;\n  body: x;\n",
+    )
+    .expect("write consumer source");
+
+    let certificate_path = consumer_dir.join(".proof-cert.json");
+    assert_success(
+        &fixture.run_in_directory(
+            &consumer_dir,
+            &[
+                "verify",
+                "--proof-cert",
+                "--output",
+                certificate_path
+                    .to_str()
+                    .expect("certificate path is UTF-8"),
+                "src/main.mm",
+            ],
+        ),
+        "certify the consumer against a manifest dependency",
+    );
+    let certificate: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&certificate_path).unwrap())
+            .expect("parse consumer certificate");
+    let main_atom = certificate
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "main")
+        .expect("main certificate");
+    assert!(
+        main_atom
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes")
+            .contains_key("type:Limit"),
+        "the manifest dependency's unused refined type must be keyed"
+    );
+
+    std::fs::write(&dep_main, dep_source("v <= 50")).expect("change the dep predicate");
+    let changed = fixture.run_in_directory(
+        &consumer_dir,
+        &[
+            "verify-cert",
+            certificate_path
+                .to_str()
+                .expect("certificate path is UTF-8"),
+            "src/main.mm",
+        ],
+    );
+    let changed_text = output_text(&changed);
+    assert_eq!(changed.status.code(), Some(0), "{changed_text}");
+    assert!(
+        changed_text.contains("dependency_changed"),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("type:Limit"), "{changed_text}");
+}

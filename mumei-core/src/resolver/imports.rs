@@ -881,7 +881,7 @@ pub(crate) fn resolve_imports_recursive(
     Ok(())
 }
 
-fn record_import_closure(
+pub(crate) fn record_import_closure(
     module_env: &mut ModuleEnv,
     source_file: Option<&str>,
     imported_file: Option<&str>,

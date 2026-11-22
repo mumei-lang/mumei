@@ -154,13 +154,14 @@ pub(crate) fn try_load_and_prepare_with_full_options_and_persistence(
     if let Some((proj_dir, m)) = manifest::find_and_load() {
         if strict_imports || allow_lean_verified {
             if let Err(e) =
-                resolver::resolve_manifest_dependencies_with_full_options_and_persistence(
+                resolver::resolve_manifest_dependencies_with_full_options_persistence_and_source(
                     &m,
                     &proj_dir,
                     &mut module_env,
                     strict_imports,
                     allow_lean_verified,
                     persist_cache,
+                    Some(input),
                 )
             {
                 if strict_imports {
@@ -169,13 +170,14 @@ pub(crate) fn try_load_and_prepare_with_full_options_and_persistence(
                 eprintln!("  ⚠️  Dependency resolution warning: {}", e);
             }
         } else if let Err(e) =
-            resolver::resolve_manifest_dependencies_with_full_options_and_persistence(
+            resolver::resolve_manifest_dependencies_with_full_options_persistence_and_source(
                 &m,
                 &proj_dir,
                 &mut module_env,
                 false,
                 false,
                 persist_cache,
+                Some(input),
             )
         {
             eprintln!("  ⚠️  Dependency resolution warning: {}", e);

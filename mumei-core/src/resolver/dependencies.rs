@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use super::cache::{load_cache, save_cache};
 use super::imports::{
-    mark_dependency_atoms_with_cert, register_imported_alias_names,
+    mark_dependency_atoms_with_cert, record_import_closure, register_imported_alias_names,
     register_imported_items_with_source, resolve_imports_recursive, verify_import_certificate,
     ResolverContext,
 };
@@ -98,6 +98,33 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
     allow_lean_verified: bool,
     persist_cache: bool,
 ) -> MumeiResult<()> {
+    resolve_manifest_dependencies_with_full_options_persistence_and_source(
+        manifest,
+        project_dir,
+        module_env,
+        strict_imports,
+        allow_lean_verified,
+        persist_cache,
+        None,
+    )
+}
+
+/// Same as [`resolve_manifest_dependencies_with_full_options_and_persistence`]
+/// but records each dependency entry file in `source_file`'s
+/// [`ModuleEnv::import_closure`] entry, so atoms in the root file treat
+/// manifest dependencies as part of their tracked import closure — the same
+/// way `import` statements do. Without it, manifest-loaded definitions would
+/// fall outside the root closure and be dropped from dependency keys even
+/// though module-wide checks see them.
+pub fn resolve_manifest_dependencies_with_full_options_persistence_and_source(
+    manifest: &crate::manifest::Manifest,
+    project_dir: &Path,
+    module_env: &mut ModuleEnv,
+    strict_imports: bool,
+    allow_lean_verified: bool,
+    persist_cache: bool,
+    source_file: Option<&str>,
+) -> MumeiResult<()> {
     let mut deferred_certificates = Vec::new();
 
     for (dep_name, dep) in &manifest.dependencies {
@@ -134,6 +161,12 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                     module_env,
                     entry_path.to_str(),
                 )?;
+                // Manifest dependencies load into the root file's module
+                // environment just like `import` statements do, so record the
+                // entry edge in the root's import closure — otherwise the
+                // dep's definitions fall outside the tracked closure and are
+                // dropped from the root atoms' dependency keys.
+                record_import_closure(module_env, source_file, entry_path.to_str());
                 if persist_cache {
                     save_cache(&cache_path, &cache);
                 }
@@ -255,6 +288,12 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                     module_env,
                     entry_path.to_str(),
                 )?;
+                // Manifest dependencies load into the root file's module
+                // environment just like `import` statements do, so record the
+                // entry edge in the root's import closure — otherwise the
+                // dep's definitions fall outside the tracked closure and are
+                // dropped from the root atoms' dependency keys.
+                record_import_closure(module_env, source_file, entry_path.to_str());
                 if persist_cache {
                     save_cache(&cache_path, &cache);
                 }
@@ -329,6 +368,12 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                         module_env,
                         entry_path.to_str(),
                     )?;
+                    // Manifest dependencies load into the root file's module
+                    // environment just like `import` statements do, so record
+                    // the entry edge in the root's import closure — otherwise
+                    // the dep's definitions fall outside the tracked closure
+                    // and are dropped from the root atoms' dependency keys.
+                    record_import_closure(module_env, source_file, entry_path.to_str());
                     if persist_cache {
                         save_cache(&cache_path, &cache);
                     }
