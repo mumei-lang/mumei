@@ -2066,6 +2066,7 @@ fn record_cover_obligation<'a>(vc: &VCtx<'a>, obligation: Bool<'a>) {
     obligations.borrow_mut().push(obligation);
 }
 
+#[inline(never)]
 pub(crate) fn expr_to_z3_with_domain_obligations<'a>(
     vc: &VCtx<'a>,
     expr: &Expr,
@@ -2092,6 +2093,7 @@ pub(crate) fn expr_to_z3_with_domain_obligations<'a>(
     Ok(Bool::and(vc.ctx, &conjuncts).into())
 }
 
+#[inline(never)]
 fn check_call_argument_domain<'a>(
     vc: &VCtx<'a>,
     solver_opt: Option<&Solver<'a>>,
@@ -2209,6 +2211,7 @@ fn check_call_argument_domain<'a>(
     Ok(())
 }
 
+#[inline(never)]
 fn check_call_argument_domains<'a>(
     vc: &VCtx<'a>,
     solver_opt: Option<&Solver<'a>>,
@@ -7410,68 +7413,7 @@ pub(crate) fn expr_to_z3<'a>(
                 arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
             }
             vc.reject_quantifier_dependent_call("call", &arg_vals)?;
-            if let Expr::Variable(callee_var_name) = callee.as_ref() {
-                if let Some(param) = vc.current_atom.and_then(|atom| {
-                    atom.params
-                        .iter()
-                        .find(|param| param.name == *callee_var_name)
-                }) {
-                    let function_type = param
-                        .type_ref
-                        .as_ref()
-                        .filter(|ty| ty.is_fn_type())
-                        .cloned()
-                        .or_else(|| {
-                            param.type_name.as_deref().and_then(|name| {
-                                let resolved = vc.module_env.resolve_base_type(name);
-                                let parsed = crate::parser::parse_type_ref(&resolved);
-                                parsed.is_fn_type().then_some(parsed)
-                            })
-                        });
-                    let Some(function_type) = function_type else {
-                        return Err(MumeiError::verification(format!(
-                            "Call through function parameter '{callee_var_name}' has no typed signature to check argument domains"
-                        ))
-                        .with_verdict(crate::verification::VerdictKind::Rejected));
-                    };
-                    let param_types = function_type.fn_param_types().unwrap_or_default();
-                    if param_types.len() != arg_vals.len() {
-                        return Err(MumeiError::verification(format!(
-                            "Call to function parameter '{callee_var_name}' expects {} argument(s), got {}",
-                            param_types.len(),
-                            arg_vals.len()
-                        ))
-                        .with_verdict(crate::verification::VerdictKind::Rejected));
-                    }
-                    let mut callback_env = env.clone();
-                    for (index, (param_type, value)) in
-                        param_types.iter().zip(&arg_vals).enumerate()
-                    {
-                        let arg_name = format!("arg{index}");
-                        callback_env.insert(arg_name.clone(), value.clone());
-                        alias_struct_fields(&mut callback_env, &arg_name, value);
-                        if value.as_array().is_some() {
-                            let length = super::z3_types::array_len_for_expr(
-                                vc,
-                                &mut callback_env,
-                                args.get(index),
-                                value,
-                                solver_opt,
-                            );
-                            callback_env.insert(super::z3_types::array_len_key(&arg_name), length);
-                        }
-                        check_lambda_call_argument_domain(
-                            vc,
-                            solver_opt,
-                            callee_var_name,
-                            &arg_name,
-                            &param_type.display_name(),
-                            value,
-                            &mut callback_env,
-                        )?;
-                    }
-                }
-            }
+            check_function_param_call_domains(vc, solver_opt, callee, args, &arg_vals, env)?;
             reject_shared_array_mutating_call_args(
                 vc,
                 CalleeRef::Expr(callee.as_ref()),
@@ -7904,182 +7846,7 @@ pub(crate) fn expr_to_z3<'a>(
                 Ok(sym.into())
             }
         }
-        // Lambda 式: Z3 uninterpreted function として表現する
-        // 将来のフェーズでキャプチャ変数の環境アサーションと
-        // 高階関数コントラクトの検証を追加する
-        Expr::Lambda { params, body, .. } => {
-            // Create a fresh symbolic value for the lambda
-            // Lambda bodies will be verified when called via higher-order function contracts
-            // Use a unique counter to avoid Z3 constant name collisions when multiple lambdas
-            // with the same arity appear in the same atom body (e.g., `let f = |x| x+1; let g = |x| x-1;`).
-            static LAMBDA_COUNTER: std::sync::atomic::AtomicUsize =
-                std::sync::atomic::AtomicUsize::new(0);
-            let lambda_id = LAMBDA_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let lambda_name = format!("__lambda_{}_{}", params.len(), lambda_id);
-            let lambda_sym = Int::new_const(ctx, lambda_name.as_str());
-
-            // Register parameter names in a sub-environment for body verification
-            let mut lambda_env = env.clone();
-            for p in params {
-                if let Some(type_name) = p.type_ref.as_ref().map(|ty| ty.display_name()) {
-                    super::z3_types::validate_enum_array_type(vc, &type_name)?;
-                }
-            }
-            let int_types_before = vc.local_int_types.borrow().clone();
-            let array_elem_types_before = vc.local_array_elem_types.borrow().clone();
-            let struct_types_before = vc.local_struct_types.borrow().clone();
-            let enum_types_before = vc.local_enum_types.borrow().clone();
-            for (param_index, p) in params.iter().enumerate() {
-                super::z3_types::clear_array_shared(ctx, &mut lambda_env, &p.name);
-                let type_name = p.type_ref.as_ref().map(|ty| ty.display_name());
-                let lambda_param_name = format!("__mumei_lambda_param_{lambda_id}_{param_index}");
-                let p_sym =
-                    datatype::param_z3_value_for_vc(vc, &lambda_param_name, type_name.as_deref());
-                lambda_env.insert(p.name.clone(), p_sym.clone());
-                lambda_env.remove(&format!("__z3_arr_{}", p.name));
-                lambda_env.remove(&super::z3_types::array_len_key(&p.name));
-                let struct_array_prefix = format!("__struct_arr#{}#", p.name);
-                lambda_env.retain(|key, _| !key.starts_with(&struct_array_prefix));
-                vc.local_int_types.borrow_mut().remove(&p.name);
-                vc.local_array_elem_types.borrow_mut().remove(&p.name);
-                vc.local_struct_types.borrow_mut().remove(&p.name);
-                vc.local_enum_types.borrow_mut().remove(&p.name);
-                let Some(type_ref) = p.type_ref.as_ref() else {
-                    continue;
-                };
-                let resolved_type = vc.module_env.resolve_base_type(&type_ref.display_name());
-                if let Some((int_type, _, _)) =
-                    fixed_width_int(&vc.module_env.resolve_base_type(&type_ref.name))
-                {
-                    vc.local_int_types
-                        .borrow_mut()
-                        .insert(p.name.clone(), int_type);
-                }
-                if let Some(element_type) = type_ref.array_element_type() {
-                    let length = super::z3_types::array_root_len_value(
-                        ctx,
-                        &mut lambda_env,
-                        &lambda_param_name,
-                        vc.bitvec_i64,
-                        None,
-                    );
-                    lambda_env.insert(super::z3_types::array_len_key(&p.name), length);
-                    lambda_env.insert(format!("__z3_arr_{}", p.name), p_sym.clone());
-                    vc.local_array_elem_types
-                        .borrow_mut()
-                        .insert(p.name.clone(), element_type.display_name());
-                }
-                if let Some(struct_def) = vc.module_env.get_struct(&resolved_type) {
-                    let struct_field_prefix = format!("__struct_{}_", p.name);
-                    let stale_fields: Vec<String> = lambda_env
-                        .keys()
-                        .filter_map(|key| {
-                            key.strip_prefix(&struct_field_prefix).map(str::to_string)
-                        })
-                        .collect();
-                    for field in stale_fields {
-                        lambda_env.remove(&struct_field_key(&p.name, &field));
-                        lambda_env.remove(&format!("{}_{}", p.name, field));
-                    }
-                    super::struct_invariants::seed_struct_fields(
-                        vc,
-                        &mut lambda_env,
-                        &lambda_param_name,
-                        struct_def,
-                    );
-                    let fields =
-                        super::struct_invariants::nested_field_bindings(&lambda_env, &p_sym);
-                    super::struct_invariants::bind_struct_fields(&mut lambda_env, &p.name, &fields);
-                    vc.local_struct_types
-                        .borrow_mut()
-                        .insert(p.name.clone(), resolved_type.clone());
-                }
-                if vc.module_env.get_enum(&resolved_type).is_some() {
-                    vc.local_enum_types
-                        .borrow_mut()
-                        .insert(p.name.clone(), resolved_type);
-                }
-            }
-
-            // A param shadows a same-named outer lambda binding for the
-            // body's duration, and lambda `let`s bound inside the body
-            // stay body-local — both fall out of restoring the map.
-            // Params bind as `Opaque` rather than dropping outright so a
-            // body like `|f, x| f(x)` still translates — the callee shape
-            // is only known once a call site supplies a real closure.
-            let saved_lambdas = vc.local_lambdas.borrow().clone();
-            {
-                let mut map = vc.local_lambdas.borrow_mut();
-                for p in params {
-                    map.insert(p.name.clone(), std::rc::Rc::new(LocalLambda::Opaque));
-                }
-            }
-            // Verify the lambda body in the sub-environment. This is a
-            // bind-time pass with arbitrary param constants, so recursive
-            // calls inside are not congruent: no `rec_fn#` application and
-            // no termination obligation (the real invocation through
-            // `apply_local_lambda` re-checks both with actual arguments).
-            vc.recursion
-                .lambda_bind_depth
-                .set(vc.recursion.lambda_bind_depth.get() + 1);
-            let body_result = if let Some(solver) = solver_opt {
-                solver.push();
-                solver.assert(&vc.path_cond_conj());
-                for p in params {
-                    let (Some(type_ref), Some(value)) =
-                        (p.type_ref.as_ref(), lambda_env.get(&p.name).cloned())
-                    else {
-                        continue;
-                    };
-                    let type_name = type_ref.display_name();
-                    if type_ref.array_element_type().is_some() {
-                        if let Some(length) =
-                            lambda_env.get(&super::z3_types::array_len_key(&p.name))
-                        {
-                            if let Some(nonneg) = super::z3_types::nonneg_constraint(ctx, length) {
-                                solver.assert(&nonneg);
-                            }
-                        }
-                    }
-                    for (_, domain) in fixed_width_param_domains(
-                        vc,
-                        &p.name,
-                        &type_name,
-                        &value,
-                        &mut lambda_env,
-                        solver_opt,
-                    ) {
-                        solver.assert(&domain);
-                    }
-                }
-                let result = stmt_to_z3(vc, body, &mut lambda_env, solver_opt);
-                solver.pop(1);
-                result
-            } else {
-                vc.begin_spec_domain_clause();
-                let result = stmt_to_z3(vc, body, &mut lambda_env, solver_opt);
-                let obligations = vc.finish_spec_domain_clause();
-                if obligations.is_empty() {
-                    result
-                } else {
-                    Err(MumeiError::verification(
-                        "lambda body has argument-domain obligations that require a solver",
-                    )
-                    .with_verdict(crate::verification::VerdictKind::Rejected))
-                }
-            };
-            vc.recursion
-                .lambda_bind_depth
-                .set(vc.recursion.lambda_bind_depth.get() - 1);
-            *vc.local_lambdas.borrow_mut() = saved_lambdas;
-            *vc.local_int_types.borrow_mut() = int_types_before;
-            *vc.local_array_elem_types.borrow_mut() = array_elem_types_before;
-            *vc.local_struct_types.borrow_mut() = struct_types_before;
-            *vc.local_enum_types.borrow_mut() = enum_types_before;
-            let _body_val = body_result?;
-
-            Ok(lambda_sym.into())
-        }
+        Expr::Lambda { params, body, .. } => lambda_expr_to_z3(vc, params, body, env, solver_opt),
         // Plan 8: Channel send — evaluate channel and value, return unit
         Expr::ChanSend { channel, value } => {
             let _ch = expr_to_z3(vc, channel, env, solver_opt)?;
@@ -8096,6 +7863,239 @@ pub(crate) fn expr_to_z3<'a>(
             Ok(recv_sym.into())
         }
     }
+}
+
+#[inline(never)]
+fn check_function_param_call_domains<'a>(
+    vc: &VCtx<'a>,
+    solver_opt: Option<&Solver<'a>>,
+    callee: &Expr,
+    args: &[Expr],
+    arg_vals: &[Dynamic<'a>],
+    env: &Env<'a>,
+) -> MumeiResult<()> {
+    let Expr::Variable(callee_var_name) = callee else {
+        return Ok(());
+    };
+    let Some(param) = vc.current_atom.and_then(|atom| {
+        atom.params
+            .iter()
+            .find(|param| param.name == *callee_var_name)
+    }) else {
+        return Ok(());
+    };
+    let function_type = param
+        .type_ref
+        .as_ref()
+        .filter(|ty| ty.is_fn_type())
+        .cloned()
+        .or_else(|| {
+            param.type_name.as_deref().and_then(|name| {
+                let resolved = vc.module_env.resolve_base_type(name);
+                let parsed = crate::parser::parse_type_ref(&resolved);
+                parsed.is_fn_type().then_some(parsed)
+            })
+        });
+    let Some(function_type) = function_type else {
+        return Err(MumeiError::verification(format!(
+            "Call through function parameter '{callee_var_name}' has no typed signature to check argument domains"
+        ))
+        .with_verdict(crate::verification::VerdictKind::Rejected));
+    };
+    let param_types = function_type.fn_param_types().unwrap_or_default();
+    if param_types.len() != arg_vals.len() {
+        return Err(MumeiError::verification(format!(
+            "Call to function parameter '{callee_var_name}' expects {} argument(s), got {}",
+            param_types.len(),
+            arg_vals.len()
+        ))
+        .with_verdict(crate::verification::VerdictKind::Rejected));
+    }
+    let mut callback_env = env.clone();
+    for (index, (param_type, value)) in param_types.iter().zip(arg_vals).enumerate() {
+        let arg_name = format!("arg{index}");
+        callback_env.insert(arg_name.clone(), value.clone());
+        alias_struct_fields(&mut callback_env, &arg_name, value);
+        if value.as_array().is_some() {
+            let length = super::z3_types::array_len_for_expr(
+                vc,
+                &mut callback_env,
+                args.get(index),
+                value,
+                solver_opt,
+            );
+            callback_env.insert(super::z3_types::array_len_key(&arg_name), length);
+        }
+        check_lambda_call_argument_domain(
+            vc,
+            solver_opt,
+            callee_var_name,
+            &arg_name,
+            &param_type.display_name(),
+            value,
+            &mut callback_env,
+        )?;
+    }
+    Ok(())
+}
+
+#[inline(never)]
+fn lambda_expr_to_z3<'a>(
+    vc: &VCtx<'a>,
+    params: &[crate::parser::ast::LambdaParam],
+    body: &crate::parser::ast::Stmt,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> MumeiResult<Dynamic<'a>> {
+    let ctx = vc.ctx;
+    static LAMBDA_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let lambda_id = LAMBDA_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let lambda_name = format!("__lambda_{}_{}", params.len(), lambda_id);
+    let lambda_sym = Int::new_const(ctx, lambda_name.as_str());
+
+    let mut lambda_env = env.clone();
+    for p in params {
+        if let Some(type_name) = p.type_ref.as_ref().map(|ty| ty.display_name()) {
+            super::z3_types::validate_enum_array_type(vc, &type_name)?;
+        }
+    }
+    let int_types_before = vc.local_int_types.borrow().clone();
+    let array_elem_types_before = vc.local_array_elem_types.borrow().clone();
+    let struct_types_before = vc.local_struct_types.borrow().clone();
+    let enum_types_before = vc.local_enum_types.borrow().clone();
+    for (param_index, p) in params.iter().enumerate() {
+        super::z3_types::clear_array_shared(ctx, &mut lambda_env, &p.name);
+        let type_name = p.type_ref.as_ref().map(|ty| ty.display_name());
+        let lambda_param_name = format!("__mumei_lambda_param_{lambda_id}_{param_index}");
+        let p_sym = datatype::param_z3_value_for_vc(vc, &lambda_param_name, type_name.as_deref());
+        lambda_env.insert(p.name.clone(), p_sym.clone());
+        lambda_env.remove(&format!("__z3_arr_{}", p.name));
+        lambda_env.remove(&super::z3_types::array_len_key(&p.name));
+        let struct_array_prefix = format!("__struct_arr#{}#", p.name);
+        lambda_env.retain(|key, _| !key.starts_with(&struct_array_prefix));
+        vc.local_int_types.borrow_mut().remove(&p.name);
+        vc.local_array_elem_types.borrow_mut().remove(&p.name);
+        vc.local_struct_types.borrow_mut().remove(&p.name);
+        vc.local_enum_types.borrow_mut().remove(&p.name);
+        let Some(type_ref) = p.type_ref.as_ref() else {
+            continue;
+        };
+        let resolved_type = vc.module_env.resolve_base_type(&type_ref.display_name());
+        if let Some((int_type, _, _)) =
+            fixed_width_int(&vc.module_env.resolve_base_type(&type_ref.name))
+        {
+            vc.local_int_types
+                .borrow_mut()
+                .insert(p.name.clone(), int_type);
+        }
+        if let Some(element_type) = type_ref.array_element_type() {
+            let length = super::z3_types::array_root_len_value(
+                ctx,
+                &mut lambda_env,
+                &lambda_param_name,
+                vc.bitvec_i64,
+                None,
+            );
+            lambda_env.insert(super::z3_types::array_len_key(&p.name), length);
+            lambda_env.insert(format!("__z3_arr_{}", p.name), p_sym.clone());
+            vc.local_array_elem_types
+                .borrow_mut()
+                .insert(p.name.clone(), element_type.display_name());
+        }
+        if let Some(struct_def) = vc.module_env.get_struct(&resolved_type) {
+            let struct_field_prefix = format!("__struct_{}_", p.name);
+            let stale_fields: Vec<String> = lambda_env
+                .keys()
+                .filter_map(|key| key.strip_prefix(&struct_field_prefix).map(str::to_string))
+                .collect();
+            for field in stale_fields {
+                lambda_env.remove(&struct_field_key(&p.name, &field));
+                lambda_env.remove(&format!("{}_{}", p.name, field));
+            }
+            super::struct_invariants::seed_struct_fields(
+                vc,
+                &mut lambda_env,
+                &lambda_param_name,
+                struct_def,
+            );
+            let fields = super::struct_invariants::nested_field_bindings(&lambda_env, &p_sym);
+            super::struct_invariants::bind_struct_fields(&mut lambda_env, &p.name, &fields);
+            vc.local_struct_types
+                .borrow_mut()
+                .insert(p.name.clone(), resolved_type.clone());
+        }
+        if vc.module_env.get_enum(&resolved_type).is_some() {
+            vc.local_enum_types
+                .borrow_mut()
+                .insert(p.name.clone(), resolved_type);
+        }
+    }
+
+    let saved_lambdas = vc.local_lambdas.borrow().clone();
+    {
+        let mut map = vc.local_lambdas.borrow_mut();
+        for p in params {
+            map.insert(p.name.clone(), std::rc::Rc::new(LocalLambda::Opaque));
+        }
+    }
+    vc.recursion
+        .lambda_bind_depth
+        .set(vc.recursion.lambda_bind_depth.get() + 1);
+    let body_result = if let Some(solver) = solver_opt {
+        solver.push();
+        solver.assert(&vc.path_cond_conj());
+        for p in params {
+            let (Some(type_ref), Some(value)) =
+                (p.type_ref.as_ref(), lambda_env.get(&p.name).cloned())
+            else {
+                continue;
+            };
+            let type_name = type_ref.display_name();
+            if type_ref.array_element_type().is_some() {
+                if let Some(length) = lambda_env.get(&super::z3_types::array_len_key(&p.name)) {
+                    if let Some(nonneg) = super::z3_types::nonneg_constraint(ctx, length) {
+                        solver.assert(&nonneg);
+                    }
+                }
+            }
+            for (_, domain) in fixed_width_param_domains(
+                vc,
+                &p.name,
+                &type_name,
+                &value,
+                &mut lambda_env,
+                solver_opt,
+            ) {
+                solver.assert(&domain);
+            }
+        }
+        let result = stmt_to_z3(vc, body, &mut lambda_env, solver_opt);
+        solver.pop(1);
+        result
+    } else {
+        vc.begin_spec_domain_clause();
+        let result = stmt_to_z3(vc, body, &mut lambda_env, solver_opt);
+        let obligations = vc.finish_spec_domain_clause();
+        if obligations.is_empty() {
+            result
+        } else {
+            Err(MumeiError::verification(
+                "lambda body has argument-domain obligations that require a solver",
+            )
+            .with_verdict(crate::verification::VerdictKind::Rejected))
+        }
+    };
+    vc.recursion
+        .lambda_bind_depth
+        .set(vc.recursion.lambda_bind_depth.get() - 1);
+    *vc.local_lambdas.borrow_mut() = saved_lambdas;
+    *vc.local_int_types.borrow_mut() = int_types_before;
+    *vc.local_array_elem_types.borrow_mut() = array_elem_types_before;
+    *vc.local_struct_types.borrow_mut() = struct_types_before;
+    *vc.local_enum_types.borrow_mut() = enum_types_before;
+    body_result?;
+
+    Ok(lambda_sym.into())
 }
 
 /// Key a call result's fields — and each struct-typed field's own
@@ -8133,6 +8133,7 @@ fn same_local_lambda<'a>(
     std::rc::Rc::ptr_eq(a, b)
 }
 
+#[inline(never)]
 fn fixed_width_param_domains<'a>(
     vc: &VCtx<'a>,
     param_name: &str,
@@ -8215,6 +8216,7 @@ fn fixed_width_param_domains<'a>(
     domains
 }
 
+#[inline(never)]
 fn check_lambda_call_argument_domain<'a>(
     vc: &VCtx<'a>,
     solver_opt: Option<&Solver<'a>>,
@@ -8249,6 +8251,7 @@ fn check_lambda_call_argument_domain<'a>(
 /// are all restored afterwards: `let`s inside the body stay call-local
 /// (they land in the cloned `call_env`, but the type/lambda side tables
 /// are shared and would otherwise leak).
+#[inline(never)]
 fn apply_local_lambda<'a>(
     vc: &VCtx<'a>,
     call_name: &str,
