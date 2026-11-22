@@ -2203,6 +2203,7 @@ struct KindEnv<'a> {
     effects: &'a EffectEnv,
     atom_effects: BTreeSet<String>,
     admit_effects: bool,
+    allow_perform_statements: bool,
     composites: BTreeMap<String, &'a str>,
     structs: &'a StructEnv,
     /// The module's admitted enums: a composite name resolving to an
@@ -3213,6 +3214,7 @@ fn check_atom_contract(
             .map(|effect| effect.name.clone())
             .collect(),
         admit_effects,
+        allow_perform_statements: false,
         composites,
         structs,
         enums,
@@ -3255,6 +3257,8 @@ fn check_atom_contract(
         parse_expression_checked(&atom.ensures).map_err(|_| SemanticContractError::Parse)?;
     let body =
         parse_body_expr_checked(&atom.body_expr).map_err(|_| SemanticContractError::Parse)?;
+    let mut body_env = env.clone();
+    body_env.allow_perform_statements = true;
     expect_kind(
         expression_kind(
             &requires,
@@ -3299,7 +3303,7 @@ fn check_atom_contract(
                 false,
                 allow_wrapping_arithmetic,
                 &scope.keys().cloned().collect(),
-                &env,
+                &body_env,
             )?;
             if produced != enum_name {
                 return Err(SemanticContractError::Unsupported(
@@ -3339,7 +3343,7 @@ fn check_atom_contract(
                 false,
                 allow_wrapping_arithmetic,
                 &scope.keys().cloned().collect(),
-                &env,
+                &body_env,
             )?;
             if produced != struct_name {
                 return Err(SemanticContractError::Unsupported(
@@ -3369,7 +3373,7 @@ fn check_atom_contract(
             false,
             allow_wrapping_arithmetic,
             &scope.keys().cloned().collect(),
-            &env,
+            &body_env,
         )?,
         result_kind,
     )?;
@@ -5240,6 +5244,7 @@ fn resolve_alias(
                     effects: &EffectEnv::new(),
                     atom_effects: BTreeSet::new(),
                     admit_effects: false,
+                    allow_perform_statements: false,
                     composites: BTreeMap::new(),
                     structs: &StructEnv::new(),
                     enums: &EnumEnv::new(),
@@ -5653,7 +5658,7 @@ fn block_prefix_kinds<'a>(
                     args,
                 },
                 _,
-            ) if inner_env.admit_effects => {
+            ) if inner_env.admit_effects && inner_env.allow_perform_statements => {
                 validate_perform_statement(
                     effect,
                     operation,
@@ -16420,6 +16425,42 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
                 matches!(v25(source), Err(SemanticContractError::Unsupported(actual)) if actual == reason),
                 "unexpected result for {source}"
             );
+        }
+    }
+
+    #[test]
+    fn composite_v25_rejects_perform_in_clause_blocks_and_bounded_encoder() {
+        for clauses in [
+            "requires: { perform Vault.apply(x); true }; ensures: true;",
+            "requires: true; ensures: { perform Vault.apply(x); result >= 0 };",
+            "requires: { if x > 0 { perform Vault.apply(x); true } else { true } }; ensures: true;",
+        ] {
+            let source = format!(
+                "effect Vault;\natom f(x: i64) -> i64 effects: [Vault]; {clauses} body: x;"
+            );
+            assert!(matches!(
+                extract_pure_i64_module_contracts(
+                    &source,
+                    "m.mm",
+                    None,
+                    RefinedAdmission::CompositeV25
+                ),
+                Err(SemanticContractError::Unsupported(
+                    "perform outside statement position"
+                ))
+            ));
+            let config = z3::Config::new();
+            let context = z3::Context::new(&config);
+            assert!(matches!(
+                encode_pure_i64_module_obligations(
+                    &source,
+                    &context,
+                    RefinedAdmission::CompositeV25
+                ),
+                Err(SemanticContractError::Unsupported(
+                    "perform outside statement position"
+                ))
+            ));
         }
     }
 
