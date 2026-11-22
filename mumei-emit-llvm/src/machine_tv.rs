@@ -722,31 +722,49 @@ fn assert_path_equivalence_query<'ctx>(
     result_width: ResultWidth,
     context: &'ctx Context,
 ) {
+    let substitutions = input_substitutions(model, arguments);
     assert_path_assumptions(solver, model, arguments, path);
+    // Lifted machine terms can themselves contain the model's input
+    // constants — e.g. a call's return value is the callee's
+    // uninterpreted-function application over the *source* argument
+    // terms — so fold them onto the same variables as the model side.
+    let substituted_returns: Vec<BV> = path
+        .return_values
+        .iter()
+        .map(|value| value.substitute(&substitutions))
+        .collect();
+    let model_value = model.value.substitute(&substitutions);
     let output_matches = if let Some(leaf_count) = model.result_shape {
         let matches = (0..leaf_count)
             .map(|leaf| {
-                let source_leaf = aggregate_leaf(&model.value, leaf_count, leaf);
+                let source_leaf = aggregate_leaf(&model_value, leaf_count, leaf);
                 if model.result_leaf_doubles[leaf] {
-                    f64_values_match(context, &source_leaf, &path.return_values[leaf])
+                    f64_values_match(context, &source_leaf, &substituted_returns[leaf])
                 } else {
-                    source_leaf._eq(&path.return_values[leaf])
+                    source_leaf._eq(&substituted_returns[leaf])
                 }
             })
             .collect::<Vec<_>>();
         Bool::and(context, &matches.iter().collect::<Vec<_>>())
     } else {
-        let return_value = &path.return_values[0];
+        let return_value = &substituted_returns[0];
         match result_width {
-            ResultWidth::I64 => model.value._eq(return_value),
-            ResultWidth::I32 => model.value.extract(31, 0)._eq(&return_value.extract(31, 0)),
-            ResultWidth::F64 => f64_values_match(context, &model.value, return_value),
-            ResultWidth::I128 => model.value._eq(return_value),
+            ResultWidth::I64 => model_value._eq(return_value),
+            ResultWidth::I32 => model_value.extract(31, 0)._eq(&return_value.extract(31, 0)),
+            ResultWidth::F64 => f64_values_match(context, &model_value, return_value),
+            ResultWidth::I128 => model_value._eq(return_value),
         }
     };
-    let mut equivalent_terms: Vec<&Bool> = path.call_argument_obligations.iter().collect();
-    equivalent_terms.push(&output_matches);
-    solver.assert(&Bool::and(context, &equivalent_terms).not());
+    // Call-site obligations reference the model's input constants
+    // (e.g. a call passing the caller's own argument through), so fold
+    // them with the same substitutions as the assumptions.
+    let mut equivalent_terms: Vec<Bool> = path
+        .call_argument_obligations
+        .iter()
+        .map(|obligation| obligation.substitute(&substitutions))
+        .collect();
+    equivalent_terms.push(output_matches);
+    solver.assert(&Bool::and(context, &equivalent_terms.iter().collect::<Vec<_>>()).not());
 }
 
 fn assert_path_exact_f64_call_arguments_query<'ctx>(
@@ -756,12 +774,21 @@ fn assert_path_exact_f64_call_arguments_query<'ctx>(
     path: &LiftedPath<'ctx>,
     context: &'ctx Context,
 ) {
+    let substitutions = input_substitutions(model, arguments);
     assert_path_assumptions(solver, model, arguments, path);
-    let exact_arguments = path
+    let exact_arguments: Vec<Bool> = path
         .exact_f64_call_argument_obligations
         .iter()
-        .collect::<Vec<_>>();
-    solver.assert(&Bool::and(context, &exact_arguments).not());
+        .map(|obligation| obligation.substitute(&substitutions))
+        .collect();
+    solver.assert(&Bool::and(context, &exact_arguments.iter().collect::<Vec<_>>()).not());
+}
+
+fn input_substitutions<'ctx, 'a>(
+    model: &'a PureI64Body<'ctx>,
+    arguments: &'a [BV<'ctx>],
+) -> Vec<(&'a BV<'ctx>, &'a BV<'ctx>)> {
+    model.inputs.iter().zip(arguments.iter()).collect()
 }
 
 fn assert_path_assumptions<'ctx>(
@@ -770,9 +797,13 @@ fn assert_path_assumptions<'ctx>(
     arguments: &[BV<'ctx>],
     path: &LiftedPath<'ctx>,
 ) {
-    for (input, register) in model.inputs.iter().zip(arguments) {
-        solver.assert(&input._eq(register));
-    }
+    // Fold the model's input constants into its obligations directly
+    // instead of asserting `input_i == register_i` bridging equalities.
+    // Separate input and register variables make Z3 duplicate the
+    // bit-blasted input constraints on both sides of multiply/divide
+    // pairs (e.g. magic-multiply division), which pushes those queries
+    // over the rlimit cliff; substitution shares one term across both.
+    let substitutions = input_substitutions(model, arguments);
     for assumption in model
         .param_domain
         .iter()
@@ -780,10 +811,10 @@ fn assert_path_assumptions<'ctx>(
         .chain(&model.call_result_bounds)
         .chain(model.loop_bound_exits.iter())
     {
-        solver.assert(assumption);
+        solver.assert(&assumption.substitute(&substitutions));
     }
     for condition in &path.path_conditions {
-        solver.assert(condition);
+        solver.assert(&condition.substitute(&substitutions));
     }
 }
 
@@ -795,11 +826,17 @@ fn assert_path_callee_saved_preservation_query<'ctx>(
     path: &LiftedPath<'ctx>,
     context: &'ctx Context,
 ) {
+    let substitutions = input_substitutions(model, arguments);
     assert_path_assumptions(solver, model, arguments, path);
     let mut changed_registers = initial_callee_saved
         .iter()
         .zip(&path.callee_saved_registers)
-        .map(|(initial, final_value)| final_value._eq(initial).not())
+        .map(|(initial, final_value)| {
+            final_value
+                .substitute(&substitutions)
+                ._eq(&initial.substitute(&substitutions))
+                .not()
+        })
         .collect::<Vec<_>>();
     changed_registers.push(Bool::from_bool(context, path.final_rsp_offset != 0));
     let changed_registers = changed_registers.iter().collect::<Vec<_>>();
@@ -949,7 +986,7 @@ fn lift<'ctx>(
         .collect::<Vec<_>>();
     let callee_saved_initial = CALLEE_SAVED_REGISTERS
         .iter()
-        .map(|register_index| registers[*register_index].extract(63, 0))
+        .map(|register_index| registers[*register_index].clone())
         .collect();
     let mut integer_argument_indices = Vec::new();
     let mut integer_argument_index = 0usize;
@@ -985,7 +1022,7 @@ fn lift<'ctx>(
                 integer_argument_indices.push(input_index);
                 arguments.push(ARGUMENT_REGISTERS.get(integer_argument_index).map_or_else(
                     || BV::fresh_const(context, "machine_initial_stack_argument", 64),
-                    |register_index| registers[*register_index].extract(63, 0),
+                    |register_index| registers[*register_index].clone(),
                 ));
                 integer_argument_index += 1;
             }
@@ -1962,24 +1999,24 @@ fn finish_path<'ctx>(
                 } else {
                     let register_index = INTEGER_RESULT_REGISTERS[integer_result_index];
                     integer_result_index += 1;
-                    state.registers[register_index].extract(63, 0)
+                    state.registers[register_index].clone()
                 }
             })
             .collect()
     } else if model.value.get_size() == 128 {
         vec![state.registers[2]
-            .extract(63, 0)
-            .concat(&state.registers[0].extract(63, 0))]
+            .clone()
+            .concat(&state.registers[0].clone())]
     } else {
         vec![if model_result_is_double(model) {
             state.xmm_registers[0].extract(63, 0)
         } else {
-            state.registers[0].extract(63, 0)
+            state.registers[0].clone()
         }]
     };
     let callee_saved_registers = CALLEE_SAVED_REGISTERS
         .iter()
-        .map(|register_index| state.registers[*register_index].extract(63, 0))
+        .map(|register_index| state.registers[*register_index].clone())
         .collect();
     Ok(LiftedPath {
         return_values,
@@ -2193,7 +2230,11 @@ fn lift_shift<'ctx>(
             .bvand(&BV::from_u64(context, count_mask, 8))
             .zero_ext(width - 8)
     };
-    let value = registers[index].extract(width - 1, 0);
+    let value = if width == 64 {
+        registers[index].clone()
+    } else {
+        registers[index].extract(width - 1, 0)
+    };
     let shifted = match operation {
         ShiftOp::Left => value.bvshl(&shift_count),
         ShiftOp::LogicalRight => value.bvlshr(&shift_count),
@@ -2246,7 +2287,11 @@ fn lift_cmov<'ctx>(
     if destination_width != width || index == 4 {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    let previous = state.registers[index].extract(width - 1, 0);
+    let previous = if width == 64 {
+        state.registers[index].clone()
+    } else {
+        state.registers[index].extract(width - 1, 0)
+    };
     if !write_register(
         &mut state.registers,
         index,
@@ -3094,6 +3139,7 @@ fn path_solver<'ctx>(
 ) -> Solver<'ctx> {
     let solver = Solver::new(context);
     set_solver_budget(&solver, context);
+    let substitutions = input_substitutions(model, arguments);
     for assumption in model
         .param_domain
         .iter()
@@ -3101,13 +3147,10 @@ fn path_solver<'ctx>(
         .chain(&model.call_result_bounds)
         .chain(model.loop_bound_exits.iter())
     {
-        solver.assert(assumption);
-    }
-    for (input, argument) in model.inputs.iter().zip(arguments) {
-        solver.assert(&input._eq(argument));
+        solver.assert(&assumption.substitute(&substitutions));
     }
     for path_condition in path_conditions {
-        solver.assert(path_condition);
+        solver.assert(&path_condition.substitute(&substitutions));
     }
     solver
 }
@@ -3132,6 +3175,10 @@ fn call_guard_status<'ctx>(
     if solver.check() != SatResult::Sat {
         return None;
     }
+    // The guard is a model-side term — fold its input constants onto the
+    // same variables as the machine terms before asserting it.
+    let substitutions = input_substitutions(model, arguments);
+    let guard = guard.substitute(&substitutions);
     solver.push();
     solver.assert(&guard.not());
     let guard_true = solver.check();
@@ -3142,7 +3189,7 @@ fn call_guard_status<'ctx>(
         SatResult::Sat => {}
     }
     solver.push();
-    solver.assert(guard);
+    solver.assert(&guard);
     let guard_false = solver.check();
     solver.pop(1);
     match guard_false {
@@ -3782,7 +3829,11 @@ fn lift_binary<'ctx>(
     let Some(source) = operand_value(source, registers, context, width) else {
         return false;
     };
-    let destination = registers[index].extract(width - 1, 0);
+    let destination = if width == 64 {
+        registers[index].clone()
+    } else {
+        registers[index].extract(width - 1, 0)
+    };
     let value = match operation {
         BinaryOp::Add => destination.bvadd(&source),
         BinaryOp::Sub => destination.bvsub(&source),
@@ -3807,7 +3858,11 @@ fn lift_imul<'ctx>(
             let Some(source) = operand_value(source, registers, context, width) else {
                 return false;
             };
-            let destination = registers[index].extract(width - 1, 0);
+            let destination = if width == 64 {
+                registers[index].clone()
+            } else {
+                registers[index].extract(width - 1, 0)
+            };
             write_register(registers, index, destination.bvmul(&source), width)
         }
         [immediate, source, destination] if width == 64 => {
@@ -3861,7 +3916,11 @@ fn lift_inc_dec<'ctx>(
     if destination_width != width || (index == 4 && width != 64) {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    let previous = state.registers[index].extract(width - 1, 0);
+    let previous = if width == 64 {
+        state.registers[index].clone()
+    } else {
+        state.registers[index].extract(width - 1, 0)
+    };
     let is_decrement = matches!(instruction.mnemonic.as_str(), "decl" | "decq");
     let one = BV::from_u64(context, 1, width);
     let value = if is_decrement {
@@ -3935,7 +3994,15 @@ fn operand_value<'ctx>(
 
 fn register_value<'ctx>(operand: &str, registers: &[BV<'ctx>], width: u32) -> Option<BV<'ctx>> {
     let (index, register_width) = parse_register(operand)?;
-    (register_width == width).then(|| registers[index].extract(width - 1, 0))
+    // Registers always hold the semantic 64-bit value, so a full-width
+    // `extract(63, 0)` is the identity — skip the redundant node.
+    (register_width == width).then(|| {
+        if width == 64 {
+            registers[index].clone()
+        } else {
+            registers[index].extract(width - 1, 0)
+        }
+    })
 }
 
 fn write_register<'ctx>(
@@ -6121,6 +6188,7 @@ entry:
                 RefinedAdmission::CompositeV10,
             )
         };
+
         for name in ["pass", "callee", "caller"] {
             let model = aggregate_model(name);
             let (address, bytes, targets) = compiled_function_with_targets(ir, name);
