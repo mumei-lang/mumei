@@ -889,7 +889,9 @@ fn compute_dependency_hashes_with_names(
     };
     let atom_type_params = atom.type_params.iter().cloned().collect::<HashSet<_>>();
     let mut pending_type_names = Vec::new();
+    let mut resource_names = BTreeSet::new();
     if !legacy_names {
+        resource_names.extend(atom.resources.iter().cloned());
         collect_atom_signature_type_names(atom, &mut pending_type_names);
         let body = parse_body_expr(&atom.body_expr);
         collect_body_type_names_stmt(
@@ -898,6 +900,7 @@ fn compute_dependency_hashes_with_names(
             &atom_type_params,
             &mut pending_type_names,
         );
+        collect_acquired_resource_names_stmt(&body, &mut resource_names);
     }
     let mut pending = dependency_callees(atom, module_env, legacy_names)
         .into_iter()
@@ -1076,8 +1079,8 @@ fn compute_dependency_hashes_with_names(
             }
             hashes.insert(format!("enum:{name}"), format!("{:x}", hasher.finalize()));
         }
-        for name in module_env.resources.keys().collect::<BTreeSet<_>>() {
-            if let Some(resource) = module_env.get_resource(name) {
+        for name in resource_names {
+            if let Some(resource) = module_env.get_resource(&name) {
                 let mut hasher = Sha256::new();
                 hasher.update(b"|resource:");
                 hasher.update(name.as_bytes());
@@ -2845,16 +2848,16 @@ body: { p.a };\n";
         );
         assert_ne!(before, after);
 
-        let unreferenced = dependency_hash_for(
+        let acquired = dependency_hash_for(
             "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;\n\
              atom main() -> i64\n\
              requires: true;\n\
              ensures: true;\n\
-             body: 0;",
+             body: { acquire counter { counter.value = 3; 0 } };",
             "main",
             "resource:counter",
         );
-        assert_eq!(before, unreferenced);
+        assert_eq!(before, acquired);
     }
 
     #[test]
@@ -2867,10 +2870,11 @@ body: { p.a };\n";
         let after_source = before_source.replace("counter.value >= 0", "counter.value >= 5");
 
         assert_ne!(env_and_hash(before_source), env_and_hash(&after_source));
-        assert_ne!(
-            dependency_hash_for(before_source, "main", "resource:counter"),
-            dependency_hash_for(&after_source, "main", "resource:counter")
-        );
+        for source in [before_source, after_source.as_str()] {
+            assert!(dependency_hashes_for(source, "main")
+                .keys()
+                .all(|key| !key.starts_with("resource:")));
+        }
     }
 
     #[test]
