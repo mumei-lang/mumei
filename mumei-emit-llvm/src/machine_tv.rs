@@ -1371,18 +1371,14 @@ fn lift<'ctx>(
                         context,
                     )?;
                 }
-            } else if instruction.mnemonic == "addq"
-                && split_operands(&instruction.operands)
-                    .first()
-                    .is_some_and(|source| source.contains('('))
-            {
-                lift_stack_argument_add(
+            } else if stack_argument_binary_form(instruction).is_some() {
+                lift_stack_argument_binary(
                     instruction,
                     &mut state,
                     &stack_argument_leaves,
                     &arguments,
+                    context,
                 )?;
-                state.flags = FlagState::Unknown;
             } else if matches!(
                 instruction.mnemonic.as_str(),
                 "movsd" | "addsd" | "subsd" | "mulsd" | "divsd" | "ucomisd" | "comisd"
@@ -2907,11 +2903,36 @@ fn lift_stack_argument_sse<'ctx>(
     Ok(())
 }
 
-fn lift_stack_argument_add<'ctx>(
+/// Which operand index carries a memory operand for an instruction the
+/// stack-argument binary lifter handles: `Some(0)` for write-back ops
+/// (the incoming area is read-only, so the slot must be the source) and
+/// `Some(0) | Some(1)` for the flag-only `cmp`/`test` forms.
+fn stack_argument_binary_form(instruction: &Instruction) -> Option<usize> {
+    let index = split_operands(&instruction.operands)
+        .iter()
+        .position(|operand| operand.contains('('))?;
+    match (instruction.mnemonic.as_str(), index) {
+        ("addq" | "subq" | "imulq" | "andq" | "orq" | "xorq", 0) => Some(0),
+        ("cmpq" | "testq", 0 | 1) => Some(index),
+        _ => None,
+    }
+}
+
+/// An INTEGER binary or flag instruction whose memory operand is an
+/// incoming stack-argument slot as one operand: write-back forms
+/// (`add`/`sub`/`imul`/`and`/`or`/`xor`) only admit `opq mem, %reg`
+/// (the incoming area is read-only) and update the destination register
+/// with the same flag model their register forms carry; `cmp` and
+/// `test` are read-only, so the slot may be either operand —
+/// `cmpq %reg, mem` and `testq %reg, mem` are the forms LLVM emits
+/// when it leaves the spilled leaf in place. Other widths stay
+/// closed — spilled leaves are qword slots.
+fn lift_stack_argument_binary<'ctx>(
     instruction: &Instruction,
     state: &mut MachineState<'ctx>,
     stack_argument_leaves: &[(usize, bool)],
     arguments: &[BV<'ctx>],
+    context: &'ctx Context,
 ) -> Result<(), FunctionOutcome> {
     let operands = split_operands(&instruction.operands);
     let [source, destination] = operands.as_slice() else {
@@ -2920,23 +2941,97 @@ fn lift_stack_argument_add<'ctx>(
     if !state.rsp_is_known {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    let right = incoming_stack_argument(
-        source,
+    let memory_is_source = source.contains('(');
+    let slot_operand = if memory_is_source {
+        source
+    } else {
+        destination
+    };
+    let slot = incoming_stack_argument(
+        slot_operand,
         state.rsp_offset,
         stack_argument_leaves,
         arguments,
         false,
     )?;
+    match instruction.mnemonic.as_str() {
+        "cmpq" | "testq" => {
+            let other_operand = if memory_is_source {
+                destination
+            } else {
+                source
+            };
+            let other = operand_value(other_operand, &state.registers, context, 64)
+                .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+            let (left, right) = if memory_is_source {
+                (other, slot)
+            } else {
+                (slot, other)
+            };
+            state.flags = match instruction.mnemonic.as_str() {
+                "cmpq" => FlagState::Compare {
+                    left,
+                    right,
+                    width: 64,
+                },
+                _ => FlagState::Result {
+                    value: left.bvand(&right),
+                    width: 64,
+                },
+            };
+            return Ok(());
+        }
+        _ => (),
+    }
+    if !memory_is_source {
+        // `opq %reg, mem` would write into the incoming argument area —
+        // outside the read-only convention.
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let right = slot;
     let (register_index, width) = parse_register(destination)
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
     if width != 64 || register_index == 4 {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
     let left = state.registers[register_index].clone();
-    if !write_register(&mut state.registers, register_index, left.bvadd(&right), 64) {
+    let (value, flags) = match instruction.mnemonic.as_str() {
+        "addq" => (
+            left.bvadd(&right),
+            arithmetic_flags(&left, &right, None, false, context),
+        ),
+        "subq" => (
+            left.bvsub(&right),
+            arithmetic_flags(&left, &right, None, true, context),
+        ),
+        "imulq" => (left.bvmul(&right), FlagState::Unknown),
+        "andq" => (
+            left.bvand(&right),
+            FlagState::Result {
+                value: left.bvand(&right),
+                width: 64,
+            },
+        ),
+        "orq" => (
+            left.bvor(&right),
+            FlagState::Result {
+                value: left.bvor(&right),
+                width: 64,
+            },
+        ),
+        "xorq" => (
+            left.bvxor(&right),
+            FlagState::Result {
+                value: left.bvxor(&right),
+                width: 64,
+            },
+        ),
+        _ => return Err(FunctionOutcome::OutsideProfile("unsupported_instruction")),
+    };
+    if !write_register(&mut state.registers, register_index, value, 64) {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    state.flags = FlagState::Unknown;
+    state.flags = flags;
     Ok(())
 }
 
@@ -10097,6 +10192,105 @@ entry:
         assert_eq!(
             check_function(&[0xc3], 0, &too_many_model, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("argument_count")
+        );
+    }
+
+    #[test]
+    fn stack_argument_binary_memory_operands_match_and_validate() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // Eight INTEGER arguments leave g and h on the argument stack
+        // at slots 8(%rsp) and 0x10(%rsp); LLVM folds either one into
+        // the source operand of a binary or flag instruction.
+        let signature = |body: &str| {
+            format!(
+                "atom f(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64 \
+                requires: true; ensures: true; body: {{ {body} }};"
+            )
+        };
+        let check = |body: &str, bytes: &[u8]| {
+            let model = source_model_named(&signature(body), "f", &context);
+            check_function(bytes, 0, &model, &BTreeMap::new(), &context)
+        };
+
+        let mov_g = [0x48, 0x8b, 0x44, 0x24, 0x08]; // movq 8(%rsp), %rax
+                                                    // { g - h }: subq 0x10(%rsp), %rax reads the h slot directly.
+        let mut sub_bytes = mov_g.to_vec();
+        sub_bytes.extend([0x48, 0x2b, 0x44, 0x24, 0x10, 0xc3]);
+        assert_eq!(check("g - h", &sub_bytes), FunctionOutcome::Equivalent);
+        // Reversed subtraction (h - g) must not satisfy the model.
+        assert_eq!(check("h - g", &sub_bytes), FunctionOutcome::Different);
+
+        // { g * h }: imulq folds the h slot the same way.
+        let mut imul_bytes = mov_g.to_vec();
+        imul_bytes.extend([0x48, 0x0f, 0xaf, 0x44, 0x24, 0x10, 0xc3]);
+        assert_eq!(check("g * h", &imul_bytes), FunctionOutcome::Equivalent);
+
+        // { g & h } and { g | h }: the bitwise forms carry
+        // FlagState::Result like their register counterparts.
+        let mut and_bytes = mov_g.to_vec();
+        and_bytes.extend([0x48, 0x23, 0x44, 0x24, 0x10, 0xc3]);
+        assert_eq!(check("g & h", &and_bytes), FunctionOutcome::Equivalent);
+        let mut or_bytes = mov_g.to_vec();
+        or_bytes.extend([0x48, 0x0b, 0x44, 0x24, 0x10, 0xc3]);
+        assert_eq!(check("g | h", &or_bytes), FunctionOutcome::Equivalent);
+
+        // { if g == h { 1 } else { 0 } }: cmpq 0x10(%rsp), %rcx leaves
+        // compare flags the following jne consumes.
+        let cmp_bytes = [
+            0x48, 0x8b, 0x4c, 0x24, 0x08, // movq 8(%rsp), %rcx
+            0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0x48, 0x3b, 0x4c, 0x24, 0x10, // cmpq 0x10(%rsp), %rcx
+            0x75, 0x01, // jne +1
+            0xc3, // retq — returns 1 when g == h
+            0x31, 0xc0, // xorq %eax, %eax — jne lands here
+            0xc3, // retq — returns 0 when g != h
+        ];
+        assert_eq!(
+            check("if g == h { 1 } else { 0 }", &cmp_bytes),
+            FunctionOutcome::Equivalent
+        );
+
+        // { if g == 7 { 1 } else { 0 } }: `cmpq $7, 8(%rsp)` leaves the
+        // spilled g in place and compares it as the destination operand.
+        let cmp_imm_bytes = [
+            0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0x48, 0x83, 0x7c, 0x24, 0x08, 0x07, // cmpq $7, 8(%rsp)
+            0x75, 0x01, // jne +1
+            0xc3, // retq
+            0x31, 0xc0, // xorq %eax, %eax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check("if g == 7 { 1 } else { 0 }", &cmp_imm_bytes),
+            FunctionOutcome::Equivalent
+        );
+
+        // `testq %rcx, 8(%rsp)` reads the g slot as the destination
+        // operand; setne consumes the result flags.
+        let test_bytes = [
+            0x48, 0x8b, 0x4c, 0x24, 0x10, // movq 0x10(%rsp), %rcx
+            0x48, 0x85, 0x4c, 0x24, 0x08, // testq %rcx, 8(%rsp)
+            0x0f, 0x95, 0xc0, // setne %al
+            0x0f, 0xb6, 0xc0, // movzbl %al, %eax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check("if (g & h) != 0 { 1 } else { 0 }", &test_bytes),
+            FunctionOutcome::Equivalent
+        );
+
+        // A write-back into the incoming argument area stays outside the
+        // read-only convention.
+        let write_incoming = [
+            0x48, 0x01, 0x4c, 0x24, 0x08, // addq %rcx, 8(%rsp)
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check("g", &write_incoming),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
         );
     }
 

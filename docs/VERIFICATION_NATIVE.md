@@ -1810,9 +1810,9 @@ For up to 16 integer parameters/call arguments, the assumed convention places
 incoming argument `k >= 7` at entry-relative offset `+8*(k-6)` from `%rsp`,
 and outgoing argument `k >= 7` at call-time offset `+8*(k-7)`. This is an
 assumption, not an ABI claim. The incoming return-address/argument area is
-read-only. Only 64-bit `movq` and `addq` source reads from aligned, declared
-incoming slots are supported; other memory forms and invalid slots remain
-outside the profile. Writes to entry-relative offsets `>= 0` and tail calls
+read-only. Only 64-bit `movq` loads and `addq`/`subq`/`imulq`/`andq`/`orq`/`xorq`/`cmpq`/`testq`
+source reads from aligned, declared incoming slots are supported; other memory
+forms and invalid slots remain outside the profile. Writes to entry-relative offsets `>= 0` and tail calls
 with more than six arguments are outside the profile. Outgoing stack-argument
 slots are discarded after a call, so later memory reads from them fail closed.
 `%spl` byte writes are modeled, but make the stack pointer untrackable, so a
