@@ -3082,7 +3082,7 @@ pub(crate) fn refined_predicate_to_z3<'a>(
     solver_opt: Option<&Solver<'a>>,
 ) -> DynResult<'a> {
     let base = vc.module_env.resolve_base_type(&decl._base_type);
-    if fixed_width_int(&base).is_some_and(|ty| ty.0.starts_with('u'))
+    if fixed_width_int(&base).is_some_and(|ty| ty.0 == "u64")
         && refined_predicate_rebinds_operand(expr, &decl.operand)
     {
         return Err(MumeiError::type_error_at(

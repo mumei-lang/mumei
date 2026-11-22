@@ -194,3 +194,13 @@ fn signed_i64_refinement_with_operand_rebinding_remains_usable() {
         output_text(&output)
     );
 }
+
+#[test]
+fn refined_u8_predicate_with_operand_rebinding_remains_usable() {
+    let output = run_verify("u8_rebind_control");
+    assert!(
+        output.status.success(),
+        "a u8 refinement with a same-name quantifier must remain usable\n{}",
+        output_text(&output)
+    );
+}
