@@ -537,6 +537,7 @@ pub fn compute_proof_hash_with_flags(
         }
         if let Some(callee_atom) = module_env.get_atom(&callee_name) {
             hash_callee_contract(&mut hasher, callee_atom, module_env, true);
+            hash_trait_method_constraints(&mut hasher, callee_atom, module_env);
             hash_string_map(&mut hasher, "effect_pre", &callee_atom.effect_pre);
             hash_string_map(&mut hasher, "effect_post", &callee_atom.effect_post);
             effect_names.extend(atom_effect_names(callee_atom));
@@ -783,6 +784,34 @@ fn hash_callee_contract(
             b"default".as_slice()
         },
     );
+}
+
+fn hash_trait_method_constraints(hasher: &mut Sha256, callee: &Atom, module_env: &ModuleEnv) {
+    let callee_type = callee
+        .params
+        .first()
+        .and_then(|param| param.type_name.as_deref())
+        .unwrap_or("i64");
+    let Some((trait_name, trait_method)) = module_env
+        .get_traits_for_method(&callee.name)
+        .into_iter()
+        .find(|(trait_name, _)| module_env.find_impl(trait_name, callee_type).is_some())
+    else {
+        return;
+    };
+    if !trait_method.param_constraints.iter().any(Option::is_some) {
+        return;
+    }
+
+    hasher.update(b"|trait_method_constraint:");
+    hash_field(hasher, "trait_method.callee", &callee.name);
+    hash_field(hasher, "trait_method.trait", trait_name);
+    for (index, constraint) in trait_method.param_constraints.iter().enumerate() {
+        if let Some(constraint) = constraint {
+            hash_field(hasher, "trait_method.constraint.index", &index.to_string());
+            hash_field(hasher, "trait_method.constraint.value", constraint);
+        }
+    }
 }
 
 fn hash_dependency_signature_units(
@@ -1289,6 +1318,7 @@ fn collect_enum_variant_owner_names(
 fn compute_dependency_hash_for_callee(atom: &Atom, module_env: &ModuleEnv) -> String {
     let mut hasher = Sha256::new();
     hash_callee_contract(&mut hasher, atom, module_env, false);
+    hash_trait_method_constraints(&mut hasher, atom, module_env);
     hash_dependency_signature_units(&mut hasher, atom, module_env);
     hash_string_map(&mut hasher, "effect_pre", &atom.effect_pre);
     hash_string_map(&mut hasher, "effect_post", &atom.effect_post);
@@ -1831,6 +1861,32 @@ mod nominal_hash_tests {
             .unwrap()
     }
 
+    fn trait_dependency_and_proof_hashes(
+        source: &str,
+        root_name: &str,
+    ) -> (String, BTreeMap<String, String>) {
+        let items = parse_module(source);
+        let mut module_env = ModuleEnv::default();
+        for item in items {
+            match item {
+                Item::Atom(atom) => {
+                    module_env
+                        .dependency_graph
+                        .insert(atom.name.clone(), collect_callees_from_atom(&atom));
+                    module_env.register_atom(&atom);
+                }
+                Item::TraitDef(trait_def) => module_env.register_trait(&trait_def),
+                Item::ImplDef(impl_def) => module_env.register_impl(&impl_def),
+                _ => {}
+            }
+        }
+        let root = module_env.get_atom(root_name).unwrap().clone();
+        (
+            compute_proof_hash(&root, &module_env),
+            compute_dependency_hashes(&root, &module_env),
+        )
+    }
+
     fn proof_hash_for(source: &str, root_name: &str) -> String {
         let items = parse_module(source);
         let mut module_env = ModuleEnv::default();
@@ -1968,6 +2024,30 @@ mod nominal_hash_tests {
             assert_eq!(dependencies, verified_dependencies);
             assert_ne!(proof, verified_proof);
         }
+    }
+
+    #[test]
+    fn trait_method_parameter_constraints_participate_in_freshness_hashes() {
+        let source = "trait Picker { fn pick(a: Self where v >= 0) -> Self; }\n\
+                      impl Picker for i64 { fn pick(a: i64) -> i64 { a } }\n\
+                      atom pick(a: i64) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: a;\n\
+                      atom g(x: i64) -> i64\n\
+                      requires: x >= 0;\n\
+                      ensures: true;\n\
+                      body: pick(x);\n";
+        let changed_source = source.replace("v >= 0", "v >= 5");
+        let (proof_hash, dependency_hashes) = trait_dependency_and_proof_hashes(source, "g");
+        let (changed_proof_hash, changed_dependency_hashes) =
+            trait_dependency_and_proof_hashes(&changed_source, "g");
+
+        assert_ne!(proof_hash, changed_proof_hash);
+        assert_ne!(
+            dependency_hashes["atom:pick"],
+            changed_dependency_hashes["atom:pick"]
+        );
     }
 
     #[test]
