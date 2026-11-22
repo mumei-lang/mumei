@@ -3206,9 +3206,14 @@ the admission fragment's own sixteen-leaf flattening limit bounds how large a
 struct a source can declare.
 INTEGER leaves use the next GPR from `rdi`–`r9`; SSE leaves use the next XMM
 register from `xmm0`–`xmm7`, independently. LLVM `expand` lowering flattens
-aggregates leaf-by-leaf into the scalar argument sequence, so INTEGER leaves
-that do not fit spill to the argument stack exactly like scalar arguments.
-SSE leaves without a free XMM register fail closed.
+aggregates leaf-by-leaf into the scalar argument sequence, so leaves that
+do not fit their class's registers spill to the argument stack exactly
+like scalar arguments — INTEGER leaves past `r9` and SSE leaves past
+`xmm7` share one stack area laid out in declaration order. Spilled f64
+leaves are read through `movsd` loads or directly as SSE memory operands
+(`*sd` arithmetic and `ucomisd`/`comisd` with an `N(%rsp)` source);
+cross-class slot reads fail closed. Outgoing f64 arguments that overflow
+still fail closed — more than eight remain `argument_count`.
 
 Aggregate results have at most four leaves overall, at most three INTEGER
 leaves, and at most two SSE leaves. Real `llc-17 -O2` output returned three

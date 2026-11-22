@@ -315,15 +315,7 @@ fn check_function_with_result_width<'ctx>(
     Option<CalleeSavedPreservation>,
     FrameMemoryUse,
 ) {
-    if model.inputs.len() > MAX_ARGUMENT_COUNT
-        || model
-            .param_leaf_doubles
-            .iter()
-            .flatten()
-            .filter(|is_double| **is_double)
-            .count()
-            > FLOAT_ARGUMENT_REGISTER_COUNT
-    {
+    if model.inputs.len() > MAX_ARGUMENT_COUNT {
         return (
             FunctionOutcome::OutsideProfile("argument_count"),
             None,
@@ -986,41 +978,46 @@ fn lift<'ctx>(
         .iter()
         .map(|register_index| registers[*register_index].clone())
         .collect();
-    let mut integer_argument_indices = Vec::new();
+    // `(input_index, is_double)` for every argument leaf that spilled
+    // onto the incoming argument stack, in declaration order — SysV
+    // lays overflow leaves of both classes out in that order, so the
+    // stack slot ordinal maps straight into this list.
+    let mut stack_argument_leaves: Vec<(usize, bool)> = Vec::new();
     let mut integer_argument_index = 0usize;
     let mut float_argument_index = 0usize;
     let mut arguments = Vec::with_capacity(model.inputs.len());
     let mut input_index = 0usize;
     for (parameter_shape, leaves) in model.param_shapes.iter().zip(&model.param_leaf_doubles) {
-        if parameter_shape.is_some() {
-            // LLVM `expand` lowering flattens aggregate arguments leaf-by-leaf
-            // into the scalar argument sequence: INTEGER leaves that do not
-            // fit `rdi`-`r9` spill to the argument stack exactly like scalar
-            // arguments, so only an SSE leaf without a free xmm0-xmm7 slot is
-            // rejected here.
-            let float_leaf_count = leaves.iter().filter(|is_double| **is_double).count();
-            if float_leaf_count > 0
-                && float_argument_index.saturating_add(float_leaf_count)
-                    > FLOAT_ARGUMENT_REGISTER_COUNT
-            {
-                return Err(FunctionOutcome::OutsideProfile("argument_count"));
-            }
-        } else if leaves.len() == 2
+        if parameter_shape.is_none()
+            && leaves.len() == 2
             && integer_argument_index.saturating_add(2) > ARGUMENT_REGISTERS.len()
         {
+            // A scalar 128-bit leaf that cannot stay fully inside the
+            // INTEGER argument registers is rejected — LLVM `expand`
+            // lowering flattens aggregate arguments leaf-by-leaf into
+            // the scalar sequence, so INTEGER and SSE leaves that do
+            // not fit their class's registers spill to the argument
+            // stack exactly like scalar arguments.
             return Err(FunctionOutcome::OutsideProfile("argument_count"));
         }
         for is_double in leaves {
             if *is_double {
-                let Some(register) = xmm_registers.get(float_argument_index) else {
-                    return Err(FunctionOutcome::OutsideProfile("argument_count"));
-                };
-                arguments.push(register.extract(63, 0));
+                // xmm0-xmm7 carry `f64` arguments; the ninth and later
+                // `f64` leaves spill to the argument stack like INTEGER
+                // leaves do past `r9`.
+                arguments.push(if float_argument_index < FLOAT_ARGUMENT_REGISTER_COUNT {
+                    xmm_registers[float_argument_index].extract(63, 0)
+                } else {
+                    stack_argument_leaves.push((input_index, true));
+                    BV::fresh_const(context, "machine_initial_stack_argument", 64)
+                });
                 float_argument_index += 1;
             } else {
-                integer_argument_indices.push(input_index);
                 arguments.push(ARGUMENT_REGISTERS.get(integer_argument_index).map_or_else(
-                    || BV::fresh_const(context, "machine_initial_stack_argument", 64),
+                    || {
+                        stack_argument_leaves.push((input_index, false));
+                        BV::fresh_const(context, "machine_initial_stack_argument", 64)
+                    },
                     |register_index| registers[*register_index].clone(),
                 ));
                 integer_argument_index += 1;
@@ -1341,7 +1338,7 @@ fn lift<'ctx>(
                     lift_stack_argument_move(
                         instruction,
                         &mut state,
-                        &integer_argument_indices,
+                        &stack_argument_leaves,
                         &arguments,
                     )?;
                 } else if should_use_allocated_frame_memory(
@@ -1360,7 +1357,7 @@ fn lift<'ctx>(
                     lift_stack_argument_move(
                         instruction,
                         &mut state,
-                        &integer_argument_indices,
+                        &stack_argument_leaves,
                         &arguments,
                     )?;
                 } else {
@@ -1382,10 +1379,25 @@ fn lift<'ctx>(
                 lift_stack_argument_add(
                     instruction,
                     &mut state,
-                    &integer_argument_indices,
+                    &stack_argument_leaves,
                     &arguments,
                 )?;
                 state.flags = FlagState::Unknown;
+            } else if matches!(
+                instruction.mnemonic.as_str(),
+                "movsd" | "addsd" | "subsd" | "mulsd" | "divsd" | "ucomisd" | "comisd"
+            ) && model_has_f64_leaves(model)
+                && split_operands(&instruction.operands)
+                    .first()
+                    .is_some_and(|source| source.contains('('))
+            {
+                lift_stack_argument_sse(
+                    instruction,
+                    &mut state,
+                    &stack_argument_leaves,
+                    &arguments,
+                    context,
+                )?;
             } else if matches!(instruction.mnemonic.as_str(), "addq" | "subq")
                 && split_operands(&instruction.operands)
                     .get(1)
@@ -2389,11 +2401,17 @@ fn rsp_memory_entry_offset(operand: &str, rsp_offset: i64) -> Result<i64, Functi
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))
 }
 
+/// Resolves an `N(%rsp)` operand above the current frame to the input
+/// BV of the N-th spilled argument leaf. `want_double` is the class of
+/// the instruction doing the access — an INTEGER load of a spilled
+/// `f64` leaf (or an SSE load of a spilled integer leaf) binds the
+/// wrong input shape and stays closed.
 fn incoming_stack_argument<'ctx>(
     operand: &str,
     rsp_offset: i64,
-    integer_argument_indices: &[usize],
+    stack_argument_leaves: &[(usize, bool)],
     arguments: &[BV<'ctx>],
+    want_double: bool,
 ) -> Result<BV<'ctx>, FunctionOutcome> {
     if rsp_offset % 8 != 0 {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
@@ -2404,15 +2422,13 @@ fn incoming_stack_argument<'ctx>(
     }
     let slot_index = usize::try_from(entry_offset / 8)
         .map_err(|_| FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
-    let stack_argument_count = integer_argument_indices
-        .len()
-        .saturating_sub(ARGUMENT_REGISTERS.len());
-    if slot_index == 0 || slot_index > stack_argument_count {
+    if slot_index == 0 || slot_index > stack_argument_leaves.len() {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    let input_index = *integer_argument_indices
-        .get(ARGUMENT_REGISTERS.len() + slot_index - 1)
-        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let (input_index, is_double) = stack_argument_leaves[slot_index - 1];
+    if is_double != want_double {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
     arguments
         .get(input_index)
         .cloned()
@@ -2742,7 +2758,7 @@ fn lift_allocated_frame_memory_load<'ctx>(
 fn lift_stack_argument_move<'ctx>(
     instruction: &Instruction,
     state: &mut MachineState<'ctx>,
-    integer_argument_indices: &[usize],
+    stack_argument_leaves: &[(usize, bool)],
     arguments: &[BV<'ctx>],
 ) -> Result<(), FunctionOutcome> {
     let operands = split_operands(&instruction.operands);
@@ -2755,8 +2771,9 @@ fn lift_stack_argument_move<'ctx>(
     let value = incoming_stack_argument(
         source,
         state.rsp_offset,
-        integer_argument_indices,
+        stack_argument_leaves,
         arguments,
+        false,
     )?;
     let (register_index, width) = parse_register(destination)
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
@@ -2769,10 +2786,68 @@ fn lift_stack_argument_move<'ctx>(
     Ok(())
 }
 
+/// An SSE scalar `f64` instruction reading a memory source: only an
+/// incoming stack-argument slot holding a spilled `f64` leaf is
+/// modeled — frame-memory or computed-address sources stay closed.
+/// `movsd` loads the low half and zeroes bits 127:64; `*sd`
+/// arithmetic keeps the destination's upper half;
+/// `ucomisd`/`comisd` only set the float-compare flags.
+fn lift_stack_argument_sse<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    stack_argument_leaves: &[(usize, bool)],
+    arguments: &[BV<'ctx>],
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    if !state.rsp_is_known {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let value = incoming_stack_argument(
+        source,
+        state.rsp_offset,
+        stack_argument_leaves,
+        arguments,
+        true,
+    )?;
+    let Some(destination_index) = parse_xmm_register(destination) else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    match instruction.mnemonic.as_str() {
+        "movsd" => {
+            state.xmm_registers[destination_index] = BV::from_u64(context, 0, 64).concat(&value);
+        }
+        "addsd" | "subsd" | "mulsd" | "divsd" => {
+            let operation = match instruction.mnemonic.as_str() {
+                "addsd" => mumei_core::semantic_contract::F64Arith::Add,
+                "subsd" => mumei_core::semantic_contract::F64Arith::Sub,
+                "mulsd" => mumei_core::semantic_contract::F64Arith::Mul,
+                "divsd" => mumei_core::semantic_contract::F64Arith::Div,
+                _ => unreachable!(),
+            };
+            let a = state.xmm_registers[destination_index].extract(63, 0);
+            let low = x86_sse_scalar_f64(context, &a, &value, operation);
+            let upper = state.xmm_registers[destination_index].extract(127, 64);
+            state.xmm_registers[destination_index] = upper.concat(&low);
+        }
+        "ucomisd" | "comisd" => {
+            state.flags = FlagState::FloatCompare {
+                left: state.xmm_registers[destination_index].extract(63, 0),
+                right: value,
+            };
+        }
+        _ => return Err(FunctionOutcome::OutsideProfile("unsupported_instruction")),
+    }
+    Ok(())
+}
+
 fn lift_stack_argument_add<'ctx>(
     instruction: &Instruction,
     state: &mut MachineState<'ctx>,
-    integer_argument_indices: &[usize],
+    stack_argument_leaves: &[(usize, bool)],
     arguments: &[BV<'ctx>],
 ) -> Result<(), FunctionOutcome> {
     let operands = split_operands(&instruction.operands);
@@ -2785,8 +2860,9 @@ fn lift_stack_argument_add<'ctx>(
     let right = incoming_stack_argument(
         source,
         state.rsp_offset,
-        integer_argument_indices,
+        stack_argument_leaves,
         arguments,
+        false,
     )?;
     let (register_index, width) = parse_register(destination)
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
@@ -5581,6 +5657,274 @@ entry:
     }
 
     #[test]
+    fn f64_argument_beyond_xmm7_spills_to_the_argument_stack() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source =
+            "atom mul_ai(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64, i: f64) \
+            -> f64 requires: true; ensures: true; body: { a * i };\n\
+            atom sq_i(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64, i: f64) \
+            -> f64 requires: true; ensures: true; body: { i * i };\n\
+            atom ret_i(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64, i: f64) \
+            -> f64 requires: true; ensures: true; body: { i };\n\
+            atom ret_h(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64, i: f64) \
+            -> f64 requires: true; ensures: true; body: { h };";
+        let models =
+            encode_pure_i64_module(source, &context, true, RefinedAdmission::CompositeV23).unwrap();
+        let mul_ai = models.iter().find(|m| m.function_name == "mul_ai").unwrap();
+        let sq_i = models.iter().find(|m| m.function_name == "sq_i").unwrap();
+        let ret_h = models.iter().find(|m| m.function_name == "ret_h").unwrap();
+        assert!(supports_signature(mul_ai));
+        assert!(supports_signature(sq_i));
+
+        // LLVM lowers the ninth `f64` argument to an SSE memory
+        // operand reading the incoming argument stack directly.
+        let mul_ai_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define double @mul_ai(double %a, double %b, double %c, double %d, double %e, double %f, double %g, double %h, double %i) {
+entry:
+  %r = fmul double %a, %i
+  ret double %r
+}
+"#;
+        let (mul_ai_address, mul_ai_bytes, mul_ai_targets) =
+            compiled_function_with_targets(mul_ai_ir, "mul_ai");
+        let mul_ai_disassembly = disassemble(&mul_ai_bytes, mul_ai_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("ninth f64 argument disassembly:\n{mul_ai_disassembly}");
+        assert!(
+            mul_ai_disassembly.contains("(%rsp)"),
+            "expected a stack-operand SSE instruction:\n{mul_ai_disassembly}"
+        );
+        assert_eq!(
+            check_function(
+                &mul_ai_bytes,
+                mul_ai_address,
+                mul_ai,
+                &mul_ai_targets,
+                &context,
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        // Using the same spilled argument twice makes LLVM load it
+        // through `movsd` first — the move form of the stack-argument
+        // access.
+        let sq_i_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define double @sq_i(double %a, double %b, double %c, double %d, double %e, double %f, double %g, double %h, double %i) {
+entry:
+  %r = fmul double %i, %i
+  ret double %r
+}
+"#;
+        let (sq_i_address, sq_i_bytes, sq_i_targets) =
+            compiled_function_with_targets(sq_i_ir, "sq_i");
+        let sq_i_disassembly = disassemble(&sq_i_bytes, sq_i_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("spilled f64 argument used twice disassembly:\n{sq_i_disassembly}");
+        assert!(
+            sq_i_disassembly.contains("movsd"),
+            "expected a movsd stack load:\n{sq_i_disassembly}"
+        );
+        assert_eq!(
+            check_function(&sq_i_bytes, sq_i_address, sq_i, &sq_i_targets, &context,),
+            FunctionOutcome::Equivalent
+        );
+
+        // A `movsd` stack load bound to a model that returns a
+        // register argument reads the wrong leaf — the stack slot is
+        // not interchangeable with a register argument.
+        let ret_i_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define double @ret_i(double %a, double %b, double %c, double %d, double %e, double %f, double %g, double %h, double %i) {
+entry:
+  ret double %i
+}
+"#;
+        let (ret_i_address, ret_i_bytes, ret_i_targets) =
+            compiled_function_with_targets(ret_i_ir, "ret_i");
+        let ret_i_disassembly = disassemble(&ret_i_bytes, ret_i_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("return spilled f64 argument disassembly:\n{ret_i_disassembly}");
+        assert!(
+            ret_i_disassembly.contains("(%rsp)"),
+            "expected a stack-operand load:\n{ret_i_disassembly}"
+        );
+        assert_eq!(
+            check_function(&ret_i_bytes, ret_i_address, ret_h, &ret_i_targets, &context,),
+            FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn mixed_class_stack_arguments_follow_declaration_order() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+
+        // Seven `i64` then nine `f64`: the seventh integer overflows
+        // into stack slot 0 and the ninth `f64` into slot 1.
+        let source_a = "atom ret_g_a(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, \
+            h: f64, i: f64, j: f64, k: f64, l: f64, m: f64, n: f64, o: f64, p: f64) \
+            -> i64 requires: true; ensures: true; body: { g };\n\
+            atom ret_p_a(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, \
+            h: f64, i: f64, j: f64, k: f64, l: f64, m: f64, n: f64, o: f64, p: f64) \
+            -> f64 requires: true; ensures: true; body: { p };";
+        let models_a =
+            encode_pure_i64_module(source_a, &context, true, RefinedAdmission::CompositeV23)
+                .unwrap();
+        let ret_g_a = models_a
+            .iter()
+            .find(|m| m.function_name == "ret_g_a")
+            .unwrap();
+        let ret_p_a = models_a
+            .iter()
+            .find(|m| m.function_name == "ret_p_a")
+            .unwrap();
+        assert!(supports_signature(ret_g_a));
+        assert!(supports_signature(ret_p_a));
+
+        // Nine `f64` then seven `i64` — the reversed overflow order:
+        // the ninth `f64` takes slot 0 and the seventh integer slot 1.
+        let source_b = "atom ret_i_b(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, \
+            h: f64, i: f64, j: i64, k: i64, l: i64, m: i64, n: i64, o: i64, p: i64) \
+            -> f64 requires: true; ensures: true; body: { i };\n\
+            atom ret_p_b(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, \
+            h: f64, i: f64, j: i64, k: i64, l: i64, m: i64, n: i64, o: i64, p: i64) \
+            -> i64 requires: true; ensures: true; body: { p };";
+        let models_b =
+            encode_pure_i64_module(source_b, &context, true, RefinedAdmission::CompositeV23)
+                .unwrap();
+        let ret_i_b = models_b
+            .iter()
+            .find(|m| m.function_name == "ret_i_b")
+            .unwrap();
+        let ret_p_b = models_b
+            .iter()
+            .find(|m| m.function_name == "ret_p_b")
+            .unwrap();
+        assert!(supports_signature(ret_i_b));
+        assert!(supports_signature(ret_p_b));
+
+        let check = |ir: &str, name: &str, model: &PureI64Body<'_>| {
+            let (address, bytes, targets) = compiled_function_with_targets(ir, name);
+            let disassembly = disassemble(&bytes, address)
+                .unwrap()
+                .iter()
+                .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+                .collect::<Vec<_>>()
+                .join("\n");
+            println!("{name} disassembly:\n{disassembly}");
+            assert!(
+                disassembly.contains("(%rsp)"),
+                "expected a stack-operand access:\n{disassembly}"
+            );
+            check_function(&bytes, address, model, &targets, &context)
+        };
+
+        // Both overflow orders verify against their own models —
+        // slot order follows declaration order, not per-class order.
+        assert_eq!(
+            check(
+                r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @ret_g_a(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, double %h, double %i, double %j, double %k, double %l, double %m, double %n, double %o, double %p) {
+entry:
+  ret i64 %g
+}
+"#,
+                "ret_g_a",
+                ret_g_a,
+            ),
+            FunctionOutcome::Equivalent
+        );
+        assert_eq!(
+            check(
+                r#"target triple = "x86_64-unknown-linux-gnu"
+define double @ret_p_a(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, double %h, double %i, double %j, double %k, double %l, double %m, double %n, double %o, double %p) {
+entry:
+  ret double %p
+}
+"#,
+                "ret_p_a",
+                ret_p_a,
+            ),
+            FunctionOutcome::Equivalent
+        );
+        assert_eq!(
+            check(
+                r#"target triple = "x86_64-unknown-linux-gnu"
+define double @ret_i_b(double %a, double %b, double %c, double %d, double %e, double %f, double %g, double %h, double %i, i64 %j, i64 %k, i64 %l, i64 %m, i64 %n, i64 %o, i64 %p) {
+entry:
+  ret double %i
+}
+"#,
+                "ret_i_b",
+                ret_i_b,
+            ),
+            FunctionOutcome::Equivalent
+        );
+        assert_eq!(
+            check(
+                r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @ret_p_b(double %a, double %b, double %c, double %d, double %e, double %f, double %g, double %h, double %i, i64 %j, i64 %k, i64 %l, i64 %m, i64 %n, i64 %o, i64 %p) {
+entry:
+  ret i64 %p
+}
+"#,
+                "ret_p_b",
+                ret_p_b,
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        // Cross-class slot reads fail closed: the INTEGER `movq` load
+        // of slot 0 is checked against the order-B model whose slot 0
+        // holds the spilled `f64` leaf `i` — class mismatch, not a
+        // bound to a wrong input.
+        assert_eq!(
+            check(
+                r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @ret_g_a(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, double %h, double %i, double %j, double %k, double %l, double %m, double %n, double %o, double %p) {
+entry:
+  ret i64 %g
+}
+"#,
+                "ret_g_a",
+                ret_i_b,
+            ),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+        // And an SSE `movsd` load of slot 0 against the order-A model
+        // whose slot 0 holds the spilled integer `g`.
+        assert_eq!(
+            check(
+                r#"target triple = "x86_64-unknown-linux-gnu"
+define double @ret_i_b(double %a, double %b, double %c, double %d, double %e, double %f, double %g, double %h, double %i, i64 %j, i64 %k, i64 %l, i64 %m, i64 %n, i64 %o, i64 %p) {
+entry:
+  ret double %i
+}
+"#,
+                "ret_i_b",
+                ret_g_a,
+            ),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+    }
+
+    #[test]
     fn struct_signature_limits_fail_closed() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
@@ -5648,6 +5992,9 @@ entry:
             &context,
             RefinedAdmission::CompositeV23,
         );
+        // The aggregate's ninth `f64` leaf spills to the argument
+        // stack the same way a scalar one does — `retq` alone returns
+        // the first argument, not the spilled field.
         assert_eq!(
             check_function(
                 &[0xc3],
@@ -5656,7 +6003,25 @@ entry:
                 &BTreeMap::new(),
                 &context,
             ),
-            FunctionOutcome::OutsideProfile("argument_count")
+            FunctionOutcome::Different
+        );
+        let after_eight_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define double @after_eight(double %a, double %b, double %c, double %d, double %e, double %f, double %g, double %h, double %p) {
+entry:
+  ret double %p
+}
+"#;
+        let (after_eight_address, after_eight_bytes, after_eight_targets) =
+            compiled_function_with_targets(after_eight_ir, "after_eight");
+        assert_eq!(
+            check_function(
+                &after_eight_bytes,
+                after_eight_address,
+                &f64_struct_after_eight,
+                &after_eight_targets,
+                &context,
+            ),
+            FunctionOutcome::Equivalent
         );
 
         let enum_source = "enum Shade { Red, Blue }\n\
@@ -7181,6 +7546,10 @@ define i64 @after_five(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i128 %x) {
             FunctionOutcome::Equivalent
         );
 
+        // Nine `f64` arguments are no longer out of profile — the
+        // ninth spills to the argument stack like an INTEGER leaf past
+        // `r9`. A bare `retq` returning `xmm0` still matches this
+        // model, which returns the first argument.
         let too_many_f64 = source_model_with_admission(
             "atom too_many(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64, i: f64) -> f64 requires: true; ensures: true; body: { a };",
             &context,
@@ -7188,7 +7557,7 @@ define i64 @after_five(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i128 %x) {
         );
         assert_eq!(
             check_function(&[0xc3], 0, &too_many_f64, &BTreeMap::new(), &context,),
-            FunctionOutcome::OutsideProfile("argument_count")
+            FunctionOutcome::Equivalent
         );
 
         let caller = source_model_named_with_admission(

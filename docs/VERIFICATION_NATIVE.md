@@ -2057,14 +2057,21 @@ flattening limit bounds the largest struct a source can declare. Each leaf
 uses its own assumed register class: integer leaves consume the next GPR from
 `rdi`–`r9`, and f64 leaves consume the next XMM register from `xmm0`–`xmm7`.
 LLVM `expand` lowering flattens aggregates leaf-by-leaf into the scalar
-argument sequence, so integer leaves without a free GPR spill onto the
-argument stack exactly like scalar stack arguments. f64 leaves without a
-free XMM register fail closed — across the whole argument list SSE leaves
-are bounded by eight — and aggregates with seventeen or more leaves fail
-closed (`argument_count` for function parameters, `call_arguments` for
-direct-call arguments). The source admission fragment already rejects
-struct declarations wider than sixteen leaves, so these checks fire only
-on hand-written object inputs, not compiler output.
+argument sequence, so leaves without a free register in their class spill
+onto the argument stack exactly like scalar stack arguments: integer
+leaves past `r9`, and f64 leaves past `xmm7`. The stack slots hold the
+overflow leaves of both classes in declaration order. Spilled f64 leaves
+are read either through a `movsd` load (low half written, upper half
+zeroed) or directly as an SSE memory operand
+(`addsd`/`subsd`/`mulsd`/`divsd`/`ucomisd`/`comisd` with an `N(%rsp)`
+source); an INTEGER instruction reading an f64 slot, or an SSE
+instruction reading an integer slot, fails closed. Aggregates with
+seventeen or more leaves fail closed (`argument_count` for function
+parameters, `call_arguments` for direct-call arguments), and outgoing
+call arguments that overflow still fail closed — more than eight f64 call
+arguments remain `argument_count`. The source admission fragment already
+rejects struct declarations wider than sixteen leaves, so these checks
+fire only on hand-written object inputs, not compiler output.
 
 Aggregate results are admitted only with at most four leaves overall, at
 most three INTEGER leaves, and at most two SSE leaves. The `llc-17 -O2`
