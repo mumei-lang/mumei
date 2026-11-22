@@ -668,6 +668,34 @@ mod tests {
         (cert, root, env)
     }
 
+    fn enum_fields_dependency_fixture(
+        enum_definition: &str,
+    ) -> (ProofCertificate, parser::Atom, ModuleEnv) {
+        let source = format!(
+            "{enum_definition}\n\
+             atom choose(e: E) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: 0;\n"
+        );
+        let mut env = ModuleEnv::new();
+        for item in parser::parse_module(&source) {
+            match item {
+                parser::Item::Atom(atom) => env.register_atom(&atom),
+                parser::Item::EnumDef(enum_def) => env.register_enum(&enum_def),
+                _ => {}
+            }
+        }
+        let root = env.get_atom("choose").unwrap().clone();
+        let mut results = HashMap::new();
+        results.insert(
+            root.name.clone(),
+            (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+        );
+        let cert = generate_certificate("test.mm", &[&root], &results, &env, None, None, None);
+        (cert, root, env)
+    }
+
     #[test]
     fn enum_signature_proof_hash_is_unchanged() {
         let (_, root, env) = enum_dependency_fixture("enum E { A(v: i64), B }");
@@ -696,6 +724,16 @@ mod tests {
             assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
             assert_eq!(check[0].changed_dependencies, vec!["enum:E"]);
         }
+    }
+
+    #[test]
+    fn verify_certificate_in_env_detects_changed_enum_payload_field_names() {
+        let (cert, root, _) = enum_fields_dependency_fixture("enum E { A(a: i64, b: i64), B }");
+        let (_, _, swapped_env) = enum_fields_dependency_fixture("enum E { A(b: i64, a: i64), B }");
+
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&swapped_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+        assert_eq!(check[0].changed_dependencies, vec!["enum:E"]);
     }
 
     #[test]

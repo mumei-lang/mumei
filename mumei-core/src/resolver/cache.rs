@@ -925,6 +925,16 @@ fn compute_dependency_hashes_with_names(
         for name in enum_names {
             let mut hasher = Sha256::new();
             hash_enum_contract(&mut hasher, &name, module_env);
+            if let Some(enum_def) = module_env.enums.get(&name) {
+                for variant in &enum_def.variants {
+                    hasher.update(b"|fields:");
+                    hasher.update(variant.name.as_bytes());
+                    for field in &variant.fields {
+                        hasher.update(b":");
+                        hasher.update(field.as_bytes());
+                    }
+                }
+            }
             if let Some(unit) = module_env.unit_of_type(&name) {
                 hasher.update(b"|unit:");
                 hasher.update(unit.as_bytes());

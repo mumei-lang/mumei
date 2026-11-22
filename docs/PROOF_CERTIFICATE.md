@@ -351,7 +351,8 @@ block. Effect values use the same field hashing as the proof hash's
 `|effect_def:` block. Type values cover the named refined type's operand, base
 type, and raw predicate; struct values cover its fields, field constraints,
 and invariants.
-Enum keys pin the variant list of enums used directly in an atom's signature.
+Enum keys pin variant names, payload field names and types for enums used
+directly in an atom's signature.
 Legacy certificates without an `enum:<name>` key for such a signature are
 reported as `dependency_unchecked`; enums reached only through struct fields or
 bodies are not keyed.
