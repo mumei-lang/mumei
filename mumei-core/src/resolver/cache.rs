@@ -1,3 +1,4 @@
+use crate::ast::TypeRef;
 use crate::parser::ast::Atom;
 use crate::verification::ModuleEnv;
 use serde::{Deserialize, Serialize};
@@ -500,18 +501,7 @@ pub fn compute_proof_hash_with_flags(
     let mut enum_names: Vec<&String> = module_env.enums.keys().collect();
     enum_names.sort();
     for name in enum_names {
-        hasher.update(b"|enum:");
-        hasher.update(name.as_bytes());
-        if let Some(edef) = module_env.enums.get(name) {
-            for variant in &edef.variants {
-                hasher.update(b"|variant:");
-                hasher.update(variant.name.as_bytes());
-                for field_type in &variant.field_types {
-                    hasher.update(b":");
-                    hasher.update(field_type.name.as_bytes());
-                }
-            }
-        }
+        hash_enum_contract(&mut hasher, name, module_env);
     }
 
     // 3. Include callee signatures (transitive dependencies)
@@ -876,27 +866,121 @@ fn compute_dependency_hashes_with_names(
 
     let mut type_names = BTreeSet::new();
     let mut struct_names = BTreeSet::new();
-    for type_name in atom
-        .params
-        .iter()
-        .filter_map(|param| param.type_name.as_deref())
-        .chain(atom.return_type.as_deref())
-    {
-        let bare_name = type_name.split('<').next().unwrap_or(type_name).trim();
-        if module_env.get_type(bare_name).is_some() {
-            type_names.insert(bare_name.to_string());
-        }
-        if module_env.get_struct(bare_name).is_some() {
-            struct_names.insert(bare_name.to_string());
-        }
-    }
-    for param in &atom.params {
-        if let Some(type_ref) = &param.type_ref {
-            if module_env.get_type(&type_ref.name).is_some() {
-                type_names.insert(type_ref.name.clone());
+    let mut enum_names = BTreeSet::new();
+    if legacy_names {
+        for type_name in atom
+            .params
+            .iter()
+            .filter_map(|param| param.type_name.as_deref())
+            .chain(atom.return_type.as_deref())
+        {
+            let bare_name = type_name.split('<').next().unwrap_or(type_name).trim();
+            if module_env.get_type(bare_name).is_some() {
+                type_names.insert(bare_name.to_string());
             }
-            if module_env.get_struct(&type_ref.name).is_some() {
-                struct_names.insert(type_ref.name.clone());
+            if module_env.get_struct(bare_name).is_some() {
+                struct_names.insert(bare_name.to_string());
+            }
+            if module_env.enums.contains_key(bare_name) {
+                enum_names.insert(bare_name.to_string());
+            }
+        }
+        for param in &atom.params {
+            if let Some(type_ref) = &param.type_ref {
+                if module_env.get_type(&type_ref.name).is_some() {
+                    type_names.insert(type_ref.name.clone());
+                }
+                if module_env.get_struct(&type_ref.name).is_some() {
+                    struct_names.insert(type_ref.name.clone());
+                }
+                let bare_name = type_ref
+                    .name
+                    .split('<')
+                    .next()
+                    .unwrap_or(&type_ref.name)
+                    .trim();
+                if module_env.enums.contains_key(bare_name) {
+                    enum_names.insert(bare_name.to_string());
+                }
+            }
+        }
+    } else {
+        let atom_type_params = atom.type_params.iter().cloned().collect::<HashSet<_>>();
+        let empty_bound_params = HashSet::new();
+        let mut pending_type_names = Vec::new();
+        for type_name in atom
+            .params
+            .iter()
+            .filter_map(|param| param.type_name.as_deref())
+            .chain(atom.return_type.as_deref())
+        {
+            collect_signature_type_names(type_name, &mut pending_type_names, &atom_type_params);
+        }
+        for param in &atom.params {
+            if let Some(type_ref) = &param.type_ref {
+                collect_signature_type_ref_names(
+                    type_ref,
+                    &mut pending_type_names,
+                    &atom_type_params,
+                );
+            }
+        }
+
+        let mut visited_type_names = HashSet::new();
+        while let Some(name) = pending_type_names.pop() {
+            if name == "Self" || !visited_type_names.insert(name.clone()) {
+                continue;
+            }
+            if let Some(refined) = module_env.get_type(&name) {
+                type_names.insert(name.clone());
+                let base_name = refined
+                    ._base_type
+                    .split('<')
+                    .next()
+                    .unwrap_or(&refined._base_type)
+                    .trim();
+                if module_env.get_struct(base_name).is_some()
+                    || module_env.enums.contains_key(base_name)
+                {
+                    collect_signature_type_names(
+                        &refined._base_type,
+                        &mut pending_type_names,
+                        &empty_bound_params,
+                    );
+                }
+            }
+            if let Some(struct_def) = module_env.get_struct(&name) {
+                struct_names.insert(name.clone());
+                let bound_params = struct_def
+                    .type_params
+                    .iter()
+                    .cloned()
+                    .collect::<HashSet<_>>();
+                for field in &struct_def.fields {
+                    collect_signature_type_names(
+                        &field.type_name,
+                        &mut pending_type_names,
+                        &bound_params,
+                    );
+                    collect_signature_type_ref_names(
+                        &field.type_ref,
+                        &mut pending_type_names,
+                        &bound_params,
+                    );
+                }
+            }
+            if let Some(enum_def) = module_env.enums.get(&name) {
+                enum_names.insert(name.clone());
+                let bound_params = enum_def.type_params.iter().cloned().collect::<HashSet<_>>();
+                for variant in &enum_def.variants {
+                    for field_type in &variant.field_types {
+                        collect_signature_type_ref_names(
+                            field_type,
+                            &mut pending_type_names,
+                            &bound_params,
+                        );
+                    }
+                }
             }
         }
     }
@@ -919,8 +1003,86 @@ fn compute_dependency_hashes_with_names(
         hash_struct_contract(&mut hasher, &name, module_env);
         hashes.insert(format!("struct:{name}"), format!("{:x}", hasher.finalize()));
     }
+    if !legacy_names {
+        for name in enum_names {
+            let mut hasher = Sha256::new();
+            hash_enum_contract(&mut hasher, &name, module_env);
+            if let Some(enum_def) = module_env.enums.get(&name) {
+                for variant in &enum_def.variants {
+                    hasher.update(b"|fields:");
+                    hasher.update(variant.name.as_bytes());
+                    for field in &variant.fields {
+                        hasher.update(b":");
+                        hasher.update(field.as_bytes());
+                    }
+                }
+            }
+            if let Some(unit) = module_env.unit_of_type(&name) {
+                hasher.update(b"|unit:");
+                hasher.update(unit.as_bytes());
+            }
+            hashes.insert(format!("enum:{name}"), format!("{:x}", hasher.finalize()));
+        }
+    }
 
     hashes
+}
+
+fn collect_signature_type_names(
+    type_name: &str,
+    names: &mut Vec<String>,
+    bound_params: &HashSet<String>,
+) {
+    let type_name = type_name.trim();
+    if type_name.is_empty() {
+        return;
+    }
+
+    let bare_name = type_name.split('<').next().unwrap_or(type_name).trim();
+    if !bare_name.is_empty() && !bound_params.contains(bare_name) {
+        names.push(bare_name.to_string());
+    }
+
+    let Some(open) = type_name.find('<') else {
+        return;
+    };
+    let Some(close) = type_name.rfind('>') else {
+        return;
+    };
+    if close <= open {
+        return;
+    }
+
+    let arguments = &type_name[open + 1..close];
+    let mut argument_start = 0;
+    let mut nesting = 0usize;
+    for (index, ch) in arguments.char_indices() {
+        match ch {
+            '<' => nesting += 1,
+            '>' => nesting = nesting.saturating_sub(1),
+            ',' if nesting == 0 => {
+                collect_signature_type_names(
+                    &arguments[argument_start..index],
+                    names,
+                    bound_params,
+                );
+                argument_start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    collect_signature_type_names(&arguments[argument_start..], names, bound_params);
+}
+
+fn collect_signature_type_ref_names(
+    type_ref: &TypeRef,
+    names: &mut Vec<String>,
+    bound_params: &HashSet<String>,
+) {
+    collect_signature_type_names(&type_ref.name, names, bound_params);
+    for type_arg in &type_ref.type_args {
+        collect_signature_type_ref_names(type_arg, names, bound_params);
+    }
 }
 
 fn compute_dependency_hash_for_callee(atom: &Atom, module_env: &ModuleEnv) -> String {
@@ -1027,6 +1189,21 @@ fn hash_struct_contract(hasher: &mut Sha256, name: &str, module_env: &ModuleEnv)
             hasher.update(name.as_bytes());
             hasher.update(b"=");
             hasher.update(invariant.as_bytes());
+        }
+    }
+}
+
+fn hash_enum_contract(hasher: &mut Sha256, name: &str, module_env: &ModuleEnv) {
+    hasher.update(b"|enum:");
+    hasher.update(name.as_bytes());
+    if let Some(enum_def) = module_env.enums.get(name) {
+        for variant in &enum_def.variants {
+            hasher.update(b"|variant:");
+            hasher.update(variant.name.as_bytes());
+            for field_type in &variant.field_types {
+                hasher.update(b":");
+                hasher.update(field_type.name.as_bytes());
+            }
         }
     }
 }
