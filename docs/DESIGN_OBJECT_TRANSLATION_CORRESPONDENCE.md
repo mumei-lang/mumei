@@ -75,7 +75,10 @@ TransformationRelation {
 - **入出力 identity**:
   - 入力: 固定済み `llvm_ir_sha256`（record ピン）＋ 固定 llc/ld argv
     （`toolchain_object_executable_reproduction` が保証）
-  - 出力: `object_sha256`、`executable_sha256`（record `files` エントリ）
+  - 出力: `object_sha256`、`executable_sha256`（record `files` エントリ）。
+    固定 llc/ld argv の照合自体が `checks_performed` に載っていることも確認する
+    — 正規化済み引数ハッシュを持たない古い record では artifact 再検証が
+    引数未比較のまま成功し得るため、昇格条件には「比較を実施した」ことも含める
   - 対応表: 関数名 → {IR 関数名、object シンボル、セクション、オフセット、
     バイト範囲、exe 内アドレス} — この対応表自体を descriptor に含めると
     consumer（mumei-agent `native-object-recheck`）が部分検証できる
@@ -84,15 +87,20 @@ TransformationRelation {
 
 `object_link_corresponds` が比較するのは関数バイトと call 解決先のみ。
 producer は object の relocation エントリを列挙し、各 reloc の
-{ターゲットシンボル、addend、適用後の exe 内値} を emit 対象とする。
+{適用位置（セクション内オフセット）、種別（PC32/PLT32 等）、ターゲットシンボル、
+addend、適用後の exe 内値} を emit 対象とする。
+適用位置と種別がないと同一シンボル・addend の複数 reloc を区別できない
+（既存のリンク照合もこの2項目を読み PC 相対値を検算している）。
 外部シンボル（libc/runtime stub）は「前提」として区別し、
 `machine_code_callee_saved_preservation_assumed_for_external_callees` と
 同じ assumption カテゴリに入れる。
 
 ## 4. `unchecked_not_translation_validated` からの昇格条件
 
-昇格は「全条件を満たす or 未充足条件が `checks_not_performed` として
-列挙される」のどちらかでのみ許可（部分昇格なし）:
+昇格は「必須条件（1-4, 6, 7）を全て満たし、残域が `checks_not_performed`
+として列挙される」場合のみ許可（部分昇格なし）。必須条件が判定不能な
+場合の昇格は認めない — 列挙で許容されるのは主張の対象外として明示する
+残域（5）のみで、必須チェック自体の未実施は昇格を抑止する:
 
 1. **関数列挙の完全性**: LLVM IR の全関数が object シンボルに対応
    （`object_symbol_correspondence` で実施済み — 再利用可）
@@ -110,10 +118,13 @@ producer は object の relocation エントリを列挙し、各 reloc の
      ソース段の変換検証とは別の責務として切り出し）
    - (b) プロファイル内の全関数で `machine_code_*_tv` が equivalent、かつ
      out-of-profile の関数がゼロ、かつ `functions` セクションに
-     OutsideProfile が残らないことを昇格ゲートとする（推移的主張:
-     source↔machine が成立し LLVM エミッタの确定性が toolchain pin で
-     担保されるなら IR↔object も一致、とする縮約。弱いが実装コスト小）
-   - (a) が本筋、(b) は中間段階の有界クレームとして許容
+     OutsideProfile が残らないことを昇格ゲートとする。
+     注意: これは source↔machine の等価であり IR↔object の等価ではない
+     — machine-TV の比較対象はソースモデルで、IR と機械語の対応はこの段でも
+     未検証のまま残る。昇格後の `validation` 語彙も source↔machine の
+     範囲に限定した名前にする必要がある
+   - (a) が本筋、(b) は source↔machine の中間段階としてのみ許容
+     （IR↔object を名乗ってはいけない）
 5. **未モデル化残域の列挙**: `unsupported_instruction`・`call_arguments`・
    `frame_memory_bounds`・over-bound ループ・MXCSR/NaN・外部呼び出し前提が
    descriptor の `checks_not_performed` / `functions.<name>.outcome` に
@@ -124,11 +135,11 @@ producer は object の relocation エントリを列挙し、各 reloc の
 7. **fail-closed**: 上記いずれかが判定不能なら inconclusive/not_performed で
    終了し、昇格した validation 値を書かない
 
-昇格後の `validation` 語彙候補: `checked_within_machine_tv_profile`
-（(b) の推移的主張）または `checked_object_translation_tv`（(a) の
-直接対応）。既存の `compiler_local_fingerprint_not_equivalence` と
-`not_executed_by_extractor` の中間に位置する第3の honesty レベルとして
-導入を検討。
+昇格後の `validation` 語彙候補: `checked_source_machine_tv_within_profile`
+（(b) — source↔machine の等価として正直に名付ける）または
+`checked_object_translation_tv`（(a) の直接対応のみに使う）。既存の
+`compiler_local_fingerprint_not_equivalence` と `not_executed_by_extractor`
+の中間に位置する第3の honesty レベルとして導入を検討。
 
 ## 5. `SemanticContract.transformations` との接続点
 
@@ -151,7 +162,8 @@ producer は object の relocation エントリを列挙し、各 reloc の
 ```bash
 # bounded ループ関数（countdown を含む）
 mumei native-bundle build loop.mm -o bundle
-mumei native-bundle recheck-machine-tv bundle loop.mm --expected-build-id <id> --json
+build_id=<出力された Build ID>
+mumei native-bundle recheck-machine-tv bundle loop.mm --expected-build-id "$build_id" --json
 # → functions.countdown.outcome = "equivalent_within_profile"
 #   checks_performed に "machine_code_bounded_loop_function_tv"
 #   checks_not_performed に "machine_code_tv_loop_executions_beyond_bound"
@@ -161,11 +173,16 @@ mumei native-bundle recheck-machine-tv bundle loop.mm --expected-build-id <id> -
 
 1. **全等価ケース**: 全関数が `equivalent_within_profile` の bundle
    （単純な i64 atom 2-3 個 + main）— 昇格条件 1-4 が全て満たされるかを確認
-2. **out-of-profile 混入ケース**: over-bound ループまたは未対応命令を含む
-   atom を混ぜ、`functions.<name>.outcome` に OutsideProfile が残り
-   昇格が抑止されることを確認
+2. **out-of-profile 混入ケース**: 未対応命令（`unsupported_instruction` で
+   fail-closed になる形）を含む atom を混ぜ、`functions.<name>.outcome` に
+   OutsideProfile が残り昇格が抑止されることを確認。over-bound ループは
+   使わない — 上限内の入力では関数が等価と判定されるため抑止ケースに
+   ならない（上限外の実行は未検証として `checks_not_performed` に残るが
+   関数自体は equivalent_within_profile になり得る）
 3. **relocation 破壊ケース**: object の call target を1バイト書き換えた
-   bundle で `object_link_correspondence` が `Different` → 昇格失敗を確認
+   bundle では artifact 再現チェックがリンク照合より先に失敗するため、
+   CLI 経路ではなく `object_link_corresponds` を直接呼ぶ単体テストで
+   `Different` → 昇格失敗を確認
 4. **非決定性ケース**: 同一ソースを2回 build して object_sha256 が一致するか
    （不一致なら条件6で昇格失敗）
 
@@ -175,9 +192,9 @@ mumei native-bundle recheck-machine-tv bundle loop.mm --expected-build-id <id> -
   `object_code→linked_executable` を `validation: "not_executed_by_extractor"`
   で追加し、output_identity に record pin の digest を入れる。
   検証は増えないが変換関係が消えない
-- **Step 2（推移的昇格）**: 昇格条件 4(b) のゲートを producer に実装 —
-  全関数 equivalent + 残域列挙の確認で `checked_within_machine_tv_profile`
-  を emit
+- **Step 2（source↔machine の中間段階）**: 昇格条件 4(b) のゲートを producer に
+  実装 — 全関数 equivalent + 残域列挙の確認で
+  `checked_source_machine_tv_within_profile` を emit（IR↔object は未検証のまま）
 - **Step 3（直接対応）**: 昇格条件 4(a) — machine-TV の比較対象を
   LLVM IR 再導出モデルに切り替える設計（大きい。別メモ化を推奨）
 - **Step 4（relocation 全件照合）**: §3.3 の reloc レコードを emit +
