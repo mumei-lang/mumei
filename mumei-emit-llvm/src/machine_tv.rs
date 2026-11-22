@@ -563,17 +563,20 @@ const MAX_SRET_RESULT_LEAF_COUNT: usize = MAX_AGGREGATE_ARGUMENT_LEAF_COUNT;
 /// leaves overflow the three INTEGER result registers — the same
 /// admission as the callee side (`sret_result_leaf_count`), keyed on
 /// the call site's `CallValueShape` instead of the function's own
-/// result shape. Register-resident results (three INTEGER and two SSE
-/// slots) and enum results stay on their own paths; results LLVM
-/// reaches for the x87 register stay fail-closed.
+/// result shape. Enum results share the path — their tag and payload
+/// leaves flatten into the same all-INTEGER buffer writes. Register-
+/// resident results (three INTEGER and two SSE slots) stay on their
+/// own path; results LLVM reaches for the x87 register stay
+/// fail-closed.
 fn sret_call_result_leaf_count(site: &CallSite<'_>) -> Option<usize> {
-    let CallValueShape::Struct {
-        leaf_count,
-        has_enum: false,
-        ..
-    } = site.result_shape
-    else {
-        return None;
+    let leaf_count = match site.result_shape {
+        CallValueShape::Struct {
+            leaf_count,
+            has_enum: false,
+            ..
+        }
+        | CallValueShape::Enum { leaf_count } => leaf_count,
+        _ => return None,
     };
     (MAX_AGGREGATE_LEAF_COUNT..=MAX_SRET_RESULT_LEAF_COUNT)
         .contains(&leaf_count)
@@ -1586,13 +1589,41 @@ fn lift<'ctx>(
                 .iter()
                 .any(|operand| operand.contains('('))
             {
-                lift_stack_wide_move(
-                    instruction,
-                    &mut state,
-                    &stack_argument_leaves,
-                    &arguments,
-                    allocated_frame_memory_mode,
-                )?;
+                let operands = split_operands(&instruction.operands);
+                let memory_is_destination =
+                    operands.get(1).is_some_and(|operand| operand.contains('('));
+                let memory = if memory_is_destination {
+                    operands.get(1).copied()
+                } else {
+                    operands.first().copied()
+                }
+                .unwrap_or("");
+                if memory.contains("%rsp") {
+                    lift_stack_wide_move(
+                        instruction,
+                        &mut state,
+                        &stack_argument_leaves,
+                        &arguments,
+                        allocated_frame_memory_mode,
+                    )?;
+                } else if memory_is_destination {
+                    // A 16-byte store through a register-held `sret`
+                    // pointer — LLVM vectorizes buffer-to-buffer
+                    // forwarding of memory-class results this way.
+                    if sret_memory_offset(memory, &state).is_some() {
+                        lift_sret_wide_store(instruction, &mut state)?;
+                    } else if sret_call_memory_offset(memory, &state).is_some() {
+                        lift_sret_call_wide_store(instruction, &mut state)?;
+                    } else {
+                        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                    }
+                } else if sret_memory_offset(memory, &state).is_some() {
+                    lift_sret_wide_load(instruction, &mut state, context)?;
+                } else if sret_call_memory_offset(memory, &state).is_some() {
+                    lift_sret_call_wide_load(instruction, &mut state, context)?;
+                } else {
+                    return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+                }
             } else if matches!(instruction.mnemonic.as_str(), "addq" | "subq")
                 && split_operands(&instruction.operands)
                     .get(1)
@@ -2845,6 +2876,145 @@ fn lift_sret_call_load<'ctx>(
     Ok(())
 }
 
+/// A 128-bit `movups`/`movaps`/`movdqa`/`movdqu` store through the sret
+/// pointer — LLVM's vectorized copy of two adjacent buffer leaves when
+/// it forwards a memory-class result (an enum call result re-returned,
+/// or any wide aggregate the callee copies). Each half records like a
+/// scalar `movq` store; a packed copy moves raw bits.
+fn lift_sret_wide_store<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let offset = sret_memory_offset(destination, state)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let Some(register_index) = parse_xmm_register(source) else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let value = state.xmm_registers[register_index].clone();
+    for (slot, half) in [
+        (offset, value.extract(63, 0)),
+        (offset + 8, value.extract(127, 64)),
+    ] {
+        if let Some((_, stored)) = state
+            .sret_stores
+            .iter_mut()
+            .find(|(stored_slot, _)| *stored_slot == slot)
+        {
+            *stored = half;
+        } else {
+            state.sret_stores.push((slot, half));
+        }
+    }
+    Ok(())
+}
+
+/// A 128-bit `movups`/`movaps`/`movdqa`/`movdqu` load through the sret
+/// pointer: two adjacent buffer leaves concat into the xmm register,
+/// recorded stores first, fresh constants for unwritten slots.
+fn lift_sret_wide_load<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let offset = sret_memory_offset(source, state)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let Some(destination_index) = parse_xmm_register(destination) else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let leaf = |slot: i64| {
+        state
+            .sret_stores
+            .iter()
+            .find(|(stored_slot, _)| *stored_slot == slot)
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| BV::fresh_const(context, "machine_sret_unwritten_slot", 64))
+    };
+    state.xmm_registers[destination_index] = leaf(offset + 8).concat(&leaf(offset));
+    Ok(())
+}
+
+/// A 128-bit `movups`/`movaps`/`movdqa`/`movdqu` store through a
+/// caller-side `sret` buffer pointer: writes both halves into the
+/// recorded `stack` slots so pointer- and `rsp`-relative reads agree.
+fn lift_sret_call_wide_store<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let (buffer_index, offset) = sret_call_memory_offset(destination, state)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let buffer = &state.sret_call_buffers[buffer_index];
+    if offset + 8 >= 8 * buffer.leaf_count as i64 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let base_offset = buffer.base_offset;
+    let Some(register_index) = parse_xmm_register(source) else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let value = state.xmm_registers[register_index].clone();
+    for (slot, half) in [
+        (base_offset + offset, value.extract(63, 0)),
+        (base_offset + offset + 8, value.extract(127, 64)),
+    ] {
+        if let Some((_, stored)) = state
+            .stack
+            .iter_mut()
+            .find(|(stack_slot, _)| *stack_slot == slot)
+        {
+            *stored = half;
+        } else {
+            state.stack.push((slot, half));
+        }
+    }
+    Ok(())
+}
+
+/// A 128-bit `movups`/`movaps`/`movdqa`/`movdqu` load through a
+/// caller-side `sret` buffer pointer: two adjacent `stack` leaves
+/// concat into the xmm register, fresh constants where unreachable.
+fn lift_sret_call_wide_load<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let (buffer_index, offset) = sret_call_memory_offset(source, state)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let buffer = &state.sret_call_buffers[buffer_index];
+    if offset + 8 >= 8 * buffer.leaf_count as i64 {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let base_offset = buffer.base_offset;
+    let Some(destination_index) = parse_xmm_register(destination) else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let leaf = |slot: i64| {
+        state
+            .stack
+            .iter()
+            .find(|(stack_slot, _)| *stack_slot == slot)
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| BV::fresh_const(context, "machine_sret_call_unwritten_slot", 64))
+    };
+    state.xmm_registers[destination_index] =
+        leaf(base_offset + offset + 8).concat(&leaf(base_offset + offset));
+    Ok(())
+}
+
 /// Resolves an `N(%rsp)` operand above the current frame to the input
 /// BV of the N-th spilled argument leaf. `want_double` is the class of
 /// the instruction doing the access — an INTEGER load of a spilled
@@ -3618,10 +3788,8 @@ fn call_site_has_unsupported_composite_shape(site: &CallSite<'_>) -> bool {
         && !aggregate_result_register_classes_supported(&site.result_leaf_doubles)
         && sret_call_result_leaf_count(site).is_none())
         || (matches!(site.result_shape, CallValueShape::Enum { .. })
-            && !call_value_shape_supported_with_leaf_bound(
-                site.result_shape,
-                MAX_AGGREGATE_LEAF_COUNT,
-            ))
+            && !aggregate_result_register_classes_supported(&site.result_leaf_doubles)
+            && sret_call_result_leaf_count(site).is_none())
 }
 
 // Resolves a call-argument leaf of either class that spilled to the
@@ -3748,10 +3916,8 @@ fn lift_call<'ctx>(
             && !aggregate_result_register_classes_supported(&call_site.result_leaf_doubles)
             && sret_call_result_leaf_count(call_site).is_none())
         || (matches!(call_site.result_shape, CallValueShape::Enum { .. })
-            && !call_value_shape_supported_with_leaf_bound(
-                call_site.result_shape,
-                MAX_AGGREGATE_LEAF_COUNT,
-            ))
+            && !aggregate_result_register_classes_supported(&call_site.result_leaf_doubles)
+            && sret_call_result_leaf_count(call_site).is_none())
     {
         return Err(FunctionOutcome::OutsideProfile("call_arguments"));
     }
@@ -3776,9 +3942,10 @@ fn lift_call<'ctx>(
     if tail_call && integer_argument_count > ARGUMENT_REGISTERS.len() {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    // A call whose all-INTEGER result needs the `sret` convention
-    // carries the caller-allocated result-buffer pointer in `rdi`, so
-    // declared INTEGER arguments begin one register right at `rsi`.
+    // A call whose all-INTEGER result — struct or enum tag/payload
+    // leaves alike — needs the `sret` convention carries the
+    // caller-allocated result-buffer pointer in `rdi`, so declared
+    // INTEGER arguments begin one register right at `rsi`.
     let sret_call_leaf_count = sret_call_result_leaf_count(call_site);
     let mut outgoing_slots = BTreeSet::new();
     let mut integer_argument_index = usize::from(sret_call_leaf_count.is_some());
@@ -12490,6 +12657,104 @@ entry:
                 &context
             ),
             FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn enum_sret_call_result_matches_real_llvm_codegen() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // A five-leaf enum (tag + four payload leaves) overflows the
+        // INTEGER register budget, so both directions go through the
+        // `sret` buffer — and LLVM vectorizes the buffer copies with
+        // `movups`.
+        let source = "enum Wide { V(a: i64, b: i64, c: i64, d: i64), N }\n\
+            atom mk_wide(x: i64) -> Wide requires: true; ensures: true; body: {\n\
+              Wide::V(x, x + 1, x + 2, x + 3)\n\
+            };\n\
+            atom wrap(x: i64) -> Wide requires: true; ensures: true; body: { mk_wide(x) };";
+        let callee_model = source_model_named_with_admission(
+            source,
+            "mk_wide",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let wrap_model = source_model_named_with_admission(
+            source,
+            "wrap",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(supports_signature(&callee_model));
+        assert!(supports_signature(&wrap_model));
+
+        // The callee writes tag + payload leaves into the `sret`
+        // buffer — real LLVM emits two `movups` stores plus one
+        // `movq` for the odd leaf.
+        let callee_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define void @__mumei_user_main(ptr sret({ i64, i64, i64, i64, i64 }) %out, i64 %x) {
+entry:
+  %p1 = add i64 %x, 1
+  %p2 = add i64 %x, 2
+  %p3 = add i64 %x, 3
+  %s0 = insertvalue { i64, i64, i64, i64, i64 } undef, i64 0, 0
+  %s1 = insertvalue { i64, i64, i64, i64, i64 } %s0, i64 %x, 1
+  %s2 = insertvalue { i64, i64, i64, i64, i64 } %s1, i64 %p1, 2
+  %s3 = insertvalue { i64, i64, i64, i64, i64 } %s2, i64 %p2, 3
+  %s4 = insertvalue { i64, i64, i64, i64, i64 } %s3, i64 %p3, 4
+  store { i64, i64, i64, i64, i64 } %s4, ptr %out
+  ret void
+}
+"#;
+        let (address, bytes, targets) =
+            compiled_function_with_targets(callee_ir, "__mumei_user_main");
+        let disassembly = disassemble(&bytes, address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("enum sret callee disassembly:\n{disassembly}");
+        assert_eq!(
+            check_function(&bytes, address, &callee_model, &targets, &context),
+            FunctionOutcome::Equivalent
+        );
+
+        // The caller re-returns the call result: buffer into xmm pairs
+        // via `movups` loads off `rsp`, then `movups` stores through the
+        // callee's own `sret` pointer held in a register.
+        let wrap_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+declare void @mk_wide(ptr sret({ i64, i64, i64, i64, i64 }), i64)
+define void @__mumei_user_main(ptr sret({ i64, i64, i64, i64, i64 }) %out, i64 %x) {
+entry:
+  %buf = alloca { i64, i64, i64, i64, i64 }
+  call void @mk_wide(ptr %buf, i64 %x)
+  %v = load { i64, i64, i64, i64, i64 }, ptr %buf
+  store { i64, i64, i64, i64, i64 } %v, ptr %out
+  ret void
+}
+"#;
+        let (wrap_address, wrap_bytes, wrap_targets) =
+            compiled_function_with_targets(wrap_ir, "__mumei_user_main");
+        let wrap_disassembly = disassemble(&wrap_bytes, wrap_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("enum sret forwarding disassembly:\n{wrap_disassembly}");
+        assert!(wrap_disassembly.contains("callq"), "{wrap_disassembly}");
+        assert_eq!(
+            check_function(
+                &wrap_bytes,
+                wrap_address,
+                &wrap_model,
+                &wrap_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
         );
     }
 }

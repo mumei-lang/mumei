@@ -270,6 +270,14 @@ fn machine_tv_model_uses_wide_composite_aggregate(
             ) || matches!(
                 call_site.result_shape,
                 semantic_contract::CallValueShape::Enum { leaf_count } if leaf_count > 2
+                    // Enum call results follow the same per-class
+                    // budgets and `sret` overflow as structs.
+                    && !(call_site.result_leaf_doubles.len() == leaf_count
+                        && (aggregate_result_leaf_doubles_modeled(
+                            &call_site.result_leaf_doubles,
+                        ) || ((4..=16).contains(&leaf_count)
+                            && integer_result_leaf_count(&call_site.result_leaf_doubles)
+                                > 3)))
             )
         })
 }
