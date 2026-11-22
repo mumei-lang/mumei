@@ -2085,9 +2085,12 @@ lowering remains outside the profile. Enum signatures, enum values, enum
 scalar operations and enum payload writes remain fail-closed. An enum `match`
 path that does not set an enum-use flag remains closed by the separate
 enum-signature gate. Function-signature and direct-call aggregates used as
-parameters or results with five or more leaves remain outside the profile.
+parameters or call arguments with seventeen or more leaves, or as results with
+five or more leaves, remain outside the profile.
 Local struct values inside a body are not subject to this aggregate limit
-because the source model flattens them. i128/u128 struct leaves, bounded
+because the source model flattens them. i128/u128 leaves inside aggregate
+parameters and call arguments flatten into the same per-slot sequence LLVM
+emits, while i128/u128 leaves inside aggregate results, bounded
 memory, and tail calls with struct arguments or results also remain outside
 the profile. When an equivalent function uses a struct
 aggregate, the descriptor performs `machine_code_composite_register_aggregate_tv`.

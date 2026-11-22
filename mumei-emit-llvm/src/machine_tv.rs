@@ -551,16 +551,22 @@ pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
         && !wide_composite_values(model)
 }
 
+/// Composite *results* keep a 128-bit leaf fail-closed: an aggregate
+/// result either spills to the hidden `sret` pointer this model
+/// rejects or — for the two-eightbyte case — needs a paired
+/// `rax`/`rdx` composite read the result comparison does not model
+/// for a wide leaf yet. Composite *parameters* and call-site
+/// arguments are admitted: LLVM flattens each aggregate leaf — a
+/// 128-bit leaf becoming two consecutive INTEGER slots — into the
+/// same scalar argument sequence the signature's leaf slot list
+/// already describes (`pure-i64-composite/v21`).
 fn wide_composite_values(model: &PureI64Body<'_>) -> bool {
     model.has_wide_scalar_features
-        && (model.param_shapes.iter().any(Option::is_some)
-            || model.result_shape.is_some()
-            || model.call_sites.iter().any(|site| {
-                site.argument_shapes
-                    .iter()
-                    .any(|shape| matches!(shape, CallValueShape::Struct { .. }))
-                    || matches!(site.result_shape, CallValueShape::Struct { .. })
-            }))
+        && (model.result_shape.is_some()
+            || model
+                .call_sites
+                .iter()
+                .any(|site| matches!(site.result_shape, CallValueShape::Struct { .. })))
 }
 
 const MAX_AGGREGATE_LEAF_COUNT: usize = 4;
@@ -6754,6 +6760,108 @@ entry:
         );
         assert_eq!(nested_model.param_shapes, vec![Some(4)]);
         assert_eq!(nested_model.inputs.len(), 4);
+    }
+
+    #[test]
+    fn wide_aggregate_arguments_match_codegen() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // A 128-bit leaf inside an aggregate parameter flattens into
+        // the same two-INTEGER-slot sequence LLVM emits for it.
+        let source = "struct P { a: i64, b: i128 }\n\
+            atom leaf(p: P) -> i128 requires: true; ensures: result == p.b; body: { p.b };\n\
+            atom caller(x: i128) -> i128 requires: true; ensures: result == x; body: { leaf(P { a: 0, b: x }) };";
+        let leaf_model = source_model_named_with_admission(
+            source,
+            "leaf",
+            &context,
+            RefinedAdmission::CompositeV21,
+        );
+        assert_eq!(leaf_model.param_shapes, vec![Some(3)]);
+        assert_eq!(
+            leaf_model.param_leaf_doubles,
+            vec![vec![false, false, false]]
+        );
+        assert!(supports_signature(&leaf_model));
+        let caller_model = source_model_named_with_admission(
+            source,
+            "caller",
+            &context,
+            RefinedAdmission::CompositeV21,
+        );
+        assert!(supports_signature(&caller_model));
+        let ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i128 @leaf({ i64, i128 } %p) {
+entry:
+  %b = extractvalue { i64, i128 } %p, 1
+  ret i128 %b
+}
+define i128 @leaf_wrong({ i64, i128 } %p) {
+entry:
+  %a = extractvalue { i64, i128 } %p, 0
+  %w = zext i64 %a to i128
+  ret i128 %w
+}
+define i128 @caller(i128 %x) {
+entry:
+  %p0 = insertvalue { i64, i128 } undef, i64 0, 0
+  %p1 = insertvalue { i64, i128 } %p0, i128 %x, 1
+  %r = call i128 @leaf({ i64, i128 } %p1)
+  ret i128 %r
+}
+"#;
+        let (leaf_address, leaf_bytes, leaf_targets) = compiled_function_with_targets(ir, "leaf");
+        assert_eq!(
+            check_function(
+                &leaf_bytes,
+                leaf_address,
+                &leaf_model,
+                &leaf_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+        // Returning the wrong field is a real counterexample, not a
+        // vacuous pass.
+        let (wrong_address, wrong_bytes, wrong_targets) =
+            compiled_function_with_targets(ir, "leaf_wrong");
+        assert_eq!(
+            check_function(
+                &wrong_bytes,
+                wrong_address,
+                &leaf_model,
+                &wrong_targets,
+                &context
+            ),
+            FunctionOutcome::Different
+        );
+        // The call-site composite argument carrying a wide leaf is
+        // checked leaf-wise as well.
+        let (caller_address, caller_bytes, caller_targets) =
+            compiled_function_with_targets(ir, "caller");
+        assert_eq!(
+            check_function(
+                &caller_bytes,
+                caller_address,
+                &caller_model,
+                &caller_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+        // A wide leaf inside an aggregate *result* stays outside the
+        // profile — that path still wants the `sret`/paired-rax-rdx
+        // composite read this model does not model for wide leaves.
+        let mk_model = source_model_named_with_admission(
+            "struct P { a: i64, b: i128 }\n\
+             atom mk(x: i128) -> P requires: true; ensures: true; body: { P { a: 0, b: x } };",
+            "mk",
+            &context,
+            RefinedAdmission::CompositeV21,
+        );
+        assert!(!supports_signature(&mk_model));
     }
 
     #[test]
