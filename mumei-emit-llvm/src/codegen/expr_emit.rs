@@ -1226,6 +1226,12 @@ pub(crate) fn hir_int_type_name(
             r,
         ) => hir_int_type_name(l, var_types, module_env)
             .or_else(|| hir_int_type_name(r, var_types, module_env)),
+        HirExpr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => stmt_int_type_name(then_branch, var_types, module_env)
+            .or_else(|| stmt_int_type_name(else_branch, var_types, module_env)),
         HirExpr::FieldAccess(inner, field) => infer_struct_type_name(inner, var_types, module_env)
             .and_then(|s| {
                 module_env
@@ -4191,6 +4197,64 @@ mod tests {
         llvm!(builder.build_return(Some(&cmp)));
         assert!(function.verify(false));
         assert!(module.print_to_string().to_string().contains("icmp ugt"));
+        Ok(())
+    }
+
+    #[test]
+    fn if_expression_with_u64_branch_compares_unsigned() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        variables.insert(
+            "a".to_string(),
+            context.i64_type().const_int(u64::MAX, false).into(),
+        );
+        variables.insert(
+            "b".to_string(),
+            context.i64_type().const_int(0, false).into(),
+        );
+        variables.insert(
+            "c".to_string(),
+            context.i64_type().const_int(1, false).into(),
+        );
+        let mut var_types = HashMap::new();
+        var_types.insert("a".to_string(), "u64".to_string());
+        var_types.insert("b".to_string(), "u64".to_string());
+        let mut array_ptrs = HashMap::new();
+
+        let condition = HirExpr::BinaryOp(
+            Box::new(HirExpr::IfThenElse {
+                cond: Box::new(HirExpr::Variable("c".to_string())),
+                then_branch: Box::new(HirStmt::Expr(HirExpr::BinaryOp(
+                    Box::new(HirExpr::Variable("a".to_string())),
+                    HirBinOp::BitOr,
+                    Box::new(HirExpr::Number(0)),
+                ))),
+                else_branch: Box::new(HirStmt::Expr(HirExpr::Variable("b".to_string()))),
+            }),
+            HirBinOp::Le,
+            Box::new(HirExpr::Number(10)),
+        );
+        let cmp = compile_hir_expr(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &condition,
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+        llvm!(builder.build_return(Some(&cmp)));
+        assert!(function.verify(false));
+        assert!(module.print_to_string().to_string().contains("icmp ule"));
         Ok(())
     }
 
