@@ -3167,8 +3167,10 @@ matches LLVM's exact module label and retains the loop-bound suffix. U64 leaves
 use full-width 64-bit bitvectors without an extra signature-domain constraint;
 unsigned comparisons, `udiv`/`urem`, and `lshr` retain their source semantics.
 Unsupported memory, enums and composite operations beyond plain struct values,
-wide struct leaves, and non-scalar f64 features remain outside the machine-TV
-profile. Scalar `i128`/`u128` values use consecutive low/high GPR pairs and
+and non-scalar f64 features remain outside the machine-TV
+profile. Wide struct leaves inside parameters, call arguments and aggregate
+results flatten into the same two-INTEGER-slot sequence LLVM emits for them,
+bounded by the same sixteen-leaf argument and four-leaf result limits. Scalar `i128`/`u128` values use consecutive low/high GPR pairs and
 `rax`/`rdx` results for the bounded add/subtract/negate, comparison,
 pass-through and direct-call subset. Wide multiplication remains
 fail-closed as `unsupported_instruction` because the bounded solver returned
@@ -3232,9 +3234,9 @@ aggregates used as parameters or call arguments with seventeen or more
 leaves, or as results with five or more leaves, remain
 fail-closed. Local struct values inside a body are not subject to this
 aggregate limit because the source model flattens them. i128/u128 leaves inside
-aggregate parameters and call arguments follow the same flattening — each wide
-leaf is two consecutive INTEGER slots — while i128/u128 leaves inside aggregate
-results remain fail-closed. Leaf-function bounded arrays admit qword `%rsp`-relative
+aggregate parameters, call arguments and aggregate results follow the same
+flattening — each wide leaf is two consecutive INTEGER slots, and LLVM emits
+its low half first, matching the source model's `[lo, hi]` slot order. Leaf-function bounded arrays admit qword `%rsp`-relative
 red-zone accesses with proven `-128..=-8` offsets; red-zone non-clobbering is
 assumed, not validated. Red-zone accesses in functions with calls
 (`frame_memory_call`) or stack adjustments (`frame_memory_stack_adjust`) remain
