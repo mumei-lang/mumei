@@ -1099,6 +1099,8 @@ pub fn recursive_contract_hint_diagnostic(
         severity: "hint".to_string(),
         atom: atom.name.clone(),
         message,
+        failure_type: None,
+        violation_type: None,
         tags: vec![code.to_string()],
         escalation_reason: None,
     })

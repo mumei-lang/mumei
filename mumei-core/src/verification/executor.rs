@@ -2388,6 +2388,7 @@ fn verify_inner_impl(
             // before reaching the postcondition check. Write a failure report so the
             // MCP self-healing flow does not read a stale report.json from a prior run.
             let err_str = format!("{}", e);
+            let mut body_extra_fields = None;
             // If this is an effect mismatch violation, save a structured report
             if err_str.contains("Effect violation: 'perform ") {
                 // Extract effect name and operation from error message
@@ -2405,7 +2406,7 @@ fn verify_inner_impl(
                             .unwrap_or_default();
                         let effect_names: Vec<String> =
                             atom.effects.iter().map(|e| e.name.clone()).collect();
-                        save_effect_violation_report(
+                        let effect_report = save_effect_violation_report(
                             output_dir,
                             &atom.name,
                             &effect_names,
@@ -2416,6 +2417,10 @@ fn verify_inner_impl(
                                 format!("Remove the call to 'perform {}'", source_op),
                             ],
                         );
+                        body_extra_fields = Some(serde_json::json!({
+                            "violation_type": effect_report["violation_type"].clone(),
+                            "effect_violation": effect_report["effect_violation"].clone(),
+                        }));
                     }
                 }
             }
@@ -2424,6 +2429,8 @@ fn verify_inner_impl(
                 FAILURE_DIVISION_BY_ZERO
             } else if err_str.contains("Termination measure violation") {
                 FAILURE_TERMINATION_MEASURE_VIOLATED
+            } else if err_str.contains("Effect violation: 'perform ") {
+                FAILURE_EFFECT_NOT_ALLOWED
             } else if err_str.contains("Constraint budget exceeded") {
                 "constraint_budget_exceeded"
             } else {
@@ -2457,7 +2464,7 @@ fn verify_inner_impl(
                 None,
                 None,
                 Some(&diagnostics),
-                None,
+                body_extra_fields.as_ref(),
             );
             return Err(e);
         }

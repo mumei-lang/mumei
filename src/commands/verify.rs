@@ -220,6 +220,8 @@ fn early_outcome(outcome: VerifyOutcome, message: &str, json_output: bool) -> Ve
             severity: "error".to_string(),
             atom: String::new(),
             message: message.to_string(),
+            failure_type: None,
+            violation_type: None,
             tags: Vec::new(),
             escalation_reason: None,
         };
@@ -867,6 +869,39 @@ fn first_error_line(error_text: &str) -> String {
         .to_string()
 }
 
+fn failure_classification_for_diagnostic(
+    output_dir: &Path,
+    atom_name: &str,
+    error_text: &str,
+) -> (Option<String>, Option<String>) {
+    let report = std::fs::read_to_string(output_dir.join("report.json"))
+        .ok()
+        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+        .filter(|report| report["atom"].as_str() == Some(atom_name));
+    let failure_type = report
+        .as_ref()
+        .and_then(|report| report["failure_type"].as_str())
+        .map(str::to_string)
+        .or_else(|| infer_failure_type_from_error_text(error_text).map(str::to_string));
+    let violation_type = report
+        .as_ref()
+        .and_then(|report| report["violation_type"].as_str())
+        .map(str::to_string);
+    (failure_type, violation_type)
+}
+
+fn common_failed_diagnostic_field<'a>(
+    diagnostics: &'a [verification::Diagnostic],
+    field: impl Fn(&'a verification::Diagnostic) -> Option<&'a str>,
+) -> Option<&'a str> {
+    let mut values = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == "error")
+        .filter_map(field);
+    let first = values.next()?;
+    values.all(|value| value == first).then_some(first)
+}
+
 fn read_fresh_impl_report(
     output_dir: &Path,
     label: &str,
@@ -1371,6 +1406,11 @@ fn verify_single_atom_inner(atom: &parser::Atom, name: &str, ctx: &mut VerifyCon
                     ctx.loss_vectors.push(loss_vector);
                 }
             }
+            let (failure_type, violation_type) = if status == "failed" {
+                failure_classification_for_diagnostic(ctx.output_dir, name, &error_text)
+            } else {
+                (None, None)
+            };
             ctx.failure_diagnostics.push(verification::Diagnostic {
                 code: status.to_string(),
                 severity: if status == "failed" {
@@ -1381,6 +1421,8 @@ fn verify_single_atom_inner(atom: &parser::Atom, name: &str, ctx: &mut VerifyCon
                 .to_string(),
                 atom: name.to_string(),
                 message: first_error_line(&error_text),
+                failure_type,
+                violation_type,
                 tags: vec![status.to_string(), format!("z3_{z3_result}")],
                 escalation_reason: if status == "escalation_candidate" {
                     escalation_reason
@@ -2656,6 +2698,20 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                 "warnings": &diagnostics,
                 "inferred_invariants": &inferred_invariants,
             });
+            if let Some(failure_type) =
+                common_failed_diagnostic_field(&failure_diagnostics, |diagnostic| {
+                    diagnostic.failure_type.as_deref()
+                })
+            {
+                payload["failure_type"] = serde_json::json!(failure_type);
+            }
+            if let Some(violation_type) =
+                common_failed_diagnostic_field(&failure_diagnostics, |diagnostic| {
+                    diagnostic.violation_type.as_deref()
+                })
+            {
+                payload["violation_type"] = serde_json::json!(violation_type);
+            }
             if skipped_clauses > 0 {
                 payload["partial"] = serde_json::json!(true);
             }

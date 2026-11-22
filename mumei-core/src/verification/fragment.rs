@@ -663,6 +663,8 @@ pub fn outside_decidable_fragment_diagnostic(
             severity: "warning".to_string(),
             atom: atom.name.clone(),
             message: outside_decidable_fragment_message(atom, &tags),
+            failure_type: None,
+            violation_type: None,
             tags,
             escalation_reason: Some("outside_decidable_fragment".to_string()),
         })
@@ -874,6 +876,8 @@ pub fn untyped_array_access_diagnostic(atom: &Atom, strict: bool) -> Option<Diag
              add an explicit `[i64]`/`[f64]`/`[bool]` annotation to select the element sort",
             if names.len() == 1 { "s" } else { "" }
         ),
+        failure_type: None,
+        violation_type: None,
         tags: vec!["untyped_array_access".to_string()],
         escalation_reason: None,
     })
