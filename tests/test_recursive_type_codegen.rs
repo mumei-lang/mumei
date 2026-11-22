@@ -109,6 +109,17 @@ fn recursive_generic_struct_instantiation_fails_cleanly() {
 }
 
 #[test]
+fn recursive_array_fields_fail_llvm_codegen_cleanly() {
+    for fixture in [
+        "test_recursive_enum_array_payload.mm",
+        "test_recursive_struct_array_field.mm",
+    ] {
+        let (_dir, output) = run_build(fixture, "llvm-ir");
+        assert_clean_recursive_type_error(&output, fixture, "llvm-ir");
+    }
+}
+
+#[test]
 fn mutual_struct_enum_cycle_remains_verifiable() {
     let (_dir, copied) = copy_fixture("test_recursive_enum_mutual_struct.mm");
     let output = Command::new(env!("CARGO_BIN_EXE_mumei"))

@@ -98,7 +98,7 @@ pub(crate) fn type_cycle_path(module_env: &ModuleEnv, type_name: &str) -> Option
                     .variants
                     .iter()
                     .flat_map(|variant| variant.field_types.iter())
-                    .map(|field| TypeRef::simple(&field.name))
+                    .cloned()
                     .collect(),
             )
         } else {
@@ -671,10 +671,9 @@ pub(crate) fn array_elem_llvm_type<'a>(
                             return true;
                         }
                         let has_array = enum_def.variants.iter().any(|variant| {
-                            variant
-                                .field_types
-                                .iter()
-                                .any(|field| has_array_payload(&field.name, module_env, visiting))
+                            variant.field_types.iter().any(|field| {
+                                has_array_payload(&field.display_name(), module_env, visiting)
+                            })
                         });
                         visiting.remove(&enum_def.name);
                         has_array
