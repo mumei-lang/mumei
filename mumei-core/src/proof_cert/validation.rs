@@ -274,6 +274,7 @@ pub fn verify_certificate_in_env(
                                     .filter(|key| {
                                         (key.starts_with("effect:")
                                             || key.starts_with("enum:")
+                                            || key.starts_with("resource:")
                                             || key.starts_with("struct:")
                                             || key.starts_with("type:"))
                                             && !expected.contains_key(*key)

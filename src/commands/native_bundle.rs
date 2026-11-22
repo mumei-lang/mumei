@@ -167,13 +167,17 @@ fn machine_tv_call_shapes_have_composite_aggregate(
     argument_shapes: &[semantic_contract::CallValueShape],
     result_shape: semantic_contract::CallValueShape,
 ) -> bool {
-    argument_shapes
-        .iter()
-        .any(|shape| matches!(shape, semantic_contract::CallValueShape::Struct { .. }))
-        || matches!(
-            result_shape,
+    argument_shapes.iter().any(|shape| {
+        matches!(
+            shape,
             semantic_contract::CallValueShape::Struct { .. }
+                | semantic_contract::CallValueShape::Enum { .. }
         )
+    }) || matches!(
+        result_shape,
+        semantic_contract::CallValueShape::Struct { .. }
+            | semantic_contract::CallValueShape::Enum { .. }
+    )
 }
 
 fn machine_tv_model_uses_composite_aggregate(model: &semantic_contract::PureI64Body<'_>) -> bool {
@@ -210,6 +214,7 @@ fn machine_tv_model_uses_wide_composite_aggregate(
                 matches!(
                     shape,
                     semantic_contract::CallValueShape::Struct { leaf_count, .. }
+                        | semantic_contract::CallValueShape::Enum { leaf_count }
                         if *leaf_count > 2
                 )
             }) || matches!(
@@ -228,6 +233,9 @@ fn machine_tv_model_uses_wide_composite_aggregate(
                             .result_leaf_doubles
                             .iter()
                             .all(|is_double| !*is_double))
+            ) || matches!(
+                call_site.result_shape,
+                semantic_contract::CallValueShape::Enum { leaf_count } if leaf_count > 2
             )
         })
 }
@@ -265,15 +273,28 @@ fn machine_tv_model_uses_f64_composite_aggregate(
         || (model.result_shape.is_some()
             && model.result_leaf_doubles.iter().any(|is_double| *is_double))
         || model.call_sites.iter().any(|call_site| {
+            let mut leaf_offset = 0usize;
             call_site.argument_shapes.iter().any(|shape| {
+                let start = leaf_offset;
+                leaf_offset = leaf_offset.saturating_add(shape.leaf_count());
                 matches!(
                     shape,
                     semantic_contract::CallValueShape::Struct { has_f64: true, .. }
-                )
+                ) || (matches!(shape, semantic_contract::CallValueShape::Enum { .. })
+                    && call_site
+                        .arg_leaf_doubles
+                        .get(start..leaf_offset)
+                        .is_some_and(|leaves| leaves.iter().any(|is_double| *is_double)))
             }) || matches!(
                 call_site.result_shape,
                 semantic_contract::CallValueShape::Struct { has_f64: true, .. }
-            )
+            ) || (matches!(
+                call_site.result_shape,
+                semantic_contract::CallValueShape::Enum { .. }
+            ) && call_site
+                .result_leaf_doubles
+                .iter()
+                .any(|is_double| *is_double))
         })
 }
 const OBSERVATION_ENVIRONMENT: &str = "empty";

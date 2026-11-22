@@ -191,6 +191,40 @@ fn setup_modules(fixture: &Fixture) -> (PathBuf, PathBuf, PathBuf, PathBuf, Path
     (a_source, b_source, c_source, a_cert, b_cert)
 }
 
+fn resource_freshness_sources(
+    fixture: &Fixture,
+    invariant_lower_bound: i64,
+    declared: bool,
+) -> (PathBuf, PathBuf) {
+    let a_source = fixture.root.join("a.mm");
+    let b_source = fixture.root.join("b.mm");
+    std::fs::write(
+        &b_source,
+        format!(
+            "resource counter {{ value: i64 }} priority: 1 mode: exclusive invariant: counter.value >= {invariant_lower_bound};\n"
+        ),
+    )
+    .expect("write resource definition");
+    let resource_clause = if declared {
+        "resources: [counter];\n"
+    } else {
+        ""
+    };
+    std::fs::write(
+        &a_source,
+        format!(
+            "import \"./b.mm\";\n\
+             atom main() -> i64\n\
+             {resource_clause}\
+             requires: true;\n\
+             ensures: true;\n\
+             body: {{ acquire counter {{ counter.value = 3; 0 }} }};\n"
+        ),
+    )
+    .expect("write resource caller");
+    (a_source, b_source)
+}
+
 fn verify_cert(fixture: &Fixture, certificate: &Path, source: &Path, strict: bool) -> Output {
     let mut args = vec![
         "verify-cert".to_string(),
@@ -1657,5 +1691,266 @@ fn imported_refined_field_body_reference_invalidates_certificate_and_cache() {
     assert!(
         !changed_verify_text.contains("skipped (unchanged)"),
         "{changed_verify_text}"
+    );
+}
+
+#[test]
+fn imported_trait_method_constraint_change_invalidates_certificate_and_cache() {
+    let fixture = Fixture::new();
+    let a_source = fixture.root.join("a.mm");
+    let b_source = fixture.root.join("b.mm");
+    let certificate = fixture.root.join("a.proof.json");
+    std::fs::write(
+        &b_source,
+        "trait Picker {\n\
+         fn pick(a: Self where v >= 0) -> Self;\n\
+         }\n\
+         impl Picker for i64 {\n\
+         fn pick(a: i64) -> i64 { a }\n\
+         }\n\
+         atom pick(a: i64) -> i64\n\
+         requires: true;\n\
+         ensures: true;\n\
+         body: a;\n",
+    )
+    .expect("write trait method and implementation");
+    std::fs::write(
+        &a_source,
+        "import \"./b.mm\";\n\
+         atom g(x: i64) -> i64\n\
+         requires: x >= 0;\n\
+         ensures: true;\n\
+         body: pick(x);\n",
+    )
+    .expect("write trait method caller");
+
+    assert_success(
+        &fixture.certify(&a_source, &certificate),
+        "certify trait method caller",
+    );
+    let cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&certificate).unwrap()).expect("parse certificate");
+    let g = cert
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "g")
+        .expect("g certificate");
+    let dependency_hashes = g
+        .dependency_hashes
+        .as_ref()
+        .expect("generated dependency hashes");
+    assert!(dependency_hashes.contains_key("atom:pick"));
+
+    let unchanged_certificate = verify_cert(&fixture, &certificate, &a_source, false);
+    let unchanged_certificate_text = output_text(&unchanged_certificate);
+    assert_eq!(
+        unchanged_certificate.status.code(),
+        Some(0),
+        "{unchanged_certificate_text}"
+    );
+    assert!(
+        unchanged_certificate_text.contains("g: proven"),
+        "{unchanged_certificate_text}"
+    );
+
+    let initial_verify = fixture.verify(&a_source, &[]);
+    assert_success(&initial_verify, "verify unchanged trait method caller");
+    let cached_verify = fixture.verify(&a_source, &[]);
+    let cached_verify_text = output_text(&cached_verify);
+    assert_success(&cached_verify, "verify cached trait method caller");
+    assert!(
+        cached_verify_text.contains("skipped (unchanged)"),
+        "{cached_verify_text}"
+    );
+
+    std::fs::write(
+        &b_source,
+        "trait Picker {\n\
+         fn pick(a: Self where v >= 5) -> Self;\n\
+         }\n\
+         impl Picker for i64 {\n\
+         fn pick(a: i64) -> i64 { a }\n\
+         }\n\
+         atom pick(a: i64) -> i64\n\
+         requires: true;\n\
+         ensures: true;\n\
+         body: a;\n",
+    )
+    .expect("strengthen trait method parameter constraint");
+
+    let changed_certificate = verify_cert(&fixture, &certificate, &a_source, false);
+    let changed_certificate_text = output_text(&changed_certificate);
+    assert_eq!(
+        changed_certificate.status.code(),
+        Some(0),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("g: dependency_changed"),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("atom:pick"),
+        "{changed_certificate_text}"
+    );
+
+    let changed_verify = fixture.verify(&a_source, &[]);
+    let changed_verify_text = output_text(&changed_verify);
+    assert!(
+        !changed_verify.status.success(),
+        "changed trait constraint unexpectedly verified\n{changed_verify_text}"
+    );
+    assert!(
+        !changed_verify_text.contains("skipped (unchanged)"),
+        "{changed_verify_text}"
+    );
+    assert!(
+        changed_verify_text
+            .contains("Call to 'pick': trait method parameter constraint 'v >= 5' not satisfied"),
+        "{changed_verify_text}"
+    );
+}
+
+#[test]
+fn imported_acquired_resource_invariant_change_invalidates_certificate_and_cache() {
+    let fixture = Fixture::new();
+    let certificate = fixture.root.join("a.proof.json");
+    let (a_source, _) = resource_freshness_sources(&fixture, 0, false);
+
+    assert_success(
+        &fixture.certify(&a_source, &certificate),
+        "certify caller with acquired resource",
+    );
+    let cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&certificate).unwrap()).expect("parse certificate");
+    let main = cert
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "main")
+        .expect("main certificate");
+    assert!(main
+        .dependency_hashes
+        .as_ref()
+        .expect("generated dependency hashes")
+        .contains_key("resource:counter"));
+
+    let mut legacy_cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&certificate).unwrap())
+            .expect("parse certificate for legacy-key check");
+    let main = legacy_cert
+        .atoms
+        .iter_mut()
+        .find(|atom| atom.name == "main")
+        .expect("main certificate");
+    assert!(main
+        .dependency_hashes
+        .as_mut()
+        .expect("generated dependency hashes")
+        .remove("resource:counter")
+        .is_some());
+    refresh_certificate_integrity(&mut legacy_cert);
+    let legacy_certificate = fixture.root.join("a.legacy.proof.json");
+    std::fs::write(
+        &legacy_certificate,
+        serde_json::to_vec_pretty(&legacy_cert).unwrap(),
+    )
+    .expect("write certificate without resource dependency key");
+    let unchecked = verify_cert(&fixture, &legacy_certificate, &a_source, false);
+    let unchecked_text = output_text(&unchecked);
+    assert_eq!(unchecked.status.code(), Some(0), "{unchecked_text}");
+    assert!(
+        unchecked_text.contains("main: dependency_unchecked"),
+        "{unchecked_text}"
+    );
+    assert!(
+        unchecked_text.contains("resource:counter"),
+        "{unchecked_text}"
+    );
+
+    let initial_verify = fixture.verify(&a_source, &[]);
+    assert_success(
+        &initial_verify,
+        "verify caller with unchanged acquired resource",
+    );
+    let cached_verify = fixture.verify(&a_source, &[]);
+    let cached_verify_text = output_text(&cached_verify);
+    assert_success(&cached_verify, "verify cached acquired resource caller");
+    assert!(
+        cached_verify_text.contains("skipped (unchanged)"),
+        "{cached_verify_text}"
+    );
+
+    resource_freshness_sources(&fixture, 5, false);
+    let changed_certificate = verify_cert(&fixture, &certificate, &a_source, false);
+    let changed_certificate_text = output_text(&changed_certificate);
+    assert_eq!(
+        changed_certificate.status.code(),
+        Some(0),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("main: dependency_changed"),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("resource:counter"),
+        "{changed_certificate_text}"
+    );
+
+    let changed_verify = fixture.verify(&a_source, &[]);
+    let changed_verify_text = output_text(&changed_verify);
+    assert!(
+        !changed_verify.status.success(),
+        "changed acquired resource invariant unexpectedly verified\n{changed_verify_text}"
+    );
+    assert!(
+        !changed_verify_text.contains("skipped (unchanged)"),
+        "{changed_verify_text}"
+    );
+    assert!(
+        changed_verify_text
+            .contains("resource 'counter' invariant does not hold for the initial state"),
+        "{changed_verify_text}"
+    );
+}
+
+#[test]
+fn imported_declared_resource_invariant_change_is_a_dependency_change() {
+    let fixture = Fixture::new();
+    let certificate = fixture.root.join("a.proof.json");
+    let (a_source, _) = resource_freshness_sources(&fixture, 0, true);
+
+    assert_success(
+        &fixture.certify(&a_source, &certificate),
+        "certify caller with declared resource",
+    );
+    let cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&certificate).unwrap()).expect("parse certificate");
+    let main = cert
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "main")
+        .expect("main certificate");
+    assert!(main
+        .dependency_hashes
+        .as_ref()
+        .expect("generated dependency hashes")
+        .contains_key("resource:counter"));
+
+    resource_freshness_sources(&fixture, 5, true);
+    let changed_certificate = verify_cert(&fixture, &certificate, &a_source, false);
+    let changed_certificate_text = output_text(&changed_certificate);
+    assert_eq!(
+        changed_certificate.status.code(),
+        Some(0),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("main: dependency_changed"),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("resource:counter"),
+        "{changed_certificate_text}"
     );
 }
