@@ -333,6 +333,17 @@ fn recheck_semantic_contract_sidecar(
 
     let source_bytes = super::input::read_regular(source_path, MAX_INPUT_BYTES as u64)?;
     let source = String::from_utf8(source_bytes).map_err(|_| "source is not UTF-8")?;
+    let mut config = Config::new();
+    config.set_timeout_msec(u64::from(options.timeout_ms));
+    config.set_param_value("rlimit", &options.resource_limit.to_string());
+    let context = Context::new(&config);
+    // The bounded encoder must run first to guard the extractor's recursive parser.
+    let atoms = semantic_contract::encode_pure_i64_module_obligations(
+        &source,
+        &context,
+        RefinedAdmission::CompositeV24,
+    )
+    .map_err(|_| "source outside semantic-contract sidecar profile")?;
     let contracts = semantic_contract::extract_pure_i64_module_contracts(
         &source,
         label,
@@ -346,16 +357,6 @@ fn recheck_semantic_contract_sidecar(
         return Err("sidecar contracts differ from fresh extraction");
     }
 
-    let mut config = Config::new();
-    config.set_timeout_msec(u64::from(options.timeout_ms));
-    config.set_param_value("rlimit", &options.resource_limit.to_string());
-    let context = Context::new(&config);
-    let atoms = semantic_contract::encode_pure_i64_module_obligations(
-        &source,
-        &context,
-        RefinedAdmission::CompositeV24,
-    )
-    .map_err(|_| "source outside semantic-contract sidecar profile")?;
     let solver = Solver::new(&context);
     let outcome =
         native_bundle::solve_module_obligations(&atoms, &solver).map_err(|error| error.0)?;

@@ -478,3 +478,26 @@ fn recheck_rejects_sources_outside_the_sidecar_profile() {
     assert!(String::from_utf8_lossy(&output.stderr)
         .contains("source outside semantic-contract sidecar profile"));
 }
+
+#[test]
+fn recheck_bounds_deeply_nested_source_before_contract_extraction() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = write_input(dir.path(), "clamp.mm", CLAMP_SOURCE);
+    let output_base = dir.path().join("clamp");
+    succeeds(run_build(&input, &output_base, true));
+
+    let llvm_path = only_llvm_file(dir.path());
+    let sidecar_path = llvm_path.with_extension("semantic-contract.json");
+    let nested_source = format!(
+        "atom f(x: i64) -> i64 requires: true; ensures: result == {}x{}; body: x;",
+        "(".repeat(20_000),
+        ")".repeat(20_000)
+    );
+    let nested_input = write_input(dir.path(), "nested.mm", &nested_source);
+
+    let output = run_sidecar_recheck(&sidecar_path, &nested_input, &llvm_path, true);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("source outside semantic-contract sidecar profile"));
+}
