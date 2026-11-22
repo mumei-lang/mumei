@@ -2568,10 +2568,11 @@ fn bind_struct_array_fields<'a>(
             let nested_handle = super::fresh_struct_handle(vc.ctx, nested_base);
             let field_key = super::struct_field_key(binding, &field.name);
             env.insert(field_key, nested_handle.clone());
+            let nested_handle_name = nested_handle.decl().name().to_string();
             env.insert(format!("{binding}_{}", field.name), nested_handle);
             bind_struct_array_fields(
                 vc,
-                &format!("{binding}_{}", field.name),
+                &nested_handle_name,
                 nested_base,
                 element,
                 &path,

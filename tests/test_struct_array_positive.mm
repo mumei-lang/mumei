@@ -98,6 +98,15 @@ requires: len(ps) > 0 && ps[0].inner.y > 9;
 ensures: result > 9;
 body: ps[0].inner.y;
 
+atom nested_store_restore(ps: [Nested]) -> i64
+requires: len(ps) > 1 && ps[0].inner.y == 9;
+ensures: result == 9;
+body: {
+    let p = ps[0];
+    ps[1] = p;
+    ps[1].inner.y
+};
+
 atom u32_leaf(ps: [U]) -> u32
 requires: len(ps) > 0;
 ensures: result >= 0;
