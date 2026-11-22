@@ -1194,6 +1194,23 @@ fn uses_u64_leaves(items: &[Item]) -> bool {
     })
 }
 
+/// Whether a declared leaf type name resolves to a 128-bit scalar —
+/// the literal `i128`/`u128`, or a refined alias whose base does
+/// (`pure-i64-composite/v21`). Sites that lay out ABI slot vectors
+/// (leaf doubles, flattened signature shapes) must use this rather
+/// than a literal name match so alias-typed wide leaves take the
+/// same two-64-bit-slot shape as the literal leaf.
+fn is_wide_leaf_name(name: Option<&str>, refined: &RefinedEnv) -> bool {
+    match name {
+        Some("i128") | Some("u128") => true,
+        Some(n) => refined
+            .get(n)
+            .map(|alias| matches!(alias.kind, ScalarKind::I128 | ScalarKind::U128))
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
 /// Whether the admitted module declares a 128-bit leaf anywhere — a
 /// parameter, a result, a struct field or an enum payload slot. Only
 /// `CompositeV21` admission ever produces one.
@@ -3309,7 +3326,19 @@ fn flatten_fields<'a>(
                                 }
                                 out.push((
                                     format!("{path}.{i}"),
-                                    if matches!(type_name, Some("i128" | "u128")) {
+                                    // Wide-ness comes from the resolved
+                                    // payload kind, not the declared
+                                    // name, so an alias-typed 128-bit
+                                    // leaf takes the two-slot shape
+                                    // (`pure-i64-composite/v22`).
+                                    if variants
+                                        .iter()
+                                        .find_map(|v| v.fields.get(i))
+                                        .and_then(|field| field.leaf_kind())
+                                        .is_some_and(|kind| {
+                                            matches!(kind, ScalarKind::I128 | ScalarKind::U128)
+                                        })
+                                    {
                                         SignatureSlot::EnumWideField {
                                             type_name,
                                             carriers: slot_carriers,
@@ -7413,7 +7442,7 @@ fn encode_atom_body<'ctx>(
                                         // 64-bit ABI slots — neither
                                         // is a `double`
                                         // (`pure-i64-composite/v22`).
-                                        if matches!(type_name, Some("i128" | "u128")) {
+                                        if is_wide_leaf_name(type_name, refined) {
                                             vec![false, false]
                                         } else {
                                             vec![type_name == Some("f64")]
@@ -7426,7 +7455,7 @@ fn encode_atom_body<'ctx>(
                     .unwrap_or_else(|| {
                         // A scalar 128-bit leaf pairs two 64-bit ABI
                         // slots — neither is a `double`.
-                        if matches!(p.type_name.as_deref(), Some("i128") | Some("u128")) {
+                        if is_wide_leaf_name(p.type_name.as_deref(), refined) {
                             vec![false, false]
                         } else {
                             vec![p.type_name.as_deref() == Some("f64")]
@@ -7457,7 +7486,7 @@ fn encode_atom_body<'ctx>(
                                 enum_leaf_paths(variants, structs, enums)
                                     .into_iter()
                                     .flat_map(|(_, type_name)| {
-                                        if matches!(type_name, Some("i128" | "u128")) {
+                                        if is_wide_leaf_name(type_name, refined) {
                                             vec![false, false]
                                         } else {
                                             vec![type_name == Some("f64")]
@@ -7468,7 +7497,7 @@ fn encode_atom_body<'ctx>(
                         })
                     })
                     .unwrap_or_else(|| {
-                        if matches!(name, "i128" | "u128") {
+                        if is_wide_leaf_name(Some(name), refined) {
                             vec![false, false]
                         } else {
                             vec![name == "f64"]
@@ -7953,6 +7982,13 @@ fn result_conjuncts_at<'ctx>(
             let conjuncts = match slot_value {
                 SourceValue::Integer(v) | SourceValue::Unsigned(v) => {
                     declared_slot_domain(type_name, v, context, refined)?
+                }
+                // A wide payload leaf (literal or alias `i128`/`u128`)
+                // carries its alias conjuncts on the combined 128-bit
+                // operand — `declared_slot_domain` only knows 64-bit
+                // leaves (`pure-i64-composite/v22`).
+                SourceValue::Wide(_) | SourceValue::UWide(_) => {
+                    refined_conjuncts_at(type_name, slot_value.clone(), refined, context)?
                 }
                 SourceValue::Boolean(_) => {
                     refined_conjuncts_at(type_name, slot_value.clone(), refined, context)?
@@ -13908,6 +13944,42 @@ atom add(b: B, e: u64) -> B requires: true; ensures: result.t == b.t + e; body: 
             RefinedAdmission::CompositeV21,
         )
         .is_err());
+        // An alias-typed wide enum payload on the *result* side keeps
+        // its conjuncts: returning a payload outside the declared
+        // bound is a real counterexample (`pure-i64-composite/v22`).
+        let v22 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV22)
+        };
+        let outcomes22 = |source: &str| {
+            refined_module_outcomes_admission(source, RefinedAdmission::CompositeV22)
+        };
+        let enum_result = module(
+            "type Big = u128 where v <= 10;\nenum F { A(Big), B(Big) }\n\
+             atom wrap(x: Big) -> F requires: true; ensures: true; body: { F::A(x) };",
+        );
+        assert!(v22(&enum_result).is_ok());
+        assert!(outcomes22(&enum_result)
+            .iter()
+            .all(|r| *r == z3::SatResult::Unsat));
+        let bad_result = module(
+            "type Big = u128 where v <= 10;\nenum F { A(Big), B(Big) }\n\
+             atom bad() -> F requires: true; ensures: true; body: { F::A(11) };",
+        );
+        assert!(outcomes22(&bad_result).contains(&z3::SatResult::Sat));
+        // An enum-typed struct field whose payload slot is an alias
+        // wide leaf expands to the two-slot shape — the signature
+        // stays aligned on recheck.
+        let nested_enum = module(
+            "type Big = u128 where v <= 10;\nenum F { A(Big), B(Big) }\n\
+             struct S { f: F, k: i64 }\n\
+             atom get(s: S) -> i64 requires: true; ensures: true; body: { s.k };",
+        );
+        assert!(v22(&nested_enum).is_ok());
+        assert!(outcomes22(&nested_enum)
+            .iter()
+            .all(|r| *r == z3::SatResult::Unsat));
+        let widths = module_leaf_widths(&nested_enum, RefinedAdmission::CompositeV22).unwrap();
+        assert_eq!(widths["get"], vec![64, 128, 64]);
     }
 
     #[test]
