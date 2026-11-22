@@ -148,6 +148,20 @@ fn shift_width_uses_right_u64_operand() {
 }
 
 #[test]
+fn block_tail_preserves_u64_width() {
+    let output = run_verify("block");
+    let text = output_text(&output);
+    assert!(
+        !output.status.success(),
+        "a u64 block tail outside the postcondition must fail: {text}"
+    );
+    assert!(
+        text.contains("ensures clause 1 is inconsistent with requires"),
+        "{text}"
+    );
+}
+
+#[test]
 fn branch_local_let_shadow_uses_signed_comparison() {
     let output = run_verify("shadow");
     assert!(

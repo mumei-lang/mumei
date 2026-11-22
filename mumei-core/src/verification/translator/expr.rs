@@ -1597,6 +1597,7 @@ fn fixed_width_int_type_in_scope(
             ..
         } => stmt_tail_int_type(vc, then_branch, local_types)
             .or_else(|| stmt_tail_int_type(vc, else_branch, local_types)),
+        Expr::Block(stmt) => stmt_tail_int_type(vc, stmt, local_types),
         Expr::FieldAccess(inner, field) => {
             // Preserve the declared width through nested structs and named
             // enum payloads, not only fields whose receiver is a struct.
