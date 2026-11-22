@@ -119,6 +119,48 @@ fn free_refinement_identifiers_are_rejected_in_both_integer_modes() {
 }
 
 #[test]
+fn bare_enum_names_are_rejected_and_qualified_enum_paths_remain_allowed() {
+    let cases = [
+        (
+            "bare_enum_name",
+            "enum E { A, B }\n\
+             type T = i64 where v <= E;\n\
+             atom f(E: i64, x: i64) -> T requires: E >= 100 && x == 50; \
+             ensures: result == 50; body: x;",
+            false,
+        ),
+        (
+            "qualified_enum_path",
+            "enum E { A, B }\n\
+             type T = i64 where v >= 0 && E::A == E::A;\n\
+             atom f(x: i64) -> T requires: x >= 0; ensures: result == x; body: x;",
+            true,
+        ),
+    ];
+
+    for (name, source, should_verify) in cases {
+        for bitvec in [false, true] {
+            let (dir, output) = verify_source(name, source, bitvec);
+            let text = output_text(&output);
+            assert_eq!(
+                output.status.success(),
+                should_verify,
+                "{name} (bitvec={bitvec}) had unexpected result:\n{text}"
+            );
+            if !should_verify {
+                assert!(
+                    text.contains(
+                        "Refinement predicate of type 'T' references free identifier 'E'; only the operand 'v' may appear"
+                    ),
+                    "{name} (bitvec={bitvec}) had wrong diagnostic:\n{text}"
+                );
+            }
+            std::fs::remove_dir_all(dir).expect("remove fixture directory");
+        }
+    }
+}
+
+#[test]
 fn quantifier_and_named_refinement_operands_remain_supported() {
     for bitvec in [false, true] {
         for (name, source) in [

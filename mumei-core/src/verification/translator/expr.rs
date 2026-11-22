@@ -3286,6 +3286,7 @@ fn stmt_contains_shadowing_binder(stmt: &Stmt, operand: &str) -> bool {
 fn collect_refinement_free_identifiers(
     expr: &Expr,
     bound: &std::collections::HashSet<String>,
+    enum_names: &std::collections::HashSet<String>,
     out: &mut Vec<String>,
 ) {
     fn add_identifier(
@@ -3315,12 +3316,29 @@ fn collect_refinement_free_identifiers(
         }
     }
 
-    fn visit_stmt(stmt: &Stmt, bound: &std::collections::HashSet<String>, out: &mut Vec<String>) {
+    fn is_qualified_enum_path(expr: &Expr, enum_names: &std::collections::HashSet<String>) -> bool {
+        let mut current = expr;
+        let mut has_field_access = false;
+        while let Expr::FieldAccess(inner, _) = current {
+            has_field_access = true;
+            current = inner;
+        }
+        has_field_access && matches!(current, Expr::Variable(name) if enum_names.contains(name))
+    }
+
+    fn visit_stmt(
+        stmt: &Stmt,
+        bound: &std::collections::HashSet<String>,
+        enum_names: &std::collections::HashSet<String>,
+        out: &mut Vec<String>,
+    ) {
         match stmt {
-            Stmt::Let { value, .. } => collect_refinement_free_identifiers(value, bound, out),
+            Stmt::Let { value, .. } => {
+                collect_refinement_free_identifiers(value, bound, enum_names, out)
+            }
             Stmt::Assign { var, value, .. } => {
                 add_identifier(var.split('.').next().unwrap_or(var), bound, out);
-                collect_refinement_free_identifiers(value, bound, out);
+                collect_refinement_free_identifiers(value, bound, enum_names, out);
             }
             Stmt::ArrayStore {
                 array,
@@ -3329,17 +3347,17 @@ fn collect_refinement_free_identifiers(
                 ..
             } => {
                 add_identifier(array.split('.').next().unwrap_or(array), bound, out);
-                collect_refinement_free_identifiers(index, bound, out);
-                collect_refinement_free_identifiers(value, bound, out);
+                collect_refinement_free_identifiers(index, bound, enum_names, out);
+                collect_refinement_free_identifiers(value, bound, enum_names, out);
             }
             Stmt::Block(stmts, _) => {
                 let mut local = bound.clone();
                 for stmt in stmts {
                     if let Stmt::Let { var, value, .. } = stmt {
-                        collect_refinement_free_identifiers(value, &local, out);
+                        collect_refinement_free_identifiers(value, &local, enum_names, out);
                         local.insert(var.clone());
                     } else {
-                        visit_stmt(stmt, &local, out);
+                        visit_stmt(stmt, &local, enum_names, out);
                     }
                 }
             }
@@ -3350,23 +3368,25 @@ fn collect_refinement_free_identifiers(
                 body,
                 ..
             } => {
-                collect_refinement_free_identifiers(cond, bound, out);
-                collect_refinement_free_identifiers(invariant, bound, out);
+                collect_refinement_free_identifiers(cond, bound, enum_names, out);
+                collect_refinement_free_identifiers(invariant, bound, enum_names, out);
                 if let Some(decreases) = decreases {
-                    collect_refinement_free_identifiers(decreases, bound, out);
+                    collect_refinement_free_identifiers(decreases, bound, enum_names, out);
                 }
-                visit_stmt(body, bound, out);
+                visit_stmt(body, bound, enum_names, out);
             }
             Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
-                visit_stmt(body, bound, out);
+                visit_stmt(body, bound, enum_names, out);
             }
             Stmt::TaskGroup { children, .. } => {
                 for child in children {
-                    visit_stmt(child, bound, out);
+                    visit_stmt(child, bound, enum_names, out);
                 }
             }
             Stmt::Cancel { target, .. } => add_identifier(target, bound, out),
-            Stmt::Expr(expr, _) => collect_refinement_free_identifiers(expr, bound, out),
+            Stmt::Expr(expr, _) => {
+                collect_refinement_free_identifiers(expr, bound, enum_names, out)
+            }
         }
     }
 
@@ -3375,39 +3395,39 @@ fn collect_refinement_free_identifiers(
         Expr::Variable(name) => add_identifier(name, bound, out),
         Expr::ArrayLit(elements) => {
             for element in elements {
-                collect_refinement_free_identifiers(element, bound, out);
+                collect_refinement_free_identifiers(element, bound, enum_names, out);
             }
         }
         Expr::ArrayAccess(array, index) => {
             add_identifier(array.split('.').next().unwrap_or(array), bound, out);
-            collect_refinement_free_identifiers(index, bound, out);
+            collect_refinement_free_identifiers(index, bound, enum_names, out);
         }
         Expr::BinaryOp(left, _, right) => {
-            collect_refinement_free_identifiers(left, bound, out);
-            collect_refinement_free_identifiers(right, bound, out);
+            collect_refinement_free_identifiers(left, bound, enum_names, out);
+            collect_refinement_free_identifiers(right, bound, enum_names, out);
         }
-        Expr::Block(stmt) => visit_stmt(stmt, bound, out),
+        Expr::Block(stmt) => visit_stmt(stmt, bound, enum_names, out),
         Expr::IfThenElse {
             cond,
             then_branch,
             else_branch,
         } => {
-            collect_refinement_free_identifiers(cond, bound, out);
-            visit_stmt(then_branch, bound, out);
-            visit_stmt(else_branch, bound, out);
+            collect_refinement_free_identifiers(cond, bound, enum_names, out);
+            visit_stmt(then_branch, bound, enum_names, out);
+            visit_stmt(else_branch, bound, enum_names, out);
         }
         Expr::Call(name, args)
             if matches!(name.as_str(), "forall" | "exists") && args.len() == 4 =>
         {
-            collect_refinement_free_identifiers(&args[1], bound, out);
-            collect_refinement_free_identifiers(&args[2], bound, out);
+            collect_refinement_free_identifiers(&args[1], bound, enum_names, out);
+            collect_refinement_free_identifiers(&args[2], bound, enum_names, out);
             if let Expr::Variable(var) = &args[0] {
                 let mut local = bound.clone();
                 local.insert(var.clone());
-                collect_refinement_free_identifiers(&args[3], &local, out);
+                collect_refinement_free_identifiers(&args[3], &local, enum_names, out);
             } else {
-                collect_refinement_free_identifiers(&args[0], bound, out);
-                collect_refinement_free_identifiers(&args[3], bound, out);
+                collect_refinement_free_identifiers(&args[0], bound, enum_names, out);
+                collect_refinement_free_identifiers(&args[3], bound, enum_names, out);
             }
         }
         Expr::Call(name, args) => {
@@ -3416,53 +3436,57 @@ fn collect_refinement_free_identifiers(
                 if skip_callback && index == 0 && matches!(arg, Expr::Variable(_)) {
                     continue;
                 }
-                collect_refinement_free_identifiers(arg, bound, out);
+                collect_refinement_free_identifiers(arg, bound, enum_names, out);
             }
         }
         Expr::StructInit { fields, .. } => {
             for (_, value) in fields {
-                collect_refinement_free_identifiers(value, bound, out);
+                collect_refinement_free_identifiers(value, bound, enum_names, out);
             }
         }
         Expr::FieldAccess(inner, _) => {
-            collect_refinement_free_identifiers(inner, bound, out);
+            if !is_qualified_enum_path(expr, enum_names) {
+                collect_refinement_free_identifiers(inner, bound, enum_names, out);
+            }
         }
         Expr::Match { target, arms } => {
-            collect_refinement_free_identifiers(target, bound, out);
+            collect_refinement_free_identifiers(target, bound, enum_names, out);
             for arm in arms {
                 let mut local = bound.clone();
                 add_pattern_bindings(&arm.pattern, &mut local);
                 if let Some(guard) = &arm.guard {
-                    collect_refinement_free_identifiers(guard, &local, out);
+                    collect_refinement_free_identifiers(guard, &local, enum_names, out);
                 }
-                visit_stmt(&arm.body, &local, out);
+                visit_stmt(&arm.body, &local, enum_names, out);
             }
         }
-        Expr::Async { body } => visit_stmt(body, bound, out),
-        Expr::Await { expr } => collect_refinement_free_identifiers(expr, bound, out),
+        Expr::Async { body } => visit_stmt(body, bound, enum_names, out),
+        Expr::Await { expr } => collect_refinement_free_identifiers(expr, bound, enum_names, out),
         Expr::CallRef { callee, args } => {
             if !matches!(callee.as_ref(), Expr::Variable(_) | Expr::AtomRef { .. }) {
-                collect_refinement_free_identifiers(callee, bound, out);
+                collect_refinement_free_identifiers(callee, bound, enum_names, out);
             }
             for arg in args {
-                collect_refinement_free_identifiers(arg, bound, out);
+                collect_refinement_free_identifiers(arg, bound, enum_names, out);
             }
         }
         Expr::Perform { args, .. } => {
             for arg in args {
-                collect_refinement_free_identifiers(arg, bound, out);
+                collect_refinement_free_identifiers(arg, bound, enum_names, out);
             }
         }
         Expr::Lambda { params, body, .. } => {
             let mut local = bound.clone();
             local.extend(params.iter().map(|param| param.name.clone()));
-            visit_stmt(body, &local, out);
+            visit_stmt(body, &local, enum_names, out);
         }
         Expr::ChanSend { channel, value } => {
-            collect_refinement_free_identifiers(channel, bound, out);
-            collect_refinement_free_identifiers(value, bound, out);
+            collect_refinement_free_identifiers(channel, bound, enum_names, out);
+            collect_refinement_free_identifiers(value, bound, enum_names, out);
         }
-        Expr::ChanRecv { channel } => collect_refinement_free_identifiers(channel, bound, out),
+        Expr::ChanRecv { channel } => {
+            collect_refinement_free_identifiers(channel, bound, enum_names, out)
+        }
     }
 }
 
@@ -3474,14 +3498,18 @@ pub(crate) fn refined_predicate_to_z3<'a>(
     solver_opt: Option<&Solver<'a>>,
 ) -> DynResult<'a> {
     let mut free_identifiers = Vec::new();
+    let enum_names: std::collections::HashSet<String> =
+        vc.module_env.enums.keys().cloned().collect();
     collect_refinement_free_identifiers(
         expr,
         &std::collections::HashSet::new(),
+        &enum_names,
         &mut free_identifiers,
     );
-    if let Some(identifier) = free_identifiers.into_iter().find(|identifier| {
-        identifier != &decl.operand && !vc.module_env.enums.contains_key(identifier)
-    }) {
+    if let Some(identifier) = free_identifiers
+        .into_iter()
+        .find(|identifier| identifier != &decl.operand)
+    {
         return Err(MumeiError::type_error(format!(
             "Refinement predicate of type '{}' references free identifier '{}'; only the operand '{}' may appear",
             decl.name, identifier, decl.operand
@@ -3514,7 +3542,8 @@ mod refined_predicate_rebinding_tests {
     fn free_identifiers(source: &str) -> Vec<String> {
         let expr = parse_expression(source);
         let mut free = Vec::new();
-        collect_refinement_free_identifiers(&expr, &HashSet::new(), &mut free);
+        let enum_names = HashSet::from(["Enum".to_string()]);
+        collect_refinement_free_identifiers(&expr, &HashSet::new(), &enum_names, &mut free);
         free
     }
 
@@ -3525,6 +3554,8 @@ mod refined_predicate_rebinding_tests {
         assert_eq!(free_identifiers("{ let i = v; i >= 0 }"), ["v"]);
         assert_eq!(free_identifiers("len(v) <= 10"), ["v"]);
         assert!(free_identifiers("Enum::Variant() == Enum::Variant()").is_empty());
+        assert!(free_identifiers("Enum::Variant == Enum::Variant").is_empty());
+        assert_eq!(free_identifiers("Enum"), ["Enum"]);
     }
 
     #[test]
