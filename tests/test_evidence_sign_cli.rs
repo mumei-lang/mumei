@@ -272,7 +272,7 @@ fn input_selection_and_subject_cap_apply_to_file_and_stdin() {
     });
     assert_signed_subject(&output, &old_limit_plus_one);
 
-    let max_subject = vec![0x6b; mumei_core::producer_signature::MAX_SUBJECT_BYTES as usize];
+    let max_subject = vec![0x6b; 4_194_304];
     let max_subject_file = dir.path().join("max-subject.bin");
     write(&max_subject_file, &max_subject);
     let output = run({
