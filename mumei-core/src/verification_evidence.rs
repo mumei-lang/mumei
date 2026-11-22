@@ -206,6 +206,107 @@ pub fn is_rfc3339_timestamp(value: &str) -> bool {
     }
 }
 
+/// Parse a strict RFC 3339 timestamp into conservative nanosecond bounds.
+///
+/// The low bound truncates fractional precision after nine digits. If any
+/// discarded digit is nonzero, the high bound is one nanosecond above low.
+/// Calendar dates and leap seconds are validated more strictly than the
+/// representation-level timestamp predicate.
+pub fn rfc3339_instant(value: &str) -> Option<(i128, i128)> {
+    if !is_rfc3339_timestamp(value) {
+        return None;
+    }
+
+    let bytes = value.as_bytes();
+    let year = decimal_pair_or_quad(bytes, 0, 4)? as i64;
+    let month = decimal_pair_or_quad(bytes, 5, 2)?;
+    let day = decimal_pair_or_quad(bytes, 8, 2)?;
+    let hour = decimal_pair_or_quad(bytes, 11, 2)?;
+    let minute = decimal_pair_or_quad(bytes, 14, 2)?;
+    let second = decimal_pair_or_quad(bytes, 17, 2)?;
+    if year == 0 || second == 60 {
+        return None;
+    }
+
+    let leap_year = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap_year => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if day == 0 || day > days_in_month {
+        return None;
+    }
+
+    let mut index = 19;
+    let fraction = if bytes.get(index) == Some(&b'.') {
+        let start = index + 1;
+        index = start;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        &bytes[start..index]
+    } else {
+        &[]
+    };
+
+    let offset_seconds = match bytes.get(index).copied()? {
+        b'Z' | b'z' => 0i128,
+        sign @ (b'+' | b'-') => {
+            let offset_hour = decimal_pair_or_quad(bytes, index + 1, 2)? as i128;
+            let offset_minute = decimal_pair_or_quad(bytes, index + 4, 2)? as i128;
+            let seconds = offset_hour * 3_600 + offset_minute * 60;
+            if sign == b'+' {
+                seconds
+            } else {
+                -seconds
+            }
+        }
+        _ => return None,
+    };
+
+    let mut nanoseconds = 0i128;
+    for byte in fraction.iter().take(9) {
+        nanoseconds = nanoseconds * 10 + i128::from(*byte - b'0');
+    }
+    for _ in fraction.len().min(9)..9 {
+        nanoseconds *= 10;
+    }
+
+    let days = days_from_civil(year, month as i64, day as i64);
+    let local_seconds =
+        days * 86_400 + i128::from(hour) * 3_600 + i128::from(minute) * 60 + i128::from(second);
+    let low = (local_seconds - offset_seconds) * 1_000_000_000 + nanoseconds;
+    let uncertain_tail = fraction.iter().skip(9).any(|byte| *byte != b'0');
+    let high = low + if uncertain_tail { 1 } else { 0 };
+    Some((low, high))
+}
+
+fn decimal_pair_or_quad(bytes: &[u8], start: usize, width: usize) -> Option<u32> {
+    bytes
+        .get(start..start + width)?
+        .iter()
+        .try_fold(0u32, |value, byte| {
+            if byte.is_ascii_digit() {
+                Some(value * 10 + u32::from(*byte - b'0'))
+            } else {
+                None
+            }
+        })
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i128 {
+    let adjusted_year = year - if month <= 2 { 1 } else { 0 };
+    let era = adjusted_year.div_euclid(400);
+    let year_of_era = adjusted_year - era * 400;
+    let adjusted_month = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * adjusted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    i128::from(era * 146_097 + day_of_era - 719_468)
+}
+
 /// An explicit `null` is not "absent": the standalone schema admits
 /// `produced_at` only as a string, so a null must fail shape here too
 /// instead of decoding to `None`.

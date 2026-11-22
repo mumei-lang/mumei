@@ -12,15 +12,19 @@
 //! says nothing about the key's own authenticity, freshness or revocation,
 //! and signing grants no acceptance, grade or truth claim.
 
-use ed25519_dalek::{Signer, SigningKey};
+use crate::verification_evidence;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::{OsRng, RngCore};
 use serde::Serialize;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::verification_evidence;
 use zeroize::Zeroize;
 
 pub const PRODUCER_SIGNATURE_SCHEMA: &str = "mumei.producer-signature/v1";
+pub const PRODUCER_KEY_REGISTRY_SCHEMA: &str = "mumei.producer-key-registry/v1";
+pub const KEY_REVOCATION_LIST_SCHEMA: &str = "mumei.key-revocation-list/v1";
 
 /// Closed envelope shape; `producer_key_id` is a caller-declared label the
 /// consumer pins separately — it is never derived from the key bytes.
@@ -99,6 +103,395 @@ pub fn generate_keypair() -> (String, String) {
 /// `sha256sum` over the same file, so no canonicalization is needed.
 pub fn subject_digest(record: &[u8]) -> String {
     format!("{:x}", Sha256::digest(record))
+}
+
+pub fn envelope_match(envelope: &Value) -> bool {
+    let Some(object) = envelope.as_object() else {
+        return false;
+    };
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "schema_version"
+                | "subject_digest"
+                | "algorithm"
+                | "signature"
+                | "producer_key_id"
+                | "produced_at"
+        )
+    }) {
+        return false;
+    }
+    let required = [
+        "schema_version",
+        "subject_digest",
+        "algorithm",
+        "signature",
+        "producer_key_id",
+    ];
+    if required.iter().any(|key| !object.contains_key(*key)) {
+        return false;
+    }
+    object.get("schema_version").and_then(Value::as_str) == Some(PRODUCER_SIGNATURE_SCHEMA)
+        && object
+            .get("subject_digest")
+            .and_then(Value::as_str)
+            .is_some_and(|value| is_lower_hex(value, 64))
+        && object.get("algorithm").and_then(Value::as_str) == Some("ed25519")
+        && object
+            .get("signature")
+            .and_then(Value::as_str)
+            .is_some_and(|value| is_lower_hex(value, 128))
+        && object
+            .get("producer_key_id")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+        && object.get("produced_at").is_none_or(Value::is_string)
+}
+
+pub fn decode_public_key_hex(value: &str) -> Option<[u8; 32]> {
+    decode_lower_hex(value)
+}
+
+pub fn signature_valid(public_key_hex: &str, signature_hex: &str, message: &[u8]) -> bool {
+    let Some(public_key_bytes) = decode_public_key_hex(public_key_hex) else {
+        return false;
+    };
+    let Some(signature_bytes) = decode_lower_hex::<64>(signature_hex) else {
+        return false;
+    };
+    let Ok(public_key) = VerifyingKey::from_bytes(&public_key_bytes) else {
+        return false;
+    };
+    let signature = Signature::from_bytes(&signature_bytes);
+    public_key.verify(message, &signature).is_ok()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RegistryEntry {
+    pub principal: String,
+    pub not_before: (i128, i128),
+    pub not_after: (i128, i128),
+}
+
+pub type ProducerKeyRegistry = BTreeMap<String, RegistryEntry>;
+pub type RevocationKeySet = BTreeSet<String>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnchorError {
+    InvalidDocument,
+}
+
+pub fn parse_key_registry(bytes: &[u8]) -> Result<ProducerKeyRegistry, AnchorError> {
+    use crate::strict_json::{self, JsonValue};
+
+    let value = strict_json::parse(bytes).map_err(|_| AnchorError::InvalidDocument)?;
+    let object = strict_json::object(&value).map_err(|_| AnchorError::InvalidDocument)?;
+    strict_json::require_keys(object, &["schema_version", "registry"])
+        .map_err(|_| AnchorError::InvalidDocument)?;
+    if strict_json::string_field(object, "schema_version")
+        .map_err(|_| AnchorError::InvalidDocument)?
+        != PRODUCER_KEY_REGISTRY_SCHEMA
+    {
+        return Err(AnchorError::InvalidDocument);
+    }
+    let registry =
+        match strict_json::field(object, "registry").map_err(|_| AnchorError::InvalidDocument)? {
+            JsonValue::Object(registry) if !registry.is_empty() => registry,
+            _ => return Err(AnchorError::InvalidDocument),
+        };
+    let mut parsed = ProducerKeyRegistry::new();
+    for (key_id, entry) in registry {
+        if key_id.is_empty() {
+            return Err(AnchorError::InvalidDocument);
+        }
+        let entry = strict_json::object(entry).map_err(|_| AnchorError::InvalidDocument)?;
+        strict_json::require_keys(entry, &["principal", "not_before", "not_after"])
+            .map_err(|_| AnchorError::InvalidDocument)?;
+        let principal = strict_json::string_field(entry, "principal")
+            .map_err(|_| AnchorError::InvalidDocument)?;
+        if principal.is_empty() {
+            return Err(AnchorError::InvalidDocument);
+        }
+        let not_before = verification_evidence::rfc3339_instant(
+            strict_json::string_field(entry, "not_before")
+                .map_err(|_| AnchorError::InvalidDocument)?,
+        )
+        .ok_or(AnchorError::InvalidDocument)?;
+        let not_after = verification_evidence::rfc3339_instant(
+            strict_json::string_field(entry, "not_after")
+                .map_err(|_| AnchorError::InvalidDocument)?,
+        )
+        .ok_or(AnchorError::InvalidDocument)?;
+        if not_before.0 > not_after.1 {
+            return Err(AnchorError::InvalidDocument);
+        }
+        parsed.insert(
+            key_id.clone(),
+            RegistryEntry {
+                principal: principal.to_owned(),
+                not_before,
+                not_after,
+            },
+        );
+    }
+    Ok(parsed)
+}
+
+pub fn parse_revocation_list(bytes: &[u8]) -> Result<RevocationKeySet, AnchorError> {
+    use crate::strict_json::{self, JsonValue};
+
+    let value = strict_json::parse(bytes).map_err(|_| AnchorError::InvalidDocument)?;
+    let object = strict_json::object(&value).map_err(|_| AnchorError::InvalidDocument)?;
+    strict_json::require_keys(object, &["schema_version", "revoked_keys"])
+        .map_err(|_| AnchorError::InvalidDocument)?;
+    if strict_json::string_field(object, "schema_version")
+        .map_err(|_| AnchorError::InvalidDocument)?
+        != KEY_REVOCATION_LIST_SCHEMA
+    {
+        return Err(AnchorError::InvalidDocument);
+    }
+    let revoked = match strict_json::field(object, "revoked_keys")
+        .map_err(|_| AnchorError::InvalidDocument)?
+    {
+        JsonValue::Array(revoked) => revoked,
+        _ => return Err(AnchorError::InvalidDocument),
+    };
+    let mut parsed = RevocationKeySet::new();
+    for key_id in revoked {
+        let JsonValue::String(key_id) = key_id else {
+            return Err(AnchorError::InvalidDocument);
+        };
+        if key_id.is_empty() {
+            return Err(AnchorError::InvalidDocument);
+        }
+        parsed.insert(key_id.clone());
+    }
+    Ok(parsed)
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct SignatureBinding {
+    pub envelope_match: bool,
+    pub signature_valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_digest: Option<String>,
+    pub subject_bound: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_pinned: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_not_revoked: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_authentic: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope_fresh: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revocation_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry_authentic: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revocation_list_authentic: Option<bool>,
+    pub checks_not_performed: Vec<&'static str>,
+}
+
+impl SignatureBinding {
+    pub fn failed_fields(&self) -> Vec<&'static str> {
+        let mut failed = Vec::new();
+        if !self.envelope_match {
+            failed.push("envelope_match");
+        }
+        if !self.signature_valid {
+            failed.push("signature_valid");
+        }
+        if !self.subject_bound {
+            failed.push("subject_bound");
+        }
+        for (name, value) in [
+            ("key_pinned", self.key_pinned),
+            ("key_not_revoked", self.key_not_revoked),
+            ("key_authentic", self.key_authentic),
+            ("envelope_fresh", self.envelope_fresh),
+            ("registry_authentic", self.registry_authentic),
+            ("revocation_list_authentic", self.revocation_list_authentic),
+        ] {
+            if value == Some(false) {
+                failed.push(name);
+            }
+        }
+        failed
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct SignatureBindingInput<'a> {
+    pub envelope: &'a Value,
+    pub evidence_fingerprint: &'a str,
+    pub producer_key_hex: &'a str,
+    pub expected_producer_key: Option<&'a str>,
+    pub reference_time: Option<(i128, i128)>,
+    pub max_age_seconds: Option<u64>,
+    pub key_registry: Option<&'a ProducerKeyRegistry>,
+    pub registry_digest: Option<&'a str>,
+    pub registry_signature: Option<&'a Value>,
+    pub registry_key_hex: Option<&'a str>,
+    pub revocation_list: Option<&'a RevocationKeySet>,
+    pub revocation_digest: Option<&'a str>,
+    pub revocation_signature: Option<&'a Value>,
+    pub revocation_key_hex: Option<&'a str>,
+}
+
+pub fn verify_binding(input: SignatureBindingInput<'_>) -> SignatureBinding {
+    let matched = envelope_match(input.envelope);
+    let envelope = input.envelope;
+    let subject_digest = matched.then(|| envelope["subject_digest"].as_str().unwrap().to_owned());
+    let signature_valid = matched
+        && signature_valid(
+            input.producer_key_hex,
+            envelope["signature"].as_str().unwrap(),
+            envelope["subject_digest"].as_str().unwrap().as_bytes(),
+        );
+    let subject_bound =
+        matched && envelope["subject_digest"].as_str() == Some(input.evidence_fingerprint);
+    let key_pinned = input
+        .expected_producer_key
+        .map(|expected| matched && envelope["producer_key_id"].as_str() == Some(expected));
+
+    let registry_authentic = input.registry_signature.map(|wrapper| {
+        matched && anchor_signature_valid(wrapper, input.registry_key_hex, input.registry_digest)
+    });
+    let revocation_list_authentic = input.revocation_signature.map(|wrapper| {
+        matched
+            && anchor_signature_valid(wrapper, input.revocation_key_hex, input.revocation_digest)
+    });
+
+    let key_not_revoked = input.revocation_list.map(|revoked| {
+        let not_listed = matched
+            && envelope["producer_key_id"]
+                .as_str()
+                .is_some_and(|key_id| !revoked.contains(key_id));
+        not_listed && revocation_list_authentic.unwrap_or(true)
+    });
+    let key_authentic = input.key_registry.map(|registry| {
+        let in_window = matched
+            && input.reference_time.is_some_and(|reference| {
+                envelope["producer_key_id"]
+                    .as_str()
+                    .and_then(|key_id| registry.get(key_id))
+                    .is_some_and(|entry| {
+                        entry.not_before.1 <= reference.0 && entry.not_after.0 >= reference.1
+                    })
+            });
+        in_window && registry_authentic.unwrap_or(true)
+    });
+    let envelope_fresh = input.max_age_seconds.map(|max_age| {
+        matched
+            && input.reference_time.is_some_and(|reference| {
+                envelope["produced_at"]
+                    .as_str()
+                    .and_then(verification_evidence::rfc3339_instant)
+                    .is_some_and(|produced| {
+                        produced.1 <= reference.0
+                            && reference.1 - produced.0 <= i128::from(max_age) * 1_000_000_000
+                    })
+            })
+    });
+
+    let mut checks_not_performed = vec![
+        "key_binding",
+        "key_authenticity",
+        "envelope_freshness",
+        "key_revocation",
+        "registry_authenticity",
+        "revocation_list_authenticity",
+        "producer_time_authenticity",
+        "clock_authenticity",
+    ];
+    if input.expected_producer_key.is_some() {
+        checks_not_performed.retain(|check| *check != "key_binding");
+    }
+    if input.key_registry.is_some() {
+        checks_not_performed.retain(|check| *check != "key_authenticity");
+    }
+    if input.max_age_seconds.is_some() {
+        checks_not_performed.retain(|check| *check != "envelope_freshness");
+    }
+    if input.revocation_list.is_some() {
+        checks_not_performed.retain(|check| *check != "key_revocation");
+    }
+    if input.registry_signature.is_some() {
+        checks_not_performed.retain(|check| *check != "registry_authenticity");
+    }
+    if input.revocation_signature.is_some() {
+        checks_not_performed.retain(|check| *check != "revocation_list_authenticity");
+    }
+
+    SignatureBinding {
+        envelope_match: matched,
+        signature_valid,
+        subject_digest,
+        subject_bound,
+        key_pinned,
+        key_not_revoked,
+        key_authentic,
+        envelope_fresh,
+        registry_digest: input.registry_digest.map(str::to_owned),
+        revocation_digest: input.revocation_digest.map(str::to_owned),
+        registry_authentic,
+        revocation_list_authentic,
+        checks_not_performed,
+    }
+}
+
+fn anchor_signature_valid(
+    envelope: &Value,
+    public_key_hex: Option<&str>,
+    expected_digest: Option<&str>,
+) -> bool {
+    if !envelope_match(envelope) {
+        return false;
+    }
+    let (Some(public_key_hex), Some(expected_digest)) = (public_key_hex, expected_digest) else {
+        return false;
+    };
+    let Some(subject_digest) = envelope["subject_digest"].as_str() else {
+        return false;
+    };
+    subject_digest == expected_digest
+        && signature_valid(
+            public_key_hex,
+            envelope["signature"].as_str().unwrap(),
+            subject_digest.as_bytes(),
+        )
+}
+
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn decode_lower_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
+    if value.len() != N * 2 {
+        return None;
+    }
+    let mut decoded = [0u8; N];
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+        let high = lower_hex_nibble(pair[0])?;
+        let low = lower_hex_nibble(pair[1])?;
+        decoded[index] = high << 4 | low;
+    }
+    Some(decoded)
+}
+
+fn lower_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
 }
 
 /// Sign `record` under `secret_key` and emit the detached envelope.

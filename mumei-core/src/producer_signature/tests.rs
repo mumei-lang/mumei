@@ -1,6 +1,7 @@
 use super::*;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::collections::BTreeSet;
 
 // Obviously fake sentinel key material (AGENTS.md: never a real-looking secret).
 const SECRET: &str = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -180,4 +181,298 @@ fn non_rfc3339_produced_at_is_rejected() {
             SignError::InvalidProducedAt
         );
     }
+}
+
+struct BindingFixture {
+    producer_public: String,
+    root_public: String,
+    envelope: Value,
+    evidence_fingerprint: String,
+    registry: ProducerKeyRegistry,
+    registry_bytes: Vec<u8>,
+    registry_digest: String,
+    registry_signature: Value,
+    revoked: RevocationKeySet,
+    revocation_bytes: Vec<u8>,
+    revocation_digest: String,
+    revocation_signature: Value,
+    reference_time: (i128, i128),
+}
+
+impl BindingFixture {
+    fn new() -> Self {
+        let (producer_secret, producer_public) = generate_keypair();
+        let producer_signing_key = decode_secret_key(&producer_secret).unwrap();
+        let record = b"binding fixture evidence";
+        let envelope = serde_json::to_value(
+            sign(
+                record,
+                &producer_signing_key,
+                "producer-a",
+                Some("2024-02-01T00:00:00Z"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let evidence_fingerprint = subject_digest(record);
+
+        let (root_secret, root_public) = generate_keypair();
+        let root_signing_key = decode_secret_key(&root_secret).unwrap();
+        let registry_bytes = serde_json::to_vec(&json!({
+            "schema_version": PRODUCER_KEY_REGISTRY_SCHEMA,
+            "registry": {
+                "producer-a": {
+                    "principal": "test-principal",
+                    "not_before": "2024-01-01T00:00:00Z",
+                    "not_after": "2024-12-31T23:59:59Z",
+                }
+            }
+        }))
+        .unwrap();
+        let registry = parse_key_registry(&registry_bytes).unwrap();
+        let registry_digest = subject_digest(&registry_bytes);
+        let registry_signature =
+            serde_json::to_value(sign(&registry_bytes, &root_signing_key, "root", None).unwrap())
+                .unwrap();
+
+        let revocation_bytes = serde_json::to_vec(&json!({
+            "schema_version": KEY_REVOCATION_LIST_SCHEMA,
+            "revoked_keys": [],
+        }))
+        .unwrap();
+        let revoked = parse_revocation_list(&revocation_bytes).unwrap();
+        let revocation_digest = subject_digest(&revocation_bytes);
+        let revocation_signature =
+            serde_json::to_value(sign(&revocation_bytes, &root_signing_key, "root", None).unwrap())
+                .unwrap();
+
+        Self {
+            producer_public,
+            root_public,
+            envelope,
+            evidence_fingerprint,
+            registry,
+            registry_bytes,
+            registry_digest,
+            registry_signature,
+            revoked,
+            revocation_bytes,
+            revocation_digest,
+            revocation_signature,
+            reference_time: verification_evidence::rfc3339_instant("2024-02-15T00:00:00Z").unwrap(),
+        }
+    }
+
+    fn input(&self) -> SignatureBindingInput<'_> {
+        SignatureBindingInput {
+            envelope: &self.envelope,
+            evidence_fingerprint: &self.evidence_fingerprint,
+            producer_key_hex: &self.producer_public,
+            expected_producer_key: Some("producer-a"),
+            reference_time: Some(self.reference_time),
+            max_age_seconds: Some(30 * 24 * 60 * 60),
+            key_registry: Some(&self.registry),
+            registry_digest: Some(&self.registry_digest),
+            registry_signature: Some(&self.registry_signature),
+            registry_key_hex: Some(&self.root_public),
+            revocation_list: Some(&self.revoked),
+            revocation_digest: Some(&self.revocation_digest),
+            revocation_signature: Some(&self.revocation_signature),
+            revocation_key_hex: Some(&self.root_public),
+        }
+    }
+}
+
+#[test]
+fn signature_envelopes_and_public_keys_use_closed_lowercase_hex_shapes() {
+    let fixture = BindingFixture::new();
+    assert!(envelope_match(&fixture.envelope));
+
+    let mut extra = fixture.envelope.clone();
+    extra["unexpected"] = json!(true);
+    assert!(!envelope_match(&extra));
+    assert!(!envelope_match(&json!([])));
+
+    let mut malformed_stamp = fixture.envelope.clone();
+    malformed_stamp["produced_at"] = Value::Null;
+    assert!(!envelope_match(&malformed_stamp));
+
+    assert!(decode_public_key_hex(&fixture.producer_public).is_some());
+    for invalid in [
+        String::new(),
+        "00".repeat(31),
+        "AA".repeat(32),
+        "zz".repeat(32),
+        format!("{} ", fixture.producer_public),
+    ] {
+        assert!(decode_public_key_hex(&invalid).is_none());
+    }
+}
+
+#[test]
+fn signature_verification_rejects_wrong_or_invalid_public_keys() {
+    let fixture = BindingFixture::new();
+    let digest = fixture.envelope["subject_digest"].as_str().unwrap();
+    let signature = fixture.envelope["signature"].as_str().unwrap();
+    assert!(signature_valid(
+        &fixture.producer_public,
+        signature,
+        digest.as_bytes()
+    ));
+    let (_, wrong_public) = generate_keypair();
+    assert!(!signature_valid(
+        &wrong_public,
+        signature,
+        digest.as_bytes()
+    ));
+    assert!(!signature_valid(
+        &"ff".repeat(32),
+        signature,
+        digest.as_bytes()
+    ));
+    assert!(!signature_valid(
+        &fixture.producer_public,
+        "AA".repeat(64).as_str(),
+        digest.as_bytes()
+    ));
+}
+
+#[test]
+fn trust_anchor_parsers_validate_closed_shapes_and_reject_duplicate_keys() {
+    let fixture = BindingFixture::new();
+    assert_eq!(
+        parse_key_registry(&fixture.registry_bytes).unwrap(),
+        fixture.registry
+    );
+    assert_eq!(
+        parse_revocation_list(&fixture.revocation_bytes).unwrap(),
+        fixture.revoked
+    );
+
+    for duplicate in [
+        br#"{"schema_version":"mumei.producer-key-registry/v1","schema_version":"mumei.producer-key-registry/v1","registry":{"producer-a":{"principal":"p","not_before":"2024-01-01T00:00:00Z","not_after":"2024-12-31T00:00:00Z"}}}"#.as_slice(),
+        br#"{"schema_version":"mumei.producer-key-registry/v1","registry":{"producer-a":{"principal":"p","principal":"q","not_before":"2024-01-01T00:00:00Z","not_after":"2024-12-31T00:00:00Z"}}}"#.as_slice(),
+        br#"{"schema_version":"mumei.producer-key-registry/v1","registry":{"producer-a":{"principal":"p","not_before":"2024-01-01T00:00:00Z","not_after":"2024-12-31T00:00:00Z"}},"unknown":{"same":1,"same":2}}"#.as_slice(),
+    ] {
+        assert_eq!(
+            parse_key_registry(duplicate),
+            Err(AnchorError::InvalidDocument)
+        );
+    }
+    for malformed in [
+        br#"{"schema_version":"mumei.producer-key-registry/v1","registry":{}}"#.as_slice(),
+        br#"{"schema_version":"mumei.producer-key-registry/v1","registry":{"":{"principal":"p","not_before":"2024-01-01T00:00:00Z","not_after":"2024-12-31T00:00:00Z"}}}"#.as_slice(),
+        br#"{"schema_version":"mumei.producer-key-registry/v1","registry":{"producer-a":{"principal":"","not_before":"2024-01-01T00:00:00Z","not_after":"2024-12-31T00:00:00Z"}}}"#.as_slice(),
+        br#"{"schema_version":"mumei.producer-key-registry/v1","registry":{"producer-a":{"principal":"p","not_before":"2024-12-31T00:00:00Z","not_after":"2024-01-01T00:00:00Z"}}}"#.as_slice(),
+        br#"{"schema_version":"mumei.producer-key-registry/v1","registry":{"producer-a":{"principal":"p","not_before":"2024-02-30T00:00:00Z","not_after":"2024-12-31T00:00:00Z"}}}"#.as_slice(),
+        br#"{"schema_version":"mumei.producer-key-registry/v1","registry":{"producer-a":{"principal":"p","not_before":"2024-01-01T00:00:00Z","not_after":"2024-12-31T00:00:00Z","extra":true}}}"#.as_slice(),
+        br#"{"schema_version":"mumei.producer-key-registry/v1","registry":{"producer-a":{"principal":"p","not_before":"2024-01-01T00:00:00Z","not_after":"2024-12-31T00:00:00Z"}},"extra":true}"#.as_slice(),
+    ] {
+        assert_eq!(
+            parse_key_registry(malformed),
+            Err(AnchorError::InvalidDocument)
+        );
+    }
+    assert_eq!(
+        parse_revocation_list(
+            br#"{"schema_version":"mumei.key-revocation-list/v1","revoked_keys":["producer-a",""]}"#
+        ),
+        Err(AnchorError::InvalidDocument)
+    );
+    assert_eq!(
+        parse_revocation_list(
+            br#"{"schema_version":"mumei.key-revocation-list/v1","revoked_keys":[],"extra":true}"#
+        ),
+        Err(AnchorError::InvalidDocument)
+    );
+}
+
+#[test]
+fn signature_binding_emits_true_results_for_a_valid_complete_chain() {
+    let fixture = BindingFixture::new();
+    let binding = verify_binding(fixture.input());
+    assert!(binding.envelope_match);
+    assert!(binding.signature_valid);
+    assert_eq!(
+        binding.subject_digest.as_deref(),
+        Some(fixture.evidence_fingerprint.as_str())
+    );
+    assert!(binding.subject_bound);
+    assert_eq!(binding.key_pinned, Some(true));
+    assert_eq!(binding.key_not_revoked, Some(true));
+    assert_eq!(binding.key_authentic, Some(true));
+    assert_eq!(binding.envelope_fresh, Some(true));
+    assert_eq!(binding.registry_authentic, Some(true));
+    assert_eq!(binding.revocation_list_authentic, Some(true));
+    assert!(binding.failed_fields().is_empty());
+    assert_eq!(
+        binding.checks_not_performed,
+        ["producer_time_authenticity", "clock_authenticity"]
+    );
+}
+
+#[test]
+fn signature_binding_reports_each_failed_binding_check() {
+    let fixture = BindingFixture::new();
+    let mut input = fixture.input();
+    input.producer_key_hex = &fixture.root_public;
+    assert_eq!(verify_binding(input).failed_fields(), ["signature_valid"]);
+
+    let wrong_fingerprint = "0".repeat(64);
+    let mut input = fixture.input();
+    input.evidence_fingerprint = &wrong_fingerprint;
+    assert!(!verify_binding(input).subject_bound);
+
+    let mut input = fixture.input();
+    input.expected_producer_key = Some("other-producer");
+    assert_eq!(verify_binding(input).key_pinned, Some(false));
+
+    let revoked = BTreeSet::from(["producer-a".to_owned()]);
+    let mut input = fixture.input();
+    input.revocation_list = Some(&revoked);
+    input.revocation_digest = None;
+    input.revocation_signature = None;
+    input.revocation_key_hex = None;
+    assert_eq!(verify_binding(input).key_not_revoked, Some(false));
+
+    let after_window = verification_evidence::rfc3339_instant("2025-01-01T00:00:00Z").unwrap();
+    let mut input = fixture.input();
+    input.reference_time = Some(after_window);
+    assert_eq!(verify_binding(input).key_authentic, Some(false));
+
+    let mut input = fixture.input();
+    input.max_age_seconds = Some(1);
+    assert_eq!(verify_binding(input).envelope_fresh, Some(false));
+
+    let mut bad_registry_signature = fixture.registry_signature.clone();
+    bad_registry_signature["unexpected"] = json!(true);
+    let mut input = fixture.input();
+    input.registry_signature = Some(&bad_registry_signature);
+    let binding = verify_binding(input);
+    assert_eq!(binding.registry_authentic, Some(false));
+    assert_eq!(binding.key_authentic, Some(false));
+
+    let mut bad_revocation_signature = fixture.revocation_signature.clone();
+    bad_revocation_signature["unexpected"] = json!(true);
+    let mut input = fixture.input();
+    input.revocation_signature = Some(&bad_revocation_signature);
+    let binding = verify_binding(input);
+    assert_eq!(binding.revocation_list_authentic, Some(false));
+    assert_eq!(binding.key_not_revoked, Some(false));
+
+    let mut bad_envelope = fixture.envelope.clone();
+    bad_envelope["unexpected"] = json!(true);
+    let mut input = fixture.input();
+    input.envelope = &bad_envelope;
+    let binding = verify_binding(input);
+    assert!(!binding.envelope_match);
+    assert!(!binding.signature_valid);
+    assert_eq!(binding.subject_digest, None);
+    assert!(!binding.subject_bound);
+    assert_eq!(binding.key_pinned, Some(false));
+    assert_eq!(binding.key_not_revoked, Some(false));
+    assert_eq!(binding.key_authentic, Some(false));
+    assert_eq!(binding.envelope_fresh, Some(false));
+    assert_eq!(binding.registry_authentic, Some(false));
+    assert_eq!(binding.revocation_list_authentic, Some(false));
 }
