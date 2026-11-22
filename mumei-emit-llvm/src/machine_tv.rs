@@ -1371,13 +1371,7 @@ fn lift<'ctx>(
                         context,
                     )?;
                 }
-            } else if matches!(
-                instruction.mnemonic.as_str(),
-                "addq" | "subq" | "imulq" | "andq" | "orq" | "xorq" | "cmpq" | "testq"
-            ) && split_operands(&instruction.operands)
-                .first()
-                .is_some_and(|source| source.contains('('))
-            {
+            } else if stack_argument_binary_form(instruction).is_some() {
                 lift_stack_argument_binary(
                     instruction,
                     &mut state,
@@ -2846,13 +2840,30 @@ fn lift_stack_argument_sse<'ctx>(
     Ok(())
 }
 
+/// Which operand index carries a memory operand for an instruction the
+/// stack-argument binary lifter handles: `Some(0)` for write-back ops
+/// (the incoming area is read-only, so the slot must be the source) and
+/// `Some(0) | Some(1)` for the flag-only `cmp`/`test` forms.
+fn stack_argument_binary_form(instruction: &Instruction) -> Option<usize> {
+    let index = split_operands(&instruction.operands)
+        .iter()
+        .position(|operand| operand.contains('('))?;
+    match (instruction.mnemonic.as_str(), index) {
+        ("addq" | "subq" | "imulq" | "andq" | "orq" | "xorq", 0) => Some(0),
+        ("cmpq" | "testq", 0 | 1) => Some(index),
+        _ => None,
+    }
+}
+
 /// An INTEGER binary or flag instruction whose memory operand is an
-/// incoming stack-argument slot: `opq mem, %reg` reads the spilled
-/// INTEGER leaf as the source (right) operand. Write-back forms
-/// (`add`/`sub`/`imul`/`and`/`or`/`xor`) update the destination register
+/// incoming stack-argument slot as one operand: write-back forms
+/// (`add`/`sub`/`imul`/`and`/`or`/`xor`) only admit `opq mem, %reg`
+/// (the incoming area is read-only) and update the destination register
 /// with the same flag model their register forms carry; `cmp` and
-/// `test` set flags only. Other widths stay closed — spilled leaves
-/// are qword slots.
+/// `test` are read-only, so the slot may be either operand —
+/// `cmpq %reg, mem` and `testq %reg, mem` are the forms LLVM emits
+/// when it leaves the spilled leaf in place. Other widths stay
+/// closed — spilled leaves are qword slots.
 fn lift_stack_argument_binary<'ctx>(
     instruction: &Instruction,
     state: &mut MachineState<'ctx>,
@@ -2867,37 +2878,60 @@ fn lift_stack_argument_binary<'ctx>(
     if !state.rsp_is_known {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    let right = incoming_stack_argument(
-        source,
+    let memory_is_source = source.contains('(');
+    let slot_operand = if memory_is_source {
+        source
+    } else {
+        destination
+    };
+    let slot = incoming_stack_argument(
+        slot_operand,
         state.rsp_offset,
         stack_argument_leaves,
         arguments,
         false,
     )?;
+    match instruction.mnemonic.as_str() {
+        "cmpq" | "testq" => {
+            let other_operand = if memory_is_source {
+                destination
+            } else {
+                source
+            };
+            let other = operand_value(other_operand, &state.registers, context, 64)
+                .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+            let (left, right) = if memory_is_source {
+                (other, slot)
+            } else {
+                (slot, other)
+            };
+            state.flags = match instruction.mnemonic.as_str() {
+                "cmpq" => FlagState::Compare {
+                    left,
+                    right,
+                    width: 64,
+                },
+                _ => FlagState::Result {
+                    value: left.bvand(&right),
+                    width: 64,
+                },
+            };
+            return Ok(());
+        }
+        _ => (),
+    }
+    if !memory_is_source {
+        // `opq %reg, mem` would write into the incoming argument area —
+        // outside the read-only convention.
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    let right = slot;
     let (register_index, width) = parse_register(destination)
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
     if width != 64 || register_index == 4 {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
     let left = state.registers[register_index].clone();
-    match instruction.mnemonic.as_str() {
-        "cmpq" => {
-            state.flags = FlagState::Compare {
-                left,
-                right,
-                width: 64,
-            };
-            return Ok(());
-        }
-        "testq" => {
-            state.flags = FlagState::Result {
-                value: left.bvand(&right),
-                width: 64,
-            };
-            return Ok(());
-        }
-        _ => (),
-    }
     let (value, flags) = match instruction.mnemonic.as_str() {
         "addq" => (
             left.bvadd(&right),
@@ -9969,6 +10003,46 @@ entry:
         assert_eq!(
             check("if g == h { 1 } else { 0 }", &cmp_bytes),
             FunctionOutcome::Equivalent
+        );
+
+        // { if g == 7 { 1 } else { 0 } }: `cmpq $7, 8(%rsp)` leaves the
+        // spilled g in place and compares it as the destination operand.
+        let cmp_imm_bytes = [
+            0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0x48, 0x83, 0x7c, 0x24, 0x08, 0x07, // cmpq $7, 8(%rsp)
+            0x75, 0x01, // jne +1
+            0xc3, // retq
+            0x31, 0xc0, // xorq %eax, %eax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check("if g == 7 { 1 } else { 0 }", &cmp_imm_bytes),
+            FunctionOutcome::Equivalent
+        );
+
+        // `testq %rcx, 8(%rsp)` reads the g slot as the destination
+        // operand; setne consumes the result flags.
+        let test_bytes = [
+            0x48, 0x8b, 0x4c, 0x24, 0x10, // movq 0x10(%rsp), %rcx
+            0x48, 0x85, 0x4c, 0x24, 0x08, // testq %rcx, 8(%rsp)
+            0x0f, 0x95, 0xc0, // setne %al
+            0x0f, 0xb6, 0xc0, // movzbl %al, %eax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check("if (g & h) != 0 { 1 } else { 0 }", &test_bytes),
+            FunctionOutcome::Equivalent
+        );
+
+        // A write-back into the incoming argument area stays outside the
+        // read-only convention.
+        let write_incoming = [
+            0x48, 0x01, 0x4c, 0x24, 0x08, // addq %rcx, 8(%rsp)
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check("g", &write_incoming),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
         );
     }
 
