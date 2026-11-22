@@ -691,11 +691,17 @@ pub(crate) struct SignatureArgs {
     /// 64-char lowercase-hex ed25519 revocation root public key
     #[arg(long, requires_all = ["signature", "revocation_list", "revocation_signature"])]
     pub(crate) revocation_key: Option<String>,
-    /// Minimum acceptable v2 revocation-list version; requires the list and reference time
+    /// Minimum acceptable v2 version; checks not_after and requires a root-signed list and reference time
     #[arg(
         long,
         value_parser = clap::value_parser!(u64).range(1..),
-        requires_all = ["signature", "revocation_list", "reference_time"]
+        requires_all = [
+            "signature",
+            "revocation_list",
+            "revocation_signature",
+            "revocation_key",
+            "reference_time"
+        ]
     )]
     pub(crate) min_revocation_version: Option<u64>,
 }

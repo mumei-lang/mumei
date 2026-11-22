@@ -186,6 +186,7 @@ fn non_rfc3339_produced_at_is_rejected() {
 struct BindingFixture {
     producer_public: String,
     root_public: String,
+    root_secret: String,
     envelope: Value,
     evidence_fingerprint: String,
     registry: ProducerKeyRegistry,
@@ -249,6 +250,7 @@ impl BindingFixture {
         Self {
             producer_public,
             root_public,
+            root_secret,
             envelope,
             evidence_fingerprint,
             registry,
@@ -474,10 +476,14 @@ fn signature_binding_emits_true_results_for_a_valid_complete_chain() {
 #[test]
 fn current_v2_revocation_list_is_independent_of_a_mismatched_signature_envelope() {
     let fixture = BindingFixture::new();
-    let revocation_list = parse_revocation_list(
-        br#"{"schema_version":"mumei.key-revocation-list/v2","list_version":1,"issued_at":"2024-02-01T00:00:00Z","revoked_keys":[]}"#,
-    )
-    .unwrap();
+    let revocation_bytes =
+        br#"{"schema_version":"mumei.key-revocation-list/v2","list_version":1,"issued_at":"2024-02-01T00:00:00Z","revoked_keys":[]}"#;
+    let revocation_list = parse_revocation_list(revocation_bytes).unwrap();
+    let revocation_digest = subject_digest(revocation_bytes);
+    let revocation_key = decode_secret_key(&fixture.root_secret).unwrap();
+    let revocation_signature =
+        serde_json::to_value(sign(revocation_bytes, &revocation_key, "root", None).unwrap())
+            .unwrap();
     let mismatched_envelope = json!({
         "schema_version": PRODUCER_SIGNATURE_SCHEMA,
         "unexpected": true,
@@ -486,13 +492,38 @@ fn current_v2_revocation_list_is_independent_of_a_mismatched_signature_envelope(
     let mut input = fixture.input();
     input.envelope = &mismatched_envelope;
     input.revocation_list = Some(&revocation_list);
+    input.revocation_digest = Some(&revocation_digest);
+    input.revocation_signature = Some(&revocation_signature);
     input.min_revocation_version = Some(1);
     let binding = verify_binding(input);
 
     assert!(!binding.envelope_match);
+    assert_eq!(binding.revocation_list_authentic, Some(true));
     assert_eq!(binding.revocation_list_current, Some(true));
     assert!(binding.failed_fields().contains(&"envelope_match"));
     assert!(binding.failed_fields().contains(&"signature_valid"));
+}
+
+#[test]
+fn v2_revocation_list_current_requires_root_authenticity() {
+    let fixture = BindingFixture::new();
+    let revocation_bytes = br#"{"schema_version":"mumei.key-revocation-list/v2","list_version":1,"issued_at":"2024-02-01T00:00:00Z","revoked_keys":[]}"#;
+    let revocation_list = parse_revocation_list(revocation_bytes).unwrap();
+    let revocation_digest = subject_digest(revocation_bytes);
+    let mut invalid_signature = fixture.revocation_signature.clone();
+    invalid_signature["subject_digest"] = json!(revocation_digest);
+    invalid_signature["signature"] = json!("0".repeat(128));
+
+    let mut input = fixture.input();
+    input.revocation_list = Some(&revocation_list);
+    input.revocation_digest = Some(&revocation_digest);
+    input.revocation_signature = Some(&invalid_signature);
+    input.min_revocation_version = Some(1);
+    let binding = verify_binding(input);
+
+    assert_eq!(binding.revocation_list_authentic, Some(false));
+    assert_eq!(binding.revocation_list_current, Some(false));
+    assert!(binding.failed_fields().contains(&"revocation_list_current"));
 }
 
 #[test]
@@ -619,5 +650,5 @@ fn signature_binding_reports_each_failed_binding_check() {
     assert_eq!(binding.key_authentic, Some(false));
     assert_eq!(binding.envelope_fresh, Some(false));
     assert_eq!(binding.registry_authentic, Some(false));
-    assert_eq!(binding.revocation_list_authentic, Some(false));
+    assert_eq!(binding.revocation_list_authentic, Some(true));
 }

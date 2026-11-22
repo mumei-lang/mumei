@@ -700,6 +700,13 @@ fn validate_signature_options(options: SignatureOptions<'_>) -> Result<(), &'sta
     if options.min_revocation_version.is_some() && options.reference_time.is_none() {
         return Err("--min-revocation-version requires --reference-time");
     }
+    if options.min_revocation_version.is_some()
+        && (options.revocation_signature.is_none() || options.revocation_key.is_none())
+    {
+        return Err(
+            "--min-revocation-version requires --revocation-signature and --revocation-key",
+        );
+    }
     if options.max_age_seconds.is_some() && options.reference_time.is_none() {
         return Err("--max-age-seconds requires --reference-time");
     }

@@ -635,10 +635,10 @@ fn nonmatching_json_object_envelope_is_a_failed_binding_not_an_input_error() {
         "key_authentic",
         "envelope_fresh",
         "registry_authentic",
-        "revocation_list_authentic",
     ] {
         assert_eq!(binding[name], false, "{name}");
     }
+    assert_eq!(binding["revocation_list_authentic"], true);
 }
 
 #[test]
@@ -840,6 +840,31 @@ fn v2_revocation_list_version_window_and_rollback_checks() {
         assert_eq!(descriptor["producer_signature"]["key_not_revoked"], true);
     }
 
+    let invalid_root_signature = fixture(Some("2024-02-01T00:00:00Z"));
+    write_v2_revocation_list(
+        &invalid_root_signature,
+        3,
+        "2024-02-01T00:00:00Z",
+        Some("2024-03-01T00:00:00Z"),
+    );
+    rewrite_json(&invalid_root_signature.revocation_signature, |signature| {
+        signature["signature"] = json!("0".repeat(128));
+    });
+    let mut command = full_chain_command(&invalid_root_signature, true);
+    command.args(["--min-revocation-version", "3"]);
+    let output = run_command(command);
+    assert_eq!(output.status.code(), Some(1));
+    let descriptor = accepted_value(&output);
+    assert_eq!(descriptor["verdict"], "rejected");
+    assert_eq!(
+        descriptor["producer_signature"]["revocation_list_authentic"],
+        false
+    );
+    assert_eq!(
+        descriptor["producer_signature"]["revocation_list_current"],
+        false
+    );
+
     let no_minimum = fixture(Some("2024-02-01T00:00:00Z"));
     write_v2_revocation_list(
         &no_minimum,
@@ -878,6 +903,16 @@ fn min_revocation_version_dependencies_and_v1_rejection() {
         .arg(&fixture.revocation_list)
         .args(["--min-revocation-version", "1"]);
     assert_failure_without_descriptor(&run_command(no_reference));
+
+    let mut unsigned_list = signature_command(&fixture, true);
+    unsigned_list
+        .args(["--expected-producer-key", PRODUCER_KEY_ID])
+        .args(["--reference-time", REFERENCE_TIME])
+        .args(["--revocation-list"])
+        .arg(&fixture.revocation_list)
+        .args(["--min-revocation-version", "1"]);
+    assert_failure_without_descriptor(&run_command(unsigned_list));
+
     let mut zero = full_chain_command(&fixture, true);
     zero.args(["--min-revocation-version", "0"]);
     assert_failure_without_descriptor(&run_command(zero));

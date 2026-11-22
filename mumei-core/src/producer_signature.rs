@@ -433,8 +433,7 @@ pub fn verify_binding(input: SignatureBindingInput<'_>) -> SignatureBinding {
         matched && anchor_signature_valid(wrapper, input.registry_key_hex, input.registry_digest)
     });
     let revocation_list_authentic = input.revocation_signature.map(|wrapper| {
-        matched
-            && anchor_signature_valid(wrapper, input.revocation_key_hex, input.revocation_digest)
+        anchor_signature_valid(wrapper, input.revocation_key_hex, input.revocation_digest)
     });
 
     let key_not_revoked = input.revocation_list.map(|revoked| {
@@ -483,7 +482,8 @@ pub fn verify_binding(input: SignatureBindingInput<'_>) -> SignatureBinding {
                 && metadata
                     .not_after
                     .is_none_or(|not_after| not_after.0 >= reference_time.1)
-                && metadata.list_version >= minimum_version,
+                && metadata.list_version >= minimum_version
+                && revocation_list_authentic == Some(true),
         )
     });
 

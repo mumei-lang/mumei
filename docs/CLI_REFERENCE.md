@@ -167,7 +167,7 @@ Usage: mumei evidence accept-source [OPTIONS] --source <SOURCE> <INPUT>
 | `--revocation-list <REVOCATION_LIST>` | — | — | Regular mumei.key-revocation-list/v1 or /v2 file (at most 65,536 bytes); requires a pinned producer key id |
 | `--revocation-signature <REVOCATION_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 revocation-list signature file |
 | `--revocation-key <REVOCATION_KEY>` | — | — | 64-char lowercase-hex ed25519 revocation root public key |
-| `--min-revocation-version <MIN_REVOCATION_VERSION>` | — | — | Minimum acceptable v2 revocation-list version; requires the list and reference time |
+| `--min-revocation-version <MIN_REVOCATION_VERSION>` | — | — | Minimum acceptable v2 version; checks not_after and requires a root-signed list and reference time |
 
 ## `mumei evidence verify-source`
 
@@ -363,7 +363,7 @@ Usage: mumei evidence accept [OPTIONS] [INPUT]
 | `--revocation-list <REVOCATION_LIST>` | — | — | Regular mumei.key-revocation-list/v1 or /v2 file (at most 65,536 bytes); requires a pinned producer key id |
 | `--revocation-signature <REVOCATION_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 revocation-list signature file |
 | `--revocation-key <REVOCATION_KEY>` | — | — | 64-char lowercase-hex ed25519 revocation root public key |
-| `--min-revocation-version <MIN_REVOCATION_VERSION>` | — | — | Minimum acceptable v2 revocation-list version; requires the list and reference time |
+| `--min-revocation-version <MIN_REVOCATION_VERSION>` | — | — | Minimum acceptable v2 version; checks not_after and requires a root-signed list and reference time |
 
 ## `mumei evidence accept-list`
 
@@ -400,7 +400,7 @@ Usage: mumei evidence accept-list [OPTIONS] [INPUT]
 | `--revocation-list <REVOCATION_LIST>` | — | — | Regular mumei.key-revocation-list/v1 or /v2 file (at most 65,536 bytes); requires a pinned producer key id |
 | `--revocation-signature <REVOCATION_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 revocation-list signature file |
 | `--revocation-key <REVOCATION_KEY>` | — | — | 64-char lowercase-hex ed25519 revocation root public key |
-| `--min-revocation-version <MIN_REVOCATION_VERSION>` | — | — | Minimum acceptable v2 revocation-list version; requires the list and reference time |
+| `--min-revocation-version <MIN_REVOCATION_VERSION>` | — | — | Minimum acceptable v2 version; checks not_after and requires a root-signed list and reference time |
 
 ## `mumei evidence check-list`
 
