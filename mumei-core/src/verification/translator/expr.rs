@@ -5781,11 +5781,11 @@ pub(crate) fn expr_to_z3<'a>(
                             std::collections::HashSet::new();
                         let enum_types_before_guard = vc.local_enum_types.borrow().clone();
                         pattern_bind_variables(
-                            ctx,
                             &arm.pattern,
                             &target_z3,
                             &mut check_env,
                             vc,
+                            None,
                             decl_hint.as_deref(),
                             &mut check_bound,
                         );
@@ -5911,11 +5911,11 @@ pub(crate) fn expr_to_z3<'a>(
                 //    pattern_bind_variables が再帰的にパターンを分解し、
                 //    バインド変数を arm_env に登録する。
                 pattern_bind_variables(
-                    ctx,
                     &arm.pattern,
                     &target_z3,
                     &mut arm_env,
                     vc,
+                    solver_opt,
                     decl_hint.as_deref(),
                     &mut arm_bound,
                 );
