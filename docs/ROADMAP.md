@@ -3228,30 +3228,33 @@ past `xmm7` must be written with a `movsd %xmm, N(%rsp)` store into the
 same declaration-ordered stack area, and the slot carries the same
 NaN-aware plus exact-bit obligations as a register argument.
 
-Register-resident aggregate results have at most four leaves overall, at
-most three INTEGER leaves, and at most two SSE leaves. Real `llc-17 -O2`
+Register-resident aggregate results follow a per-class register
+budget: at most three INTEGER leaves (`rax`, `rdx`, `rcx`) and at
+most two SSE leaves (`xmm0`, `xmm1`) — a five-leaf
+`{i64,f64,i64,f64,i64}` still returns in registers. Real `llc-17 -O2`
 output returned three INTEGER leaves in `rax`, `rdx`, `rcx` and
 `{i64,f64,i64,f64}` in `rax`, `xmm0`, `rdx`, `xmm1`. It did not return a
-fourth INTEGER leaf in `r8`: an all-INTEGER aggregate of four or more leaves
-returns through a hidden sret pointer and memory stores. For three f64
-leaves, the third leaf uses an x87 stack register, outside this model.
+fourth INTEGER leaf in `r8`: once INTEGER leaves overflow the budget
+the whole aggregate returns through a hidden sret pointer and memory
+stores, `f64` leaves landing as `movsd` stores. For three f64
+leaves with INTEGER leaves still fitting, the third leaf uses an x87
+stack register, outside this model.
 Register-resident supported results preserve source leaf order; f64 leaves
 compare NaN-aware and integer leaves compare exactly.
-All-INTEGER aggregate results of four to sixteen leaves are instead admitted
+Aggregate results of four to sixteen leaves are instead admitted
 through the SysV `sret` convention on the callee side: `rdi` carries a
 hidden caller-buffer pointer, INTEGER arguments shift one register right to
-`rsi`, `movq` stores through a register still holding that pointer write the
+`rsi`, `movq`/`movsd` stores through a register still holding that pointer write the
 result-buffer leaves, and `rax` must hand the pointer back. Stores into
 slots never written compare against fresh constants, so a dropped leaf store
 is `different`; a callee that forgets the pointer return fails the `rax`
-obligation. Mixed-class sret aggregates — any `f64` leaf — remain
-fail-closed. The caller side is modeled the same way: a call whose
-all-INTEGER result needs `sret` reads `rdi` as the caller-allocated
+obligation. The caller side is modeled the same way: a call whose
+result needs `sret` reads `rdi` as the caller-allocated
 buffer pointer, INTEGER arguments begin at `rsi`, the buffer's frame
 offset is recovered from `rdi - rsp`, each result leaf lands in the
 frame slot map, and `rax` returns the pointer — `N(%rsp)` reads and
 reads through a register still holding the pointer resolve to the same
-leaf slots. This is an assumed LLVM first-class aggregate lowering
+leaf slots, `movsd` reads and writes of `f64` leaves included. This is an assumed LLVM first-class aggregate lowering
 convention plus the modeled sret store convention, not general SysV C-ABI
 aggregate classification.
 
@@ -3270,9 +3273,8 @@ zero-initializes inactive payload slots. This assumes that LLVM lowering and
 does not validate an ABI. F64 tail calls remain fail-closed. Function-signature and direct-call
 aggregates used as parameters or call arguments with seventeen or more
 leaves remain fail-closed. Result aggregates outside the admitted
-shapes — register-resident results of at most four leaves, at most three
-INTEGER and two SSE, or all-INTEGER sret results of four to sixteen
-leaves — remain fail-closed. Local struct values inside a body are not subject to this
+shapes — register-resident within the per-class budgets, or sret
+results of four to sixteen leaves — remain fail-closed. Local struct values inside a body are not subject to this
 aggregate limit because the source model flattens them. i128/u128 leaves inside
 aggregate parameters, call arguments, aggregate results and enum payloads
 follow the same
@@ -3304,9 +3306,9 @@ than two leaves use
 in the active integer or f64 convention string. Aggregate uses that still
 stand for an assumed SysV memory-class ABI — wide aggregate parameters and
 aggregate call arguments — list
-`machine_code_tv_sysv_memory_class_aggregate_abi` as not performed; an
-all-INTEGER sret result the lifter validates, on either side of the call,
-does not. The
+`machine_code_tv_sysv_memory_class_aggregate_abi` as not performed; a
+modeled register-resident or sret result the lifter validates, on
+either side of the call, does not. The
 convention names LLVM aggregate lowering and does not claim general ABI
 validation.
 

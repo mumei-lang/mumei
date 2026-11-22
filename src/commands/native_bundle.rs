@@ -191,6 +191,36 @@ fn machine_tv_model_uses_composite_aggregate(model: &semantic_contract::PureI64B
         })
 }
 
+/// Whether any aggregate in the model's signatures or call sites exceeds
+/// the two-leaf shape the narrow convention strings describe — the basis for
+/// the `llvm_first_class_aggregates` convention name regardless of whether
+/// the shape is modeled or assumed.
+fn machine_tv_model_uses_wide_composite_aggregate_convention(
+    model: &semantic_contract::PureI64Body<'_>,
+) -> bool {
+    model
+        .param_shapes
+        .iter()
+        .flatten()
+        .any(|leaf_count| *leaf_count > 2)
+        || model.result_shape.is_some_and(|leaf_count| leaf_count > 2)
+        || model.call_sites.iter().any(|call_site| {
+            call_site.argument_shapes.iter().any(|shape| {
+                matches!(
+                    shape,
+                    semantic_contract::CallValueShape::Struct { leaf_count, .. }
+                        | semantic_contract::CallValueShape::Enum { leaf_count }
+                        if *leaf_count > 2
+                )
+            }) || matches!(
+                call_site.result_shape,
+                semantic_contract::CallValueShape::Struct { leaf_count, .. }
+                    | semantic_contract::CallValueShape::Enum { leaf_count }
+                    if leaf_count > 2
+            )
+        })
+}
+
 fn machine_tv_model_uses_wide_composite_aggregate(
     model: &semantic_contract::PureI64Body<'_>,
 ) -> bool {
@@ -201,13 +231,15 @@ fn machine_tv_model_uses_wide_composite_aggregate(
         .any(|leaf_count| *leaf_count > 2)
         || model.result_shape.is_some_and(|leaf_count| {
             leaf_count > 2
-                // An all-INTEGER aggregate result past the three
-                // register-resident INTEGER leaves comes back through
-                // the `sret` convention the lifter now models — it is
+                // An aggregate result the lifter resolves — within the
+                // per-class register budgets, or back through the
+                // `sret` convention past the INTEGER budget — is
                 // validated, not an assumed memory-class ABI.
-                && !((4..=16).contains(&leaf_count)
-                    && model.result_leaf_doubles.len() == leaf_count
-                    && model.result_leaf_doubles.iter().all(|is_double| !*is_double))
+                && !(model.result_leaf_doubles.len() == leaf_count
+                    && (aggregate_result_leaf_doubles_modeled(
+                        &model.result_leaf_doubles,
+                    ) || ((4..=16).contains(&leaf_count)
+                        && integer_result_leaf_count(&model.result_leaf_doubles) > 3)))
         })
         || model.call_sites.iter().any(|call_site| {
             call_site.argument_shapes.iter().any(|shape| {
@@ -224,20 +256,32 @@ fn machine_tv_model_uses_wide_composite_aggregate(
                     has_enum: false,
                     ..
                 } if leaf_count > 2
-                    // An all-INTEGER call result of four to sixteen
-                    // leaves comes back through the caller's `sret`
-                    // buffer — modeled, not an assumed memory-class ABI.
-                    && !((4..=16).contains(&leaf_count)
-                        && call_site.result_leaf_doubles.len() == leaf_count
-                        && call_site
-                            .result_leaf_doubles
-                            .iter()
-                            .all(|is_double| !*is_double))
+                    // A call result the lifter resolves —
+                    // register-resident within the per-class budgets,
+                    // or back through the caller's `sret` buffer past
+                    // the INTEGER budget — is modeled, not an assumed
+                    // memory-class ABI.
+                    && !(call_site.result_leaf_doubles.len() == leaf_count
+                        && (aggregate_result_leaf_doubles_modeled(
+                            &call_site.result_leaf_doubles,
+                        ) || ((4..=16).contains(&leaf_count)
+                            && integer_result_leaf_count(&call_site.result_leaf_doubles)
+                                > 3)))
             ) || matches!(
                 call_site.result_shape,
                 semantic_contract::CallValueShape::Enum { leaf_count } if leaf_count > 2
             )
         })
+}
+
+fn integer_result_leaf_count(leaf_doubles: &[bool]) -> usize {
+    leaf_doubles.iter().filter(|is_double| !**is_double).count()
+}
+
+fn aggregate_result_leaf_doubles_modeled(leaf_doubles: &[bool]) -> bool {
+    !leaf_doubles.is_empty()
+        && integer_result_leaf_count(leaf_doubles) <= 3
+        && leaf_doubles.iter().filter(|is_double| **is_double).count() <= 2
 }
 
 fn machine_tv_model_uses_wide_scalar(model: &semantic_contract::PureI64Body<'_>) -> bool {
@@ -3706,6 +3750,7 @@ struct MachineTvCounts {
     equivalent_composite_aggregate_count: usize,
     equivalent_f64_composite_aggregate_count: usize,
     equivalent_wide_composite_aggregate_count: usize,
+    equivalent_wide_composite_aggregate_convention_count: usize,
     equivalent_wide_scalar_count: usize,
     equivalent_red_zone_frame_memory_count: usize,
     equivalent_allocated_frame_memory_count: usize,
@@ -3825,6 +3870,7 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
     let mut equivalent_composite_aggregate_count = 0usize;
     let mut equivalent_f64_composite_aggregate_count = 0usize;
     let mut equivalent_wide_composite_aggregate_count = 0usize;
+    let mut equivalent_wide_composite_aggregate_convention_count = 0usize;
     let mut equivalent_wide_scalar_count = 0usize;
     let mut equivalent_red_zone_frame_memory_count = 0usize;
     let mut equivalent_allocated_frame_memory_count = 0usize;
@@ -3861,6 +3907,9 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
         let has_wide_composite_aggregate = source_models
             .get(function_name)
             .is_some_and(machine_tv_model_uses_wide_composite_aggregate);
+        let has_wide_composite_aggregate_convention = source_models
+            .get(function_name)
+            .is_some_and(machine_tv_model_uses_wide_composite_aggregate_convention);
         let has_wide_scalar = source_models
             .get(function_name)
             .is_some_and(machine_tv_model_uses_wide_scalar);
@@ -3975,6 +4024,9 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
                     if has_wide_composite_aggregate {
                         equivalent_wide_composite_aggregate_count += 1;
                     }
+                    if has_wide_composite_aggregate_convention {
+                        equivalent_wide_composite_aggregate_convention_count += 1;
+                    }
                     if has_wide_scalar {
                         equivalent_wide_scalar_count += 1;
                     }
@@ -4049,6 +4101,7 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
         equivalent_composite_aggregate_count,
         equivalent_f64_composite_aggregate_count,
         equivalent_wide_composite_aggregate_count,
+        equivalent_wide_composite_aggregate_convention_count,
         equivalent_wide_scalar_count,
         equivalent_red_zone_frame_memory_count,
         equivalent_allocated_frame_memory_count,
@@ -4174,7 +4227,9 @@ fn write_machine_tv(
                 evaluation.counts.equivalent_f64_leaf_count,
                 evaluation.counts.equivalent_composite_aggregate_count,
                 evaluation.counts.equivalent_f64_composite_aggregate_count,
-                evaluation.counts.equivalent_wide_composite_aggregate_count,
+                evaluation
+                    .counts
+                    .equivalent_wide_composite_aggregate_convention_count,
                 evaluation.counts.equivalent_wide_scalar_count,
                 evaluation.counts.equivalent_red_zone_frame_memory_count,
                 evaluation.counts.equivalent_allocated_frame_memory_count,
@@ -4335,7 +4390,9 @@ fn write_object_machine_tv_acceptance(
                 evaluation.counts.equivalent_f64_leaf_count,
                 evaluation.counts.equivalent_composite_aggregate_count,
                 evaluation.counts.equivalent_f64_composite_aggregate_count,
-                evaluation.counts.equivalent_wide_composite_aggregate_count,
+                evaluation
+                    .counts
+                    .equivalent_wide_composite_aggregate_convention_count,
                 evaluation.counts.equivalent_wide_scalar_count,
                 evaluation.counts.equivalent_red_zone_frame_memory_count,
                 evaluation.counts.equivalent_allocated_frame_memory_count,
@@ -5122,6 +5179,9 @@ mod tests {
             has_f64: false,
         }];
         assert!(machine_tv_model_uses_wide_composite_aggregate(&model));
+        assert!(machine_tv_model_uses_wide_composite_aggregate_convention(
+            &model
+        ));
         assert_eq!(
             machine_tv_register_convention_assumed(0, 1, 0, 1),
             MACHINE_CODE_REGISTER_CONVENTION_WITH_LLVM_AGGREGATES
@@ -5141,6 +5201,31 @@ mod tests {
         assert_eq!(
             machine_tv_register_convention_assumed(1, 1, 1, 0),
             MACHINE_CODE_F64_REGISTER_CONVENTION_WITH_SSE_AGGREGATES
+        );
+
+        // An all-INTEGER call result the lifter resolves through `sret`
+        // no longer counts toward the assumed memory-class ABI, but the
+        // convention string still names the wider register budget.
+        model.call_sites[0].arg_leaf_doubles = vec![false];
+        model.call_sites[0].argument_shapes =
+            vec![semantic_contract::CallValueShape::Scalar { leaf_count: 1 }];
+        model.call_sites[0].result_leaf_doubles = vec![false; 5];
+        model.call_sites[0].result_shape = semantic_contract::CallValueShape::Struct {
+            leaf_count: 5,
+            has_enum: false,
+            has_f64: false,
+        };
+        assert!(!machine_tv_model_uses_wide_composite_aggregate(&model));
+        assert!(machine_tv_model_uses_wide_composite_aggregate_convention(
+            &model
+        ));
+        assert_eq!(
+            machine_tv_register_convention_assumed(0, 1, 0, 1),
+            MACHINE_CODE_REGISTER_CONVENTION_WITH_LLVM_AGGREGATES
+        );
+        assert_eq!(
+            machine_tv_composite_aggregate_checks(1, 0).1,
+            Vec::<&'static str>::new()
         );
     }
 

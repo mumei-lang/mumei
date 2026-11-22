@@ -2085,30 +2085,35 @@ parameters, `call_arguments` for direct-call arguments). The source admission fr
 rejects struct declarations wider than sixteen leaves, so these checks
 fire only on hand-written object inputs, not compiler output.
 
-Register-resident aggregate results are admitted only with at most four
-leaves overall, at most three INTEGER leaves, and at most two SSE leaves.
-The `llc-17 -O2` probe observed three INTEGER leaves returned in `rax`,
-`rdx`, `rcx`, and a mixed `{i64,f64,i64,f64}` result returned in `rax`,
-`xmm0`, `rdx`, `xmm1`. The expected fourth INTEGER result register `r8` was
-not observed: an all-INTEGER aggregate of four or more leaves is lowered
-through a hidden sret pointer and memory stores. A three-f64 result uses
-`xmm0`, `xmm1`, and an x87 stack register for its third leaf, which this
-model does not support; those shapes fail closed (`unsupported_signature`
-for function results, `call_arguments` for call results). All-INTEGER
-aggregate results of four to sixteen leaves are admitted through the SysV
-`sret` convention on the callee side: `rdi` carries the hidden
-result-buffer pointer, INTEGER arguments shift one register right, `movq`
-stores through a register still holding that pointer write the buffer
-leaves, and `rax` must return the pointer. Unwritten buffer slots compare
+Register-resident aggregate results follow a per-class register
+budget: at most three INTEGER leaves (`rax`, `rdx`, `rcx`) and at most
+two SSE leaves (`xmm0`, `xmm1`) — a five-leaf `{i64,f64,i64,f64,i64}`
+still returns in registers. The `llc-17 -O2` probe observed three
+INTEGER leaves returned in `rax`, `rdx`, `rcx`, and a mixed
+`{i64,f64,i64,f64}` result returned in `rax`, `xmm0`, `rdx`, `xmm1`.
+The expected fourth INTEGER result register `r8` was not observed:
+once INTEGER leaves overflow the budget the whole aggregate is
+lowered through a hidden sret pointer and memory stores, `f64` leaves
+landing as `movsd` stores. A result whose INTEGER leaves still fit
+but carries three or more `f64` leaves reaches for the x87 stack
+register for the third SSE leaf, which this model does not support;
+those shapes fail closed (`unsupported_signature` for function
+results, `call_arguments` for call results). Aggregate results of
+four to sixteen leaves are admitted through the SysV `sret` convention on
+the callee side: `rdi` carries the hidden
+result-buffer pointer, INTEGER arguments shift one register right,
+`movq`/`movsd` stores through a register still holding that pointer
+write the buffer leaves, and `rax` must return the pointer. Unwritten
+buffer slots compare
 against fresh constants, so a dropped leaf store is `different`, and a
-callee that does not return the pointer fails its own obligation. sret
-results carrying `f64` leaves remain fail-closed. The caller side is
+callee that does not return the pointer fails its own obligation. The caller side is
 modeled too: a call whose result needs `sret` reads `rdi` as the
 caller-allocated buffer pointer (declared INTEGER arguments begin at
 `rsi`), recovers the buffer's frame offset from `rdi - rsp`, records
 each result leaf in the frame slot map, and returns the pointer in
 `rax`, so `N(%rsp)` reads and reads through a register still holding
-the pointer both resolve to the same leaf slots. This is LLVM
+the pointer both resolve to the same leaf slots, `movsd` reads and
+writes of `f64` leaves included. This is LLVM
 first-class aggregate lowering plus the
 modeled sret store convention, not general SysV C-ABI aggregate
 classification. Function-result f64 leaves use NaN-aware matching, integer
@@ -2130,8 +2135,8 @@ first-class lowering preflights. Every modeled leaf is compared exactly;
 LLVM's first-class aggregate lowering zero-initializes inactive payload slots.
 This is an assumption about that LLVM lowering, not a validated ABI. Function-
 signature and direct-call aggregates used as parameters or call arguments with
-seventeen or more leaves, or as results outside the admitted shapes — at
-most four register-resident leaves, or four-to-sixteen-leaf all-INTEGER sret
+seventeen or more leaves, or as results outside the admitted shapes —
+register-resident within the per-class budgets, or four-to-sixteen-leaf sret
 — remain outside the profile. Enum-valued direct-call results in modules
 with f64 features remain fail-closed as `call_arguments` because their source
 call model does not retain per-leaf SSE classes.
@@ -2155,8 +2160,8 @@ on the active integer or f64 `register_convention_assumed` string.
 Aggregate uses that still stand for an assumed SysV memory-class ABI —
 wide aggregate parameters and aggregate call arguments — add
 `machine_code_tv_sysv_memory_class_aggregate_abi` to checks not performed;
-an all-INTEGER sret result the lifter validates, on either side of the
-call, does not.
+a modeled register-resident or sret result the lifter validates, on
+either side of the call, does not.
 This is bounded evidence for the observed LLVM lowering, not SysV C-ABI
 classification or general ABI validation.
 

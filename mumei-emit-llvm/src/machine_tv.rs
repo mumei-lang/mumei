@@ -521,7 +521,7 @@ pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
         }
         Some(count) => {
             sret_result_leaf_count(model).is_some()
-                || ((1..=MAX_AGGREGATE_LEAF_COUNT).contains(&count)
+                || ((1..=MAX_SRET_RESULT_LEAF_COUNT).contains(&count)
                     && model.result_leaf_doubles.len() == count
                     && aggregate_result_register_classes_supported(&model.result_leaf_doubles)
                     && model.value.get_size() == (64 * count) as u32)
@@ -559,16 +559,18 @@ const MAX_AGGREGATE_ARGUMENT_LEAF_COUNT: usize = 16;
 const MAX_SRET_RESULT_LEAF_COUNT: usize = MAX_AGGREGATE_ARGUMENT_LEAF_COUNT;
 
 /// Whether a call site's result comes back through an `sret` buffer the
-/// caller allocated: an all-INTEGER struct of four to sixteen leaves —
-/// the same admission as the callee side (`sret_result_leaf_count`),
-/// keyed on the call site's `CallValueShape` instead of the function's
-/// own result shape. Mixed-class call results and enum results stay
-/// fail-closed.
+/// caller allocated: a struct of four to sixteen leaves whose INTEGER
+/// leaves overflow the three INTEGER result registers — the same
+/// admission as the callee side (`sret_result_leaf_count`), keyed on
+/// the call site's `CallValueShape` instead of the function's own
+/// result shape. Register-resident results (three INTEGER and two SSE
+/// slots) and enum results stay on their own paths; results LLVM
+/// reaches for the x87 register stay fail-closed.
 fn sret_call_result_leaf_count(site: &CallSite<'_>) -> Option<usize> {
     let CallValueShape::Struct {
         leaf_count,
         has_enum: false,
-        has_f64: false,
+        ..
     } = site.result_shape
     else {
         return None;
@@ -578,16 +580,20 @@ fn sret_call_result_leaf_count(site: &CallSite<'_>) -> Option<usize> {
         .then_some(())
         .filter(|_| {
             site.result_leaf_doubles.len() == leaf_count
-                && site.result_leaf_doubles.iter().all(|is_double| !*is_double)
+                && leaf_doubles_need_sret(&site.result_leaf_doubles)
                 && site.result.get_size() == (64 * leaf_count) as u32
         })
         .map(|_| leaf_count)
 }
 
 /// Whether this function's result comes back through a hidden `sret`
-/// pointer: an all-INTEGER aggregate of four or more leaves — real LLVM
-// lowers a four-`i64` result this way too. Mixed-class sret aggregates
-// (any `f64` leaf) stay fail-closed in this slice.
+/// pointer: an aggregate whose INTEGER leaves exceed the three
+/// register-resident INTEGER slots — real LLVM lowers a four-`i64`
+/// result this way, and a mixed-class aggregate then writes every leaf
+/// to memory (`f64` leaves as `movsd` stores), no matter how few SSE
+/// leaves it carries. When INTEGER leaves still fit, LLVM puts the
+/// third-plus SSE leaf in the x87 register instead — that path stays
+/// fail-closed.
 fn sret_result_leaf_count(model: &PureI64Body<'_>) -> Option<usize> {
     let leaf_count = model.result_shape?;
     (MAX_AGGREGATE_LEAF_COUNT..=MAX_SRET_RESULT_LEAF_COUNT)
@@ -595,10 +601,7 @@ fn sret_result_leaf_count(model: &PureI64Body<'_>) -> Option<usize> {
         .then_some(())
         .filter(|_| {
             model.result_leaf_doubles.len() == leaf_count
-                && model
-                    .result_leaf_doubles
-                    .iter()
-                    .all(|is_double| !*is_double)
+                && leaf_doubles_need_sret(&model.result_leaf_doubles)
                 && model.value.get_size() == (64 * leaf_count) as u32
         })
         .map(|_| leaf_count)
@@ -606,6 +609,12 @@ fn sret_result_leaf_count(model: &PureI64Body<'_>) -> Option<usize> {
 const INTEGER_RESULT_REGISTERS: [usize; 3] = [0, 2, 1];
 const FLOAT_RESULT_REGISTER_COUNT: usize = 2;
 
+// LLVM hands aggregate results back on a per-class register budget:
+// three INTEGER (`rax`/`rdx`/`rcx`) and two SSE (`xmm0`/`xmm1`) slots,
+// so a five-leaf `{i64,f64,i64,f64,i64}` still returns in registers.
+// Past the INTEGER budget the whole result goes memory-class (`sret`);
+// past the SSE budget with room in INTEGER slots LLVM reaches for the
+// x87 result register, which this model does not cover.
 fn aggregate_result_register_classes_supported(result_leaf_doubles: &[bool]) -> bool {
     let integer_leaf_count = result_leaf_doubles
         .iter()
@@ -616,9 +625,20 @@ fn aggregate_result_register_classes_supported(result_leaf_doubles: &[bool]) -> 
         .filter(|is_double| **is_double)
         .count();
     !result_leaf_doubles.is_empty()
-        && result_leaf_doubles.len() <= MAX_AGGREGATE_LEAF_COUNT
         && integer_leaf_count <= INTEGER_RESULT_REGISTERS.len()
         && float_leaf_count <= FLOAT_RESULT_REGISTER_COUNT
+}
+
+/// Whether `result_leaf_doubles` describes a shape LLVM lowers through
+/// the `sret` convention: more INTEGER leaves than the three INTEGER
+/// result registers carry — the whole aggregate then goes to memory,
+/// `f64` leaves included (`movsd` stores), no matter the SSE count.
+fn leaf_doubles_need_sret(result_leaf_doubles: &[bool]) -> bool {
+    result_leaf_doubles
+        .iter()
+        .filter(|is_double| !**is_double)
+        .count()
+        > INTEGER_RESULT_REGISTERS.len()
 }
 
 fn call_site_shapes_are_consistent(site: &CallSite<'_>) -> bool {
@@ -1507,13 +1527,29 @@ fn lift<'ctx>(
                     .first()
                     .is_some_and(|source| source.contains('('))
             {
-                lift_stack_argument_sse(
-                    instruction,
-                    &mut state,
-                    &stack_argument_leaves,
-                    &arguments,
-                    context,
-                )?;
+                let operands = split_operands(&instruction.operands);
+                let source = operands
+                    .first()
+                    .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+                if instruction.mnemonic == "movsd"
+                    && sret_memory_offset(source, &state).is_some_and(|offset| {
+                        sret_leaf_count.is_some_and(|leaf_count| offset < 8 * leaf_count as i64)
+                    })
+                {
+                    lift_sret_load(instruction, &mut state, context)?;
+                } else if instruction.mnemonic == "movsd"
+                    && sret_call_memory_offset(source, &state).is_some()
+                {
+                    lift_sret_call_load(instruction, &mut state, context)?;
+                } else {
+                    lift_stack_argument_sse(
+                        instruction,
+                        &mut state,
+                        &stack_argument_leaves,
+                        &arguments,
+                        context,
+                    )?;
+                }
             } else if instruction.mnemonic.as_str() == "movsd"
                 && model_has_f64_leaves(model)
                 && split_operands(&instruction.operands)
@@ -1524,7 +1560,13 @@ fn lift<'ctx>(
                 let destination = operands
                     .get(1)
                     .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
-                if should_use_allocated_frame_memory(
+                if sret_memory_offset(destination, &state).is_some_and(|offset| {
+                    sret_leaf_count.is_some_and(|leaf_count| offset < 8 * leaf_count as i64)
+                }) {
+                    lift_sret_store(instruction, &mut state, context)?;
+                } else if sret_call_memory_offset(destination, &state).is_some() {
+                    lift_sret_call_store(instruction, &mut state, context)?;
+                } else if should_use_allocated_frame_memory(
                     destination,
                     &state,
                     allocated_frame_memory_mode,
@@ -1534,8 +1576,9 @@ fn lift<'ctx>(
                     // while integer loads read `frame_memory` would
                     // silently drop the write, so fail closed.
                     return Err(FunctionOutcome::OutsideProfile("frame_memory_bounds"));
+                } else {
+                    lift_stack_store_sse(instruction, &mut state)?;
                 }
-                lift_stack_store_sse(instruction, &mut state)?;
             } else if matches!(
                 instruction.mnemonic.as_str(),
                 "movaps" | "movups" | "movdqa" | "movdqu"
@@ -2610,7 +2653,9 @@ fn sret_memory_offset<'ctx>(operand: &str, state: &MachineState<'ctx>) -> Option
 
 /// Records a `movq %r, N(%reg)` store through the sret pointer into the
 /// result-buffer slot map — the callee's only way to write its
-/// memory-class result.
+/// memory-class result. `movsd %xmm, N(%reg)` writes an `f64` leaf of a
+/// mixed-class buffer: once INTEGER leaves overflow the whole
+/// aggregate goes to memory, SSE leaves landing as bit-pattern stores.
 fn lift_sret_store<'ctx>(
     instruction: &Instruction,
     state: &mut MachineState<'ctx>,
@@ -2622,8 +2667,14 @@ fn lift_sret_store<'ctx>(
     };
     let offset = sret_memory_offset(destination, state)
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
-    let value = operand_value(source, &state.registers, context, 64)
-        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let value = if instruction.mnemonic == "movsd" {
+        parse_xmm_register(source)
+            .map(|index| state.xmm_registers[index].extract(63, 0))
+            .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?
+    } else {
+        operand_value(source, &state.registers, context, 64)
+            .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?
+    };
     if let Some((_, stored)) = state
         .sret_stores
         .iter_mut()
@@ -2657,6 +2708,13 @@ fn lift_sret_load<'ctx>(
         .find(|(slot, _)| *slot == offset)
         .map(|(_, value)| value.clone())
         .unwrap_or_else(|| BV::fresh_const(context, "machine_sret_unwritten_slot", 64));
+    if instruction.mnemonic == "movsd" {
+        let Some(destination_index) = parse_xmm_register(destination) else {
+            return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+        };
+        state.xmm_registers[destination_index] = BV::from_u64(context, 0, 64).concat(&value);
+        return Ok(());
+    }
     let (register_index, width) = parse_register(destination)
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
     if !write_register(&mut state.registers, register_index, value, width) {
@@ -2726,8 +2784,14 @@ fn lift_sret_call_store<'ctx>(
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
     let entry_offset = buffer.base_offset + offset;
-    let value = operand_value(source, &state.registers, context, 64)
-        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let value = if instruction.mnemonic == "movsd" {
+        parse_xmm_register(source)
+            .map(|index| state.xmm_registers[index].extract(63, 0))
+            .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?
+    } else {
+        operand_value(source, &state.registers, context, 64)
+            .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?
+    };
     if let Some((_, stored)) = state
         .stack
         .iter_mut()
@@ -2766,6 +2830,13 @@ fn lift_sret_call_load<'ctx>(
         .find(|(stack_slot, _)| *stack_slot == entry_offset)
         .map(|(_, value)| value.clone())
         .unwrap_or_else(|| BV::fresh_const(context, "machine_sret_call_unwritten_slot", 64));
+    if instruction.mnemonic == "movsd" {
+        let Some(destination_index) = parse_xmm_register(destination) else {
+            return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+        };
+        state.xmm_registers[destination_index] = BV::from_u64(context, 0, 64).concat(&value);
+        return Ok(());
+    }
     let (register_index, width) = parse_register(destination)
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
     if !write_register(&mut state.registers, register_index, value, width) {
@@ -3543,14 +3614,14 @@ fn call_site_has_unsupported_composite_shape(site: &CallSite<'_>) -> bool {
             shape,
             CallValueShape::Struct { .. } | CallValueShape::Enum { .. }
         ) && !call_value_shape_supported_with_leaf_bound(shape, MAX_AGGREGATE_ARGUMENT_LEAF_COUNT)
-    }) || (matches!(site.result_shape, CallValueShape::Struct { .. }) && {
-        sret_call_result_leaf_count(site).is_none()
-            && (!call_value_shape_supported_with_leaf_bound(
+    }) || (matches!(site.result_shape, CallValueShape::Struct { .. })
+        && !aggregate_result_register_classes_supported(&site.result_leaf_doubles)
+        && sret_call_result_leaf_count(site).is_none())
+        || (matches!(site.result_shape, CallValueShape::Enum { .. })
+            && !call_value_shape_supported_with_leaf_bound(
                 site.result_shape,
                 MAX_AGGREGATE_LEAF_COUNT,
-            ) || !aggregate_result_register_classes_supported(&site.result_leaf_doubles))
-    }) || (matches!(site.result_shape, CallValueShape::Enum { .. })
-        && !call_value_shape_supported_with_leaf_bound(site.result_shape, MAX_AGGREGATE_LEAF_COUNT))
+            ))
 }
 
 // Resolves a call-argument leaf of either class that spilled to the
@@ -3673,10 +3744,14 @@ fn lift_call<'ctx>(
         || call_site.argument_shapes.iter().copied().any(|shape| {
             !call_value_shape_supported_with_leaf_bound(shape, MAX_AGGREGATE_ARGUMENT_LEAF_COUNT)
         })
-        || !call_value_shape_supported_with_leaf_bound(
-            call_site.result_shape,
-            MAX_AGGREGATE_LEAF_COUNT,
-        ) && sret_call_result_leaf_count(call_site).is_none()
+        || (matches!(call_site.result_shape, CallValueShape::Struct { .. })
+            && !aggregate_result_register_classes_supported(&call_site.result_leaf_doubles)
+            && sret_call_result_leaf_count(call_site).is_none())
+        || (matches!(call_site.result_shape, CallValueShape::Enum { .. })
+            && !call_value_shape_supported_with_leaf_bound(
+                call_site.result_shape,
+                MAX_AGGREGATE_LEAF_COUNT,
+            ))
     {
         return Err(FunctionOutcome::OutsideProfile("call_arguments"));
     }
@@ -3929,7 +4004,7 @@ fn apply_call_result_and_clobbers<'ctx>(
             leaf_count,
             has_enum: false,
             has_f64,
-        } if (1..=MAX_AGGREGATE_LEAF_COUNT).contains(&leaf_count) => {
+        } if leaf_count <= INTEGER_RESULT_REGISTERS.len() + FLOAT_RESULT_REGISTER_COUNT => {
             if result_leaf_doubles.len() != leaf_count
                 || has_f64 != result_leaf_doubles.iter().any(|is_double| *is_double)
                 || !aggregate_result_register_classes_supported(result_leaf_doubles)
@@ -12044,17 +12119,17 @@ entry:
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
         config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
         let context = Context::new(&config);
-        // A five-leaf result past the register-resident bound needs
-        // the sret pointer — this slice only models INTEGER-leaf sret
-        // buffers, so a mixed-class aggregate stays outside the
+        // A five-leaf result whose INTEGER leaves still fit the three
+        // register slots makes LLVM return the third `f64` leaf
+        // through the x87 register — that path stays outside the
         // profile.
-        let source = "struct BigF { a: i64, b: i64, c: i64, d: i64, e: f64 }\n\
-            atom mk_mixed(x: i64, v: f64) -> BigF requires: true; ensures: true; body: {\n\
-              BigF { a: x, b: x, c: x, d: x, e: v }\n\
+        let source = "struct WideF { a: f64, b: f64, c: f64, d: i64, e: i64 }\n\
+            atom mk_wide(x: i64, v: f64) -> WideF requires: true; ensures: true; body: {\n\
+              WideF { a: v, b: v, c: v, d: x, e: x }\n\
             };";
         let model = source_model_named_with_admission(
             source,
-            "mk_mixed",
+            "mk_wide",
             &context,
             RefinedAdmission::CompositeV23,
         );
@@ -12142,20 +12217,20 @@ entry:
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
         config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
         let context = Context::new(&config);
-        let source = "struct BigF { a: i64, b: i64, c: i64, d: i64, e: f64 }\n\
-            atom mk_mixed(x: i64, v: f64) -> BigF requires: true; ensures: true; body: {\n\
-              BigF { a: x, b: x, c: x, d: x, e: v }\n\
+        // A call result whose third `f64` leaf needs the x87
+        // register stays fail-closed — the `sret` model only covers
+        // INTEGER overflow, not that convention.
+        let source = "struct WideF { a: f64, b: f64, c: f64, d: i64, e: i64 }\n\
+            atom mk_wide(x: i64, v: f64) -> WideF requires: true; ensures: true; body: {\n\
+              WideF { a: v, b: v, c: v, d: x, e: x }\n\
             };\n\
-            atom main(v: f64) -> i64 requires: true; ensures: true; body: { mk_mixed(5, v).a };";
+            atom main(v: f64) -> i64 requires: true; ensures: true; body: { mk_wide(5, v).d };";
         let main_model = source_model_named_with_admission(
             source,
             "main",
             &context,
             RefinedAdmission::CompositeV23,
         );
-        // A mixed-class call result still needs memory-class handling
-        // this slice does not model — the honest failure is
-        // `call_arguments`, so the signature stays fail-closed.
         assert!(!supports_signature(&main_model));
     }
 
@@ -12202,6 +12277,219 @@ entry:
                 &context
             ),
             FunctionOutcome::OutsideProfile("call_arguments")
+        );
+    }
+
+    #[test]
+    fn mixed_class_sret_result_matches_real_llvm_sret_codegen() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // Four INTEGER leaves overflow the register budget, so the
+        // whole aggregate — `f64` leaf included — returns through the
+        // `sret` buffer: real LLVM emits `movq` stores for the INTEGER
+        // leaves and a `movsd` store for the `f64` leaf.
+        let source = "struct BigF { a: i64, b: i64, c: i64, d: i64, e: f64 }\n\
+            atom mk_mixed(x: i64, v: f64) -> BigF requires: true; ensures: true; body: {\n\
+              BigF { a: x + 1, b: x + 2, c: x + 3, d: x + 4, e: v }\n\
+            };\n\
+            atom mk_mixed_b(x: i64, v: f64) -> BigF requires: true; ensures: true; body: {\n\
+              BigF { a: x + 9, b: x + 2, c: x + 3, d: x + 4, e: v }\n\
+            };";
+        let model = source_model_named_with_admission(
+            source,
+            "mk_mixed",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let model_b = source_model_named_with_admission(
+            source,
+            "mk_mixed_b",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(supports_signature(&model));
+        let ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i64, i64, i64, double } @__mumei_user_main(i64 %x, double %v) {
+entry:
+  %a = add i64 %x, 1
+  %b = add i64 %x, 2
+  %c = add i64 %x, 3
+  %d = add i64 %x, 4
+  %s0 = insertvalue { i64, i64, i64, i64, double } undef, i64 %a, 0
+  %s1 = insertvalue { i64, i64, i64, i64, double } %s0, i64 %b, 1
+  %s2 = insertvalue { i64, i64, i64, i64, double } %s1, i64 %c, 2
+  %s3 = insertvalue { i64, i64, i64, i64, double } %s2, i64 %d, 3
+  %s4 = insertvalue { i64, i64, i64, i64, double } %s3, double %v, 4
+  ret { i64, i64, i64, i64, double } %s4
+}
+"#;
+        let (address, bytes, targets) = compiled_function_with_targets(ir, "__mumei_user_main");
+        let disassembly = disassemble(&bytes, address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("mixed sret callee disassembly:\n{disassembly}");
+        assert!(disassembly.contains("movsd"), "expected movsd store");
+        assert_eq!(
+            check_function(&bytes, address, &model, &targets, &context),
+            FunctionOutcome::Equivalent
+        );
+        assert_eq!(
+            check_function(&bytes, address, &model_b, &targets, &context),
+            FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn register_class_five_leaf_result_matches_real_llvm_codegen() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // Three INTEGER and two SSE leaves fit the per-class register
+        // budgets — real LLVM returns the five-leaf aggregate in
+        // `rax`/`rdx`/`rcx` + `xmm0`/`xmm1`, no `sret` pointer.
+        let source = "struct Mix5 { a: i64, b: f64, c: i64, d: f64, e: i64 }\n\
+            atom mk_reg(x: i64, v: f64) -> Mix5 requires: true; ensures: true; body: {\n\
+              Mix5 { a: x + 1, b: v, c: x + 3, d: v, e: x + 5 }\n\
+            };\n\
+            atom main(x: i64, v: f64) -> i64 requires: true; ensures: true; body: {\n\
+              mk_reg(x, v).e\n\
+            };";
+        let model = source_model_named_with_admission(
+            source,
+            "mk_reg",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let main_model = source_model_named_with_admission(
+            source,
+            "main",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(supports_signature(&model));
+        assert!(supports_signature(&main_model));
+        let callee_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, double, i64, double, i64 } @__mumei_user_main(i64 %x, double %v) {
+entry:
+  %a = add i64 %x, 1
+  %c = add i64 %x, 3
+  %e = add i64 %x, 5
+  %s0 = insertvalue { i64, double, i64, double, i64 } undef, i64 %a, 0
+  %s1 = insertvalue { i64, double, i64, double, i64 } %s0, double %v, 1
+  %s2 = insertvalue { i64, double, i64, double, i64 } %s1, i64 %c, 2
+  %s3 = insertvalue { i64, double, i64, double, i64 } %s2, double %v, 3
+  %s4 = insertvalue { i64, double, i64, double, i64 } %s3, i64 %e, 4
+  ret { i64, double, i64, double, i64 } %s4
+}
+"#;
+        let (address, bytes, targets) =
+            compiled_function_with_targets(callee_ir, "__mumei_user_main");
+        assert_eq!(
+            check_function(&bytes, address, &model, &targets, &context),
+            FunctionOutcome::Equivalent
+        );
+
+        // The caller binds all five result leaves back out of the
+        // per-class registers — the fifth INTEGER leaf lands in `rcx`.
+        let caller_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+declare { i64, double, i64, double, i64 } @mk_reg(i64, double)
+define i64 @__mumei_user_main(i64 %x, double %v) {
+entry:
+  %call = call { i64, double, i64, double, i64 } @mk_reg(i64 %x, double %v)
+  %leaf = extractvalue { i64, double, i64, double, i64 } %call, 4
+  ret i64 %leaf
+}
+"#;
+        let (caller_address, caller_bytes, caller_targets) =
+            compiled_function_with_targets(caller_ir, "__mumei_user_main");
+        let caller_disassembly = disassemble(&caller_bytes, caller_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(caller_disassembly.contains("callq"), "{caller_disassembly}");
+        assert_eq!(
+            check_function(
+                &caller_bytes,
+                caller_address,
+                &main_model,
+                &caller_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn mixed_class_call_result_matches_real_llvm_sret_codegen() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // The caller reads the `f64` leaf back out of its own `sret`
+        // buffer with `movsd N(%rsp),%xmm0`.
+        let source = "struct BigF { a: i64, b: i64, c: i64, d: i64, e: f64 }\n\
+            atom mk_mixed(x: i64, v: f64) -> BigF requires: true; ensures: true; body: {\n\
+              BigF { a: x, b: x, c: x, d: x, e: v }\n\
+            };\n\
+            atom main(v: f64) -> f64 requires: true; ensures: true; body: { mk_mixed(5, v).e };\n\
+            atom main_d(v: f64) -> i64 requires: true; ensures: true; body: { mk_mixed(5, v).d };";
+        let main_model = source_model_named_with_admission(
+            source,
+            "main",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let main_d_model = source_model_named_with_admission(
+            source,
+            "main_d",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let main_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+declare { i64, i64, i64, i64, double } @mk_mixed(i64, double)
+define double @__mumei_user_main(double %v) {
+entry:
+  %call = call { i64, i64, i64, i64, double } @mk_mixed(i64 5, double %v)
+  %leaf = extractvalue { i64, i64, i64, i64, double } %call, 4
+  ret double %leaf
+}
+"#;
+        let (main_address, main_bytes, main_targets) =
+            compiled_function_with_targets(main_ir, "__mumei_user_main");
+        let main_disassembly = disassemble(&main_bytes, main_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("mixed sret caller disassembly:\n{main_disassembly}");
+        assert_eq!(
+            check_function(
+                &main_bytes,
+                main_address,
+                &main_model,
+                &main_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+        assert_eq!(
+            check_function(
+                &main_bytes,
+                main_address,
+                &main_d_model,
+                &main_targets,
+                &context
+            ),
+            FunctionOutcome::Different
         );
     }
 }
