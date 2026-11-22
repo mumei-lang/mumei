@@ -369,6 +369,7 @@ pub fn verify_impl_with_options(
             check_i64_overflow: std::cell::Cell::new(false),
 
             local_int_types: Default::default(),
+            refined_operand_types: Default::default(),
         };
 
         let mut env: Env = HashMap::new();

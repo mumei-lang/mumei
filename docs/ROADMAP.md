@@ -2828,6 +2828,9 @@ contract to its certificate obligation, Lean goal and LLVM definition, and
 checks that unsupported specification clauses fail closed. Transformation
 relations are exposed per edge, while formal source-to-LLVM correspondence
 remains open; this is regression coverage only and C03 remains open.
+Refined predicates over `u64` bases compare unsigned; documented v10 literal
+wrapping (`0 - 1` is `u64::MAX` in a `u64` context) is unchanged, and general
+width-aware literal spelling above `i64::MAX` remains open.
 
 WASM remains the existing deferred P7-C item, tracked by
 [C14](https://github.com/mumei-lang/mumei/issues/792); dynamic capability

@@ -50,6 +50,32 @@ impl Drop for LocalArrayElementTypeGuard<'_> {
     }
 }
 
+struct LocalIntTypeGuard<'a> {
+    types: &'a std::cell::RefCell<Vec<(String, &'static str)>>,
+}
+
+impl<'a> LocalIntTypeGuard<'a> {
+    fn for_refined_operand(
+        vc: &'a VCtx<'_>,
+        decl: &crate::parser::ast::RefinedType,
+    ) -> Option<Self> {
+        let base = vc.module_env.resolve_base_type(&decl._base_type);
+        let int_type = fixed_width_int(&base).map(|(ty, _, _)| ty)?;
+        vc.refined_operand_types
+            .borrow_mut()
+            .push((decl.operand.clone(), int_type));
+        Some(Self {
+            types: &vc.refined_operand_types,
+        })
+    }
+}
+
+impl Drop for LocalIntTypeGuard<'_> {
+    fn drop(&mut self) {
+        self.types.borrow_mut().pop();
+    }
+}
+
 fn field_access_chain_text(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Variable(name) => Some(name.clone()),
@@ -675,7 +701,9 @@ fn constant_call_antecedent<'a>(
             let mut refinement_env = call_env.clone();
             refinement_env.insert(decl.operand.clone(), arg.clone());
             let predicate_ast = parse_expression(&decl.predicate_raw);
-            let predicate_value = expr_to_z3(vc, &predicate_ast, &mut refinement_env, None).ok()?;
+            let predicate_value =
+                refined_predicate_to_z3(vc, decl, &predicate_ast, &mut refinement_env, None)
+                    .ok()?;
             terms.push(predicate_value.as_bool()?);
         }
     }
@@ -1495,8 +1523,34 @@ fn expr_struct_type(vc: &VCtx, expr: &Expr) -> Option<String> {
 /// the parameter or local it reads. `None` when nothing declares one
 /// (literals, calls, lengths), which the overflow check treats as `i64`.
 pub(crate) fn fixed_width_int_type(vc: &VCtx, expr: &Expr) -> Option<&'static str> {
+    fixed_width_int_type_in_scope(
+        vc,
+        expr,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+}
+
+fn fixed_width_int_type_in_scope(
+    vc: &VCtx,
+    expr: &Expr,
+    local_types: &std::collections::HashMap<String, Option<&'static str>>,
+    local_struct_types: &std::collections::HashMap<String, String>,
+) -> Option<&'static str> {
     match expr {
         Expr::Variable(name) => {
+            if let Some(ty) = local_types.get(name) {
+                return *ty;
+            }
+            if let Some((_, ty)) = vc
+                .refined_operand_types
+                .borrow()
+                .iter()
+                .rev()
+                .find(|(operand, _)| operand == name)
+            {
+                return Some(*ty);
+            }
             // Inside an instantiated callee contract (`ensures`/`requires`
             // evaluated in `call_env`) names bind to the callee's signature,
             // not the caller's: `result` is the callee's return value and a
@@ -1528,25 +1582,55 @@ pub(crate) fn fixed_width_int_type(vc: &VCtx, expr: &Expr) -> Option<&'static st
                 .resolve_base_type(atom.return_type.as_deref()?);
             fixed_width_int(&base).map(|(ty, _, _)| ty)
         }
-        Expr::BinaryOp(l, Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Rem, r) => {
-            fixed_width_int_type(vc, l).or_else(|| fixed_width_int_type(vc, r))
-        }
+        Expr::BinaryOp(
+            l,
+            Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Rem
+            | Op::BitAnd
+            | Op::BitOr
+            | Op::BitXor
+            | Op::Shl
+            | Op::Shr,
+            r,
+        ) => fixed_width_int_type_in_scope(vc, l, local_types, local_struct_types)
+            .or_else(|| fixed_width_int_type_in_scope(vc, r, local_types, local_struct_types)),
         Expr::IfThenElse {
             then_branch,
             else_branch,
             ..
-        } => stmt_tail_int_type(vc, then_branch).or_else(|| stmt_tail_int_type(vc, else_branch)),
+        } => stmt_tail_int_type(vc, then_branch, local_types, local_struct_types)
+            .or_else(|| stmt_tail_int_type(vc, else_branch, local_types, local_struct_types)),
+        Expr::Block(stmt) => stmt_tail_int_type(vc, stmt, local_types, local_struct_types),
         Expr::FieldAccess(inner, field) => {
             // Preserve the declared width through nested structs and named
             // enum payloads, not only fields whose receiver is a struct.
-            let declared = datatype::declared_type_of_expr(vc, expr).or_else(|| {
-                let ty = expr_struct_type(vc, inner)?;
-                let sdef = vc.module_env.get_struct(&ty)?;
-                sdef.fields
-                    .iter()
-                    .find(|candidate| candidate.name == *field)
-                    .map(|candidate| candidate.type_name.clone())
-            })?;
+            let scoped_declared = match inner.as_ref() {
+                Expr::Variable(name) => local_struct_types.get(name).and_then(|type_name| {
+                    let resolved = vc.module_env.resolve_base_type(type_name);
+                    let sdef = vc.module_env.get_struct(&resolved).or_else(|| {
+                        vc.module_env
+                            .get_struct(datatype::type_name_base(&resolved))
+                    })?;
+                    sdef.fields
+                        .iter()
+                        .find(|candidate| candidate.name == *field)
+                        .map(|candidate| candidate.type_name.clone())
+                }),
+                _ => None,
+            };
+            let declared = scoped_declared
+                .or_else(|| datatype::declared_type_of_expr(vc, expr))
+                .or_else(|| {
+                    let ty = expr_struct_type(vc, inner)?;
+                    let sdef = vc.module_env.get_struct(&ty)?;
+                    sdef.fields
+                        .iter()
+                        .find(|candidate| candidate.name == *field)
+                        .map(|candidate| candidate.type_name.clone())
+                })?;
             let base = vc.module_env.resolve_base_type(&declared);
             fixed_width_int(&base).map(|(ty, _, _)| ty)
         }
@@ -1554,10 +1638,40 @@ pub(crate) fn fixed_width_int_type(vc: &VCtx, expr: &Expr) -> Option<&'static st
     }
 }
 
-fn stmt_tail_int_type(vc: &VCtx, stmt: &Stmt) -> Option<&'static str> {
+fn stmt_tail_int_type(
+    vc: &VCtx,
+    stmt: &Stmt,
+    local_types: &std::collections::HashMap<String, Option<&'static str>>,
+    local_struct_types: &std::collections::HashMap<String, String>,
+) -> Option<&'static str> {
     match stmt {
-        Stmt::Expr(e, _) => fixed_width_int_type(vc, e),
-        Stmt::Block(stmts, _) => stmts.last().and_then(|s| stmt_tail_int_type(vc, s)),
+        Stmt::Expr(e, _) => fixed_width_int_type_in_scope(vc, e, local_types, local_struct_types),
+        Stmt::Block(stmts, _) => {
+            let (tail, preceding) = stmts.split_last()?;
+            let mut scoped_types = local_types.clone();
+            let mut scoped_struct_types = local_struct_types.clone();
+            for stmt in preceding {
+                if let Stmt::Let { var, value, .. } = stmt {
+                    let ty = fixed_width_int_type_in_scope(
+                        vc,
+                        value,
+                        &scoped_types,
+                        &scoped_struct_types,
+                    );
+                    scoped_types.insert(var.clone(), ty);
+                    let struct_type = match value.as_ref() {
+                        Expr::StructInit { type_name, .. } => Some(type_name.clone()),
+                        _ => expr_struct_type(vc, value),
+                    };
+                    if let Some(struct_type) = struct_type {
+                        scoped_struct_types.insert(var.clone(), struct_type);
+                    } else {
+                        scoped_struct_types.remove(var);
+                    }
+                }
+            }
+            stmt_tail_int_type(vc, tail, &scoped_types, &scoped_struct_types)
+        }
         _ => None,
     }
 }
@@ -2876,6 +2990,192 @@ fn read_struct_array_field<'a>(
     Ok(Some(selected))
 }
 
+fn refined_predicate_rebinds_operand(expr: &Expr, operand: &str) -> bool {
+    expr.rebinds_name(operand) || predicate_contains_shadowing_binder(expr, operand)
+}
+
+fn predicate_pattern_binds_operand(pattern: &crate::parser::ast::Pattern, operand: &str) -> bool {
+    match pattern {
+        crate::parser::ast::Pattern::Variable(name) => name == operand,
+        crate::parser::ast::Pattern::Variant { fields, .. } => fields
+            .iter()
+            .any(|field| predicate_pattern_binds_operand(field, operand)),
+        crate::parser::ast::Pattern::Wildcard | crate::parser::ast::Pattern::Literal(_) => false,
+    }
+}
+
+fn predicate_contains_shadowing_binder(expr: &Expr, operand: &str) -> bool {
+    match expr {
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => false,
+        Expr::ArrayLit(elements) => elements
+            .iter()
+            .any(|element| predicate_contains_shadowing_binder(element, operand)),
+        Expr::ArrayAccess(_, index) => predicate_contains_shadowing_binder(index, operand),
+        Expr::BinaryOp(left, _, right) => {
+            predicate_contains_shadowing_binder(left, operand)
+                || predicate_contains_shadowing_binder(right, operand)
+        }
+        Expr::Block(stmt) => stmt_contains_shadowing_binder(stmt, operand),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            predicate_contains_shadowing_binder(cond, operand)
+                || stmt_contains_shadowing_binder(then_branch, operand)
+                || stmt_contains_shadowing_binder(else_branch, operand)
+        }
+        Expr::Call(name, args) => {
+            (matches!(name.as_str(), "forall" | "exists")
+                && args
+                    .first()
+                    .is_some_and(|arg| matches!(arg, Expr::Variable(bound) if bound == operand)))
+                || args
+                    .iter()
+                    .any(|arg| predicate_contains_shadowing_binder(arg, operand))
+        }
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| predicate_contains_shadowing_binder(value, operand)),
+        Expr::FieldAccess(inner, _) => predicate_contains_shadowing_binder(inner, operand),
+        Expr::Match { target, arms } => {
+            predicate_contains_shadowing_binder(target, operand)
+                || arms.iter().any(|arm| {
+                    predicate_pattern_binds_operand(&arm.pattern, operand)
+                        || arm.guard.as_ref().is_some_and(|guard| {
+                            predicate_contains_shadowing_binder(guard, operand)
+                        })
+                        || stmt_contains_shadowing_binder(&arm.body, operand)
+                })
+        }
+        Expr::Async { body } => stmt_contains_shadowing_binder(body, operand),
+        Expr::Lambda { params, body, .. } => {
+            params.iter().any(|param| param.name == operand)
+                || stmt_contains_shadowing_binder(body, operand)
+        }
+        Expr::Await { expr } => predicate_contains_shadowing_binder(expr, operand),
+        Expr::CallRef { callee, args } => {
+            predicate_contains_shadowing_binder(callee, operand)
+                || args
+                    .iter()
+                    .any(|arg| predicate_contains_shadowing_binder(arg, operand))
+        }
+        Expr::Perform { args, .. } => args
+            .iter()
+            .any(|arg| predicate_contains_shadowing_binder(arg, operand)),
+        Expr::ChanSend { channel, value } => {
+            predicate_contains_shadowing_binder(channel, operand)
+                || predicate_contains_shadowing_binder(value, operand)
+        }
+        Expr::ChanRecv { channel } => predicate_contains_shadowing_binder(channel, operand),
+    }
+}
+
+fn stmt_contains_shadowing_binder(stmt: &Stmt, operand: &str) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            predicate_contains_shadowing_binder(value, operand)
+        }
+        Stmt::ArrayStore { index, value, .. } => {
+            predicate_contains_shadowing_binder(index, operand)
+                || predicate_contains_shadowing_binder(value, operand)
+        }
+        Stmt::Block(stmts, _) => stmts
+            .iter()
+            .any(|stmt| stmt_contains_shadowing_binder(stmt, operand)),
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            predicate_contains_shadowing_binder(cond, operand)
+                || predicate_contains_shadowing_binder(invariant, operand)
+                || decreases.as_ref().is_some_and(|decreases| {
+                    predicate_contains_shadowing_binder(decreases, operand)
+                })
+                || stmt_contains_shadowing_binder(body, operand)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            stmt_contains_shadowing_binder(body, operand)
+        }
+        Stmt::TaskGroup { children, .. } => children
+            .iter()
+            .any(|child| stmt_contains_shadowing_binder(child, operand)),
+        Stmt::Cancel { .. } => false,
+        Stmt::Expr(expr, _) => predicate_contains_shadowing_binder(expr, operand),
+    }
+}
+
+pub(crate) fn refined_predicate_to_z3<'a>(
+    vc: &VCtx<'a>,
+    decl: &crate::parser::ast::RefinedType,
+    expr: &Expr,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> DynResult<'a> {
+    let base = vc.module_env.resolve_base_type(&decl._base_type);
+    if fixed_width_int(&base).is_some_and(|ty| ty.0 == "u64")
+        && refined_predicate_rebinds_operand(expr, &decl.operand)
+    {
+        return Err(MumeiError::type_error_at(
+            format!(
+                "Refinement predicate for '{}' rebinds its operand '{}'",
+                decl.name, decl.operand
+            ),
+            decl.span.clone(),
+        )
+        .with_help("Rename the inner binding"));
+    }
+    let _guard = LocalIntTypeGuard::for_refined_operand(vc, decl);
+    expr_to_z3(vc, expr, env, solver_opt)
+}
+
+#[cfg(test)]
+mod refined_predicate_rebinding_tests {
+    use super::refined_predicate_rebinds_operand;
+    use crate::parser::ast::{Expr, MatchArm, Pattern, Span, Stmt};
+
+    #[test]
+    fn finds_local_quantifier_and_match_bindings() {
+        let local_binding = Expr::Block(Box::new(Stmt::Let {
+            var: "v".to_string(),
+            value: Box::new(Expr::Number(-1)),
+            span: Span::default(),
+        }));
+        assert!(refined_predicate_rebinds_operand(&local_binding, "v"));
+
+        let quantifier = Expr::Call(
+            "forall".to_string(),
+            vec![
+                Expr::Variable("v".to_string()),
+                Expr::Number(0),
+                Expr::Number(1),
+                Expr::Number(1),
+            ],
+        );
+        assert!(refined_predicate_rebinds_operand(&quantifier, "v"));
+
+        let match_binding = Expr::Match {
+            target: Box::new(Expr::Number(0)),
+            arms: vec![MatchArm {
+                pattern: Pattern::Variant {
+                    variant_name: "Some".to_string(),
+                    fields: vec![Pattern::Variable("v".to_string())],
+                },
+                guard: None,
+                body: Box::new(Stmt::Expr(Expr::Number(0), Span::default())),
+            }],
+        };
+        assert!(refined_predicate_rebinds_operand(&match_binding, "v"));
+    }
+}
+
 pub(crate) fn expr_to_z3<'a>(
     vc: &VCtx<'a>,
     expr: &Expr,
@@ -3722,10 +4022,14 @@ pub(crate) fn expr_to_z3<'a>(
                                         let mut local_env = call_env.clone();
                                         local_env.insert(decl.operand.clone(), arg_z3.clone());
                                         let pred_ast = parse_expression(&decl.predicate_raw);
-                                        let Some(pred_bool) =
-                                            expr_to_z3(vc, &pred_ast, &mut local_env, None)?
-                                                .as_bool()
-                                        else {
+                                        let Some(pred_bool) = refined_predicate_to_z3(
+                                            vc,
+                                            decl,
+                                            &pred_ast,
+                                            &mut local_env,
+                                            None,
+                                        )?
+                                        .as_bool() else {
                                             continue;
                                         };
                                         if vc.cover_obligations.is_some() {
@@ -4138,10 +4442,14 @@ pub(crate) fn expr_to_z3<'a>(
                                         let mut local_env = call_env.clone();
                                         local_env.insert(decl.operand.clone(), result_z3.clone());
                                         let pred_ast = parse_expression(&decl.predicate_raw);
-                                        let Some(pred_bool) =
-                                            expr_to_z3(vc, &pred_ast, &mut local_env, None)?
-                                                .as_bool()
-                                        else {
+                                        let Some(pred_bool) = refined_predicate_to_z3(
+                                            vc,
+                                            decl,
+                                            &pred_ast,
+                                            &mut local_env,
+                                            None,
+                                        )?
+                                        .as_bool() else {
                                             continue;
                                         };
                                         if let Some(solver) = solver_opt {
@@ -4471,10 +4779,14 @@ pub(crate) fn expr_to_z3<'a>(
                                         let mut local_env = env.clone();
                                         local_env.insert(decl.operand.clone(), arg_z3.clone());
                                         let predicate_ast = parse_expression(&decl.predicate_raw);
-                                        let Some(pred_bool) =
-                                            expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
-                                                .as_bool()
-                                        else {
+                                        let Some(pred_bool) = refined_predicate_to_z3(
+                                            vc,
+                                            decl,
+                                            &predicate_ast,
+                                            &mut local_env,
+                                            None,
+                                        )?
+                                        .as_bool() else {
                                             continue;
                                         };
                                         if vc.cover_obligations.is_some() {
@@ -5825,10 +6137,14 @@ pub(crate) fn expr_to_z3<'a>(
                                     let mut local_env = arm_env.clone();
                                     local_env.insert(decl.operand.clone(), bound.clone());
                                     let predicate_ast = parse_expression(&decl.predicate_raw);
-                                    let Some(predicate_z3) =
-                                        expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
-                                            .as_bool()
-                                    else {
+                                    let Some(predicate_z3) = refined_predicate_to_z3(
+                                        vc,
+                                        decl,
+                                        &predicate_ast,
+                                        &mut local_env,
+                                        None,
+                                    )?
+                                    .as_bool() else {
                                         continue;
                                     };
                                     solver.assert(&arm_cond.implies(&predicate_z3));
@@ -6491,9 +6807,14 @@ pub(crate) fn expr_to_z3<'a>(
                                     let mut local_env = call_env.clone();
                                     local_env.insert(decl.operand.clone(), arg_z3.clone());
                                     let pred_ast = parse_expression(&decl.predicate_raw);
-                                    let Some(pred_bool) =
-                                        expr_to_z3(vc, &pred_ast, &mut local_env, None)?.as_bool()
-                                    else {
+                                    let Some(pred_bool) = refined_predicate_to_z3(
+                                        vc,
+                                        decl,
+                                        &pred_ast,
+                                        &mut local_env,
+                                        None,
+                                    )?
+                                    .as_bool() else {
                                         continue;
                                     };
                                     solver.push();
@@ -6736,9 +7057,14 @@ pub(crate) fn expr_to_z3<'a>(
                                     let mut local_env = call_env.clone();
                                     local_env.insert(decl.operand.clone(), result_z3.clone());
                                     let pred_ast = parse_expression(&decl.predicate_raw);
-                                    let Some(pred_bool) =
-                                        expr_to_z3(vc, &pred_ast, &mut local_env, None)?.as_bool()
-                                    else {
+                                    let Some(pred_bool) = refined_predicate_to_z3(
+                                        vc,
+                                        decl,
+                                        &pred_ast,
+                                        &mut local_env,
+                                        None,
+                                    )?
+                                    .as_bool() else {
                                         continue;
                                     };
                                     if let Some(solver) = solver_opt {

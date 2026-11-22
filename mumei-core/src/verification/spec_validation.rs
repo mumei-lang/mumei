@@ -569,6 +569,7 @@ pub(crate) fn validation_ctx<'a>(
         check_i64_overflow: std::cell::Cell::new(false),
 
         local_int_types: Default::default(),
+        refined_operand_types: Default::default(),
     }
 }
 

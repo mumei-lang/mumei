@@ -207,6 +207,7 @@ pub(crate) struct VCtx<'a> {
     /// bound locals, so `--check-i64-overflow` checks arithmetic on them
     /// against their own range rather than `i64`.
     pub(crate) local_int_types: std::cell::RefCell<std::collections::HashMap<String, &'static str>>,
+    pub(crate) refined_operand_types: std::cell::RefCell<Vec<(String, &'static str)>>,
     /// Clause booleans asserted so far during spec validation, in source
     /// order. Deferred obligations are conditioned on the clauses already in
     /// scope so a bound in one conjunct (`result <= 62`) discharges a shift
