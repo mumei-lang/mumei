@@ -1019,7 +1019,7 @@ pub(crate) fn register_imported_alias_names(
             Item::ResourceDef(resource_def) => {
                 let mut fqn_resource = resource_def.clone();
                 fqn_resource.name = format!("{}::{}", alias, resource_def.name);
-                module_env.register_resource_with_origin(&fqn_resource, source_file);
+                module_env.register_resource_with_origin(&fqn_resource, None);
             }
             Item::EffectDef(effect_def) => {
                 let mut fqn_effect = effect_def.clone();
