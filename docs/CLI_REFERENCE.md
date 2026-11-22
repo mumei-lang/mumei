@@ -45,7 +45,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei native-bundle accept-stderr` | 2 | Accept the pinned artifact after the stderr recheck; emits an anonymous acceptance descriptor, not reusable Evidence |
 | `mumei native-bundle recheck-observations` | 2 | Execute the reproduced executable once and compare its exit status, stdout and stderr with every record pin; no runtime/ABI semantics |
 | `mumei native-bundle accept-observations` | 2 | Accept the artifact chain plus one invocation of the reproduced executable matching every runtime-observation pin; no runtime/ABI semantics |
-| `mumei build` | 5 | Verify + compile to LLVM IR (default) |
+| `mumei build` | 6 | Verify + compile to LLVM IR (default) |
 | `mumei verify` | 38 | Z3 formal verification only (no codegen) |
 | `mumei config` | 2 | Show effective settings and where each value comes from. The CLI `--profile` is per-invocation; `mumei config` only reports the manifest source. |
 | `mumei proof-store` | 0 | Inspect or prune the local proof store |
@@ -931,6 +931,7 @@ Usage: mumei build [OPTIONS] <INPUT>
 |---|---|---|---|
 | `-o, --output <OUTPUT>` | katana | — | Output base name |
 | `--emit <EMIT>` | llvm-ir | — | Emit target: llvm-ir (default), c-header, verified-json, decidable-metrics, proof-book, proof-cert, escalation-bundle, rust-wrapper, python-wrapper, runtime-monitor |
+| `--semantic-contract` | false | — | Write a <stem>.semantic-contract.json sidecar (C03 pure-i64 profile; hash binding only, correspondence unchecked) |
 | `--strict-imports` | false | — | P5-C: Strict import mode — missing/invalid certificates cause hard errors |
 | `--allow-lean-verified` | false | — | PR 2: Accept mumei-lean-emitted certificates (`z3_check_result == "lean_verified"`) as proven during import resolution. Off by default for backwards compatibility — the resolver only trusts Z3-discharged (`unsat`) atoms unless this flag is set |
 | `--proof-store` | false | — | Reuse Z3-verified proofs from the opt-in local proof store |

@@ -615,6 +615,11 @@ edges; the LLVM edge remains unchecked, while C09's opt-in
 `native-bundle recheck-llvm` is a separate check. Unsupported constructs still
 fail closed, and no edge is labeled lossy.
 
+The opt-in `mumei build --semantic-contract` path writes a sidecar beside
+emitted LLVM IR, using the CompositeV24 module profile. Its SHA-256 binds the
+exact `.ll` bytes only; correspondence remains unchecked, no consumer accepts
+the sidecar yet, and it is not emitted by default.
+
 An optional `requested_target_triple` is a caller request, never a binding to
 emitted code or a capability/availability claim. `None` serializes as null. The
 existing LLVM-IR emitter does not bind a target triple in the emitted module;
