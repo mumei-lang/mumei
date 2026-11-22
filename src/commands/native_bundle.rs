@@ -2972,6 +2972,8 @@ struct ObjectRecheckData {
     object_link_correspondence: bool,
     llvm_bytes: Vec<u8>,
     object_bytes: Vec<u8>,
+    executable_bytes: Vec<u8>,
+    object_translation: Option<ObjectTranslationRecord>,
     resolved_call_sites: usize,
     source_text: Option<String>,
 }
@@ -2990,7 +2992,9 @@ struct ObjectFunctionRange {
 }
 
 struct ObjectLinkFunction {
+    name: String,
     section: object::SectionIndex,
+    section_name: String,
     object_address: u64,
     object_size: u64,
     executable_address: u64,
@@ -3000,9 +3004,73 @@ struct ObjectLinkFunction {
 
 struct ObjectLinkRelocation {
     function_index: usize,
+    section_name: String,
+    offset_in_section: u64,
     offset: usize,
+    kind: &'static str,
     target: String,
     addend: i64,
+    resolved_value: Option<i64>,
+}
+
+/// Metadata-only record of the LLVM-IR -> object -> linked-executable
+/// correspondence, emitted so consumers can inspect the translation
+/// without any equivalence being claimed on it (Step 1 of
+/// docs/DESIGN_OBJECT_TRANSLATION_CORRESPONDENCE.md).
+#[derive(Debug, Clone)]
+struct ObjectTranslationRecord {
+    functions: Vec<ObjectFunctionRecord>,
+    relocations: Vec<ObjectRelocationRecord>,
+}
+
+#[derive(Debug, Clone)]
+struct ObjectFunctionRecord {
+    ir_function: String,
+    object_symbol: String,
+    object_section: String,
+    object_offset: u64,
+    object_size: u64,
+    executable_address: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct ObjectRelocationRecord {
+    object_section: String,
+    object_offset: u64,
+    kind: &'static str,
+    target_symbol: String,
+    addend: i64,
+    resolved_value: Option<i64>,
+}
+
+fn object_translation_record(
+    functions: &[ObjectLinkFunction],
+    relocations: &[ObjectLinkRelocation],
+) -> ObjectTranslationRecord {
+    ObjectTranslationRecord {
+        functions: functions
+            .iter()
+            .map(|function| ObjectFunctionRecord {
+                ir_function: function.name.clone(),
+                object_symbol: function.name.clone(),
+                object_section: function.section_name.clone(),
+                object_offset: function.object_address,
+                object_size: function.object_size,
+                executable_address: Some(function.executable_address),
+            })
+            .collect(),
+        relocations: relocations
+            .iter()
+            .map(|relocation| ObjectRelocationRecord {
+                object_section: relocation.section_name.clone(),
+                object_offset: relocation.offset_in_section,
+                kind: relocation.kind,
+                target_symbol: relocation.target.clone(),
+                addend: relocation.addend,
+                resolved_value: relocation.resolved_value,
+            })
+            .collect(),
+    }
 }
 
 fn object_symbol_surface(bytes: &[u8]) -> Result<ObjectSymbolSurface, ()> {
@@ -3179,7 +3247,7 @@ fn object_call_edges_correspond(
 fn object_link_corresponds(
     object_bytes: &[u8],
     executable_bytes: &[u8],
-) -> Result<Option<(bool, usize)>, ()> {
+) -> Result<Option<(bool, usize, ObjectTranslationRecord)>, ()> {
     let object_file = object::File::parse(object_bytes).map_err(|_| ())?;
     let executable_file = object::File::parse(executable_bytes).map_err(|_| ())?;
     if object_file.format() != BinaryFormat::Elf
@@ -3269,7 +3337,7 @@ fn object_link_corresponds(
             return Ok(None);
         }
         if object_size != executable_size {
-            return Ok(Some((false, 0)));
+            return Ok(Some((false, 0, object_translation_record(&functions, &[]))));
         }
 
         if functions.iter().any(|function: &ObjectLinkFunction| {
@@ -3280,8 +3348,11 @@ fn object_link_corresponds(
             return Ok(None);
         }
         executable_addresses.insert(name.to_owned(), executable_address);
+        let section_name = object_section.name().unwrap_or_default().to_owned();
         functions.push(ObjectLinkFunction {
+            name: name.to_owned(),
             section: section_index,
+            section_name,
             object_address: symbol.address(),
             object_size,
             executable_address,
@@ -3357,31 +3428,52 @@ fn object_link_corresponds(
             if field_end > function_size {
                 return Ok(None);
             }
+            let section_name = section.name().unwrap_or_default().to_owned();
+            let kind = match relocation.flags() {
+                RelocationFlags::Elf { r_type } if r_type == object::elf::R_X86_64_PLT32 => {
+                    "R_X86_64_PLT32"
+                }
+                RelocationFlags::Elf { r_type } if r_type == object::elf::R_X86_64_PC32 => {
+                    "R_X86_64_PC32"
+                }
+                _ => "other",
+            };
             relocations.push(ObjectLinkRelocation {
                 function_index,
+                section_name,
+                offset_in_section: offset,
                 offset: relative_offset,
+                kind,
                 target: target_name.to_owned(),
                 addend: relocation.addend(),
+                resolved_value: None,
             });
         }
     }
 
     let mut resolved_call_sites = 0;
     for (function_index, function) in functions.iter().enumerate() {
-        let mut function_relocations: Vec<_> = relocations
+        let mut function_relocations: Vec<usize> = relocations
             .iter()
-            .filter(|relocation| relocation.function_index == function_index)
+            .enumerate()
+            .filter(|(_, relocation)| relocation.function_index == function_index)
+            .map(|(index, _)| index)
             .collect();
-        function_relocations.sort_by_key(|relocation| relocation.offset);
+        function_relocations.sort_by_key(|index| relocations[*index].offset);
         let mut compared_through = 0;
-        for relocation in function_relocations {
+        for relocation_index in function_relocations {
+            let relocation = &relocations[relocation_index];
             if relocation.offset < compared_through {
                 return Ok(None);
             }
             if function.object_bytes[compared_through..relocation.offset]
                 != function.executable_bytes[compared_through..relocation.offset]
             {
-                return Ok(Some((false, resolved_call_sites)));
+                return Ok(Some((
+                    false,
+                    resolved_call_sites,
+                    object_translation_record(&functions, &relocations),
+                )));
             }
             let field_end = relocation.offset + 4;
             let Some(target_address) = executable_addresses.get(&relocation.target).copied() else {
@@ -3392,22 +3484,42 @@ fn object_link_corresponds(
             };
             let Some(place_address) = function.executable_address.checked_add(relative_offset)
             else {
-                return Ok(Some((false, resolved_call_sites)));
+                return Ok(Some((
+                    false,
+                    resolved_call_sites,
+                    object_translation_record(&functions, &relocations),
+                )));
             };
             let Ok(target_address) = i64::try_from(target_address) else {
-                return Ok(Some((false, resolved_call_sites)));
+                return Ok(Some((
+                    false,
+                    resolved_call_sites,
+                    object_translation_record(&functions, &relocations),
+                )));
             };
             let Ok(place_address) = i64::try_from(place_address) else {
-                return Ok(Some((false, resolved_call_sites)));
+                return Ok(Some((
+                    false,
+                    resolved_call_sites,
+                    object_translation_record(&functions, &relocations),
+                )));
             };
             let Some(resolved_value) = target_address
                 .checked_add(relocation.addend)
                 .and_then(|value| value.checked_sub(place_address))
             else {
-                return Ok(Some((false, resolved_call_sites)));
+                return Ok(Some((
+                    false,
+                    resolved_call_sites,
+                    object_translation_record(&functions, &relocations),
+                )));
             };
             let Ok(resolved_value) = i32::try_from(resolved_value) else {
-                return Ok(Some((false, resolved_call_sites)));
+                return Ok(Some((
+                    false,
+                    resolved_call_sites,
+                    object_translation_record(&functions, &relocations),
+                )));
             };
             let Some(actual_bytes) = function.executable_bytes.get(relocation.offset..field_end)
             else {
@@ -3418,18 +3530,31 @@ fn object_link_corresponds(
             };
             let actual_value = i32::from_le_bytes(actual_bytes);
             if actual_value != resolved_value {
-                return Ok(Some((false, resolved_call_sites)));
+                return Ok(Some((
+                    false,
+                    resolved_call_sites,
+                    object_translation_record(&functions, &relocations),
+                )));
             }
+            relocations[relocation_index].resolved_value = Some(i64::from(resolved_value));
             compared_through = field_end;
             resolved_call_sites += 1;
         }
         if function.object_bytes[compared_through..]
             != function.executable_bytes[compared_through..]
         {
-            return Ok(Some((false, resolved_call_sites)));
+            return Ok(Some((
+                false,
+                resolved_call_sites,
+                object_translation_record(&functions, &relocations),
+            )));
         }
     }
-    Ok(Some((true, resolved_call_sites)))
+    Ok(Some((
+        true,
+        resolved_call_sites,
+        object_translation_record(&functions, &relocations),
+    )))
 }
 
 fn recheck_object_pipeline(
@@ -3508,10 +3633,12 @@ fn recheck_object_pipeline(
                 ));
         }
     };
-    let (object_link_correspondence, link_corresponds, resolved_call_sites) =
+    let (object_link_correspondence, link_corresponds, resolved_call_sites, object_translation) =
         match object_link_corresponds(&object_bytes, &executable) {
-            Ok(Some((corresponds, resolved))) => (true, corresponds, resolved),
-            Ok(None) | Err(()) if allow_uncheckable_object_link => (false, true, 0),
+            Ok(Some((corresponds, resolved, record))) => {
+                (true, corresponds, resolved, Some(record))
+            }
+            Ok(None) | Err(()) if allow_uncheckable_object_link => (false, true, 0, None),
             Ok(None) | Err(()) => {
                 return Ok(ObjectRecheckPipeline::Inconclusive(
                     "Native object link correspondence inconclusive; linked function bytes or call targets are not checkable.",
@@ -3534,6 +3661,8 @@ fn recheck_object_pipeline(
             object_link_correspondence,
             llvm_bytes: ir,
             object_bytes,
+            executable_bytes: executable,
+            object_translation,
             resolved_call_sites,
             source_text,
         },
@@ -4275,6 +4404,7 @@ fn write_machine_tv(
             ),
             "input_domain": evaluation.input_domain,
             "functions": evaluation.functions,
+            "object_translation": object_translation_json(&data),
             "checks_performed": checks_performed,
             "checks_not_performed": checks_not_performed,
         });
@@ -4303,6 +4433,184 @@ fn write_machine_tv(
         );
         Ok(())
     }
+}
+
+/// Step 1 of docs/DESIGN_OBJECT_TRANSLATION_CORRESPONDENCE.md: emit the
+/// object-stage translation record as metadata only. The relations keep
+/// `unchecked_not_translation_validated` (or the honest link-check name)
+/// — no promotion is claimed here.
+/// Best-effort parse of the object/executable pair for the metadata
+/// record. Unlike `object_link_corresponds` it never bails on
+/// uncheckable details: it lists every defined text symbol and every
+/// text-section relocation it finds, leaving `executable_address` /
+/// `resolved_value` empty when they cannot be computed.
+fn object_translation_parse(
+    object_bytes: &[u8],
+    executable_bytes: &[u8],
+) -> ObjectTranslationRecord {
+    let mut record = ObjectTranslationRecord {
+        functions: Vec::new(),
+        relocations: Vec::new(),
+    };
+    let (Ok(object_file), Ok(executable_file)) = (
+        object::File::parse(object_bytes),
+        object::File::parse(executable_bytes),
+    ) else {
+        return record;
+    };
+    let mut executable_symbols = BTreeMap::<String, Vec<u64>>::new();
+    for symbol in executable_file.symbols() {
+        if symbol.is_global() && symbol.is_definition() && symbol.kind() == SymbolKind::Text {
+            if let Ok(name) = symbol.name() {
+                executable_symbols
+                    .entry(name.to_owned())
+                    .or_default()
+                    .push(symbol.address());
+            }
+        }
+    }
+    let executable_address_of = |name: &str| -> Option<u64> {
+        executable_symbols
+            .get(name)
+            .filter(|addresses| addresses.len() == 1)
+            .map(|addresses| addresses[0])
+    };
+    for symbol in object_file.symbols() {
+        if !symbol.is_global() || !symbol.is_definition() || symbol.kind() != SymbolKind::Text {
+            continue;
+        }
+        let Ok(name) = symbol.name() else {
+            continue;
+        };
+        let section_name = symbol
+            .section_index()
+            .and_then(|index| object_file.section_by_index(index).ok())
+            .and_then(|section| section.name().ok())
+            .unwrap_or_default()
+            .to_owned();
+        record.functions.push(ObjectFunctionRecord {
+            ir_function: name.to_owned(),
+            object_symbol: name.to_owned(),
+            object_section: section_name,
+            object_offset: symbol.address(),
+            object_size: symbol.size(),
+            executable_address: executable_address_of(name),
+        });
+    }
+    for section in object_file.sections() {
+        if section.kind() != SectionKind::Text {
+            continue;
+        }
+        let section_name = section.name().unwrap_or_default().to_owned();
+        for (offset, relocation) in section.relocations() {
+            let kind = match relocation.flags() {
+                RelocationFlags::Elf { r_type } if r_type == object::elf::R_X86_64_PLT32 => {
+                    "R_X86_64_PLT32"
+                }
+                RelocationFlags::Elf { r_type } if r_type == object::elf::R_X86_64_PC32 => {
+                    "R_X86_64_PC32"
+                }
+                _ => "other",
+            };
+            let RelocationTarget::Symbol(symbol_index) = relocation.target() else {
+                continue;
+            };
+            let Ok(target) = object_file.symbol_by_index(symbol_index) else {
+                continue;
+            };
+            let Ok(target_name) = target.name() else {
+                continue;
+            };
+            // resolved_value is the ELF pc-relative formula value
+            // (target + addend - place); it needs the target's linked
+            // address and the containing function's linked address.
+            let resolved_value = executable_address_of(target_name).and_then(|target_address| {
+                let function = record.functions.iter().find(|function| {
+                    function.object_section == section_name
+                        && function.object_offset <= offset
+                        && offset < function.object_offset + function.object_size
+                })?;
+                let relative = offset.checked_sub(function.object_offset)?;
+                let place = function.executable_address?.checked_add(relative)?;
+                i64::try_from(target_address)
+                    .ok()?
+                    .checked_add(relocation.addend())?
+                    .checked_sub(i64::try_from(place).ok()?)
+            });
+            record.relocations.push(ObjectRelocationRecord {
+                object_section: section_name.clone(),
+                object_offset: offset,
+                kind,
+                target_symbol: target_name.to_owned(),
+                addend: relocation.addend(),
+                resolved_value,
+            });
+        }
+    }
+    record
+}
+
+fn object_translation_json(data: &ObjectRecheckData) -> serde_json::Value {
+    let record = data
+        .object_translation
+        .clone()
+        .unwrap_or_else(|| object_translation_parse(&data.object_bytes, &data.executable_bytes));
+    let object_sha256 = {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(&data.object_bytes))
+    };
+    let executable_sha256 = {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(&data.executable_bytes))
+    };
+    let link_validation = if data.object_link_correspondence {
+        "checked_object_link_correspondence"
+    } else {
+        "unchecked_not_translation_validated"
+    };
+    serde_json::json!({
+        "status": "metadata_only",
+        "transformations": [
+            {
+                "from": "llvm_ir",
+                "to": "object_code",
+                "relation": "llc_instruction_selection_register_allocation",
+                "output_identity": object_sha256,
+                "validation": "unchecked_not_translation_validated",
+            },
+            {
+                "from": "object_code",
+                "to": "linked_executable",
+                "relation": "static_link_relocation_placement",
+                "output_identity": executable_sha256,
+                "validation": link_validation,
+            },
+        ],
+        "functions": record
+            .functions
+            .iter()
+            .map(|function| serde_json::json!({
+                "ir_function": function.ir_function,
+                "object_symbol": function.object_symbol,
+                "object_section": function.object_section,
+                "object_offset": function.object_offset,
+                "object_size": function.object_size,
+                "executable_address": function.executable_address,
+            }))
+            .collect::<Vec<_>>(),
+        "relocations": record
+            .relocations
+            .iter()
+            .map(|relocation| serde_json::json!({
+                "object_section": relocation.object_section,
+                "object_offset": relocation.object_offset,
+                "kind": relocation.kind,
+                "target_symbol": relocation.target_symbol,
+                "addend": relocation.addend,
+                "resolved_value": relocation.resolved_value,
+            }))
+            .collect::<Vec<_>>(),
+    })
 }
 
 fn object_machine_tv_source_atom_count(outcomes: &BTreeMap<String, FunctionOutcome>) -> usize {
@@ -4438,6 +4746,7 @@ fn write_object_machine_tv_acceptance(
             ),
             "input_domain": &evaluation.input_domain,
             "functions": &evaluation.functions,
+            "object_translation": object_translation_json(data),
         });
         let mut bytes = serde_json::to_vec_pretty(&descriptor)
             .map_err(|_| BundleError("cannot encode native object acceptance descriptor"))?;
@@ -5765,17 +6074,58 @@ entry:
 
         let object_bytes = fs::read(&object_path).unwrap();
         let executable_bytes = fs::read(&executable_path).unwrap();
-        assert_eq!(
-            object_link_corresponds(&object_bytes, &executable_bytes),
-            Ok(Some((true, 2)))
-        );
+        let comparison = object_link_corresponds(&object_bytes, &executable_bytes)
+            .unwrap()
+            .unwrap();
+        assert!(comparison.0);
+        assert_eq!(comparison.1, 2);
+
+        // Step 1 metadata: the record names every function's object and
+        // executable placement, and every relocation's section, apply
+        // position, kind, target, addend and resolved value.
+        let record = &comparison.2;
+        let function_names: Vec<&str> = record
+            .functions
+            .iter()
+            .map(|function| function.object_symbol.as_str())
+            .collect();
+        for name in ["helper", "main", "__mumei_user_main"] {
+            assert!(
+                function_names.contains(&name),
+                "missing function record for {name}"
+            );
+        }
+        for function in &record.functions {
+            assert_eq!(function.ir_function, function.object_symbol);
+            assert!(!function.object_section.is_empty());
+            assert!(function.object_size > 0);
+            assert!(function.executable_address.unwrap_or(0) > 0);
+        }
+        assert_eq!(record.relocations.len(), 2);
+        let reloc_targets: Vec<&str> = record
+            .relocations
+            .iter()
+            .map(|relocation| relocation.target_symbol.as_str())
+            .collect();
+        for target in ["helper", "__mumei_user_main"] {
+            assert!(
+                reloc_targets.contains(&target),
+                "missing relocation to {target}"
+            );
+        }
+        for relocation in &record.relocations {
+            assert_eq!(relocation.object_section, ".text");
+            assert_eq!(relocation.kind, "R_X86_64_PLT32");
+            assert_eq!(relocation.addend, -4);
+            assert!(relocation.resolved_value.is_some());
+        }
 
         let helper_offset = executable_symbol_file_offset(&executable_bytes, "helper", 0);
         let mut altered_helper = executable_bytes.clone();
         altered_helper[helper_offset] ^= 1;
         assert!(matches!(
             object_link_corresponds(&object_bytes, &altered_helper),
-            Ok(Some((false, _)))
+            Ok(Some((false, _, _)))
         ));
 
         let call_field_offset =
@@ -5790,7 +6140,7 @@ entry:
         altered_call[call_field_file_offset] ^= 1;
         assert!(matches!(
             object_link_corresponds(&object_bytes, &altered_call),
-            Ok(Some((false, _)))
+            Ok(Some((false, _, _)))
         ));
 
         assert!(object_link_corresponds(&object_bytes, b"not an executable").is_err());
