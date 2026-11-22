@@ -539,8 +539,6 @@ pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
                     && site.result_shape == (CallValueShape::Scalar { leaf_count: 2 })))
                 && call_site_shapes_are_consistent(site)
         })
-        && !model.has_enum_composite_features
-        && !model.has_enum_signature
 }
 
 const MAX_AGGREGATE_LEAF_COUNT: usize = 4;
@@ -644,6 +642,12 @@ fn call_site_shapes_are_consistent(site: &CallSite<'_>) -> bool {
             {
                 return false;
             }
+        } else if let CallValueShape::Enum { leaf_count } = shape {
+            if !(1..=MAX_AGGREGATE_LEAF_COUNT).contains(leaf_count)
+                || leaf_doubles.first().copied().unwrap_or(true)
+            {
+                return false;
+            }
         } else if matches!(shape, CallValueShape::Scalar { leaf_count: 2 })
             && leaf_doubles.iter().any(|is_double| *is_double)
         {
@@ -657,8 +661,10 @@ fn call_site_shapes_are_consistent(site: &CallSite<'_>) -> bool {
     if site.result_leaf_doubles.len() != site.result_shape.leaf_count() {
         return false;
     }
-    if matches!(site.result_shape, CallValueShape::Struct { .. })
-        && !aggregate_result_register_classes_supported(&site.result_leaf_doubles)
+    if matches!(
+        site.result_shape,
+        CallValueShape::Struct { .. } | CallValueShape::Enum { .. }
+    ) && !aggregate_result_register_classes_supported(&site.result_leaf_doubles)
         && sret_call_result_leaf_count(site).is_none()
     {
         return false;
@@ -677,6 +683,11 @@ fn call_site_shapes_are_consistent(site: &CallSite<'_>) -> bool {
         }
         CallValueShape::Struct { has_f64, .. }
             if has_f64 != site.result_leaf_doubles.iter().any(|is_double| *is_double) =>
+        {
+            return false;
+        }
+        CallValueShape::Enum { .. }
+            if site.result_leaf_doubles.first().copied().unwrap_or(true) =>
         {
             return false;
         }
@@ -2304,11 +2315,8 @@ fn lift_bitwise_flags<'ctx>(
     }
     let left = register_value(destination, registers, width)
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
-    let right = match operation {
-        BitwiseOp::And | BitwiseOp::Or => operand_value(source, registers, context, width),
-        BitwiseOp::Xor => register_value(source, registers, width),
-    }
-    .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let right = operand_value(source, registers, context, width)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
     let value = match operation {
         BitwiseOp::And => left.bvand(&right),
         BitwiseOp::Or => left.bvor(&right),
@@ -3521,7 +3529,10 @@ fn call_value_shape_supported_with_leaf_bound(
             has_enum: false,
             ..
         } => (1..=aggregate_leaf_bound).contains(&leaf_count),
-        CallValueShape::Enum { .. } | CallValueShape::Struct { .. } => false,
+        CallValueShape::Enum { leaf_count, .. } => {
+            (1..=MAX_AGGREGATE_LEAF_COUNT).contains(&leaf_count)
+        }
+        CallValueShape::Struct { .. } => false,
     }
 }
 
@@ -3668,6 +3679,9 @@ fn lift_call<'ctx>(
     {
         return Err(FunctionOutcome::OutsideProfile("call_arguments"));
     }
+    if model.has_f64_features && matches!(call_site.result_shape, CallValueShape::Enum { .. }) {
+        return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+    }
     if tail_call && has_composite_shape {
         return Err(FunctionOutcome::OutsideProfile("call_arguments"));
     }
@@ -3698,7 +3712,7 @@ fn lift_call<'ctx>(
     for shape in &call_site.argument_shapes {
         let leaf_count = shape.leaf_count();
         match *shape {
-            CallValueShape::Struct { .. } => {
+            CallValueShape::Struct { .. } | CallValueShape::Enum { .. } => {
                 let leaf_end = leaf_index
                     .checked_add(leaf_count)
                     .ok_or(FunctionOutcome::OutsideProfile("call_arguments"))?;
@@ -3758,9 +3772,6 @@ fn lift_call<'ctx>(
                         stack_argument_index += 1;
                     }
                 }
-            }
-            CallValueShape::Enum { .. } => {
-                return Err(FunctionOutcome::OutsideProfile("call_arguments"));
             }
             CallValueShape::Scalar { leaf_count: 2 } => {
                 let leaf_end = leaf_index
@@ -3920,6 +3931,29 @@ fn apply_call_result_and_clobbers<'ctx>(
         } if (1..=MAX_AGGREGATE_LEAF_COUNT).contains(&leaf_count) => {
             if result_leaf_doubles.len() != leaf_count
                 || has_f64 != result_leaf_doubles.iter().any(|is_double| *is_double)
+                || !aggregate_result_register_classes_supported(result_leaf_doubles)
+            {
+                return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+            }
+            let mut integer_result_index = 0usize;
+            let mut float_result_index = 0usize;
+            for (leaf_index, is_double) in result_leaf_doubles.iter().enumerate() {
+                let leaf = aggregate_leaf(&result, leaf_count, leaf_index);
+                if *is_double {
+                    let upper = BV::fresh_const(context, "machine_call_xmm_result_upper", 64);
+                    xmm_registers[float_result_index] = upper.concat(&leaf);
+                    float_result_index += 1;
+                } else {
+                    registers[INTEGER_RESULT_REGISTERS[integer_result_index]] = leaf;
+                    integer_result_index += 1;
+                }
+            }
+        }
+        CallValueShape::Enum { leaf_count }
+            if (1..=MAX_AGGREGATE_LEAF_COUNT).contains(&leaf_count) =>
+        {
+            if result_leaf_doubles.len() != leaf_count
+                || result_leaf_doubles.first().copied().unwrap_or(true)
                 || !aggregate_result_register_classes_supported(result_leaf_doubles)
             {
                 return Err(FunctionOutcome::OutsideProfile("call_arguments"));
@@ -5497,39 +5531,307 @@ match.body_1:
     }
 
     #[test]
-    fn enum_values_and_enum_matches_remain_outside_machine_tv() {
+    fn enum_signatures_and_values_match_real_llvm_codegen() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
         config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
         let context = Context::new(&config);
-        let enum_source = "enum E { Off, Val(x: i64) }\n\
-            atom make(x: i64) -> i64 requires: true; ensures: true; body: { let e = E::Val(x); match e { E::Val(y) => y, _ => 0 } };";
-        let model = source_model_named_with_admission(
-            enum_source,
+        let model = |source: &str, name| {
+            source_model_named_with_admission(
+                source,
+                name,
+                &context,
+                RefinedAdmission::CompositeV23,
+            )
+        };
+        let opt_source = "enum Opt { Some(v: i64), Nothing }\n\
+            atom mk(x: i64) -> Opt requires: true; ensures: true; body: { if x > 0 { Opt::Some(x) } else { Opt::Nothing } };\n\
+            atom pick(o: Opt) -> i64 requires: true; ensures: true; body: { match o { Opt::Some(v) => v, _ => 0 } };\n\
+            atom get(o: Opt) -> i64 requires: true; ensures: true; body: { match o { Opt::Some(v) => v, _ => 0 } };\n\
+            atom main() -> i64 requires: true; ensures: true; body: { get(mk(5)) };";
+        let c_source = "enum C { T(p: i64), U }\n\
+            atom bump(w: i64) -> C requires: true; ensures: result == C::T(w); body: { let t = C::T(0); t.p = w; t };";
+        let chan_source = "enum Chan { Tcp(p: i64), Idle }\n\
+            atom is_idle(c: Chan) -> bool requires: true; ensures: true; body: { c == Chan::Idle };\n\
+            atom differs(a: Chan, b: Chan) -> bool requires: true; ensures: true; body: { a != b };";
+        let e_source = "enum E { A(x: i64, y: i64), B }\n\
+            atom make3(x: i64, y: i64, c: i64) -> E requires: true; ensures: true; body: { if c > 0 { E::A(x, y) } else { E::B } };";
+
+        let mk_model = model(opt_source, "mk");
+        assert!(mk_model.has_enum_composite_features);
+        assert!(mk_model.has_enum_signature);
+        assert!(supports_signature(&mk_model));
+        let mk_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i64 } @mk(i64 %0) {
+entry:
+  %cmp_tmp = icmp sgt i64 %0, 0
+  %bool_tmp = zext i1 %cmp_tmp to i64
+  %if_cond = icmp ne i64 %bool_tmp, 0
+  br i1 %if_cond, label %then, label %else
+then:
+  %payload_0 = insertvalue { i64, i64 } zeroinitializer, i64 %0, 1
+  br label %merge
+else:
+  br label %merge
+merge:
+  %if_result = phi { i64, i64 } [ %payload_0, %then ], [ { i64 1, i64 0 }, %else ]
+  ret { i64, i64 } %if_result
+}
+"#;
+        let (mk_address, mk_bytes, mk_targets) = compiled_function_with_targets(mk_ir, "mk");
+        assert_eq!(
+            check_function(&mk_bytes, mk_address, &mk_model, &mk_targets, &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let tag_immediate = mk_bytes
+            .windows(5)
+            .position(|window| window[0] == 0xb8 && window[1..] == [0x01, 0x00, 0x00, 0x00])
+            .unwrap();
+        let mut wrong_tag_bytes = mk_bytes.clone();
+        wrong_tag_bytes[tag_immediate + 1] = 0;
+        assert_eq!(
+            check_function(
+                &wrong_tag_bytes,
+                mk_address,
+                &mk_model,
+                &mk_targets,
+                &context
+            ),
+            FunctionOutcome::Different
+        );
+
+        let swapped_result_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i64 } @mk(i64 %0) {
+entry:
+  %cmp_tmp = icmp sgt i64 %0, 0
+  br i1 %cmp_tmp, label %then, label %else
+then:
+  %swapped = insertvalue { i64, i64 } zeroinitializer, i64 %0, 0
+  br label %merge
+else:
+  br label %merge
+merge:
+  %if_result = phi { i64, i64 } [ %swapped, %then ], [ { i64 0, i64 1 }, %else ]
+  ret { i64, i64 } %if_result
+}
+"#;
+        let (swapped_address, swapped_bytes, swapped_targets) =
+            compiled_function_with_targets(swapped_result_ir, "mk");
+        assert_eq!(
+            check_function(
+                &swapped_bytes,
+                swapped_address,
+                &mk_model,
+                &swapped_targets,
+                &context
+            ),
+            FunctionOutcome::Different
+        );
+
+        let pick_model = model(opt_source, "pick");
+        assert!(pick_model.has_enum_signature);
+        assert!(!pick_model.param_domain.is_empty());
+        assert!(supports_signature(&pick_model));
+        let pick_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @pick({ i64, i64 } %0) {
+entry:
+  %pat_tag = extractvalue { i64, i64 } %0, 0
+  %pat_tag_eq = icmp eq i64 %pat_tag, 0
+  br i1 %pat_tag_eq, label %some, label %other
+some:
+  %variant_payload_0 = extractvalue { i64, i64 } %0, 1
+  br label %merge
+other:
+  br label %merge
+merge:
+  %result = phi i64 [ %variant_payload_0, %some ], [ 0, %other ]
+  ret i64 %result
+}
+"#;
+        let (pick_address, pick_bytes, pick_targets) =
+            compiled_function_with_targets(pick_ir, "pick");
+        assert_eq!(
+            check_function(
+                &pick_bytes,
+                pick_address,
+                &pick_model,
+                &pick_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let main_model = model(opt_source, "main");
+        assert!(matches!(
+            main_model.call_sites[0].result_shape,
+            CallValueShape::Enum { leaf_count: 2 }
+        ));
+        assert!(matches!(
+            main_model.call_sites[1].argument_shapes.as_slice(),
+            [CallValueShape::Enum { leaf_count: 2 }]
+        ));
+        let main_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+declare { i64, i64 } @mk(i64)
+declare i64 @get({ i64, i64 })
+define i64 @__mumei_user_main() {
+entry:
+  %call_mk = call { i64, i64 } @mk(i64 5)
+  %call_get = call i64 @get({ i64, i64 } %call_mk)
+  ret i64 %call_get
+}
+"#;
+        let (main_address, main_bytes, main_targets) =
+            compiled_function_with_targets(main_ir, "__mumei_user_main");
+        assert_eq!(
+            check_function(
+                &main_bytes,
+                main_address,
+                &main_model,
+                &main_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let bump_model = model(c_source, "bump");
+        let bump_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i64 } @bump(i64 %0) {
+entry:
+  %t.p = insertvalue { i64, i64 } zeroinitializer, i64 %0, 1
+  ret { i64, i64 } %t.p
+}
+"#;
+        let (bump_address, bump_bytes, bump_targets) =
+            compiled_function_with_targets(bump_ir, "bump");
+        assert_eq!(
+            check_function(
+                &bump_bytes,
+                bump_address,
+                &bump_model,
+                &bump_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let is_idle_model = model(chan_source, "is_idle");
+        let is_idle_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @is_idle({ i64, i64 } %0) {
+entry:
+  %enum_eq_l = extractvalue { i64, i64 } %0, 0
+  %enum_eq_int = icmp eq i64 %enum_eq_l, 1
+  %enum_eq_and = and i1 true, %enum_eq_int
+  %enum_eq_l1 = extractvalue { i64, i64 } %0, 1
+  %enum_eq_int2 = icmp eq i64 %enum_eq_l1, 0
+  %enum_eq_and3 = and i1 %enum_eq_and, %enum_eq_int2
+  %enum_eq_ext = zext i1 %enum_eq_and3 to i64
+  ret i64 %enum_eq_ext
+}
+"#;
+        let (is_idle_address, is_idle_bytes, is_idle_targets) =
+            compiled_function_with_targets(is_idle_ir, "is_idle");
+        assert_eq!(
+            check_function(
+                &is_idle_bytes,
+                is_idle_address,
+                &is_idle_model,
+                &is_idle_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let differs_model = model(chan_source, "differs");
+        let differs_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @differs({ i64, i64 } %0, { i64, i64 } %1) {
+entry:
+  %enum_eq_l = extractvalue { i64, i64 } %0, 0
+  %enum_eq_r = extractvalue { i64, i64 } %1, 0
+  %enum_eq_int = icmp eq i64 %enum_eq_l, %enum_eq_r
+  %enum_eq_and = and i1 true, %enum_eq_int
+  %enum_eq_l1 = extractvalue { i64, i64 } %0, 1
+  %enum_eq_r2 = extractvalue { i64, i64 } %1, 1
+  %enum_eq_int3 = icmp eq i64 %enum_eq_l1, %enum_eq_r2
+  %enum_eq_and4 = and i1 %enum_eq_and, %enum_eq_int3
+  %enum_neq_not = xor i1 %enum_eq_and4, true
+  %enum_eq_ext = zext i1 %enum_neq_not to i64
+  ret i64 %enum_eq_ext
+}
+"#;
+        let (differs_address, differs_bytes, differs_targets) =
+            compiled_function_with_targets(differs_ir, "differs");
+        assert_eq!(
+            check_function(
+                &differs_bytes,
+                differs_address,
+                &differs_model,
+                &differs_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let make3_model = model(e_source, "make3");
+        assert_eq!(make3_model.result_shape, Some(3));
+        let make3_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i64, i64 } @make3(i64 %0, i64 %1, i64 %2) {
+entry:
+  %cmp_tmp = icmp sgt i64 %2, 0
+  %bool_tmp = zext i1 %cmp_tmp to i64
+  %if_cond = icmp ne i64 %bool_tmp, 0
+  br i1 %if_cond, label %then, label %else
+then:
+  %payload_0 = insertvalue { i64, i64, i64 } zeroinitializer, i64 %0, 1
+  %payload_1 = insertvalue { i64, i64, i64 } %payload_0, i64 %1, 2
+  br label %merge
+else:
+  br label %merge
+merge:
+  %if_result = phi { i64, i64, i64 } [ %payload_1, %then ], [ { i64 1, i64 0, i64 0 }, %else ]
+  ret { i64, i64, i64 } %if_result
+}
+"#;
+        let (make3_address, make3_bytes, make3_targets) =
+            compiled_function_with_targets(make3_ir, "make3");
+        assert_eq!(
+            check_function(
+                &make3_bytes,
+                make3_address,
+                &make3_model,
+                &make3_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+
+        let five_leaf_source = "enum Five { A(a: i64, b: i64, c: i64, d: i64), B }\n\
+            atom make() -> Five requires: true; ensures: true; body: { Five::A(1, 2, 3, 4) };";
+        let five_leaf_model = source_model_named_with_admission(
+            five_leaf_source,
             "make",
             &context,
             RefinedAdmission::CompositeV23,
         );
-        assert!(model.has_enum_composite_features);
-        let bytes = [0x48, 0x89, 0xf8, 0xc3];
         assert_eq!(
-            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+            check_function(&[0xc3], 0, &five_leaf_model, &BTreeMap::new(), &context),
             FunctionOutcome::OutsideProfile("unsupported_signature")
         );
 
-        let match_source = "enum E { Off, Val(x: i64) }\n\
-            atom pick(e: E) -> i64 requires: true; ensures: true; body: { match e { E::Val(y) => y, _ => 0 } };";
-        let match_model = source_model_named_with_admission(
-            match_source,
-            "pick",
+        let wide_enum_source = "enum Wide { A(x: i128), B }\n\
+            atom make() -> Wide requires: true; ensures: true; body: { Wide::A(1) };";
+        let wide_enum_model = source_model_named_with_admission(
+            wide_enum_source,
+            "make",
             &context,
             RefinedAdmission::CompositeV23,
         );
-        assert!(match_model.has_enum_signature);
-        assert!(!match_model.has_enum_composite_features);
+        // The i128 payload flattens into two INTEGER leaves, so the three-leaf
+        // result is register-resident and admitted: a bare `ret` fails only on
+        // the return obligations.
         assert_eq!(
-            check_function(&bytes, 0, &match_model, &BTreeMap::new(), &context),
-            FunctionOutcome::OutsideProfile("unsupported_signature")
+            check_function(&[0xc3], 0, &wide_enum_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Different
         );
     }
 
@@ -6956,20 +7258,6 @@ entry:
             FunctionOutcome::Equivalent
         );
 
-        let enum_source = "enum Shade { Red, Blue }\n\
-            atom color(value: Shade) -> i64 requires: true; ensures: true; body: { 0 };";
-        let enum_model = source_model_named_with_admission(
-            enum_source,
-            "color",
-            &context,
-            RefinedAdmission::CompositeV23,
-        );
-        assert!(enum_model.has_enum_signature);
-        assert_eq!(
-            check_function(&[0xc3], 0, &enum_model, &BTreeMap::new(), &context),
-            FunctionOutcome::OutsideProfile("unsupported_signature")
-        );
-
         let after_five_source = "struct P { x: i64, y: i64 }\n\
             atom after_five(a: i64, b: i64, c: i64, d: i64, e: i64, p: P) -> i64 \
             requires: true; ensures: true; body: { p.x + p.y };";
@@ -7617,17 +7905,23 @@ entry:
             FunctionOutcome::Equivalent
         );
 
-        let enum_source = "enum Shade { Red, Blue }\n\
-            atom color(p: Shade) -> i64 requires: true; ensures: true; body: { 0 };\n\
-            atom enum_arg() -> i64 requires: true; ensures: true; body: { color(Shade::Red) };";
-        let mut enum_targets = targets.clone();
-        enum_targets.get_mut(&1).unwrap().name = "color".to_owned();
+        let enum_float_source = "enum F { A(x: f64), B }\n\
+            atom make(v: f64) -> F requires: true; ensures: true; body: { F::A(v) };\n\
+            atom discard(v: f64) -> i64 requires: true; ensures: true; body: { let value = make(v); 0 };";
+        let enum_float_model = model(enum_float_source, "discard");
+        assert!(enum_float_model.has_f64_features);
+        assert_eq!(
+            enum_float_model.call_sites[0].result_leaf_doubles,
+            vec![false, false]
+        );
+        let mut enum_float_targets = targets.clone();
+        enum_float_targets.get_mut(&1).unwrap().name = "make".to_owned();
         assert_eq!(
             check_function(
                 &regular_bytes,
                 0,
-                &model(enum_source, "enum_arg"),
-                &enum_targets,
+                &enum_float_model,
+                &enum_float_targets,
                 &context,
             ),
             FunctionOutcome::OutsideProfile("call_arguments")
@@ -7785,7 +8079,7 @@ entry:
     }
 
     #[test]
-    fn unsupported_memory_and_enum_features_fail_closed() {
+    fn unsupported_memory_and_other_feature_flags_fail_closed() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
         config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
@@ -7798,15 +8092,6 @@ entry:
         assert_eq!(
             check_function(&bytes, 0, &memory_model, &BTreeMap::new(), &context),
             FunctionOutcome::Equivalent
-        );
-
-        let mut composite_model = source_model(source, &context);
-        composite_model.has_composite_or_enum_features = true;
-        composite_model.has_composite_features_beyond_struct_values = true;
-        composite_model.has_enum_composite_features = true;
-        assert_eq!(
-            check_function(&bytes, 0, &composite_model, &BTreeMap::new(), &context),
-            FunctionOutcome::OutsideProfile("unsupported_signature")
         );
 
         let mut floating_model = source_model(source, &context);
@@ -9370,7 +9655,7 @@ entry:
             "atom helper() -> i64 requires: true; ensures: true; body: { 7 };",
             &context,
         );
-        model.has_enum_signature = true;
+        model.param_shapes = vec![Some(MAX_AGGREGATE_LEAF_COUNT + 1)];
         assert_eq!(
             check_function(&[0x90, 0xeb, 0xfd], 0, &model, &BTreeMap::new(), &context,),
             FunctionOutcome::OutsideProfile("cyclic_control_flow")

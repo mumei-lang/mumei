@@ -2122,13 +2122,19 @@ unknown, the function fails closed as `call_arguments`, not `different`.
 Struct field writes, nested field writes and branch- or match-merged struct
 values are admitted when their source values flatten to the modeled register
 leaves. These are local value updates, not memory modeling; LLVM stack-memory
-lowering remains outside the profile. Enum signatures, enum values, enum
-scalar operations and enum payload writes remain fail-closed. An enum `match`
-path that does not set an enum-use flag remains closed by the separate
-enum-signature gate. Function-signature and direct-call aggregates used as
-parameters or call arguments with seventeen or more leaves, or as results
-outside the admitted shapes — at most four register-resident leaves, or
-four-to-sixteen-leaf all-INTEGER sret — remain outside the profile.
+lowering remains outside the profile. Enum signatures and values, including
+branch-built results, `match` projections, scalar equality and payload writes,
+are admitted when their flattened tag and payload leaves fit the existing
+register classes and aggregate limits, including the existing 3–4-leaf
+first-class lowering preflights. Every modeled leaf is compared exactly;
+LLVM's first-class aggregate lowering zero-initializes inactive payload slots.
+This is an assumption about that LLVM lowering, not a validated ABI. Function-
+signature and direct-call aggregates used as parameters or call arguments with
+seventeen or more leaves, or as results outside the admitted shapes — at
+most four register-resident leaves, or four-to-sixteen-leaf all-INTEGER sret
+— remain outside the profile. Enum-valued direct-call results in modules
+with f64 features remain fail-closed as `call_arguments` because their source
+call model does not retain per-leaf SSE classes.
 Local struct values inside a body are not subject to this aggregate limit
 because the source model flattens them. i128/u128 leaves inside aggregate
 parameters, call arguments and aggregate results flatten into the same
@@ -2139,7 +2145,9 @@ registers run out mid-pair LLVM keeps the low half in the last register
 and spills only the high half onto the argument stack —
 while bounded
 memory, and tail calls with struct arguments or results also remain outside
-the profile. When an equivalent function uses a struct
+the profile. i128/u128 leaves inside enum payloads flatten into the same
+per-slot sequence — two consecutive INTEGER slots each, low half first — so a
+wide-payload enum stays inside the aggregate leaf bounds. When an equivalent function uses a struct
 aggregate, the descriptor performs `machine_code_composite_register_aggregate_tv`.
 Aggregates wider than two leaves use the convention suffix
 `_llvm_first_class_aggregates_split_into_registers_result_rax_rdx_rcx_xmm0_xmm1`

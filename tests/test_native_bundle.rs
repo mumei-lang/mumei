@@ -6346,6 +6346,47 @@ fn multifile_bundle_builds_and_rechecks_with_honest_consumer_rejections() {
 }
 
 #[test]
+fn module_bundle_with_enum_values_rechecks_machine_tv_and_accept_object() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "enum Opt { Some(v: i64), Nothing }\n\
+         atom mk(x: i64) -> Opt requires: true; ensures: true; body: { if x > 0 { Opt::Some(x) } else { Opt::Nothing } };\n\
+         atom get(o: Opt) -> i64 requires: true; ensures: true; body: { match o { Opt::Some(v) => v, _ => 0 } };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { get(mk(5)) };",
+    );
+    let record = module_record(&bundle);
+    assert!(record["profile"].as_str().unwrap().contains("/v"));
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+
+    let machine_tv = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&machine_tv);
+    let machine_tv: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
+    for function in ["mk", "get", "main"] {
+        assert_eq!(
+            machine_tv["functions"][function]["outcome"],
+            "equivalent_within_profile"
+        );
+    }
+    assert_eq!(
+        machine_tv["input_domain"],
+        "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires"
+    );
+    assert!(machine_tv["checks_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check == "machine_code_composite_register_aggregate_tv"));
+
+    let accepted = accept_object(&source, &bundle, &id, true);
+    assert_success(&accepted);
+    let accepted: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(accepted["accepted"], true);
+}
+
+#[test]
 fn module_bundle_with_enum_equality_builds_as_v17_and_rechecks() {
     // `e == e'`/`e != e'` on two values of one declared enum pins the
     // module at composite v14: the source model compares the whole
