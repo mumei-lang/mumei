@@ -520,10 +520,11 @@ pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
                     && model.value.get_size() == 128)
         }
         Some(count) => {
-            (1..=MAX_AGGREGATE_LEAF_COUNT).contains(&count)
-                && model.result_leaf_doubles.len() == count
-                && aggregate_result_register_classes_supported(&model.result_leaf_doubles)
-                && model.value.get_size() == (64 * count) as u32
+            sret_result_leaf_count(model).is_some()
+                || ((1..=MAX_AGGREGATE_LEAF_COUNT).contains(&count)
+                    && model.result_leaf_doubles.len() == count
+                    && aggregate_result_register_classes_supported(&model.result_leaf_doubles)
+                    && model.value.get_size() == (64 * count) as u32)
         }
     };
     model.inputs.len() == parameter_leaf_count
@@ -549,9 +550,35 @@ const MAX_AGGREGATE_LEAF_COUNT: usize = 4;
 // spilling onto the argument stack like scalars. Sixteen keeps each leaf a
 // bounded solver term without admitting the unbounded leaf counts of truly
 // huge aggregates; beyond it signatures stay fail-closed.
-// Result aggregates stay at MAX_AGGREGATE_LEAF_COUNT: four-`i64` results
-// already need a hidden sret pointer, which this model rejects.
 const MAX_AGGREGATE_ARGUMENT_LEAF_COUNT: usize = 16;
+
+// Result aggregates past the register-resident three INTEGER leaves return
+// through a hidden `sret` pointer — SysV's memory-class convention — carried
+// in `rdi` while INTEGER arguments shift one register right. The callee
+// stores each result leaf through a register that still holds the entry `rdi`
+// value and must leave that same pointer in `rax`. The bound mirrors the
+// argument one: a bounded solver term per leaf.
+const MAX_SRET_RESULT_LEAF_COUNT: usize = MAX_AGGREGATE_ARGUMENT_LEAF_COUNT;
+
+/// Whether this function's result comes back through a hidden `sret`
+/// pointer: an all-INTEGER aggregate of four or more leaves — real LLVM
+// lowers a four-`i64` result this way too. Mixed-class sret aggregates
+// (any `f64` leaf) stay fail-closed in this slice.
+fn sret_result_leaf_count(model: &PureI64Body<'_>) -> Option<usize> {
+    let leaf_count = model.result_shape?;
+    (MAX_AGGREGATE_LEAF_COUNT..=MAX_SRET_RESULT_LEAF_COUNT)
+        .contains(&leaf_count)
+        .then_some(())
+        .filter(|_| {
+            model.result_leaf_doubles.len() == leaf_count
+                && model
+                    .result_leaf_doubles
+                    .iter()
+                    .all(|is_double| !*is_double)
+                && model.value.get_size() == (64 * leaf_count) as u32
+        })
+        .map(|_| leaf_count)
+}
 const INTEGER_RESULT_REGISTERS: [usize; 3] = [0, 2, 1];
 const FLOAT_RESULT_REGISTER_COUNT: usize = 2;
 
@@ -754,6 +781,9 @@ fn assert_path_equivalence_query<'ctx>(
         .map(|obligation| obligation.substitute(&substitutions))
         .collect();
     equivalent_terms.push(output_matches);
+    if let Some(obligation) = &path.sret_pointer_obligation {
+        equivalent_terms.push(obligation.substitute(&substitutions));
+    }
     solver.assert(&Bool::and(context, &equivalent_terms.iter().collect::<Vec<_>>()).not());
 }
 
@@ -868,6 +898,9 @@ struct LiftedFunction<'ctx> {
 
 struct LiftedPath<'ctx> {
     return_values: Vec<BV<'ctx>>,
+    /// `rax` must hand the sret result pointer back to the caller —
+    /// present only on memory-class result signatures.
+    sret_pointer_obligation: Option<Bool<'ctx>>,
     callee_saved_registers: Vec<BV<'ctx>>,
     final_rsp_offset: i64,
     path_conditions: Vec<Bool<'ctx>>,
@@ -933,6 +966,15 @@ struct MachineState<'ctx> {
     flags: FlagState<'ctx>,
     call_state: CallState<'ctx>,
     path_conditions: Vec<Bool<'ctx>>,
+    /// The hidden `sret` result-buffer pointer a memory-class result
+    /// arrives with — the entry `rdi` BV itself, so a `mov %rdi,%rax`
+    /// keeps registers carrying that same AST recognized as the
+    /// pointer while overwriting `rdi` drops the recognition.
+    sret_pointer: Option<BV<'ctx>>,
+    /// `movq` stores this path recorded through the sret pointer, as
+    /// `(byte offset inside the result buffer, value)` — the last
+    /// store to an offset wins.
+    sret_stores: Vec<(i64, BV<'ctx>)>,
 }
 
 const MAX_COMPLETED_PATHS: usize = 64;
@@ -983,7 +1025,14 @@ fn lift<'ctx>(
     // lays overflow leaves of both classes out in that order, so the
     // stack slot ordinal maps straight into this list.
     let mut stack_argument_leaves: Vec<(usize, bool)> = Vec::new();
-    let mut integer_argument_index = 0usize;
+    // A memory-class result hands the callee a hidden `sret` pointer in
+    // `rdi`, so INTEGER argument leaves begin one register later at
+    // `rsi`. The pointer is the entry `rdi` BV itself: a `mov
+    // %rdi,%rax` leaves `rax` carrying the same AST, which the sret
+    // store path recognizes as the result-buffer base.
+    let sret_leaf_count = sret_result_leaf_count(model);
+    let sret_pointer = sret_leaf_count.map(|_| registers[7].clone());
+    let mut integer_argument_index = usize::from(sret_pointer.is_some());
     let mut float_argument_index = 0usize;
     let mut arguments = Vec::with_capacity(model.inputs.len());
     let mut input_index = 0usize;
@@ -1036,6 +1085,8 @@ fn lift<'ctx>(
             exact_f64_argument_obligations: Vec::new(),
         },
         path_conditions: Vec::new(),
+        sret_pointer,
+        sret_stores: Vec::new(),
     }];
     let mut paths = Vec::new();
     while let Some(mut state) = pending.pop() {
@@ -1291,7 +1342,11 @@ fn lift<'ctx>(
                 let destination = operands
                     .get(1)
                     .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
-                if is_incoming_stack_argument_operand(destination, state.rsp_offset) {
+                if sret_memory_offset(destination, &state).is_some_and(|offset| {
+                    sret_leaf_count.is_some_and(|leaf_count| offset < 8 * leaf_count as i64)
+                }) {
+                    lift_sret_store(instruction, &mut state, context)?;
+                } else if is_incoming_stack_argument_operand(destination, state.rsp_offset) {
                     lift_stack_store(instruction, &mut state, context)?;
                 } else if should_use_allocated_frame_memory(
                     destination,
@@ -1327,7 +1382,11 @@ fn lift<'ctx>(
                 let source = operands
                     .first()
                     .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
-                if is_incoming_stack_argument_operand(source, state.rsp_offset) {
+                if sret_memory_offset(source, &state).is_some_and(|offset| {
+                    sret_leaf_count.is_some_and(|leaf_count| offset < 8 * leaf_count as i64)
+                }) {
+                    lift_sret_load(instruction, &mut state, context)?;
+                } else if is_incoming_stack_argument_operand(source, state.rsp_offset) {
                     lift_stack_argument_move(
                         instruction,
                         &mut state,
@@ -2020,7 +2079,27 @@ fn finish_path<'ctx>(
             return Err(FunctionOutcome::OutsideProfile("call_order"));
         }
     }
-    let return_values = if let Some(leaf_count) = model.result_shape {
+    let return_values = if state.sret_pointer.is_some() {
+        // A memory-class result comes back as the leaves the callee
+        // stored through the sret pointer, leaf `i` at byte offset
+        // `8 * i`. A slot the path never stored still holds whatever
+        // the caller left — a fresh constant — so an unwritten leaf
+        // compares `Different` against the determined source result.
+        let leaf_count = model.result_shape.unwrap_or_default();
+        (0..leaf_count)
+            .map(|leaf| {
+                state
+                    .sret_stores
+                    .iter()
+                    .rev()
+                    .find(|(offset, _)| *offset == 8 * leaf as i64)
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_else(|| {
+                        BV::fresh_const(context, "machine_sret_unwritten_result_leaf", 64)
+                    })
+            })
+            .collect()
+    } else if let Some(leaf_count) = model.result_shape {
         let mut integer_result_index = 0usize;
         let mut float_result_index = 0usize;
         model
@@ -2054,8 +2133,16 @@ fn finish_path<'ctx>(
         .iter()
         .map(|register_index| state.registers[*register_index].clone())
         .collect();
+    // SysV's sret convention also requires the callee to hand the
+    // result pointer back in `rax` — a callee that stores every leaf
+    // but returns a different `rax` breaks the ABI.
+    let sret_pointer_obligation = state
+        .sret_pointer
+        .as_ref()
+        .map(|pointer| state.registers[0]._eq(pointer));
     Ok(LiftedPath {
         return_values,
+        sret_pointer_obligation,
         callee_saved_registers,
         final_rsp_offset: state.rsp_offset,
         path_conditions: state.path_conditions,
@@ -2424,6 +2511,93 @@ fn rsp_memory_entry_offset(operand: &str, rsp_offset: i64) -> Result<i64, Functi
     rsp_offset
         .checked_add(displacement)
         .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))
+}
+
+/// Resolves an `N(%reg)` operand whose base register still holds the
+/// entry `sret` pointer — the identical BV AST, so a `mov %rdi,%rax`
+/// keeps the recognition while overwriting the register drops it — to
+/// the byte offset inside the caller-owned result buffer it addresses.
+/// Anything else (`%rsp` bases, displaced bases, offsets outside the
+/// buffer) does not qualify and falls through to the ordinary
+/// stack/frame paths.
+fn sret_memory_offset<'ctx>(operand: &str, state: &MachineState<'ctx>) -> Option<i64> {
+    let sret_pointer = state.sret_pointer.as_ref()?;
+    let open = operand.find('(')?;
+    let close = operand.rfind(')')?;
+    if close + 1 != operand.len() {
+        return None;
+    }
+    let (register_index, width) = parse_register(operand[open + 1..close].trim())?;
+    if width != 64 || register_index == 4 {
+        return None;
+    }
+    if state.registers[register_index].get_z3_ast() != sret_pointer.get_z3_ast() {
+        return None;
+    }
+    let displacement = operand[..open].trim();
+    let offset = if displacement.is_empty() {
+        0
+    } else {
+        parse_integer(displacement)? as i64
+    };
+    (offset % 8 == 0 && offset >= 0).then_some(offset)
+}
+
+/// Records a `movq %r, N(%reg)` store through the sret pointer into the
+/// result-buffer slot map — the callee's only way to write its
+/// memory-class result.
+fn lift_sret_store<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let offset = sret_memory_offset(destination, state)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let value = operand_value(source, &state.registers, context, 64)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    if let Some((_, stored)) = state
+        .sret_stores
+        .iter_mut()
+        .find(|(slot, _)| *slot == offset)
+    {
+        *stored = value;
+    } else {
+        state.sret_stores.push((offset, value));
+    }
+    Ok(())
+}
+
+/// Loads a `movq N(%reg), %r` read through the sret pointer: a value
+/// this path recorded, or a fresh constant for a slot the callee has
+/// not written yet — that byte still holds whatever the caller left in
+/// its buffer.
+fn lift_sret_load<'ctx>(
+    instruction: &Instruction,
+    state: &mut MachineState<'ctx>,
+    context: &'ctx Context,
+) -> Result<(), FunctionOutcome> {
+    let operands = split_operands(&instruction.operands);
+    let [source, destination] = operands.as_slice() else {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    };
+    let offset = sret_memory_offset(source, state)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    let value = state
+        .sret_stores
+        .iter()
+        .find(|(slot, _)| *slot == offset)
+        .map(|(_, value)| value.clone())
+        .unwrap_or_else(|| BV::fresh_const(context, "machine_sret_unwritten_slot", 64));
+    let (register_index, width) = parse_register(destination)
+        .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
+    if !write_register(&mut state.registers, register_index, value, width) {
+        return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
+    }
+    Ok(())
 }
 
 /// Resolves an `N(%rsp)` operand above the current frame to the input
@@ -5794,9 +5968,12 @@ entry:
             .collect::<Vec<_>>()
             .join("\n");
         println!("four-i64 aggregate return disassembly:\n{mk4_disassembly}");
+        // The four-`i64` result comes back through the sret pointer —
+        // `rdi` carries it, the four arguments shift to `rsi`-`r8` —
+        // and the recorded `movq` stores match the result leaves.
         assert_eq!(
             check_function(&mk4_bytes, mk4_address, &mk4_model, &mk4_targets, &context),
-            FunctionOutcome::OutsideProfile("unsupported_signature")
+            FunctionOutcome::Equivalent
         );
         let (sum4_address, sum4_bytes, sum4_targets) =
             compiled_function_with_targets(four_integer_ir, "sum4");
@@ -6421,6 +6598,10 @@ entry:
             FunctionOutcome::Different
         );
 
+        // A five-leaf INTEGER result is memory-class and admitted
+        // under the `sret` convention: a bare `ret` writes no buffer
+        // leaves and does not hand the pointer back in `rax`, so it
+        // differs from `identity`.
         let five_leaf_source = "struct Five { a: i64, b: i64, c: i64, d: i64, e: i64 }\n\
             atom identity(value: Five) -> Five requires: true; ensures: true; body: { value };";
         let five_leaf = source_model_named_with_admission(
@@ -6429,9 +6610,10 @@ entry:
             &context,
             RefinedAdmission::CompositeV23,
         );
+        assert!(supports_signature(&five_leaf));
         assert_eq!(
             check_function(&[0xc3], 0, &five_leaf, &BTreeMap::new(), &context),
-            FunctionOutcome::OutsideProfile("unsupported_signature")
+            FunctionOutcome::Different
         );
 
         let f64_struct_source = "struct F { value: f64 }\n\
@@ -11036,5 +11218,223 @@ entry:
             ),
             FunctionOutcome::OutsideProfile("division_trap")
         );
+    }
+
+    #[test]
+    fn memory_class_struct_result_matches_real_llvm_sret_codegen() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "struct Big { a: i64, b: i64, c: i64, d: i64, e: i64 }\n\
+            atom mk_big(x: i64) -> Big requires: true; ensures: true; body: {\n\
+              Big { a: x + 1, b: x + 2, c: x + 3, d: x + 4, e: x + 5 }\n\
+            };";
+        let mk_model = source_model_named_with_admission(
+            source,
+            "mk_big",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert_eq!(mk_model.result_shape, Some(5));
+        assert!(supports_signature(&mk_model));
+
+        // LLVM lowers the five-leaf result through the SysV `sret`
+        // convention: `rdi` carries a hidden result-buffer pointer,
+        // the integer argument shifts to `rsi`, each leaf lands via a
+        // `movq` store through the pointer, and `rax` returns it.
+        let mk_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i64, i64, i64, i64 } @mk_big(i64 %x) {
+entry:
+  %a = add i64 %x, 1
+  %b = add i64 %x, 2
+  %c = add i64 %x, 3
+  %d = add i64 %x, 4
+  %e = add i64 %x, 5
+  %s0 = insertvalue { i64, i64, i64, i64, i64 } undef, i64 %a, 0
+  %s1 = insertvalue { i64, i64, i64, i64, i64 } %s0, i64 %b, 1
+  %s2 = insertvalue { i64, i64, i64, i64, i64 } %s1, i64 %c, 2
+  %s3 = insertvalue { i64, i64, i64, i64, i64 } %s2, i64 %d, 3
+  %s4 = insertvalue { i64, i64, i64, i64, i64 } %s3, i64 %e, 4
+  ret { i64, i64, i64, i64, i64 } %s4
+}
+"#;
+        let (mk_address, mk_bytes, mk_targets) = compiled_function_with_targets(mk_ir, "mk_big");
+        let mk_disassembly = disassemble(&mk_bytes, mk_address)
+            .unwrap()
+            .iter()
+            .map(|instruction| format!("{} {}", instruction.mnemonic, instruction.operands))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("mk_big sret disassembly:\n{mk_disassembly}");
+        assert_eq!(
+            check_function(&mk_bytes, mk_address, &mk_model, &mk_targets, &context),
+            FunctionOutcome::Equivalent
+        );
+
+        // Four all-INTEGER leaves already cross the register-resident
+        // bound — real LLVM lowers a four-`i64` result through sret
+        // too.
+        let four_source = "struct Four { a: i64, b: i64, c: i64, d: i64 }\n\
+            atom mk_four(x: i64) -> Four requires: true; ensures: true; body: {\n\
+              Four { a: x + 1, b: x + 2, c: x + 3, d: x + 4 }\n\
+            };";
+        let four_model = source_model_named_with_admission(
+            four_source,
+            "mk_four",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(supports_signature(&four_model));
+        let four_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i64, i64, i64 } @mk_four(i64 %x) {
+entry:
+  %a = add i64 %x, 1
+  %b = add i64 %x, 2
+  %c = add i64 %x, 3
+  %d = add i64 %x, 4
+  %s0 = insertvalue { i64, i64, i64, i64 } undef, i64 %a, 0
+  %s1 = insertvalue { i64, i64, i64, i64 } %s0, i64 %b, 1
+  %s2 = insertvalue { i64, i64, i64, i64 } %s1, i64 %c, 2
+  %s3 = insertvalue { i64, i64, i64, i64 } %s2, i64 %d, 3
+  ret { i64, i64, i64, i64 } %s3
+}
+"#;
+        let (four_address, four_bytes, four_targets) =
+            compiled_function_with_targets(four_ir, "mk_four");
+        assert_eq!(
+            check_function(
+                &four_bytes,
+                four_address,
+                &four_model,
+                &four_targets,
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn memory_class_struct_result_rejects_wrong_leaves_and_dropped_pointer() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let source = "struct Big { a: i64, b: i64, c: i64, d: i64, e: i64 }\n\
+            atom mk_big(x: i64) -> Big requires: true; ensures: true; body: {\n\
+              Big { a: x + 1, b: x + 2, c: x + 3, d: x + 4, e: x + 5 }\n\
+            };\n\
+            atom mk_swapped(x: i64) -> Big requires: true; ensures: true; body: {\n\
+              Big { a: x + 5, b: x + 4, c: x + 3, d: x + 2, e: x + 1 }\n\
+            };";
+        let mk_model = source_model_named_with_admission(
+            source,
+            "mk_big",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let swapped_model = source_model_named_with_admission(
+            source,
+            "mk_swapped",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        // Correct sret shape with `a` and `e` stored in the wrong
+        // buffer slots: the recorded leaves no longer line up.
+        let wrong_slot_order = [
+            0x48, 0x89, 0xf8, // movq %rdi,%rax
+            0x48, 0x8d, 0x4e, 0x01, // leaq 0x1(%rsi),%rcx
+            0x48, 0x8d, 0x56, 0x02, // leaq 0x2(%rsi),%rdx
+            0x48, 0x8d, 0x7e, 0x03, // leaq 0x3(%rsi),%rdi
+            0x4c, 0x8d, 0x46, 0x04, // leaq 0x4(%rsi),%r8
+            0x48, 0x83, 0xc6, 0x05, // addq $0x5,%rsi
+            0x48, 0x89, 0x70, 0x00, // movq %rsi,(%rax)      — e into slot 0
+            0x4c, 0x89, 0x40, 0x18, // movq %r8,0x18(%rax)
+            0x48, 0x89, 0x78, 0x10, // movq %rdi,0x10(%rax)
+            0x48, 0x89, 0x50, 0x08, // movq %rdx,0x8(%rax)
+            0x48, 0x89, 0x48, 0x20, // movq %rcx,0x20(%rax) — a into slot 4
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&wrong_slot_order, 0, &mk_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Different
+        );
+        // A callee that returns the pointer — `movq %rdi,%rax` — but
+        // drops the store of leaf `e` leaves buffer slot 4 holding
+        // whatever the caller wrote there.
+        let dropped_leaf_store = [
+            0x48, 0x89, 0xf8, // movq %rdi,%rax
+            0x48, 0x8d, 0x4e, 0x01, // leaq 0x1(%rsi),%rcx
+            0x48, 0x8d, 0x56, 0x02, // leaq 0x2(%rsi),%rdx
+            0x48, 0x8d, 0x7e, 0x03, // leaq 0x3(%rsi),%rdi
+            0x4c, 0x8d, 0x46, 0x04, // leaq 0x4(%rsi),%r8
+            0x4c, 0x89, 0x40, 0x18, // movq %r8,0x18(%rax)
+            0x48, 0x89, 0x78, 0x10, // movq %rdi,0x10(%rax)
+            0x48, 0x89, 0x50, 0x08, // movq %rdx,0x8(%rax)
+            0x48, 0x89, 0x08, // movq %rcx,(%rax)
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(
+                &dropped_leaf_store,
+                0,
+                &mk_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::Different
+        );
+        // Same stores through `r10` carrying the pointer, but `rax`
+        // zeroed instead of returning it: the buffer is right, the
+        // ABI is not.
+        let dropped_pointer_return = [
+            0x49, 0x89, 0xfa, // movq %rdi,%r10
+            0x48, 0x8d, 0x4e, 0x01, // leaq 0x1(%rsi),%rcx
+            0x48, 0x8d, 0x56, 0x02, // leaq 0x2(%rsi),%rdx
+            0x48, 0x8d, 0x7e, 0x03, // leaq 0x3(%rsi),%rdi
+            0x4c, 0x8d, 0x46, 0x04, // leaq 0x4(%rsi),%r8
+            0x48, 0x83, 0xc6, 0x05, // addq $0x5,%rsi
+            0x49, 0x89, 0x72, 0x20, // movq %rsi,0x20(%r10)
+            0x4d, 0x89, 0x42, 0x18, // movq %r8,0x18(%r10)
+            0x49, 0x89, 0x7a, 0x10, // movq %rdi,0x10(%r10)
+            0x49, 0x89, 0x52, 0x08, // movq %rdx,0x8(%r10)
+            0x49, 0x89, 0x0a, // movq %rcx,(%r10)
+            0x48, 0x31, 0xc0, // xorq %rax,%rax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(
+                &dropped_pointer_return,
+                0,
+                &swapped_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn memory_class_struct_result_with_f64_leaf_stays_fail_closed() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // A five-leaf result past the register-resident bound needs
+        // the sret pointer — this slice only models INTEGER-leaf sret
+        // buffers, so a mixed-class aggregate stays outside the
+        // profile.
+        let source = "struct BigF { a: i64, b: i64, c: i64, d: i64, e: f64 }\n\
+            atom mk_mixed(x: i64, v: f64) -> BigF requires: true; ensures: true; body: {\n\
+              BigF { a: x, b: x, c: x, d: x, e: v }\n\
+            };";
+        let model = source_model_named_with_admission(
+            source,
+            "mk_mixed",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert_eq!(model.result_shape, Some(5));
+        assert!(!supports_signature(&model));
     }
 }
