@@ -533,7 +533,7 @@ pub(crate) enum EvidenceCommand {
     },
     /// Validate one agent attempt-schedule record's representation and consistency only
     #[command(
-        long_about = "Core checks only the static representation and schedule consistency. A `selected` outcome names only a manifest-declared-success exit, never acceptance. `reported_outcome` is the adapter's manifest-declared self-report, never result polarity or a verdict. Manifest-declared argv, stdin and memory bounds are not attested by this record; embedded evidence_acceptance is carried, not re-judged. No adapter is executed and no grade is promoted."
+        long_about = "Core checks only the static representation and schedule consistency. A `selected` outcome names only a manifest-declared-success exit, never acceptance. `reported_outcome` is the adapter's manifest-declared self-report, never result polarity or a verdict. The optional `enforcement` object, when present, must have exactly `environment`, `network`, `filesystem_write`, `filesystem_read`, `process_spawn`, and `memory_bound_mb` keys. It is the agent's self-reported effective dispatch boundary and is checked for shape only; it is not Evidence or a resource-enforcement attestation. Manifest-declared argv, stdin and memory bounds are not attested by this record; embedded evidence_acceptance is carried, not re-judged. No adapter is executed and no grade is promoted."
     )]
     CheckSchedule {
         /// Regular mumei.attempt-schedule/v1 JSON file (at most 65,536 bytes)

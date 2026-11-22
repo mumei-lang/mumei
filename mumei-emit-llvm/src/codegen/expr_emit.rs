@@ -1226,6 +1226,12 @@ pub(crate) fn hir_int_type_name(
             r,
         ) => hir_int_type_name(l, var_types, module_env)
             .or_else(|| hir_int_type_name(r, var_types, module_env)),
+        HirExpr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => stmt_int_type_name(then_branch, var_types, module_env)
+            .or_else(|| stmt_int_type_name(else_branch, var_types, module_env)),
         HirExpr::FieldAccess(inner, field) => infer_struct_type_name(inner, var_types, module_env)
             .and_then(|s| {
                 module_env
@@ -1303,9 +1309,26 @@ fn stmt_int_type_name(
 ) -> Option<String> {
     match stmt {
         HirStmt::Expr(expr) => hir_int_type_name(expr, var_types, module_env),
-        HirStmt::Block { tail_expr, .. } => tail_expr
-            .as_deref()
-            .and_then(|expr| hir_int_type_name(expr, var_types, module_env)),
+        HirStmt::Block { stmts, tail_expr } => {
+            let mut scoped_types = var_types.clone();
+            for stmt in stmts {
+                if let HirStmt::Let { var, value, .. } = stmt {
+                    match hir_int_type_name(value, &scoped_types, module_env)
+                        .or_else(|| infer_struct_type_name(value, &scoped_types, module_env))
+                    {
+                        Some(ty) => {
+                            scoped_types.insert(var.clone(), ty);
+                        }
+                        None => {
+                            scoped_types.remove(var);
+                        }
+                    }
+                }
+            }
+            tail_expr
+                .as_deref()
+                .and_then(|expr| hir_int_type_name(expr, &scoped_types, module_env))
+        }
         _ => None,
     }
 }
@@ -4191,6 +4214,207 @@ mod tests {
         llvm!(builder.build_return(Some(&cmp)));
         assert!(function.verify(false));
         assert!(module.print_to_string().to_string().contains("icmp ugt"));
+        Ok(())
+    }
+
+    #[test]
+    fn if_expression_with_u64_branch_compares_unsigned() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        variables.insert(
+            "a".to_string(),
+            context.i64_type().const_int(u64::MAX, false).into(),
+        );
+        variables.insert(
+            "b".to_string(),
+            context.i64_type().const_int(0, false).into(),
+        );
+        variables.insert(
+            "c".to_string(),
+            context.i64_type().const_int(1, false).into(),
+        );
+        let mut var_types = HashMap::new();
+        var_types.insert("a".to_string(), "u64".to_string());
+        var_types.insert("b".to_string(), "u64".to_string());
+        let mut array_ptrs = HashMap::new();
+
+        let condition = HirExpr::BinaryOp(
+            Box::new(HirExpr::IfThenElse {
+                cond: Box::new(HirExpr::Variable("c".to_string())),
+                then_branch: Box::new(HirStmt::Expr(HirExpr::BinaryOp(
+                    Box::new(HirExpr::Variable("a".to_string())),
+                    HirBinOp::BitOr,
+                    Box::new(HirExpr::Number(0)),
+                ))),
+                else_branch: Box::new(HirStmt::Expr(HirExpr::Variable("b".to_string()))),
+            }),
+            HirBinOp::Le,
+            Box::new(HirExpr::Number(10)),
+        );
+        let cmp = compile_hir_expr(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &condition,
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+        llvm!(builder.build_return(Some(&cmp)));
+        assert!(function.verify(false));
+        assert!(module.print_to_string().to_string().contains("icmp ule"));
+        Ok(())
+    }
+
+    #[test]
+    fn if_expression_with_local_let_shadow_compares_signed(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        variables.insert(
+            "a".to_string(),
+            context.i64_type().const_int(u64::MAX, false).into(),
+        );
+        variables.insert(
+            "c".to_string(),
+            context.i64_type().const_int(1, false).into(),
+        );
+        let mut var_types = HashMap::new();
+        var_types.insert("a".to_string(), "u64".to_string());
+        let mut array_ptrs = HashMap::new();
+        let negative_one = || {
+            HirExpr::BinaryOp(
+                Box::new(HirExpr::Number(0)),
+                HirBinOp::Sub,
+                Box::new(HirExpr::Number(1)),
+            )
+        };
+        let condition = HirExpr::BinaryOp(
+            Box::new(HirExpr::IfThenElse {
+                cond: Box::new(HirExpr::Variable("c".to_string())),
+                then_branch: Box::new(HirStmt::Block {
+                    stmts: vec![HirStmt::Let {
+                        var: "a".to_string(),
+                        ty: None,
+                        value: Box::new(negative_one()),
+                    }],
+                    tail_expr: Some(Box::new(HirExpr::Variable("a".to_string()))),
+                }),
+                else_branch: Box::new(HirStmt::Block {
+                    stmts: vec![],
+                    tail_expr: Some(Box::new(negative_one())),
+                }),
+            }),
+            HirBinOp::Lt,
+            Box::new(HirExpr::Number(0)),
+        );
+        let cmp = compile_hir_expr(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &condition,
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+        llvm!(builder.build_return(Some(&cmp)));
+        assert!(function.verify(false));
+        assert!(module.print_to_string().to_string().contains("icmp slt"));
+        Ok(())
+    }
+
+    #[test]
+    fn block_local_struct_field_compares_unsigned() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let mut module_env = ModuleEnv::new();
+        module_env.register_struct(&StructDef {
+            name: "S".to_string(),
+            type_params: vec![],
+            fields: vec![StructField {
+                name: "x".to_string(),
+                type_name: "u64".to_string(),
+                type_ref: parse_type_ref("u64"),
+                constraint: None,
+            }],
+            invariants: vec![],
+            method_names: vec![],
+            methods: vec![],
+            span: Span::default(),
+        });
+
+        let mut variables = HashMap::new();
+        variables.insert(
+            "a".to_string(),
+            context.i64_type().const_int(u64::MAX, false).into(),
+        );
+        variables.insert(
+            "c".to_string(),
+            context.i64_type().const_int(1, false).into(),
+        );
+        let mut var_types = HashMap::new();
+        var_types.insert("a".to_string(), "u64".to_string());
+        let mut array_ptrs = HashMap::new();
+        let block = || HirStmt::Block {
+            stmts: vec![HirStmt::Let {
+                var: "p".to_string(),
+                ty: None,
+                value: Box::new(HirExpr::StructInit {
+                    type_name: "S".to_string(),
+                    fields: vec![("x".to_string(), HirExpr::Variable("a".to_string()))],
+                }),
+            }],
+            tail_expr: Some(Box::new(HirExpr::FieldAccess(
+                Box::new(HirExpr::Variable("p".to_string())),
+                "x".to_string(),
+            ))),
+        };
+        let condition = HirExpr::BinaryOp(
+            Box::new(HirExpr::IfThenElse {
+                cond: Box::new(HirExpr::Variable("c".to_string())),
+                then_branch: Box::new(block()),
+                else_branch: Box::new(block()),
+            }),
+            HirBinOp::Lt,
+            Box::new(HirExpr::Number(1)),
+        );
+        let cmp = compile_hir_expr(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &condition,
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+        llvm!(builder.build_return(Some(&cmp)));
+        assert!(function.verify(false));
+        assert!(module.print_to_string().to_string().contains("icmp ult"));
         Ok(())
     }
 

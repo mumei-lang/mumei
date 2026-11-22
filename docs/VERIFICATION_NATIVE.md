@@ -1982,7 +1982,11 @@ carried by `param_domain`.
 `u64` leaves are also admitted as full-width 64-bit bitvectors with no
 additional parameter-domain constraint. Unsigned comparisons, division,
 remainder and logical right shift retain their unsigned bitvector semantics;
-division and shifts are compared only where defined. `i128`/`u128` remain
+division and shifts are compared only where defined.
+Refined predicates over `u64` bases compare unsigned; documented v10 literal
+wrapping (`0 - 1` is `u64::MAX` in a `u64` context) is unchanged, and general
+width-aware literal spelling above `i64::MAX` remains open.
+`i128`/`u128` remain
 supported as scalar bitvectors assembled from two unconstrained 64-bit input
 slots, low then high. Their argument pair must fit in consecutive remaining
 GPRs, and scalar results use `rax`/`rdx` (low/high). The bounded machine

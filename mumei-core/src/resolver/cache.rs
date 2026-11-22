@@ -74,7 +74,9 @@ use std::path::Path;
 /// array root passed by an earlier argument, matching runtime buffer aliasing.
 /// Version 35 uses recursive datatype selectors for scalar payload access and
 /// rejects writes that traverse a recursive self field. Version 36 admits
-/// finite enum and scalar-struct payloads on direct-self-recursive enums.
+/// finite enum and scalar-struct payloads on direct-self-recursive enums and
+/// re-derives cached verdicts after fixed-width refined-predicate comparisons
+/// preserve unsigned u64 semantics.
 /// Version 37 checks fixed-width payload domains when constructing finite and
 /// direct-self-recursive enum values, so cached verdicts must be re-derived.
 pub const VERIFIER_POLICY_VERSION: u32 = 37;
