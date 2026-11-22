@@ -477,8 +477,9 @@ pub enum Stmt {
 
 impl Stmt {
     /// True when executing this statement can bind or rebind `name`: a
-    /// `name`/`name.field` assignment, a `let name` shadow, or any of
-    /// those inside a nested block, branch, loop or lambda body (a
+    /// `name`/`name.field` assignment, an array store through `name`, a
+    /// `let name` shadow, or any of those inside a nested block, branch,
+    /// loop or lambda body (a
     /// lambda's writes only fire if the lambda is later called, so this
     /// is conservative — it is meant for fail-closed admission gates).
     pub fn binds_name(&self, name: &str) -> bool {
@@ -487,9 +488,12 @@ impl Stmt {
             Stmt::Assign { var, value, .. } => {
                 var == name || var.starts_with(&format!("{name}.")) || value.binds_name(name)
             }
-            Stmt::ArrayStore { index, value, .. } => {
-                index.binds_name(name) || value.binds_name(name)
-            }
+            Stmt::ArrayStore {
+                array,
+                index,
+                value,
+                ..
+            } => array == name || index.binds_name(name) || value.binds_name(name),
             Stmt::Block(stmts, _) => stmts.iter().any(|s| s.binds_name(name)),
             Stmt::While {
                 cond,
@@ -510,9 +514,8 @@ impl Stmt {
         }
     }
 
-    /// Collect the field names written on `base` by `base.f = …`
-    /// statements under this statement (nested blocks, branches, loops,
-    /// lambda bodies). Conservative — for fail-closed gates.
+    /// Collect fields written on `base` by field and struct-array stores
+    /// under this statement (nested blocks, branches, loops, lambda bodies).
     pub fn written_fields(&self, base: &str, out: &mut std::collections::HashSet<String>) {
         match self {
             Stmt::Let { value, .. } => value.written_fields(base, out),
@@ -524,7 +527,20 @@ impl Stmt {
                 }
                 value.written_fields(base, out);
             }
-            Stmt::ArrayStore { index, value, .. } => {
+            Stmt::ArrayStore {
+                array,
+                index,
+                field_path,
+                value,
+                ..
+            } => {
+                if array == base {
+                    out.insert(
+                        field_path
+                            .as_ref()
+                            .map_or_else(|| "*".to_string(), |path| path.join("_")),
+                    );
+                }
                 index.written_fields(base, out);
                 value.written_fields(base, out);
             }

@@ -99,10 +99,27 @@ fn collect_assigned_vars(
         Stmt::ArrayStore {
             array,
             index,
+            field_path,
             value,
             ..
         } => {
-            out.insert(format!("__z3_arr_{}", array));
+            let element_type = super::z3_types::array_element_type_name(array, vc);
+            if let Some(field_path) = field_path {
+                out.insert(super::z3_types::struct_array_leaf_key(
+                    array,
+                    &field_path.join("_"),
+                ));
+            } else if let Some(leaves) =
+                super::z3_types::struct_array_leaf_types(&element_type, vc.module_env)
+            {
+                out.extend(
+                    leaves
+                        .into_iter()
+                        .map(|(path, _)| super::z3_types::struct_array_leaf_key(array, &path)),
+                );
+            } else {
+                out.insert(format!("__z3_arr_{}", array));
+            }
             collect_expr_assigned_vars(env, vc, index, out, true);
             collect_expr_assigned_vars(env, vc, value, out, true);
         }
