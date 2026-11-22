@@ -2080,7 +2080,7 @@ fn verify_inner_impl(
         let Some(enum_def) = module_env.get_enum(&base) else {
             continue;
         };
-        if datatype::is_finite_adt(enum_def, module_env) {
+        if datatype::uses_datatype_sort(enum_def, module_env) {
             continue;
         }
         let Some(v) = env.get(&param.name).and_then(|d| d.as_int()) else {

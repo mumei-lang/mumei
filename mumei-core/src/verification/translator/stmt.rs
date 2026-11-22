@@ -1649,6 +1649,11 @@ fn enum_field_assign<'a>(
     let Some((vidx, fidx)) = owner else {
         return Ok(None);
     };
+    if datatype::is_direct_self_field(edef, &edef.variants[vidx].field_types[fidx], vc.module_env) {
+        return Err(MumeiError::type_error(format!(
+            "enum field write '{var}' cannot update or traverse a recursive self payload"
+        )));
+    }
     if value.binds_name(base) {
         return Err(MumeiError::type_error(format!(
             "field write '{var}' value must not rebind '{base}'",
