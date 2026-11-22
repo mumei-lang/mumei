@@ -1083,6 +1083,28 @@ mod tests {
     }
 
     #[test]
+    fn verify_certificate_in_env_tracks_refined_enum_base_despite_atom_type_parameter_name() {
+        let source = "enum E { A(v: i64), B }\n\
+                      type Alias = E where v >= 0;\n\
+                      atom read<E>(value: Alias) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: 0;\n";
+        let (cert, root, _) = signature_type_dependency_fixture(source, "read");
+        let dependency_hashes = cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(dependency_hashes.contains_key("enum:E"));
+
+        let changed_source = source.replace("B }", "B, C }");
+        let (_, _, changed_env) = signature_type_dependency_fixture(&changed_source, "read");
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+        assert_eq!(check[0].changed_dependencies, vec!["enum:E"]);
+    }
+
+    #[test]
     fn verify_certificate_in_env_checks_dependency_hashes_and_unresolved_keys() {
         let (mut cert, root, _callee, env) = dependency_fixture(status::Z3_UNSAT);
         let atoms = [&root];

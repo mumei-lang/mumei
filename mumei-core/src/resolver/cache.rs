@@ -906,6 +906,7 @@ fn compute_dependency_hashes_with_names(
         }
     } else {
         let atom_type_params = atom.type_params.iter().cloned().collect::<HashSet<_>>();
+        let empty_bound_params = HashSet::new();
         let mut pending_type_names = Vec::new();
         for type_name in atom
             .params
@@ -944,7 +945,7 @@ fn compute_dependency_hashes_with_names(
                     collect_signature_type_names(
                         &refined._base_type,
                         &mut pending_type_names,
-                        &atom_type_params,
+                        &empty_bound_params,
                     );
                 }
             }
