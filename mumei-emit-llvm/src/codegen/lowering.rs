@@ -4,7 +4,7 @@ use inkwell::module::Module;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValueEnum, FunctionValue};
 use inkwell::AddressSpace;
-use mumei_core::ast::TypeRef;
+use mumei_core::hir::HirTypeRef;
 use mumei_core::lowering::{lower, LoweredType};
 use mumei_core::parser::parse_type_ref;
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
@@ -20,22 +20,70 @@ pub(crate) fn array_struct_type(context: &Context) -> inkwell::types::StructType
 pub(crate) type ArrayPtr<'a> = (BasicValueEnum<'a>, BasicTypeEnum<'a>, BasicValueEnum<'a>);
 
 pub(crate) fn type_cycle_path(module_env: &ModuleEnv, type_name: &str) -> Option<Vec<String>> {
-    fn parse_type_name(type_name: &str) -> TypeRef {
+    fn array_type(element: HirTypeRef) -> HirTypeRef {
+        HirTypeRef {
+            name: "[]".to_string(),
+            type_args: vec![element],
+            effect_set: None,
+            capability: None,
+        }
+    }
+
+    fn parse_type_name(type_name: &str) -> HirTypeRef {
         let type_name = type_name.trim();
         if let Some(inner) = type_name
             .strip_prefix("[]<")
             .and_then(|inner| inner.strip_suffix('>'))
         {
-            TypeRef::array(parse_type_ref(inner))
+            array_type(HirTypeRef::from(parse_type_ref(inner)))
         } else {
-            parse_type_ref(type_name)
+            HirTypeRef::from(parse_type_ref(type_name))
+        }
+    }
+
+    fn array_element_type(type_ref: &HirTypeRef) -> Option<&HirTypeRef> {
+        if type_ref.name == "[]" && type_ref.type_args.len() == 1 {
+            type_ref.type_args.first()
+        } else {
+            None
+        }
+    }
+
+    fn substitute_type_ref(
+        type_ref: &HirTypeRef,
+        substitutions: &std::collections::HashMap<String, HirTypeRef>,
+    ) -> HirTypeRef {
+        if let Some(replacement) = substitutions.get(&type_ref.name) {
+            let mut result = replacement.clone();
+            if !type_ref.type_args.is_empty() {
+                result.type_args = type_ref
+                    .type_args
+                    .iter()
+                    .map(|arg| substitute_type_ref(arg, substitutions))
+                    .collect();
+            }
+            if type_ref.effect_set.is_some() {
+                result.effect_set = type_ref.effect_set.clone();
+            }
+            result
+        } else {
+            HirTypeRef {
+                name: type_ref.name.clone(),
+                type_args: type_ref
+                    .type_args
+                    .iter()
+                    .map(|arg| substitute_type_ref(arg, substitutions))
+                    .collect(),
+                effect_set: type_ref.effect_set.clone(),
+                capability: type_ref.capability.clone(),
+            }
         }
     }
 
     fn contains_unbound_type_param(
-        type_ref: &TypeRef,
+        type_ref: &HirTypeRef,
         type_params: &[String],
-        substitutions: &std::collections::HashMap<String, TypeRef>,
+        substitutions: &std::collections::HashMap<String, HirTypeRef>,
     ) -> bool {
         (type_params.iter().any(|param| param == &type_ref.name)
             && !substitutions.contains_key(&type_ref.name))
@@ -47,8 +95,8 @@ pub(crate) fn type_cycle_path(module_env: &ModuleEnv, type_name: &str) -> Option
 
     fn visit(
         module_env: &ModuleEnv,
-        type_ref: &TypeRef,
-        owner: Option<&TypeRef>,
+        type_ref: &HirTypeRef,
+        owner: Option<&HirTypeRef>,
         path: &mut Vec<(String, String)>,
         completed: &mut std::collections::HashSet<String>,
     ) -> Option<Vec<String>> {
@@ -64,7 +112,7 @@ pub(crate) fn type_cycle_path(module_env: &ModuleEnv, type_name: &str) -> Option
         } else {
             parse_type_name(&base)
         };
-        if let Some(element) = type_ref.array_element_type() {
+        if let Some(element) = array_element_type(&type_ref) {
             return visit(module_env, element, owner, path, completed);
         }
 
@@ -91,14 +139,14 @@ pub(crate) fn type_cycle_path(module_env: &ModuleEnv, type_name: &str) -> Option
             return None;
         }
 
-        let (type_params, fields): (&[String], Vec<TypeRef>) = if let Some(enum_def) = enum_def {
+        let (type_params, fields): (&[String], Vec<HirTypeRef>) = if let Some(enum_def) = enum_def {
             (
                 &enum_def.type_params,
                 enum_def
                     .variants
                     .iter()
                     .flat_map(|variant| variant.field_types.iter())
-                    .cloned()
+                    .map(|field| HirTypeRef::from(field.clone()))
                     .collect(),
             )
         } else {
@@ -108,18 +156,18 @@ pub(crate) fn type_cycle_path(module_env: &ModuleEnv, type_name: &str) -> Option
                 struct_def
                     .fields
                     .iter()
-                    .map(|field| field.type_ref.clone())
+                    .map(|field| HirTypeRef::from(field.type_ref.clone()))
                     .collect(),
             )
         };
-        let substitutions: std::collections::HashMap<String, TypeRef> = type_params
+        let substitutions: std::collections::HashMap<String, HirTypeRef> = type_params
             .iter()
             .zip(type_ref.type_args.iter())
             .map(|(param, arg)| (param.clone(), arg.clone()))
             .collect();
         path.push((name, display_name.clone()));
         for field in fields {
-            let field = field.substitute(&substitutions);
+            let field = substitute_type_ref(&field, &substitutions);
             if contains_unbound_type_param(&field, type_params, &substitutions) {
                 continue;
             }
