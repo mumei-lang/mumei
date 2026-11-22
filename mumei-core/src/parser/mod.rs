@@ -1399,6 +1399,8 @@ atom write_log(msg: i64)
             ("0 <= v && v <= 10", "v"),
             ("(v) <= 10", "v"),
             ("forall(v, 0, 1, v >= 0)", "v"),
+            ("forall(i, 0, v, i >= 0)", "v"),
+            ("v <= 10 && exists(j, 0, v, j == 1)", "v"),
             ("req_handle > 0", "req_handle"),
             ("len(v) <= 10", "v"),
             ("A::Variant == 1", "v"),

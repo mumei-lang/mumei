@@ -5,11 +5,12 @@
 use crate::ast::TypeRef;
 use crate::parser::{
     Atom, CapabilityDef, ClauseKind, ClauseLabel, ClauseMode, ClauseTrustMode, CoverClause, Effect,
-    EffectDef, EffectDefParam, EffectParam, EnumDef, EnumVariant, ExternBlock, ExternFn, ImplBlock,
-    ImplDef, ImportDecl, Item, Param, Quantifier, QuantifierType, RefinedType, ResourceDef,
-    ResourceField, ResourceMode, Span, StructDef, StructField, TraitDef, TraitMethod, TrustLevel,
-    TypeParamBound,
+    EffectDef, EffectDefParam, EffectParam, EnumDef, EnumVariant, Expr, ExternBlock, ExternFn,
+    ImplBlock, ImplDef, ImportDecl, Item, Param, Pattern, Quantifier, QuantifierType, RefinedType,
+    ResourceDef, ResourceField, ResourceMode, Span, Stmt, StructDef, StructField, TraitDef,
+    TraitMethod, TrustLevel, TypeParamBound,
 };
+use std::collections::HashSet;
 
 use super::expr::parse_expr;
 use super::token::{SpannedToken, Token};
@@ -979,6 +980,139 @@ fn collect_body(ctx: &mut ParseContext) -> String {
 // Token-based module parser
 // =============================================================================
 
+fn collect_predicate_binders(expr: &Expr, bound: &mut HashSet<String>) {
+    fn collect_pattern_binders(pattern: &Pattern, bound: &mut HashSet<String>) {
+        match pattern {
+            Pattern::Variable(name) => {
+                bound.insert(name.clone());
+            }
+            Pattern::Variant { fields, .. } => {
+                for field in fields {
+                    collect_pattern_binders(field, bound);
+                }
+            }
+            Pattern::Wildcard | Pattern::Literal(_) => {}
+        }
+    }
+
+    fn collect_stmt_binders(stmt: &Stmt, bound: &mut HashSet<String>) {
+        match stmt {
+            Stmt::Let { var, value, .. } => {
+                bound.insert(var.clone());
+                collect_predicate_binders(value, bound);
+            }
+            Stmt::Assign { value, .. } => collect_predicate_binders(value, bound),
+            Stmt::ArrayStore { index, value, .. } => {
+                collect_predicate_binders(index, bound);
+                collect_predicate_binders(value, bound);
+            }
+            Stmt::Block(stmts, _)
+            | Stmt::TaskGroup {
+                children: stmts, ..
+            } => {
+                for stmt in stmts {
+                    collect_stmt_binders(stmt, bound);
+                }
+            }
+            Stmt::While {
+                cond,
+                invariant,
+                decreases,
+                body,
+                ..
+            } => {
+                collect_predicate_binders(cond, bound);
+                collect_predicate_binders(invariant, bound);
+                if let Some(decreases) = decreases {
+                    collect_predicate_binders(decreases, bound);
+                }
+                collect_stmt_binders(body, bound);
+            }
+            Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+                collect_stmt_binders(body, bound);
+            }
+            Stmt::Cancel { .. } => {}
+            Stmt::Expr(expr, _) => collect_predicate_binders(expr, bound),
+        }
+    }
+
+    match expr {
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => {}
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                collect_predicate_binders(element, bound);
+            }
+        }
+        Expr::ArrayAccess(_, index) | Expr::Await { expr: index } => {
+            collect_predicate_binders(index, bound);
+        }
+        Expr::BinaryOp(left, _, right) => {
+            collect_predicate_binders(left, bound);
+            collect_predicate_binders(right, bound);
+        }
+        Expr::Block(stmt) | Expr::Async { body: stmt } => collect_stmt_binders(stmt, bound),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_predicate_binders(cond, bound);
+            collect_stmt_binders(then_branch, bound);
+            collect_stmt_binders(else_branch, bound);
+        }
+        Expr::Call(name, args) => {
+            if matches!(name.as_str(), "forall" | "exists") && args.len() == 4 {
+                if let Some(Expr::Variable(var)) = args.first() {
+                    bound.insert(var.clone());
+                }
+            }
+            for arg in args {
+                collect_predicate_binders(arg, bound);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_predicate_binders(value, bound);
+            }
+        }
+        Expr::FieldAccess(inner, _) => collect_predicate_binders(inner, bound),
+        Expr::Match { target, arms } => {
+            collect_predicate_binders(target, bound);
+            for arm in arms {
+                collect_pattern_binders(&arm.pattern, bound);
+                if let Some(guard) = &arm.guard {
+                    collect_predicate_binders(guard, bound);
+                }
+                collect_stmt_binders(&arm.body, bound);
+            }
+        }
+        Expr::CallRef { callee, args } => {
+            collect_predicate_binders(callee, bound);
+            for arg in args {
+                collect_predicate_binders(arg, bound);
+            }
+        }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                collect_predicate_binders(arg, bound);
+            }
+        }
+        Expr::Lambda { params, body, .. } => {
+            bound.extend(params.iter().map(|param| param.name.clone()));
+            collect_stmt_binders(body, bound);
+        }
+        Expr::ChanSend { channel, value } => {
+            collect_predicate_binders(channel, bound);
+            collect_predicate_binders(value, bound);
+        }
+        Expr::ChanRecv { channel } => collect_predicate_binders(channel, bound),
+    }
+}
+
 pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
     let mut items = Vec::new();
 
@@ -1035,6 +1169,9 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                     ctx.advance();
                     let predicate_raw = collect_until_semicolon(ctx);
                     let tokens = super::lexer::Lexer::new(&predicate_raw).tokenize();
+                    let predicate_expr = crate::parser::parse_expression(&predicate_raw);
+                    let mut bound_names = HashSet::new();
+                    collect_predicate_binders(&predicate_expr, &mut bound_names);
                     let operand = tokens
                         .iter()
                         .enumerate()
@@ -1042,13 +1179,16 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                             let Token::Ident(name) = &token.token else {
                                 return None;
                             };
-                            if matches!(
-                                tokens.get(index.wrapping_sub(1)).map(|t| &t.token),
-                                Some(Token::ColonColon)
-                            ) || matches!(
-                                tokens.get(index + 1).map(|t| &t.token),
-                                Some(Token::LParen | Token::ColonColon)
-                            ) {
+                            if bound_names.contains(name)
+                                || matches!(
+                                    tokens.get(index.wrapping_sub(1)).map(|t| &t.token),
+                                    Some(Token::ColonColon)
+                                )
+                                || matches!(
+                                    tokens.get(index + 1).map(|t| &t.token),
+                                    Some(Token::LParen | Token::ColonColon)
+                                )
+                            {
                                 return None;
                             }
                             Some(name.clone())

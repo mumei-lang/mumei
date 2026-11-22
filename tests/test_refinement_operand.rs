@@ -128,6 +128,12 @@ fn quantifier_and_named_refinement_operands_remain_supported() {
                  atom f(x: i64) -> T requires: true; ensures: result == x; body: x;",
             ),
             (
+                "quantifier_bound_before_operand",
+                "type T = i64 where forall(i, 0, v, i >= 0);\n\
+                 atom f(x: i64) -> T requires: x >= 0; \
+                 ensures: result == x; body: x;",
+            ),
+            (
                 "named_operands",
                 "type Req = i64 where req_handle > 0;\n\
                  type Server = i64 where server_handle > 0;\n\
