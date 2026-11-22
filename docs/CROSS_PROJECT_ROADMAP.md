@@ -8851,6 +8851,8 @@ capability model は Stage 1 のみが opt-in 拡張として上積みされて�
 
 **次弾候補**: benchmark 側で残る `unknown_obligation`（body semantics に依存する非算術 obligation）と、bridge lemma 追加が必要な形状。後者に着手する場合は hash lockstep 更新が必須。
 
+- ✅ **追補（2026-11-22, 11）— 追補（10）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: 新規なし。mumei-agent: C06 Sol lexical が struct フィールド・enum メンバーを binding 化（#1122。`_populate_type_members` が struct/enum 宣言の member record を `_Record.members` に保持し、`_resolve_member` が宣言型が struct/enum の member 位置（`coin.v`、`coins[0].v`、`Container.State.On`）を bind。member チェーン（`coin.t.transfer`）は内側 member の宣言型を解決。enum 定数は型名経由（`Status.Ready`）のみ bind し、enum 型変数経由のメンバは `using` 経路に残す。ネスト型宣言は型名経由のみ到達可能 — インスタンス上の member 位置（`inst.S`）は型 member を除外して inherited member・`using` へ継続。不可視 private member は solc 同様「存在しない」扱いで `using` に継続するが、overload 解決失敗（`ambiguous_overload`）は opaque を維持。public getter の struct/enum 戻り値は exploded fields のため member surface を持たず opaque。function 型スロット（`s.cb.selector`）は builtin member のため opaque。member 書き込み（`coin.v = s`・`coin.v += 1`）は write ref を emit、enum メンバー・function 型への代入は `unsupported_syntax` gap + read。compiler snapshot は 85 item（qualified declared type `Lib.S` は lexical_missing のまま）。mumei-demo: 新規シナリオなし。いずれも各 PR の境界のままで、引数型 driven の overload 解決・ABI 完全モデルのクレームは増えない）。
+
 **関連ファイル**:
 - mumei-lean: `scripts/tactic_search.py` / `MumeiLean/Tactics.lean` / `MumeiLean/Algebra.lean` / `tests/fixtures/tactic_ladder_driver.lean` / `tests/fixtures/std_algebra_finite_field_ff_pow_square_expands.proof-cert.json` / `docs/LEAN_TRANSLATOR_SPEC.md` §12.2 / `docs/LEAN_HARNESS_CONTRACT.md` / `docs/ROADMAP.md`
 - mumei: `std/algebra/finite_field.mm` / `docs/ROADMAP.md` P30 / `docs/STDLIB.md`
