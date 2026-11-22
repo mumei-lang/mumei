@@ -508,6 +508,12 @@ pub(crate) fn compile_hir_stmt<'a>(
                                     element_type,
                                 ))
                                 .is_some()
+                                || module_env
+                                    .get_struct(&super::expr_emit::resolve_named_type(
+                                        module_env,
+                                        element_type,
+                                    ))
+                                    .is_some()
                         })
                         .map(|element_type| format!("[{element_type}]"))
                 });

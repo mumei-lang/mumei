@@ -12,6 +12,44 @@ use serde_json::json;
 use z3::ast::Ast as _;
 use z3::{FuncDecl, Sort};
 
+struct LocalArrayElementTypeGuard<'a> {
+    types: &'a std::cell::RefCell<std::collections::HashMap<String, String>>,
+    name: String,
+    previous: Option<String>,
+}
+
+impl<'a> LocalArrayElementTypeGuard<'a> {
+    fn for_call_result(vc: &'a VCtx<'_>, return_type: Option<&str>) -> Option<Self> {
+        let resolved = vc.module_env.resolve_base_type(return_type?);
+        if !resolved.starts_with('[') || !resolved.ends_with(']') {
+            return None;
+        }
+        let element_type =
+            super::z3_types::array_element_type_from_annotation(Some(&resolved), vc.module_env);
+        let name = "result".to_string();
+        let previous = vc
+            .local_array_elem_types
+            .borrow_mut()
+            .insert(name.clone(), element_type);
+        Some(Self {
+            types: &vc.local_array_elem_types,
+            name,
+            previous,
+        })
+    }
+}
+
+impl Drop for LocalArrayElementTypeGuard<'_> {
+    fn drop(&mut self) {
+        let mut types = self.types.borrow_mut();
+        if let Some(previous) = self.previous.take() {
+            types.insert(self.name.clone(), previous);
+        } else {
+            types.remove(&self.name);
+        }
+    }
+}
+
 fn field_access_chain_text(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Variable(name) => Some(name.clone()),
@@ -2398,6 +2436,283 @@ fn enum_payload_field_read<'a>(
     Ok(value)
 }
 
+pub(crate) fn struct_array_expr_type(vc: &VCtx<'_>, expr: &Expr) -> Option<String> {
+    let type_name = match expr {
+        Expr::StructInit { type_name, .. } => Some(type_name.clone()),
+        _ => datatype::declared_type_of_expr(vc, expr),
+    }?;
+    let base = vc.module_env.resolve_base_type(&type_name);
+    let struct_base = datatype::type_name_base(&base);
+    vc.module_env
+        .get_struct(&base)
+        .or_else(|| vc.module_env.get_struct(struct_base))?;
+    Some(struct_base.to_string())
+}
+
+pub(crate) fn struct_array_leaf_values_from_value<'a>(
+    vc: &VCtx<'a>,
+    env: &Env<'a>,
+    value: &Dynamic<'a>,
+    type_name: &str,
+) -> Result<Vec<(String, String, Dynamic<'a>)>, MumeiError> {
+    fn collect<'a>(
+        vc: &VCtx<'a>,
+        env: &Env<'a>,
+        value: &Dynamic<'a>,
+        type_name: &str,
+        prefix: &str,
+        leaves: &mut Vec<(String, String, Dynamic<'a>)>,
+    ) -> Result<(), MumeiError> {
+        let base = vc.module_env.resolve_base_type(type_name);
+        let struct_base = datatype::type_name_base(&base);
+        let sdef = vc
+            .module_env
+            .get_struct(&base)
+            .or_else(|| vc.module_env.get_struct(struct_base))
+            .ok_or_else(|| {
+                MumeiError::type_error(format!("array element '{type_name}' is not a struct"))
+            })?;
+        let fields = super::struct_fields_of_value(env, value, sdef).ok_or_else(|| {
+            MumeiError::type_error(format!(
+                "cannot resolve scalar leaves for struct array element '{type_name}'"
+            ))
+        })?;
+        for field in &sdef.fields {
+            let field_value = fields
+                .iter()
+                .find(|(name, _)| name == &field.name)
+                .map(|(_, value)| value)
+                .ok_or_else(|| {
+                    MumeiError::type_error(format!(
+                        "struct array element is missing field '{}'",
+                        field.name
+                    ))
+                })?;
+            let path = if prefix.is_empty() {
+                field.name.clone()
+            } else {
+                format!("{prefix}_{}", field.name)
+            };
+            let field_type = vc.module_env.resolve_base_type(&field.type_name);
+            let nested_base = datatype::type_name_base(&field_type);
+            if vc.module_env.get_struct(&field_type).is_some()
+                || vc.module_env.get_struct(nested_base).is_some()
+            {
+                collect(vc, env, field_value, nested_base, &path, leaves)?;
+            } else {
+                leaves.push((path, field_type, field_value.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    let mut leaves = Vec::new();
+    collect(vc, env, value, type_name, "", &mut leaves)?;
+    Ok(leaves)
+}
+
+fn struct_array_access_path(expr: &Expr) -> Option<(String, Expr, Vec<String>)> {
+    fn collect(expr: &Expr, fields: &mut Vec<String>) -> Option<(String, Expr)> {
+        match expr {
+            Expr::FieldAccess(inner, field) => {
+                let base = collect(inner, fields)?;
+                fields.push(field.clone());
+                Some(base)
+            }
+            Expr::ArrayAccess(name, index) => Some((name.clone(), (**index).clone())),
+            _ => None,
+        }
+    }
+    let mut fields = Vec::new();
+    let (name, index) = collect(expr, &mut fields)?;
+    Some((name, index, fields))
+}
+
+fn bind_struct_array_fields<'a>(
+    vc: &VCtx<'a>,
+    binding: &str,
+    type_name: &str,
+    element: (&str, &z3::ast::Int<'a>),
+    prefix: &str,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> Result<(), MumeiError> {
+    let (array_name, index) = element;
+    let base = vc.module_env.resolve_base_type(type_name);
+    let struct_base = datatype::type_name_base(&base);
+    let sdef = vc
+        .module_env
+        .get_struct(&base)
+        .or_else(|| vc.module_env.get_struct(struct_base))
+        .ok_or_else(|| {
+            MumeiError::type_error(format!("array element '{type_name}' is not a struct"))
+        })?;
+    for field in &sdef.fields {
+        let path = if prefix.is_empty() {
+            field.name.clone()
+        } else {
+            format!("{prefix}_{}", field.name)
+        };
+        let field_type = vc.module_env.resolve_base_type(&field.type_name);
+        let nested_base = datatype::type_name_base(&field_type);
+        if vc.module_env.get_struct(&field_type).is_some()
+            || vc.module_env.get_struct(nested_base).is_some()
+        {
+            let nested_handle = super::fresh_struct_handle(vc.ctx, nested_base);
+            let field_key = super::struct_field_key(binding, &field.name);
+            env.insert(field_key, nested_handle.clone());
+            env.insert(format!("{binding}_{}", field.name), nested_handle);
+            bind_struct_array_fields(
+                vc,
+                &format!("{binding}_{}", field.name),
+                nested_base,
+                element,
+                &path,
+                env,
+                solver_opt,
+            )?;
+        } else {
+            let leaf_array =
+                super::z3_types::struct_array_leaf_array(vc, array_name, &path, &field_type, env);
+            let selected = leaf_array.select(index);
+            if let (Some(solver), Some(bound)) = (
+                solver_opt,
+                datatype::scalar_int_leaf_domain(vc, &field_type, &selected),
+            ) {
+                solver.assert(&bound);
+            }
+            env.insert(
+                super::struct_field_key(binding, &field.name),
+                selected.clone(),
+            );
+            env.insert(format!("{binding}_{}", field.name), selected);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn bind_struct_array_element<'a>(
+    vc: &VCtx<'a>,
+    _binding: &str,
+    array_name: &str,
+    index_expr: &Expr,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> Result<Option<Dynamic<'a>>, MumeiError> {
+    let element_type = super::z3_types::array_element_type_name(array_name, vc);
+    let sort =
+        super::z3_types::array_element_sort_from_type(&element_type, vc.module_env, vc.ieee754_f64);
+    if sort != super::z3_types::ArrayElementSort::Struct
+        && sort != super::z3_types::ArrayElementSort::UnsupportedStruct
+    {
+        return Ok(None);
+    }
+    super::z3_types::validate_array_element_type(vc, &element_type)?;
+    let index_value = expr_to_z3(vc, index_expr, env, solver_opt)?;
+    let index = as_int_like(&index_value)
+        .ok_or_else(|| MumeiError::type_error("Array index must be integer"))?;
+    if let Some(solver) = solver_opt {
+        let len = array_len_value(vc.ctx, env, array_name, vc.bitvec_i64, Some(solver));
+        let safe = index_in_bounds(vc.ctx, &index_value, &len)
+            .ok_or_else(|| MumeiError::type_error("Index must be integer"))?;
+        solver.push();
+        for cond in vc.path_cond_stack.borrow().iter() {
+            solver.assert(cond);
+        }
+        solver.assert(&safe.not());
+        if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
+            solver.pop(1);
+            return Err(MumeiError::verification(format!(
+                "Potential Out-of-Bounds on '{}' (index may be < 0 or >= len_{})",
+                array_name, array_name
+            ))
+            .with_help("requires にインデックスの範囲制約 (0 <= idx < len) を追加してください")
+            .with_verdict(crate::verification::VerdictKind::Rejected));
+        }
+        solver.pop(1);
+    }
+    let handle = super::fresh_struct_handle(vc.ctx, &element_type);
+    let handle_name = handle.decl().name();
+    let leaves = super::z3_types::struct_array_leaf_types(&element_type, vc.module_env)
+        .ok_or_else(|| {
+            MumeiError::type_error(format!(
+                "array element struct '{element_type}' must have only scalar leaves"
+            ))
+        })?;
+    let _ = leaves;
+    bind_struct_array_fields(
+        vc,
+        &handle_name,
+        &element_type,
+        (array_name, &index),
+        "",
+        env,
+        solver_opt,
+    )?;
+    Ok(Some(handle))
+}
+
+fn read_struct_array_field<'a>(
+    vc: &VCtx<'a>,
+    array_name: &str,
+    index_expr: &Expr,
+    field_path: &[String],
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> Result<Option<Dynamic<'a>>, MumeiError> {
+    let element_type = super::z3_types::array_element_type_name(array_name, vc);
+    let sort =
+        super::z3_types::array_element_sort_from_type(&element_type, vc.module_env, vc.ieee754_f64);
+    if sort != super::z3_types::ArrayElementSort::Struct
+        && sort != super::z3_types::ArrayElementSort::UnsupportedStruct
+    {
+        return Ok(None);
+    }
+    super::z3_types::validate_array_element_type(vc, &element_type)?;
+    let path = field_path.join("_");
+    let Some((_, leaf_type)) =
+        super::z3_types::struct_array_leaf_types(&element_type, vc.module_env)
+            .and_then(|leaves| leaves.into_iter().find(|(leaf, _)| leaf == &path))
+    else {
+        return Err(MumeiError::type_error(format!(
+            "field path '{path}' is not a scalar leaf of array element '{element_type}'"
+        )));
+    };
+    let index_value = expr_to_z3(vc, index_expr, env, solver_opt)?;
+    let index = as_int_like(&index_value)
+        .ok_or_else(|| MumeiError::type_error("Array index must be integer"))?;
+    if let Some(solver) = solver_opt {
+        let len = array_len_value(vc.ctx, env, array_name, vc.bitvec_i64, Some(solver));
+        let safe = index_in_bounds(vc.ctx, &index_value, &len)
+            .ok_or_else(|| MumeiError::type_error("Index must be integer"))?;
+        solver.push();
+        for cond in vc.path_cond_stack.borrow().iter() {
+            solver.assert(cond);
+        }
+        solver.assert(&safe.not());
+        if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
+            solver.pop(1);
+            return Err(MumeiError::verification(format!(
+                "Potential Out-of-Bounds on '{}' (index may be < 0 or >= len_{})",
+                array_name, array_name
+            ))
+            .with_help("requires にインデックスの範囲制約 (0 <= idx < len) を追加してください")
+            .with_verdict(crate::verification::VerdictKind::Rejected));
+        }
+        solver.pop(1);
+    }
+    let leaf_array =
+        super::z3_types::struct_array_leaf_array(vc, array_name, &path, &leaf_type, env);
+    let selected = leaf_array.select(&index);
+    if let (Some(solver), Some(bound)) = (
+        solver_opt,
+        datatype::scalar_int_leaf_domain(vc, &leaf_type, &selected),
+    ) {
+        solver.assert(&bound);
+    }
+    Ok(Some(selected))
+}
+
 pub(crate) fn expr_to_z3<'a>(
     vc: &VCtx<'a>,
     expr: &Expr,
@@ -3369,6 +3684,8 @@ pub(crate) fn expr_to_z3<'a>(
                             .return_type
                             .as_deref()
                             .or(if has_float { Some("f64") } else { None });
+                        let _result_array_type_guard =
+                            LocalArrayElementTypeGuard::for_call_result(vc, result_type);
                         if let Some(type_name) = result_type {
                             super::z3_types::validate_enum_array_type(vc, type_name)?;
                         }
@@ -3432,6 +3749,17 @@ pub(crate) fn expr_to_z3<'a>(
                         // and `wire_array_slots`/`tail_len_expr` recover the
                         // same symbol for `let t = f(..)` so the guarantee
                         // reaches the caller instead of a fresh `len_t`.
+                        let result_struct_arrays = if let Some(result_array) = result_z3.as_array()
+                        {
+                            super::z3_types::call_result_struct_arrays(
+                                vc,
+                                &result_array,
+                                result_type,
+                                &result_name,
+                            )?
+                        } else {
+                            std::collections::HashMap::new()
+                        };
                         let result_len: Option<Dynamic> = result_z3.as_array().map(|_| {
                             let len_sym: Dynamic = if let Some((rec_args, domain)) = &rec_signature
                             {
@@ -3461,15 +3789,21 @@ pub(crate) fn expr_to_z3<'a>(
                             {
                                 solver.assert(&nn);
                             }
-                            vc.call_result_lens.borrow_mut().insert(
-                                result_z3.get_z3_ast() as usize,
-                                (len_sym.clone(), result_z3.clone()),
-                            );
                             if rec_signature.is_none() {
                                 env.insert(array_root_len_key(&result_name), len_sym.clone());
                             }
                             len_sym
                         });
+                        if let Some(result_array) = result_z3.as_array() {
+                            vc.call_result_lens.borrow_mut().insert(
+                                super::z3_types::array_root_ast(&result_array) as usize,
+                                super::context::CallResultArray {
+                                    len: result_len.clone(),
+                                    _keep: result_z3.clone(),
+                                    struct_leaves: result_struct_arrays.clone(),
+                                },
+                            );
+                        }
 
                         // 構造体を返す呼び出し: 結果のフィールドをシンボル化し、
                         // 呼び出し先が保証する跨フィールド不変量を事実として仮定する
@@ -3658,6 +3992,12 @@ pub(crate) fn expr_to_z3<'a>(
                         {
                             let _contract_guard = vc.enter_contract_instantiation(&callee);
                             call_env.insert("result".to_string(), result_z3.clone());
+                            for (path, leaf_array) in &result_struct_arrays {
+                                call_env.insert(
+                                    super::z3_types::struct_array_leaf_key("result", path),
+                                    leaf_array.clone().into(),
+                                );
+                            }
                             if let Some(len_sym) = &result_len {
                                 call_env.insert("__z3_arr_result".to_string(), result_z3.clone());
                                 call_env.insert(array_len_key("result"), len_sym.clone());
@@ -4048,6 +4388,8 @@ pub(crate) fn expr_to_z3<'a>(
         }
         Expr::ArrayLit(elements) => {
             let mut literal_enum_type: Option<String> = None;
+            let mut literal_struct_type: Option<String> = None;
+            let mut has_non_struct_element = false;
             for element in elements {
                 if let Some(enum_name) = datatype::infer_expr_enum_name(vc, element) {
                     super::z3_types::validate_enum_array_element_type(vc, &enum_name)?;
@@ -4061,6 +4403,24 @@ pub(crate) fn expr_to_z3<'a>(
                     }
                     literal_enum_type = Some(enum_name);
                 }
+                if let Some(struct_name) = struct_array_expr_type(vc, element) {
+                    if literal_struct_type
+                        .as_ref()
+                        .is_some_and(|known| known != &struct_name)
+                    {
+                        return Err(MumeiError::type_error(
+                            "array literal elements must have the same struct type",
+                        ));
+                    }
+                    literal_struct_type = Some(struct_name);
+                } else {
+                    has_non_struct_element = true;
+                }
+            }
+            if literal_struct_type.is_some() && has_non_struct_element {
+                return Err(MumeiError::type_error(
+                    "array literal cannot mix struct and non-struct elements",
+                ));
             }
             // `[e0, e1, …]` lowers to an `Int -> Elem` Z3 array built by a
             // `store` chain over a fresh constant base. The literal has no
@@ -4074,6 +4434,60 @@ pub(crate) fn expr_to_z3<'a>(
             let mut elem_dynamics = Vec::with_capacity(elements.len());
             for element in elements {
                 elem_dynamics.push(expr_to_z3(vc, element, env, solver_opt)?);
+            }
+            if let Some(struct_type) = literal_struct_type {
+                super::z3_types::validate_array_element_type(vc, &struct_type)?;
+                let leaves = super::z3_types::struct_array_leaf_types(&struct_type, vc.module_env)
+                    .ok_or_else(|| {
+                        MumeiError::type_error(format!(
+                            "array element struct '{struct_type}' must have only scalar leaves"
+                        ))
+                    })?;
+                let mut carrier =
+                    super::z3_types::z3_array_for_sort(ctx, &name, ArrayElementSort::Struct)?;
+                for (index, element) in elem_dynamics.iter().enumerate() {
+                    let element = as_int_like(element).ok_or_else(|| {
+                        MumeiError::type_error(format!(
+                            "array literal element is not a struct value of type '{struct_type}'"
+                        ))
+                    })?;
+                    carrier = carrier.store(&Int::from_i64(ctx, index as i64), &element);
+                }
+                let all_leaf_values = elem_dynamics
+                    .iter()
+                    .map(|element| {
+                        struct_array_leaf_values_from_value(vc, env, element, &struct_type)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                for (path, leaf_type) in leaves {
+                    let key = super::z3_types::struct_array_leaf_key(&name, &path);
+                    let mut leaf_array = super::z3_types::z3_array_for_range(
+                        ctx,
+                        &key,
+                        &super::z3_types::z3_element_sort(vc, &leaf_type),
+                    );
+                    let leaf_sort = super::z3_types::array_element_sort_from_type(
+                        &leaf_type,
+                        vc.module_env,
+                        vc.ieee754_f64,
+                    );
+                    for (index, element_leaves) in all_leaf_values.iter().enumerate() {
+                        let value = element_leaves
+                            .iter()
+                            .find(|(leaf_path, _, _)| leaf_path == &path)
+                            .map(|(_, _, value)| value)
+                            .ok_or_else(|| {
+                                MumeiError::type_error(format!(
+                                    "struct array element is missing leaf '{path}'"
+                                ))
+                            })?;
+                        let value =
+                            super::z3_types::coerce_to_array_elem_sort(vc, leaf_sort, value)?;
+                        leaf_array = leaf_array.store(&Int::from_i64(ctx, index as i64), &value);
+                    }
+                    env.insert(key, leaf_array.into());
+                }
+                return Ok(carrier.into());
             }
             // Range sort = the widest element sort across the literal. Z3
             // numerals built from whole-valued floats (`1.0` → `Int`) make a
@@ -4204,7 +4618,17 @@ pub(crate) fn expr_to_z3<'a>(
                 as_int_like(&idx_value).ok_or(MumeiError::type_error("Index must be integer"))?;
 
             let element_type = super::z3_types::array_element_type_name(name, vc);
-            super::z3_types::validate_enum_array_element_type(vc, &element_type)?;
+            super::z3_types::validate_array_element_type(vc, &element_type)?;
+            if super::z3_types::array_element_sort_from_type(
+                &element_type,
+                vc.module_env,
+                vc.ieee754_f64,
+            ) == ArrayElementSort::Struct
+            {
+                return Err(MumeiError::type_error(
+                    "bare struct array elements are only supported as a local binding or scalar field access",
+                ));
+            }
             let array = z3_dynamic_array(vc, name, env);
 
             // 配列名に紐づく長さシンボルを使った境界チェック
@@ -4231,10 +4655,12 @@ pub(crate) fn expr_to_z3<'a>(
                 solver.pop(1);
             }
             let selected = array.select(&idx);
-            if let (Some(solver), Some(bound)) =
-                (solver_opt, datatype::enum_value_leaf_domain(vc, &selected))
-            {
-                solver.assert(&bound);
+            if let Some(solver) = solver_opt {
+                let bound = datatype::enum_value_leaf_domain(vc, &selected)
+                    .or_else(|| datatype::scalar_int_leaf_domain(vc, &element_type, &selected));
+                if let Some(bound) = bound {
+                    solver.assert(&bound);
+                }
             }
             Ok(selected)
         }
@@ -5891,6 +6317,8 @@ pub(crate) fn expr_to_z3<'a>(
                         CALL_REF_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let result_name = format!("call_ref_{}_{}", callee_name, call_id);
                     let result_type = callee_atom.return_type.as_deref();
+                    let _result_array_type_guard =
+                        LocalArrayElementTypeGuard::for_call_result(vc, result_type);
                     if let Some(type_name) = result_type {
                         super::z3_types::validate_enum_array_type(vc, type_name)?;
                     }
@@ -5945,6 +6373,16 @@ pub(crate) fn expr_to_z3<'a>(
                     // through the `#len` projection UF (the (contents, len)
                     // pair). The non-congruent reference-call path keeps its
                     // historical shape: no tracked result length.
+                    let result_struct_arrays = if let Some(result_array) = result_z3.as_array() {
+                        super::z3_types::call_result_struct_arrays(
+                            vc,
+                            &result_array,
+                            result_type,
+                            &result_name,
+                        )?
+                    } else {
+                        std::collections::HashMap::new()
+                    };
                     let result_len: Option<Dynamic> =
                         if let Some((rec_args, domain)) = &rec_signature {
                             result_z3.as_array().map(|_| {
@@ -5963,15 +6401,21 @@ pub(crate) fn expr_to_z3<'a>(
                                 {
                                     solver.assert(&nn);
                                 }
-                                vc.call_result_lens.borrow_mut().insert(
-                                    result_z3.get_z3_ast() as usize,
-                                    (len_sym.clone(), result_z3.clone()),
-                                );
                                 len_sym
                             })
                         } else {
                             None
                         };
+                    if let Some(result_array) = result_z3.as_array() {
+                        vc.call_result_lens.borrow_mut().insert(
+                            super::z3_types::array_root_ast(&result_array) as usize,
+                            super::context::CallResultArray {
+                                len: result_len.clone(),
+                                _keep: result_z3.clone(),
+                                struct_leaves: result_struct_arrays.clone(),
+                            },
+                        );
+                    }
 
                     // 構造体を返す参照呼び出し: 通常呼び出しと同様に結果のフィールドを
                     // シンボル化し、呼び出し先が保証する不変量を仮定する。
@@ -6111,6 +6555,12 @@ pub(crate) fn expr_to_z3<'a>(
                     if caller_ensures.trim() != "true" && !recursive_instance {
                         let _contract_guard = vc.enter_contract_instantiation(&callee_atom);
                         call_env.insert("result".to_string(), result_z3.clone());
+                        for (path, leaf_array) in &result_struct_arrays {
+                            call_env.insert(
+                                super::z3_types::struct_array_leaf_key("result", path),
+                                leaf_array.clone().into(),
+                            );
+                        }
                         if let Some(len_sym) = &result_len {
                             call_env.insert("__z3_arr_result".to_string(), result_z3.clone());
                             call_env.insert(array_len_key("result"), len_sym.clone());
@@ -6350,6 +6800,14 @@ pub(crate) fn expr_to_z3<'a>(
         }
 
         Expr::FieldAccess(inner_expr, field_name) => {
+            let access = Expr::FieldAccess(inner_expr.clone(), field_name.clone());
+            if let Some((array_name, index, field_path)) = struct_array_access_path(&access) {
+                if let Some(value) =
+                    read_struct_array_field(vc, &array_name, &index, &field_path, env, solver_opt)?
+                {
+                    return Ok(value);
+                }
+            }
             if let Expr::Variable(name) = inner_expr.as_ref() {
                 if vc.module_env.resource_field(name, field_name).is_some() {
                     let key = format!("{name}.{field_name}");

@@ -1643,6 +1643,39 @@ pub(crate) fn emit_array_literal<'a>(
             )));
         }
     }
+    let struct_names = elements
+        .iter()
+        .map(|element| {
+            infer_struct_type_name(element, var_types, module_env)
+                .filter(|type_name| module_env.get_struct(type_name).is_some())
+        })
+        .collect::<Vec<_>>();
+    if struct_names.iter().any(Option::is_some) {
+        let Some(struct_name) = struct_names.first().and_then(Option::as_deref) else {
+            return Err(MumeiError::codegen(
+                "array literal mixes struct and non-struct elements",
+            ));
+        };
+        if struct_names
+            .iter()
+            .any(|candidate| candidate.as_deref() != Some(struct_name))
+        {
+            return Err(MumeiError::codegen(
+                "array literal struct elements must have the same type",
+            ));
+        }
+        let expected = super::lowering::array_elem_llvm_type(
+            context,
+            &format!("[{struct_name}]"),
+            module_env,
+        )?
+        .ok_or_else(|| MumeiError::codegen("struct array element type did not resolve"))?;
+        if elem_ty != expected {
+            return Err(MumeiError::codegen(format!(
+                "struct array literal element type mismatch for '{struct_name}'"
+            )));
+        }
+    }
     let n = elements.len() as u32;
     let array_ty = elem_ty.array_type(n);
     // Every `alloca` goes in the entry block — the canonical LLVM form
