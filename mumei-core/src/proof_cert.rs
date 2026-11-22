@@ -730,6 +730,26 @@ mod tests {
     }
 
     #[test]
+    fn proof_hash_tracks_refined_types_used_by_struct_fields() {
+        let source = "type Pos = i64 where v >= 1;\n\
+                      struct P { x: Pos }\n\
+                      atom g(a: i64) -> i64\n\
+                      requires: a >= 1;\n\
+                      ensures: result >= 1;\n\
+                      body: { let p = P { x: a }; p.x };\n";
+        let (_, root, env) = signature_type_dependency_fixture(source, "g");
+        let changed_source = source.replace("v >= 1", "v >= 2");
+        let (_, changed_root, changed_env) =
+            signature_type_dependency_fixture(&changed_source, "g");
+
+        assert_eq!(root.body_expr, changed_root.body_expr);
+        assert_ne!(
+            crate::resolver::compute_proof_hash(&root, &env),
+            crate::resolver::compute_proof_hash(&root, &changed_env)
+        );
+    }
+
+    #[test]
     fn verify_certificate_in_env_detects_changed_signature_enum_definition() {
         let (cert, root, env) = enum_dependency_fixture("enum E { A(v: i64), B }");
         let dependency_hashes = cert.atoms[0]
@@ -864,6 +884,100 @@ mod tests {
         let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
         assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
         assert_eq!(check[0].changed_dependencies, vec!["struct:P"]);
+    }
+
+    #[test]
+    fn verify_certificate_in_env_tracks_refined_type_reached_from_body_struct_literal() {
+        let source = "type Pos = i64 where v >= 1;\n\
+                      struct P { x: Pos }\n\
+                      atom g(a: i64) -> i64\n\
+                      requires: a >= 1;\n\
+                      ensures: result >= 1;\n\
+                      body: { let p = P { x: a }; p.x };\n";
+        let (cert, root, _) = signature_type_dependency_fixture(source, "g");
+        let dependency_hashes = cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(dependency_hashes.contains_key("struct:P"));
+        assert!(dependency_hashes.contains_key("type:Pos"));
+
+        let changed_source = source.replace("v >= 1", "v >= 2");
+        let (_, _, changed_env) = signature_type_dependency_fixture(&changed_source, "g");
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+        assert_eq!(check[0].changed_dependencies, vec!["type:Pos"]);
+    }
+
+    #[test]
+    fn verify_certificate_in_env_tracks_enums_referenced_only_in_the_body() {
+        for body in [
+            "match value { E::A(v) => v, _ => 0 }",
+            "{ let constructed = E::A(value); value }",
+        ] {
+            let source = format!(
+                "enum E {{ A(v: i64), B }}\n\
+                 atom read(value: i64) -> i64\n\
+                 requires: true;\n\
+                 ensures: true;\n\
+                 body: {body};\n"
+            );
+            let (cert, root, env) = signature_type_dependency_fixture(&source, "read");
+            let dependency_hashes = cert.atoms[0]
+                .dependency_hashes
+                .as_ref()
+                .expect("generated dependency hashes");
+            assert!(dependency_hashes.contains_key("enum:E"), "{body}");
+            assert!(
+                !crate::resolver::compute_legacy_dependency_hashes(&root, &env)
+                    .contains_key("enum:E"),
+                "{body}"
+            );
+
+            let changed_source = source.replace("B }", "B, C }");
+            let (_, _, changed_env) = signature_type_dependency_fixture(&changed_source, "read");
+            let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+            assert_eq!(
+                check[0].status,
+                status::CERTIFICATE_DEPENDENCY_CHANGED,
+                "{body}"
+            );
+            assert_eq!(check[0].changed_dependencies, vec!["enum:E"], "{body}");
+        }
+
+        let bare_source = "enum E { A(v: i64), B }\n\
+                           enum F { A(v: i64), B }\n\
+                           atom read(value: i64) -> i64\n\
+                           requires: true;\n\
+                           ensures: true;\n\
+                           body: { let e = E::A(value); match e { A(v) => v, _ => 0 } };\n";
+        let (bare_cert, _bare_root, _) = signature_type_dependency_fixture(bare_source, "read");
+        let bare_hashes = bare_cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(bare_hashes.contains_key("enum:E"));
+        assert!(bare_hashes.contains_key("enum:F"));
+    }
+
+    #[test]
+    fn verify_certificate_in_env_tracks_callee_signature_types() {
+        let source = "struct P { x: i64 }\n\
+                      atom mk(a: i64) -> P\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: P { x: a };\n\
+                      atom read(a: i64) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: { let p = mk(a); p.x };\n";
+        let (cert, _, _) = signature_type_dependency_fixture(source, "read");
+        let dependency_hashes = cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(dependency_hashes.contains_key("atom:mk"));
+        assert!(dependency_hashes.contains_key("struct:P"));
     }
 
     #[test]
