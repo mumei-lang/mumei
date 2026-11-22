@@ -3182,12 +3182,14 @@ The C10 Option B machine-TV profile proves register-only scalar f64
 functions with a bounded SSE2 profile, NaN-aware result comparison, `xmm0`–`xmm7`
 entry registers for f64 parameters and the low 64 bits of `xmm0` for f64
 results. Direct calls classify f64 arguments into `xmm0`–`xmm7` and integers
-into `rdi`–`r9` then integer-indexed stack slots. Their f64 arguments must
+into `rdi`–`r9`, then overflow arguments of both classes into stack slots laid
+out in declaration order. Their f64 arguments must
 first match NaN-aware and then pass an exact-bit proof against the machine XMM
-argument under the same path assumptions. Pass-through calls can be admitted;
+argument or spilled stack slot under the same path assumptions. Pass-through
+calls can be admitted;
 computed f64 arguments whose NaN payload bits are not provably identical and
-f64 tail calls fail closed as `call_arguments`. More than eight f64 arguments
-use `argument_count`. f64 call results remain supported. MXCSR RNE, masked
+f64 tail calls fail closed as `call_arguments`. f64 call results remain
+supported. MXCSR RNE, masked
 exceptions, disabled FTZ/DAZ, and NaN payload bits remain unverified.
 The descriptor performs `machine_code_f64_scalar_function_tv` for equivalent
 functions with any f64 leaf, including one inside a struct or call shape, and
@@ -3212,8 +3214,10 @@ like scalar arguments — INTEGER leaves past `r9` and SSE leaves past
 `xmm7` share one stack area laid out in declaration order. Spilled f64
 leaves are read through `movsd` loads or directly as SSE memory operands
 (`*sd` arithmetic and `ucomisd`/`comisd` with an `N(%rsp)` source);
-cross-class slot reads fail closed. Outgoing f64 arguments that overflow
-still fail closed — more than eight remain `argument_count`.
+cross-class slot reads fail closed. On the outgoing side, a call argument
+past `xmm7` must be written with a `movsd %xmm, N(%rsp)` store into the
+same declaration-ordered stack area, and the slot carries the same
+NaN-aware plus exact-bit obligations as a register argument.
 
 Aggregate results have at most four leaves overall, at most three INTEGER
 leaves, and at most two SSE leaves. Real `llc-17 -O2` output returned three
