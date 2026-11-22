@@ -195,7 +195,16 @@ fn machine_tv_model_uses_wide_composite_aggregate(
         .iter()
         .flatten()
         .any(|leaf_count| *leaf_count > 2)
-        || model.result_shape.is_some_and(|leaf_count| leaf_count > 2)
+        || model.result_shape.is_some_and(|leaf_count| {
+            leaf_count > 2
+                // An all-INTEGER aggregate result past the three
+                // register-resident INTEGER leaves comes back through
+                // the `sret` convention the lifter now models — it is
+                // validated, not an assumed memory-class ABI.
+                && !((4..=16).contains(&leaf_count)
+                    && model.result_leaf_doubles.len() == leaf_count
+                    && model.result_leaf_doubles.iter().all(|is_double| !*is_double))
+        })
         || model.call_sites.iter().any(|call_site| {
             call_site.argument_shapes.iter().any(|shape| {
                 matches!(
