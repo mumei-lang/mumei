@@ -370,6 +370,13 @@ pub fn compute_proof_hash_with_flags(
             hash_resource_definition(&mut hasher, resource);
         }
     }
+    for resource_name in module_env.resources.keys().collect::<BTreeSet<_>>() {
+        if let Some(resource) = module_env.get_resource(resource_name) {
+            hasher.update(b"|module_resource:");
+            hasher.update(resource_name.as_bytes());
+            hash_resource_definition(&mut hasher, resource);
+        }
+    }
     for e in &atom.effects {
         hasher.update(b"|effect:");
         hasher.update(e.name.as_bytes());
@@ -2840,6 +2847,34 @@ body: { p.a };\n";
             "resource:counter",
         );
         assert_ne!(before, after);
+
+        let acquired = dependency_hash_for(
+            "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;\n\
+             atom main() -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: { acquire counter { counter.value = 3; 0 } };",
+            "main",
+            "resource:counter",
+        );
+        assert_eq!(before, acquired);
+    }
+
+    #[test]
+    fn module_resource_invariant_changes_an_unrelated_atom_hash() {
+        let before_source = "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;\n\
+                             atom main(a: i64) -> i64\n\
+                             requires: true;\n\
+                             ensures: true;\n\
+                             body: a;";
+        let after_source = before_source.replace("counter.value >= 0", "counter.value >= 5");
+
+        assert_ne!(env_and_hash(before_source), env_and_hash(&after_source));
+        for source in [before_source, after_source.as_str()] {
+            assert!(dependency_hashes_for(source, "main")
+                .keys()
+                .all(|key| !key.starts_with("resource:")));
+        }
     }
 
     #[test]
