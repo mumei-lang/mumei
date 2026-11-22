@@ -1795,8 +1795,9 @@ fn atom_contract(
             output_identity: Some(mir_identity.sha256.clone()),
             validation: "compiler_local_fingerprint_not_equivalence",
         },
+        // The LLVM emitter lowers the HIR body; MIR is not on the emission path.
         TransformationRelation {
-            from: "mir",
+            from: "hir",
             to: "llvm_ir",
             relation: "existing_llvm_emitter",
             output_identity: None,
@@ -11660,7 +11661,7 @@ mod tests {
                 "compiler_local_fingerprint_not_equivalence",
             ),
             (
-                "mir",
+                "hir",
                 "llvm_ir",
                 "existing_llvm_emitter",
                 None,

@@ -131,6 +131,7 @@ fn module_trace_binds_every_atom_from_specification_to_execution_target() {
             "no emitted LLVM file contains {definition}"
         );
         let llvm_relation = contract.transformations.last().unwrap();
+        assert_eq!(llvm_relation.from, "hir");
         assert_eq!(llvm_relation.output_identity, None);
         assert_eq!(
             llvm_relation.validation,
