@@ -26,7 +26,14 @@ pub(crate) fn apply_refinement_constraint<'a>(
     // Type System 2.0: ベース型に基づいて変数を生成 — the chain's leaf base
     // name decides the encoding (a chained alias's `_base_type` is the next
     // declaration, not a scalar).
-    let leaf_base = chain.last().map_or("", |decl| decl._base_type.as_str());
+    // The 64-bit target's width-typed leaf folds onto its machine base:
+    // `usize` carries `u64`'s unsigned domain (`resolve_base_type`
+    // folds the same way), so a `usize`-based refinement binds Int and
+    // gets the nonneg constraint exactly like a `u64` leaf.
+    let leaf_base = match chain.last().map_or("", |decl| decl._base_type.as_str()) {
+        "usize" => "u64",
+        other => other,
+    };
     // Reuse the caller's binding when present: a concrete assignment must
     // stay concrete so the chain predicates actually filter it — rebinding
     // to a fresh symbolic const would let an out-of-domain input satisfy

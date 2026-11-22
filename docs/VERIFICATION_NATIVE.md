@@ -1509,10 +1509,12 @@ admission (`mumei.pure-i64-refined-scalar/v2`, bundles pinned
 `bool` — the verifier binds the operand as `Bool` — or another declared
 type name, composing every ancestor conjunct exactly the way the
 verifier's chain enforcement does. Cyclic chains stay rejected in both.
-`u64`/`usize`/`isize`/`f64`/`Str` leaves stay rejected in both: a
-full-width unsigned domain cannot be expressed as an i64 bound and the
-obligation vocabulary has no Real/String sorts — widening those needs
-a new profile name again. The `where`
+`f64`/`Str` leaves stay rejected in both — the
+obligation vocabulary has no Real/String sorts. `u64`/`usize`/`isize`
+leaves join at `mumei.pure-i64-composite/v10` (the same admission the
+literal signature leaves need): `usize` folds to the `u64` domain,
+`isize` to `i64`, and alias predicates on a `u64` base compare
+unsigned exactly like a literal `u64` parameter's clauses. The `where`
 predicate must check as `Bool` over its declared operand under the
 existing `expression_kind` gate, with no calls admitted inside it.
 Duplicate type names and a type named like an atom are rejected, so

@@ -1142,10 +1142,19 @@ fn binder_scalar_type(type_name: Option<&str>, refined: &RefinedEnv) -> &'static
 /// Whether the admitted module declares a `u64`-family leaf anywhere —
 /// `u64` itself, `usize` or `isize`, as a parameter, a result, a struct
 /// field (instantiated decls included, since monomorphization leaves
-/// the field name behind) or an enum payload slot. Only `CompositeV10`
-/// admission ever produces one.
+/// the field name behind), an enum payload slot, or a refined-alias
+/// declaration chain's literal base (`type Big = u64 where ..` can only
+/// exist under `CompositeV10`, so its presence alone already pins it).
+/// Only `CompositeV10` admission ever produces one.
 fn uses_u64_leaves(items: &[Item]) -> bool {
     let target_width = |name: Option<&str>| matches!(name, Some("u64" | "usize" | "isize"));
+    let typedefs: BTreeMap<&str, &crate::parser::ast::RefinedType> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::TypeDef(def) => Some((def.name.as_str(), def)),
+            _ => None,
+        })
+        .collect();
     items.iter().any(|item| match item {
         Item::Atom(atom) => {
             atom.params
@@ -1162,6 +1171,23 @@ fn uses_u64_leaves(items: &[Item]) -> bool {
             .iter()
             .flat_map(|v| v.field_types.iter())
             .any(|ty| target_width(Some(ty.display_name().as_str()))),
+        Item::TypeDef(def) => {
+            // Walk the declaration chain to the literal base — an
+            // alias that ends in a u64-family leaf needed v10 to be
+            // admitted, so the module must pin it even when the alias
+            // name is the only place the width appears.
+            let mut current = def;
+            let mut seen = BTreeSet::new();
+            loop {
+                if !seen.insert(current.name.as_str()) {
+                    break false;
+                }
+                match typedefs.get(current._base_type.as_str()) {
+                    Some(next) => current = next,
+                    None => break target_width(Some(current._base_type.as_str())),
+                }
+            }
+        }
         _ => false,
     })
 }
@@ -1952,9 +1978,14 @@ fn declared_param_kind(
         "bool" if admit_widened => ScalarKind::Bool,
         "i8" | "i16" | "i32" | "u8" | "u16" | "u32" if admit_widened => ScalarKind::I64,
         // A bool-leaf alias gives the parameter a boolean signature —
-        // the same boundary literal `bool` carries.
+        // the same boundary literal `bool` carries. A u64-leaf alias
+        // likewise carries the same boundary literal `u64` does.
         other => match refined.get(other) {
-            Some(alias) if alias.kind != ScalarKind::Bool || admit_widened => alias.kind,
+            Some(alias) => match alias.kind {
+                ScalarKind::Bool if !admit_widened => return None,
+                ScalarKind::U64 if !admit_u64 => return None,
+                kind => kind,
+            },
             _ => return None,
         },
     };
@@ -2947,9 +2978,11 @@ fn validate_atom(
         // (`pure-i64-composite/v6`) returns its tag plus payload slots.
         Some(name) if structs.contains_key(name) => admit_struct_values,
         Some(name) if enums.contains_key(name) => admit_enum_values,
-        Some(name) => refined
-            .get(name)
-            .is_some_and(|alias| alias.kind != ScalarKind::Bool || admit_widened),
+        Some(name) => refined.get(name).is_some_and(|alias| match alias.kind {
+            ScalarKind::Bool => admit_widened,
+            ScalarKind::U64 => admit_u64,
+            _ => true,
+        }),
         None => false,
     };
     if !return_ok
@@ -4137,7 +4170,7 @@ fn build_enum_env(
                 "empty enum declarations",
             ));
         }
-        if scalar_base(&def.name).is_some()
+        if scalar_base(&def.name, false).is_some()
             || matches!(def.name.as_str(), "u64" | "usize" | "isize")
         {
             return Err(SemanticContractError::Unsupported(
@@ -4194,9 +4227,16 @@ fn build_enum_env(
                     "i128" if admission.admits_wide_payloads() => Some(ScalarKind::I128),
                     "u128" if admission.admits_wide_payloads() => Some(ScalarKind::U128),
                     "bool" => Some(ScalarKind::Bool),
+                    // An alias leaf rides its resolved base — a `u64`
+                    // base needs the same v10 gate the literal carries.
+                    // (`isize` aliases resolve to `i64`, `usize` to
+                    // `u64`, inside `resolve_alias`.)
                     name => refined
                         .get(name)
-                        .filter(|alias| matches!(alias.base, "i64" | "bool"))
+                        .filter(|alias| {
+                            matches!(alias.base, "i64" | "bool")
+                                || (admission.admits_u64_leaves() && alias.base == "u64")
+                        })
                         .map(|alias| alias.kind),
                 };
                 let shape = match kind {
@@ -4419,7 +4459,7 @@ fn build_struct_env(
                 "empty struct declarations",
             ));
         }
-        if scalar_base(&def.name).is_some()
+        if scalar_base(&def.name, false).is_some()
             || matches!(def.name.as_str(), "u64" | "usize" | "isize")
         {
             return Err(SemanticContractError::Unsupported(
@@ -4478,7 +4518,10 @@ fn build_struct_env(
                 }
                 name if admission >= RefinedAdmission::CompositeV2 => refined
                     .get(name)
-                    .filter(|alias| matches!(alias.base, "i64" | "bool"))
+                    .filter(|alias| {
+                        matches!(alias.base, "i64" | "bool")
+                            || (admission.admits_u64_leaves() && alias.base == "u64")
+                    })
                     .map(|alias| ValueKind::Scalar(alias.kind)),
                 _ => None,
             };
@@ -4560,7 +4603,7 @@ fn struct_depth(structs: &StructEnv, fields: &[ResolvedField], depth: usize) -> 
 /// and the obligation vocabulary has no Real/String sorts). `bool` is
 /// a V2 leaf: the verifier binds its operand as `Bool`, so admission
 /// gates it on the V2 fragment rather than this table.
-fn scalar_base(name: &str) -> Option<(ScalarKind, &'static str)> {
+fn scalar_base(name: &str, admit_u64: bool) -> Option<(ScalarKind, &'static str)> {
     match name {
         "bool" => Some((ScalarKind::Bool, "bool")),
         "i64" => Some((ScalarKind::I64, "i64")),
@@ -4570,6 +4613,12 @@ fn scalar_base(name: &str) -> Option<(ScalarKind, &'static str)> {
         "u8" => Some((ScalarKind::I64, "u8")),
         "u16" => Some((ScalarKind::I64, "u16")),
         "u32" => Some((ScalarKind::I64, "u32")),
+        // The u64-family leaves fold exactly like signature leaves
+        // (`pure-i64-composite/v10`): `usize` is the target's 64-bit
+        // unsigned width (`u64` domain), `isize` its signed width
+        // (`i64` domain).
+        "u64" | "usize" if admit_u64 => Some((ScalarKind::U64, "u64")),
+        "isize" if admit_u64 => Some((ScalarKind::I64, "i64")),
         _ => None,
     }
 }
@@ -4661,9 +4710,9 @@ fn resolve_alias(
             None => break current._base_type.clone(),
         }
     };
-    let (kind, base) = scalar_base(&leaf).ok_or(SemanticContractError::Unsupported(
-        "type outside the scalar profile",
-    ))?;
+    let (kind, base) = scalar_base(&leaf, admission.admits_u64_leaves()).ok_or(
+        SemanticContractError::Unsupported("type outside the scalar profile"),
+    )?;
     if kind == ScalarKind::Bool && admission < RefinedAdmission::V2 {
         return Err(SemanticContractError::Unsupported(
             "bool-leaf type declarations",
@@ -7662,11 +7711,10 @@ fn declared_slot_domain<'ctx>(
                 // its 0/1 domain — before the declaration's conjuncts
                 // tighten it.
                 domain.extend(scalar_domain_bounds(alias.base, v, context));
-                let operand = if alias.kind == ScalarKind::Bool {
-                    SourceValue::Boolean(v._eq(&BV::from_u64(context, 0, 64)).not())
-                } else {
-                    SourceValue::Integer(v.clone())
-                };
+                // A `u64`-leaf alias binds an unsigned operand so its
+                // predicates compare like a literal `u64` parameter's
+                // clauses (`pure-i64-composite/v10`).
+                let operand = enum_slot_value(alias.kind, v, context);
                 domain.extend(alias_predicates(alias, operand, context)?);
             }
         }
@@ -7773,7 +7821,9 @@ fn result_conjuncts_at<'ctx>(
             let carries = Bool::or(context, &carrier_tags.iter().collect::<Vec<_>>());
             let type_name = enum_slot_type(variants, i);
             let conjuncts = match slot_value {
-                SourceValue::Integer(v) => declared_slot_domain(type_name, v, context, refined)?,
+                SourceValue::Integer(v) | SourceValue::Unsigned(v) => {
+                    declared_slot_domain(type_name, v, context, refined)?
+                }
                 SourceValue::Boolean(_) => {
                     refined_conjuncts_at(type_name, slot_value.clone(), refined, context)?
                 }
@@ -13537,6 +13587,93 @@ atom add(b: B, e: u64) -> B requires: true; ensures: result.t == b.t + e; body: 
             module_source_profile(&flat, RefinedAdmission::CompositeV10).unwrap(),
             PURE_I64_COMPOSITE_PROFILE_V10
         );
+    }
+
+    #[test]
+    fn composite_v10_admits_u64_family_refined_aliases() {
+        let v10 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV10)
+        };
+        let outcomes = |source: &str| {
+            refined_module_outcomes_admission(source, RefinedAdmission::CompositeV10)
+        };
+        let module = |piece: &str| format!("{piece}\n{MAIN0}");
+        // A `u64`-leaf alias parameter: the declaration's conjunct joins
+        // the input domain and the predicates read unsigned — `a - 1`
+        // wraps to `u64::MAX` at `a == 0`, so bounding the result below
+        // the declared cap only proves when `a > 0`.
+        let positive = module(
+            "type Big = u64 where v <= 10;\n\
+             atom f(a: Big) -> u64 requires: a > 0; ensures: result < 10; body: { a - 1 };",
+        );
+        assert!(v10(&positive).is_ok());
+        assert!(outcomes(&positive)
+            .iter()
+            .all(|r| *r == z3::SatResult::Unsat));
+        // A module whose only u64-family leaf hides inside an alias
+        // declaration still pins v10 — a lower pin would reject the
+        // same source on recheck.
+        let alias_only = module(
+            "type Big = u64 where v <= 10;\n\
+             atom f(a: Big) -> i64 requires: true; ensures: result == 0; body: { 0 };",
+        );
+        assert_eq!(
+            module_source_profile(&alias_only, RefinedAdmission::CompositeV10).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V10
+        );
+        let wrapped = module(
+            "type Big = u64 where v <= 10;\n\
+             atom f(a: Big) -> u64 requires: true; ensures: result < 10; body: { a - 1 };",
+        );
+        assert!(outcomes(&wrapped).contains(&z3::SatResult::Sat));
+        // `usize` bases fold to the `u64` domain, `isize` to `i64` — the
+        // same folds signature leaves carry.
+        for piece in [
+            "type Sz = usize where v <= 4;\n\
+             atom f(a: Sz) -> u64 requires: true; ensures: result <= 4; body: { a };",
+            "type Small = isize where v >= -4;\n\
+             atom f(a: Small) -> i64 requires: a >= 0; ensures: result >= 0; body: { a };",
+            // An alias leaf inside a struct field and an enum payload.
+            "type Big = u64 where v <= 10;\nstruct P { x: Big }\n\
+             atom f(p: P) -> u64 requires: true; ensures: result <= 10; body: { p.x };",
+            "type Big = u64 where v <= 10;\nenum E { A(Big) }\n\
+             atom f(e: E) -> u64 requires: true; ensures: result <= 10; body: { match e { A(x) => x, _ => 0 } };",
+            // An alias result — `Big` caps the returned value.
+            "type Big = u64 where v <= 10;\n\
+             atom f(a: u64) -> Big requires: a <= 9; ensures: true; body: { a + 1 };",
+        ] {
+            let source = module(piece);
+            match v10(&source) {
+                Ok(_) => {}
+                Err(e) => panic!("{piece}: {e:?}"),
+            }
+            match std::panic::catch_unwind(|| outcomes(&source)) {
+                Ok(res) => assert!(
+                    res.iter().all(|r| *r == z3::SatResult::Unsat),
+                    "{piece}"
+                ),
+                Err(_) => panic!("outcomes failed for: {piece}"),
+            }
+        }
+        // Narrower admissions keep u64-family alias leaves out — the
+        // same gate literal `u64`/`usize`/`isize` leaves carry.
+        let alias_source = module(
+            "type Big = u64 where v <= 10;\n\
+             atom f(a: Big) -> u64 requires: a > 0; ensures: result < 10; body: { a - 1 };",
+        );
+        for admission in [
+            RefinedAdmission::Reject,
+            RefinedAdmission::V1,
+            RefinedAdmission::V2,
+            RefinedAdmission::Composite,
+            RefinedAdmission::CompositeV2,
+            RefinedAdmission::CompositeV9,
+        ] {
+            assert!(
+                extract_pure_i64_module_contracts(&alias_source, "m.mm", None, admission).is_err(),
+                "{admission:?}"
+            );
+        }
     }
 
     #[test]

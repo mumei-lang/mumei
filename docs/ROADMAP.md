@@ -3542,13 +3542,17 @@ derived from what its declarations actually need, and calls carry the
 callee's declared signature kinds (a `bool` argument/result lowers to
 the profile's i64 0/1 convention). The alias gate stays fail-closed in
 both: `unit` metadata, cyclic or unresolvable bases, non-scalar leaves
-(`u64`/`usize`/`isize`/`f64`/`Str`), and atom-name collisions are
-rejected. Each alias's predicates fold into the obligations the module
+(`f64`/`Str`), and atom-name collisions are
+rejected. `u64`/`usize`/`isize` leaves additionally require
+`mumei.pure-i64-composite/v10` — the same gate the literal signature
+leaves carry — and fold like them (`usize`→`u64`, `isize`→`i64`); their
+predicates compare unsigned exactly as a literal `u64` parameter's
+clauses do. Each alias's predicates fold into the obligations the module
 already proves: parameters strengthen the signature domain established
 at every call site, and results strengthen the postcondition the callee
 guarantees. Recheckers dispatch on the pinned profile name, so every
 record is re-admitted under exactly its own admission level.
-Enum member items, `u64`-family leaves, deeper
+Deeper
 optimizer/ABI/runtime assurance and producer authenticity remain
 open. See the
 [refined scalar member profiles](VERIFICATION_NATIVE.md#refined-scalar-member-profiles-v2).
