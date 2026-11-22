@@ -2091,23 +2091,18 @@ fn verify_inner_impl(
         solver.assert(&v.lt(&z3::ast::Int::from_i64(&ctx, n)));
     }
 
-    // 2d. `u64` params: under the `Int` encoding the symbol is unbounded —
-    // assert `0 <= v <= u64::MAX` so `a >= 0` and `a < 0` are decided
-    // correctly. The `BV(64)` encoding needs no bound (every value is valid;
-    // the unsigned ops carry the semantics).
-    let u64_max = z3::ast::Int::from_u64(&ctx, u64::MAX);
+    // 2d. Fixed-width scalar params must satisfy their declared domains before
+    // a later constructor or match may rely on those domains.
     for param in &atom.params {
         let Some(type_name) = param.type_name.as_deref() else {
             continue;
         };
-        if module_env.resolve_base_type(type_name) != "u64" {
-            continue;
-        }
-        let Some(v) = env.get(&param.name).and_then(|d| d.as_int()) else {
+        let Some(value) = env.get(&param.name) else {
             continue;
         };
-        solver.assert(&v.ge(&z3::ast::Int::from_u64(&ctx, 0)));
-        solver.assert(&v.le(&u64_max));
+        if let Some(domain) = datatype::scalar_int_leaf_domain(&vc, type_name, value) {
+            solver.assert(&domain);
+        }
     }
 
     // 2d'. `i128`/`u128` params: same unbounded-`Int` gap — assert the
@@ -2184,6 +2179,26 @@ fn verify_inner_impl(
             env.insert(len_name, unsafe { Int::wrap(&ctx, ast) }.into());
         } else {
             array_len_value(&ctx, &mut env, &param.name, bitvec_i64, Some(&solver));
+        }
+    }
+
+    for param in &atom.params {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        let resolved = module_env.resolve_base_type(type_name);
+        if !resolved.trim_start().starts_with('[') && !resolved.trim_end().ends_with("[]") {
+            continue;
+        }
+        let (Some(array), Some(length)) =
+            (env.get(&param.name), env.get(&array_len_key(&param.name)))
+        else {
+            continue;
+        };
+        let element_type =
+            crate::verification::translator::z3_types::array_element_type_name(&param.name, &vc);
+        if let Some(domain) = datatype::array_int_leaf_domain(&vc, array, length, &element_type) {
+            solver.assert(&domain);
         }
     }
 

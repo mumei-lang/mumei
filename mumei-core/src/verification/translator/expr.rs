@@ -2942,7 +2942,8 @@ pub(crate) fn expr_to_z3<'a>(
             // finite ADT (e.g. `Red` for `enum Color { Red, Green, Blue }`)
             // constructs the datatype value.
             if name.chars().next().is_some_and(|c| c.is_uppercase()) {
-                if let Some(value) = datatype::enum_ctor_apply(vc, env, name, &[], &[])? {
+                if let Some(value) = datatype::enum_ctor_apply(vc, env, name, &[], &[], solver_opt)?
+                {
                     return Ok(value);
                 }
             }
@@ -4509,6 +4510,7 @@ pub(crate) fn expr_to_z3<'a>(
                                 name,
                                 &ctor_args,
                                 &payload_snapshots,
+                                solver_opt,
                             )? {
                                 return Ok(value);
                             }
@@ -7078,6 +7080,7 @@ pub(crate) fn expr_to_z3<'a>(
                         &format!("{}::{}", name, field_name),
                         &[],
                         &[],
+                        solver_opt,
                     )? {
                         return Ok(value);
                     }

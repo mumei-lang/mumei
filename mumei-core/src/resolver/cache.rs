@@ -75,7 +75,9 @@ use std::path::Path;
 /// Version 35 uses recursive datatype selectors for scalar payload access and
 /// rejects writes that traverse a recursive self field. Version 36 admits
 /// finite enum and scalar-struct payloads on direct-self-recursive enums.
-pub const VERIFIER_POLICY_VERSION: u32 = 36;
+/// Version 37 checks fixed-width payload domains when constructing finite and
+/// direct-self-recursive enum values, so cached verdicts must be re-derived.
+pub const VERIFIER_POLICY_VERSION: u32 = 37;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -3358,7 +3360,7 @@ body: { p.a };\n";
         let baseline = proof_hash_for(source, "g");
         assert_eq!(
             baseline,
-            "815d07c10f6411ce2dc040f31a539a3a5da5fc3874956e554c3f2fd02bfa3333"
+            "e200bc3ffbf1b143e04d4c5b5d14344879f53310e4980a7b09782d12d5c99f00"
         );
         let changed = proof_hash_for(
             &source.replace(
@@ -3371,7 +3373,7 @@ body: { p.a };\n";
     }
 
     #[test]
-    fn effect_free_proof_hash_matches_policy_version_36() {
+    fn effect_free_proof_hash_matches_policy_version_37() {
         let source = "atom main(x: i64) -> i64\n\
                       requires: true;\n\
                       ensures: result == x;\n\
@@ -3380,7 +3382,7 @@ body: { p.a };\n";
 
         assert_eq!(
             hash,
-            "594b3ff34db421e26e232e5a9f3c70e226b4249fdad550fd5c37d7186247a5ac"
+            "34a4d90e0ea3b338b0b62f433b847251a7b9177c9d15b7c272bf31920a61597d"
         );
         assert!(!dependency_hashes_for(source, "main")
             .keys()

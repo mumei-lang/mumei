@@ -165,6 +165,34 @@ fn recursive_datatypes_support_finite_enum_and_struct_payloads() {
 }
 
 #[test]
+fn enum_constructor_payload_domains_are_checked_in_both_integer_modes() {
+    for bitvec_i64 in [false, true] {
+        assert_verified(
+            &run_verify(
+                "test_recursive_adt_enum_payload_domain_positive.mm",
+                bitvec_i64,
+            ),
+            "test_recursive_adt_enum_payload_domain_positive.mm",
+            bitvec_i64,
+        );
+        for name in [
+            "test_recursive_adt_enum_payload_domain_recursive_struct_negative.mm",
+            "test_recursive_adt_enum_payload_domain_finite_struct_negative.mm",
+            "test_recursive_adt_enum_payload_domain_recursive_scalar_negative.mm",
+            "test_recursive_adt_enum_payload_domain_finite_scalar_negative.mm",
+            "test_recursive_adt_enum_payload_array_domain_negative.mm",
+        ] {
+            assert_rejected(
+                &run_verify(name, bitvec_i64),
+                name,
+                "value may be outside the 'u32' domain",
+                bitvec_i64,
+            );
+        }
+    }
+}
+
+#[test]
 fn recursive_match_bindings_do_not_leak_enum_types_across_arms() {
     for bitvec_i64 in [false, true] {
         assert_verified(
