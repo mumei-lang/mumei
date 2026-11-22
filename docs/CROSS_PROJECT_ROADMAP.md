@@ -3963,6 +3963,9 @@ record now optionally pins `link_build.observation_envelope`. Pins from a
 different envelope are not compared, making runtime rechecks inconclusive
 (exit 3); legacy records without the field are still compared and report
 `pin_envelope: "unrecorded"`.
+Per-channel `accept-*` JSON descriptors also carry `invocation`, `host` and
+`pin_envelope`; none of these properties is covered by
+`runtime_observation_semantics`.
 Composition landed via `accept-observations`; this raw
 descriptor is not an Agent performer, while Agent's
 `native-observations-accept` route (mumei-agent#1039) performs

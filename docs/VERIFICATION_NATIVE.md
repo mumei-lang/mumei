@@ -2384,6 +2384,10 @@ so runtime rechecks are inconclusive (exit 3). Legacy records without the
 field are still compared and runtime descriptors report
 `pin_envelope: "unrecorded"`; matching recorded envelopes report
 `pin_envelope: "recorded"`.
+Per-channel `accept-exit-status`, `accept-stdout` and `accept-stderr` JSON
+acceptance descriptors also carry `invocation`, `host` and `pin_envelope`.
+As before, none of these properties is covered by
+`runtime_observation_semantics`.
 
 Both runtime-observation descriptors also carry `host` (`os`, `arch`,
 `family`), the running consumer binary's compile-time target, recorded
