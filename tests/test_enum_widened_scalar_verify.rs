@@ -67,6 +67,29 @@ fn widened_leaf_domain_stops_at_declared_width() {
 }
 
 #[test]
+fn u64_payload_doubling_respects_unsigned_wrap() {
+    let out = run_verify(
+        &fixture("test_enum_widened_scalar_wrap_negative.mm"),
+        "wrap",
+    );
+    assert!(
+        !out.status.success(),
+        "`x + x >= x` does not hold for every u64 payload because addition wraps"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let payload = stdout
+        .split("W::A(")
+        .nth(1)
+        .and_then(|witness| witness.split(')').next())
+        .and_then(|witness| witness.parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("the counterexample should include a u64 payload:\n{stdout}"));
+    assert!(
+        payload >= (1_u64 << 63),
+        "the counterexample should exercise unsigned wrap at 2^63:\n{stdout}"
+    );
+}
+
+#[test]
 fn widened_leaf_mixing_with_declared_i64_rejects() {
     let out = run_verify(&fixture("test_enum_widened_scalar_mix_negative.mm"), "mix");
     assert!(

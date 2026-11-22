@@ -192,6 +192,11 @@ pub(crate) enum ArrayElementSort {
     /// A finite algebraic datatype. The actual range sort is resolved from
     /// the declared element type at array construction sites.
     Enum,
+    /// A struct whose flattened leaves all have scalar sorts. The carrier
+    /// remains `Int`-ranged; its fields live in per-leaf arrays.
+    Struct,
+    /// A struct with leaves that cannot be represented by scalar arrays.
+    UnsupportedStruct,
     /// An enum that cannot be represented as a finite scalar ADT array
     /// element (recursive, unresolved generic, or array-bearing payload).
     UnsupportedEnum,
@@ -283,6 +288,18 @@ pub(crate) fn array_element_sort_from_type(
             ArrayElementSort::UnsupportedEnum
         };
     }
+    let struct_base = crate::verification::support::datatype::type_name_base(&resolved);
+    if module_env
+        .get_struct(&resolved)
+        .or_else(|| module_env.get_struct(struct_base))
+        .is_some()
+    {
+        return if struct_array_leaf_types(&resolved, module_env).is_some() {
+            ArrayElementSort::Struct
+        } else {
+            ArrayElementSort::UnsupportedStruct
+        };
+    }
     match lower(&resolved) {
         LoweredType::F64 if ieee754_f64 => ArrayElementSort::Float,
         LoweredType::F64 => ArrayElementSort::Real,
@@ -297,6 +314,119 @@ pub(crate) fn array_element_sort_from_type(
 pub(crate) fn array_element_sort(name: &str, vc: &VCtx<'_>) -> ArrayElementSort {
     let type_name = array_element_type_name(name, vc);
     array_element_sort_from_type(&type_name, vc.module_env, vc.ieee754_f64)
+}
+
+pub(crate) fn struct_array_leaf_types(
+    type_name: &str,
+    module_env: &ModuleEnv,
+) -> Option<Vec<(String, String)>> {
+    let resolved = module_env.resolve_base_type(type_name);
+    let base = crate::verification::support::datatype::type_name_base(&resolved);
+    module_env
+        .get_struct(&resolved)
+        .or_else(|| module_env.get_struct(base))?;
+    let leaves = crate::verification::support::datatype::field_leaf_types(&resolved, module_env)?;
+    if leaves.is_empty()
+        || leaves.iter().any(|(_, leaf)| {
+            !matches!(
+                lower(&module_env.resolve_base_type(leaf)),
+                LoweredType::I64
+                    | LoweredType::I32
+                    | LoweredType::U64
+                    | LoweredType::U32
+                    | LoweredType::F64
+                    | LoweredType::Bool
+                    | LoweredType::Str
+            )
+        })
+    {
+        return None;
+    }
+    Some(leaves)
+}
+
+pub(crate) fn validate_array_element_type(
+    vc: &VCtx<'_>,
+    type_name: &str,
+) -> Result<(), MumeiError> {
+    validate_enum_array_element_type(vc, type_name)?;
+    let sort = array_element_sort_from_type(type_name, vc.module_env, vc.ieee754_f64);
+    if sort == ArrayElementSort::UnsupportedStruct {
+        return Err(MumeiError::type_error(format!(
+            "array element struct '{type_name}' must have only scalar leaves (i64, fixed-width integers, f64, bool, or Str)"
+        )));
+    }
+    if sort == ArrayElementSort::Nested {
+        let resolved = vc.module_env.resolve_base_type(type_name);
+        let inner = resolved
+            .strip_prefix("[]<")
+            .and_then(|inner| inner.strip_suffix('>'))
+            .or_else(|| {
+                resolved
+                    .strip_prefix('[')
+                    .and_then(|inner| inner.strip_suffix(']'))
+            })
+            .map(str::trim)
+            .unwrap_or("");
+        if matches!(
+            array_element_sort_from_type(inner, vc.module_env, vc.ieee754_f64),
+            ArrayElementSort::Struct | ArrayElementSort::UnsupportedStruct
+        ) {
+            return Err(MumeiError::type_error(
+                "nested arrays of structs are not supported",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn struct_array_leaf_key(name: &str, leaf_path: &str) -> String {
+    format!("__struct_arr#{name}#{leaf_path}")
+}
+
+pub(crate) fn struct_array_leaf_array<'a>(
+    vc: &VCtx<'a>,
+    name: &str,
+    leaf_path: &str,
+    leaf_type: &str,
+    env: &mut Env<'a>,
+) -> z3::ast::Array<'a> {
+    let key = struct_array_leaf_key(name, leaf_path);
+    if let Some(array) = env.get(&key).and_then(|value| value.as_array()) {
+        return array;
+    }
+    let array = z3_fresh_array_for_range(vc.ctx, &key, &z3_element_sort(vc, leaf_type));
+    env.insert(key, array.clone().into());
+    array
+}
+
+pub(crate) fn seed_struct_array_param_leaves<'a>(
+    vc: &VCtx<'a>,
+    name: &str,
+    type_name: Option<&str>,
+    env: &mut Env<'a>,
+) {
+    let Some(type_name) = type_name.filter(|ty| ty.starts_with('[') && ty.ends_with(']')) else {
+        return;
+    };
+    let element_type = array_element_type_from_annotation(Some(type_name), vc.module_env);
+    if array_element_sort_from_type(&element_type, vc.module_env, vc.ieee754_f64)
+        != ArrayElementSort::Struct
+    {
+        return;
+    }
+    let Some(leaves) = struct_array_leaf_types(&element_type, vc.module_env) else {
+        return;
+    };
+    vc.local_array_elem_types
+        .borrow_mut()
+        .insert(name.to_string(), element_type.clone());
+    for (path, leaf_type) in leaves {
+        let key = struct_array_leaf_key(name, &path);
+        env.entry(key.clone()).or_insert_with(|| {
+            z3_fresh_array_for_range(vc.ctx, &key, &z3_element_sort(vc, &leaf_type)).into()
+        });
+    }
 }
 
 pub(crate) fn validate_enum_array_element_type(
@@ -1104,9 +1234,15 @@ pub(crate) fn z3_array_for_sort<'a>(
             let string_sort = z3::Sort::string(ctx);
             Array::new_const(ctx, name, &int_sort, &string_sort)
         }
+        ArrayElementSort::Struct => Array::new_const(ctx, name, &int_sort, &int_sort),
         ArrayElementSort::Enum | ArrayElementSort::UnsupportedEnum => {
             return Err(MumeiError::type_error(
                 "enum array construction requires its resolved datatype sort",
+            ));
+        }
+        ArrayElementSort::UnsupportedStruct => {
+            return Err(MumeiError::type_error(
+                "array element struct does not have supported scalar leaves",
             ));
         }
         // The flat tag cannot rebuild the precise inner sort of a `[[T]]` —
@@ -1138,6 +1274,78 @@ pub(crate) fn z3_dynamic_array<'a>(vc: &VCtx<'a>, name: &str, env: &Env<'a>) -> 
         .unwrap_or_else(|| z3_array_for_name(vc, name))
 }
 
+pub(crate) struct StructArrayLeafSnapshot<'a> {
+    element_type: String,
+    arrays: HashMap<String, Array<'a>>,
+}
+
+pub(crate) fn snapshot_struct_array_leaves<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    expression: &Expr,
+    value: &Dynamic<'a>,
+    declared_array_type: Option<&str>,
+) -> MumeiResult<Option<StructArrayLeafSnapshot<'a>>> {
+    let element_type = declared_array_type
+        .map(str::trim)
+        .filter(|type_name| type_name.starts_with('[') && type_name.ends_with(']'))
+        .map(|type_name| array_element_type_from_annotation(Some(type_name), vc.module_env))
+        .or_else(|| array_element_type_from_expr(vc, expression));
+    let Some(element_type) = element_type else {
+        return Ok(None);
+    };
+    if array_element_sort_from_type(&element_type, vc.module_env, vc.ieee754_f64)
+        != ArrayElementSort::Struct
+    {
+        return Ok(None);
+    }
+    validate_array_element_type(vc, &element_type)?;
+    if value.as_array().is_none() {
+        return Ok(None);
+    }
+    let leaves = struct_array_leaf_types(&element_type, vc.module_env).ok_or_else(|| {
+        MumeiError::type_error(format!(
+            "array element struct '{element_type}' must have only scalar leaves"
+        ))
+    })?;
+    static SNAPSHOT_UID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let snapshot_id = SNAPSHOT_UID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut arrays = HashMap::with_capacity(leaves.len());
+    for (path, leaf_type) in leaves {
+        let range = z3_element_sort(vc, &leaf_type);
+        let array =
+            if let Some(array) = struct_array_leaf_for_expr(vc, env, expression, value, &path, 0) {
+                array
+            } else {
+                match expression {
+                    Expr::Variable(source) => {
+                        struct_array_leaf_array(vc, source, &path, &leaf_type, env)
+                    }
+                    Expr::ArrayLit(_) => {
+                        return Err(MumeiError::type_error(format!(
+                            "struct array literal is missing leaf '{path}'"
+                        )))
+                    }
+                    _ => z3_fresh_array_for_range(
+                        vc.ctx,
+                        &format!("__struct_arr_arg_snapshot#{snapshot_id}#{path}"),
+                        &range,
+                    ),
+                }
+            };
+        if array.get_sort().array_range() != Some(range) {
+            return Err(MumeiError::type_error(format!(
+                "struct array argument leaf '{path}' has an incompatible sort"
+            )));
+        }
+        arrays.insert(path, array);
+    }
+    Ok(Some(StructArrayLeafSnapshot {
+        element_type,
+        arrays,
+    }))
+}
+
 /// Wire a name-bound array value into the tracking slots reads and stores
 /// consult: `__z3_arr_<name>` carries the Z3 array, `len_<name>` the length
 /// (concrete for a `[e0, …]` literal, the source's `len` for a `var` alias, a
@@ -1151,6 +1359,19 @@ pub(crate) fn wire_array_slots<'a>(
     val: &Dynamic<'a>,
     env: &mut Env<'a>,
     solver_opt: Option<&Solver<'a>>,
+) -> MumeiResult<()> {
+    wire_array_slots_with_struct_leaf_snapshot(vc, name, value, val, env, solver_opt, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn wire_array_slots_with_struct_leaf_snapshot<'a>(
+    vc: &VCtx<'a>,
+    name: &str,
+    value: Option<&Expr>,
+    val: &Dynamic<'a>,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+    leaf_snapshot: Option<&StructArrayLeafSnapshot<'a>>,
 ) -> MumeiResult<()> {
     // For `var` sources the live array is the tracked `__z3_arr_<src>` chain —
     // `env[src]` is only the base const, and `src[i] = v` stores never rewrite
@@ -1198,6 +1419,7 @@ pub(crate) fn wire_array_slots<'a>(
             env.insert(len_key, len);
         }
         vc.local_array_elem_types.borrow_mut().remove(name);
+        clear_struct_array_leaf_slots(env, name);
         return Ok(());
     };
     let elem_ty = z3_range_type_name(&arr.get_sort());
@@ -1206,10 +1428,128 @@ pub(crate) fn wire_array_slots<'a>(
     let len = array_len_for_expr(vc, env, value, &arr_dyn, solver_opt);
     register_array_value_len(env, &arr, len.clone());
     env.insert(array_len_key(name), len);
+    let elem_ty = leaf_snapshot
+        .map(|snapshot| snapshot.element_type.clone())
+        .or_else(|| value.and_then(|value| array_element_type_from_expr(vc, value)))
+        .unwrap_or(elem_ty);
+    validate_array_element_type(vc, &elem_ty)?;
     vc.local_array_elem_types
         .borrow_mut()
         .insert(name.to_string(), elem_ty.to_string());
+    if let Some(leaves) = struct_array_leaf_types(&elem_ty, vc.module_env) {
+        for (path, leaf_type) in leaves {
+            let key = struct_array_leaf_key(name, &path);
+            let leaf_array = if let Some(snapshot) = leaf_snapshot {
+                snapshot.arrays.get(&path).cloned().ok_or_else(|| {
+                    MumeiError::type_error(format!(
+                        "struct array argument is missing leaf snapshot '{path}'"
+                    ))
+                })?
+            } else {
+                match value {
+                    Some(Expr::Variable(source)) => {
+                        struct_array_leaf_array(vc, source, &path, &leaf_type, env)
+                    }
+                    Some(Expr::ArrayLit(_)) => {
+                        let source = array_root_name(&arr).ok_or_else(|| {
+                            MumeiError::type_error("struct array literal has no carrier root")
+                        })?;
+                        env.get(&struct_array_leaf_key(&source, &path))
+                            .and_then(|value| value.as_array())
+                            .ok_or_else(|| {
+                                MumeiError::type_error(format!(
+                                    "struct array literal is missing leaf '{path}'"
+                                ))
+                            })?
+                    }
+                    Some(expression) => {
+                        struct_array_leaf_for_expr(vc, env, expression, &arr_dyn, &path, 0)
+                            .unwrap_or_else(|| {
+                                z3_fresh_array_for_range(
+                                    vc.ctx,
+                                    &key,
+                                    &z3_element_sort(vc, &leaf_type),
+                                )
+                            })
+                    }
+                    None => {
+                        z3_fresh_array_for_range(vc.ctx, &key, &z3_element_sort(vc, &leaf_type))
+                    }
+                }
+            };
+            env.insert(key, leaf_array.into());
+        }
+    } else {
+        clear_struct_array_leaf_slots(env, name);
+    }
     Ok(())
+}
+
+fn array_element_type_from_expr(vc: &VCtx<'_>, value: &Expr) -> Option<String> {
+    match value {
+        Expr::Variable(source) => Some(array_element_type_name(source, vc)),
+        Expr::Block(stmt) => {
+            stmt_tail_expr(stmt).and_then(|tail| array_element_type_from_expr(vc, tail))
+        }
+        Expr::ArrayLit(elements) => elements.first().and_then(|element| {
+            crate::verification::support::datatype::declared_type_of_expr(vc, element)
+                .or_else(|| match element {
+                    Expr::StructInit { type_name, .. } => Some(type_name.clone()),
+                    _ => None,
+                })
+                .map(|type_name| vc.module_env.resolve_base_type(&type_name))
+        }),
+        Expr::Call(name, _) => vc
+            .module_env
+            .get_atom(name)
+            .and_then(|atom| atom.return_type.as_deref())
+            .map(|type_name| array_element_type_from_annotation(Some(type_name), vc.module_env)),
+        _ => crate::verification::support::datatype::declared_type_of_expr(vc, value)
+            .map(|type_name| array_element_type_from_annotation(Some(&type_name), vc.module_env)),
+    }
+}
+
+fn clear_struct_array_leaf_slots(env: &mut Env<'_>, name: &str) {
+    let prefix = format!("__struct_arr#{name}#");
+    env.retain(|key, _| !key.starts_with(&prefix));
+}
+
+pub(crate) fn havoc_struct_array_leaf_arrays<'a>(
+    vc: &VCtx<'a>,
+    bindings: &[String],
+    env: &mut Env<'a>,
+) {
+    static STRUCT_ARRAY_HAVOC_UID: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    let mut roots = std::collections::HashSet::new();
+    for binding in bindings {
+        let element_type = array_element_type_name(binding, vc);
+        let Some(leaves) = struct_array_leaf_types(&element_type, vc.module_env) else {
+            continue;
+        };
+        for (path, leaf_type) in leaves {
+            let old = struct_array_leaf_array(vc, binding, &path, &leaf_type, env);
+            let root = array_root_ast(&old);
+            if !roots.insert(root as usize) {
+                continue;
+            }
+            let uid = STRUCT_ARRAY_HAVOC_UID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let old: Dynamic = old.into();
+            let fresh = z3_fresh_const_like(vc.ctx, &format!("__havoc_struct_arr_{uid}"), &old);
+            let aliases: Vec<String> = env
+                .iter()
+                .filter(|(_, value)| {
+                    value
+                        .as_array()
+                        .is_some_and(|array| array_root_ast(&array) == root)
+                })
+                .map(|(key, _)| key.clone())
+                .collect();
+            for key in aliases {
+                env.insert(key, fresh.clone());
+            }
+        }
+    }
 }
 
 /// A concrete array length, sorted like `array_len_symbol` under
@@ -1374,6 +1714,91 @@ fn branch_tail_len<'a>(
     }
 }
 
+fn branch_tail_struct_array_leaf<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    scope: &Stmt,
+    val_node: &Dynamic<'a>,
+    leaf_path: &str,
+    depth: u32,
+) -> Option<z3::ast::Array<'a>> {
+    let tail = stmt_tail_expr(scope)?;
+    struct_array_leaf_for_expr(vc, env, tail, val_node, leaf_path, depth)
+}
+
+fn struct_array_leaf_for_expr<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    expression: &Expr,
+    val_node: &Dynamic<'a>,
+    leaf_path: &str,
+    depth: u32,
+) -> Option<z3::ast::Array<'a>> {
+    if depth >= TAIL_LEN_DEPTH {
+        return None;
+    }
+    match expression {
+        Expr::Variable(source) => env
+            .get(&struct_array_leaf_key(source, leaf_path))
+            .and_then(|value| value.as_array()),
+        Expr::ArrayLit(_) => {
+            let arr = val_node.as_array()?;
+            let source = array_root_name(&arr)?;
+            env.get(&struct_array_leaf_key(&source, leaf_path))
+                .and_then(|value| value.as_array())
+        }
+        Expr::Call(_, _) => val_node
+            .as_array()
+            .and_then(|arr| call_result_struct_array(vc, &arr, leaf_path)),
+        Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let cond = val_node.nth_child(0)?.as_bool()?;
+            let then_value = val_node.nth_child(1)?;
+            let else_value = val_node.nth_child(2)?;
+            let then_leaf = branch_tail_struct_array_leaf(
+                vc,
+                env,
+                then_branch,
+                &then_value,
+                leaf_path,
+                depth + 1,
+            )?;
+            let else_leaf = branch_tail_struct_array_leaf(
+                vc,
+                env,
+                else_branch,
+                &else_value,
+                leaf_path,
+                depth + 1,
+            )?;
+            Some(cond.ite(&then_leaf, &else_leaf))
+        }
+        Expr::Block(stmt) => {
+            let tail = stmt_tail_expr(stmt)?;
+            struct_array_leaf_for_expr(vc, env, tail, val_node, leaf_path, depth + 1)
+        }
+        Expr::Match { arms, .. } => {
+            let (conds, vals) = match_ite_spine(arms, val_node)?;
+            let mut leaves: Vec<z3::ast::Array> = arms
+                .iter()
+                .zip(vals.iter())
+                .map(|(arm, value)| {
+                    branch_tail_struct_array_leaf(vc, env, &arm.body, value, leaf_path, depth + 1)
+                })
+                .collect::<Option<_>>()?;
+            let mut acc = leaves.pop()?;
+            for (cond, leaf) in conds.iter().zip(leaves.iter()).rev() {
+                acc = cond.ite(leaf, &acc);
+            }
+            Some(acc)
+        }
+        _ => None,
+    }
+}
+
 fn array_value_len_or_fresh<'a>(
     vc: &VCtx<'a>,
     env: &mut Env<'a>,
@@ -1475,6 +1900,12 @@ pub(crate) fn array_root_ast(arr: &z3::ast::Array) -> z3_sys::Z3_ast {
     array_root_value(arr).get_z3_ast()
 }
 
+pub(crate) fn array_root_name(arr: &z3::ast::Array) -> Option<String> {
+    let root = array_root_value(arr);
+    (root.kind() == z3::AstKind::App && root.decl().kind() == z3::DeclKind::UNINTERPRETED)
+        .then(|| root.decl().name().to_string())
+}
+
 fn array_root_value<'a>(arr: &z3::ast::Array<'a>) -> Dynamic<'a> {
     let mut cur: Dynamic = arr.clone().into();
     loop {
@@ -1497,7 +1928,52 @@ pub(crate) fn call_result_len<'a>(vc: &VCtx<'a>, arr: &z3::ast::Array<'a>) -> Op
     vc.call_result_lens
         .borrow()
         .get(&(array_root_ast(arr) as usize))
-        .map(|(len, _keep)| len.clone())
+        .and_then(|result| result.len.clone())
+}
+
+pub(crate) fn call_result_struct_arrays<'a>(
+    vc: &VCtx<'a>,
+    arr: &z3::ast::Array<'a>,
+    return_type: Option<&str>,
+    result_name: &str,
+) -> Result<std::collections::HashMap<String, z3::ast::Array<'a>>, MumeiError> {
+    let element_type = array_element_type_from_annotation(return_type, vc.module_env);
+    validate_array_element_type(vc, &element_type)?;
+    if array_element_sort_from_type(&element_type, vc.module_env, vc.ieee754_f64)
+        != ArrayElementSort::Struct
+    {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let root = array_root_ast(arr) as usize;
+    if let Some(existing) = vc.call_result_lens.borrow().get(&root) {
+        return Ok(existing.struct_leaves.clone());
+    }
+
+    let leaves = struct_array_leaf_types(&element_type, vc.module_env).ok_or_else(|| {
+        MumeiError::type_error(format!(
+            "array element struct '{element_type}' must have only scalar leaves"
+        ))
+    })?;
+    Ok(leaves
+        .into_iter()
+        .map(|(path, leaf_type)| {
+            let key = struct_array_leaf_key(result_name, &path);
+            let array = z3_fresh_array_for_range(vc.ctx, &key, &z3_element_sort(vc, &leaf_type));
+            (path, array)
+        })
+        .collect())
+}
+
+pub(crate) fn call_result_struct_array<'a>(
+    vc: &VCtx<'a>,
+    arr: &z3::ast::Array<'a>,
+    leaf_path: &str,
+) -> Option<z3::ast::Array<'a>> {
+    vc.call_result_lens
+        .borrow()
+        .get(&(array_root_ast(arr) as usize))
+        .and_then(|result| result.struct_leaves.get(leaf_path).cloned())
 }
 
 /// Replace `name`'s tracked array chain — and every `__z3_arr_*`/`env[x]`
@@ -1541,12 +2017,17 @@ pub(crate) fn havoc_array_name<'a>(vc: &VCtx<'a>, name: &str, env: &mut Env<'a>)
         })
         .map(|(k, _)| k.clone())
         .collect();
+    let mut struct_bindings = vec![name.to_string()];
+    for var in &var_keys {
+        struct_bindings.push(var.clone());
+    }
     for var in var_keys {
         env.insert(var, fresh.clone());
     }
     // Ensure the tracked slot exists even when the arg only had a bare
     // `env[name]` const (param arrays before their first access).
     env.insert(arr_key, fresh);
+    havoc_struct_array_leaf_arrays(vc, &struct_bindings, env);
 }
 
 /// `ensures` reads post-write composite fields: at a call site the
@@ -1660,6 +2141,14 @@ pub(crate) fn z3_array_for_range<'a>(
     range: &z3::Sort<'a>,
 ) -> Array<'a> {
     Array::new_const(ctx, name, &z3::Sort::int(ctx), range)
+}
+
+pub(crate) fn z3_fresh_array_for_range<'a>(
+    ctx: &'a Context,
+    prefix: &str,
+    range: &z3::Sort<'a>,
+) -> Array<'a> {
+    Array::fresh_const(ctx, prefix, &z3::Sort::int(ctx), range)
 }
 
 pub(crate) fn z3_fresh_const_like<'a>(
@@ -1862,6 +2351,31 @@ pub(crate) fn stmt_stores_to_var(
         module_env,
         stmt,
         name,
+        &bound_names,
+        &mut std::collections::HashSet::new(),
+        0,
+    )
+}
+
+pub(crate) fn expr_stores_to_var(module_env: &ModuleEnv, expr: &Expr, name: &str) -> bool {
+    let mut aliases = std::collections::HashSet::new();
+    aliases.insert(name.to_string());
+    loop {
+        let mut additions = std::collections::HashSet::new();
+        collect_array_aliases_expr(expr, &aliases, &mut additions);
+        let previous_len = aliases.len();
+        aliases.extend(additions);
+        if aliases.len() == previous_len {
+            break;
+        }
+    }
+
+    let mut bound_names = std::collections::HashSet::new();
+    collect_bound_names_expr(expr, &mut bound_names);
+    expr_stores_to_array(
+        module_env,
+        expr,
+        &aliases,
         &bound_names,
         &mut std::collections::HashSet::new(),
         0,
@@ -2347,7 +2861,7 @@ pub(crate) fn coerce_array_store_value<'a>(
     array: &str,
     value: Dynamic<'a>,
 ) -> DynResult<'a> {
-    validate_enum_array_element_type(vc, &array_element_type_name(array, vc))?;
+    validate_array_element_type(vc, &array_element_type_name(array, vc))?;
     let sort = array_element_sort(array, vc);
     if sort == ArrayElementSort::Enum {
         let expected = z3_element_sort(vc, &array_element_type_name(array, vc));
@@ -2400,6 +2914,12 @@ pub(crate) fn coerce_to_array_elem_sort<'a>(
             .as_datatype()
             .map(Into::into)
             .ok_or_else(|| MumeiError::type_error("Array store value must be an enum datatype")),
+        ArrayElementSort::Struct => Err(MumeiError::type_error(
+            "whole-struct array stores must write each scalar leaf",
+        )),
+        ArrayElementSort::UnsupportedStruct => Err(MumeiError::type_error(
+            "array element struct does not have supported scalar leaves",
+        )),
         ArrayElementSort::UnsupportedEnum => Err(MumeiError::type_error(
             "array element enum is not a supported finite ADT",
         )),

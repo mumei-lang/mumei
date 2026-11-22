@@ -95,19 +95,6 @@ body: {
     }
 }
 
-// The bound payload leaf carries its declared width into arithmetic —
-// `x + x` on a `u64` leaf takes the unsigned operand path, not a signed
-// `i64` fold that would diverge from LLVM's wrapping `add i64`.
-atom double(e: W) -> i64
-requires: true;
-ensures: result == 1;
-body: {
-    match e {
-        W::A(x) => if x + x >= x { 1 } else { 0 },
-        _ => 1
-    }
-}
-
 // Payload-name registrations stop at the arm: the coverage pass binds
 // `W::A(x)` for its guard, but after the match the outer `x` is still
 // the declared `i64` — `x + y` must not trip the u64 mixing rule.

@@ -1768,6 +1768,12 @@ fn verify_inner_impl(
         let var =
             datatype::param_z3_value_for_vc(&vc, param.name.as_str(), param.type_name.as_deref());
         env.insert(param.name.clone(), var);
+        crate::verification::translator::z3_types::seed_struct_array_param_leaves(
+            &vc,
+            &param.name,
+            param.type_name.as_deref(),
+            &mut env,
+        );
     }
 
     // Congruent recursive contracts: when this atom declares `decreases` and

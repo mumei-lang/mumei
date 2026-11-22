@@ -1,3 +1,10 @@
+### Unreleased: reject calls with later-argument array mutations
+
+- Calls are rejected when evaluation of a later argument may mutate an array
+  root already passed by an earlier argument. This keeps verifier behavior
+  consistent with shared runtime array buffers. `VERIFIER_POLICY_VERSION` is
+  bumped 32 → 33 so cached verdicts are re-derived.
+
 ### Unreleased: reject within-struct flattened projection path collisions
 
 - Atom verification rejects structs whose distinct field chains flatten to the

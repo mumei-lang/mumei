@@ -13,6 +13,13 @@ pub(crate) type UnfoldCall<'a> = (String, Vec<Dynamic<'a>>);
 /// never alias a newer const).
 pub(crate) type CallResultFields<'a> = (Vec<(String, Dynamic<'a>)>, Dynamic<'a>);
 
+#[derive(Clone)]
+pub(crate) struct CallResultArray<'a> {
+    pub(crate) len: Option<Dynamic<'a>>,
+    pub(crate) _keep: Dynamic<'a>,
+    pub(crate) struct_leaves: std::collections::HashMap<String, z3::ast::Array<'a>>,
+}
+
 /// Cached `rec_fn#` UF plus the signature it was declared with, so a
 /// re-registration with a different domain/range can be caught.
 pub(crate) type RecFnEntry<'a> = (
@@ -248,7 +255,7 @@ pub(crate) struct VCtx<'a> {
     /// fresh unconstrained `len_t`. The stored `Dynamic` keeps the key ast
     /// alive (Z3 refcount) so a freed pointer can never alias a new const.
     pub(crate) call_result_lens:
-        std::cell::RefCell<std::collections::HashMap<usize, (Dynamic<'a>, Dynamic<'a>)>>,
+        std::cell::RefCell<std::collections::HashMap<usize, CallResultArray<'a>>>,
     /// Field values of a struct-returning call's result, keyed by the
     /// result handle's raw `Z3_ast` pointer — the struct analogue of
     /// `call_result_lens`. A direct read `f(1).x` cannot rebuild the

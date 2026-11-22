@@ -465,6 +465,16 @@ fn int_leaf_bound<'a>(ctx: &'a Context, base: &str, v: &Int<'a>) -> Option<Bool<
     Some(Bool::and(ctx, &[&v.ge(&lo), &v.le(&hi)]))
 }
 
+pub(crate) fn scalar_int_leaf_domain<'a>(
+    vc: &VCtx<'a>,
+    type_name: &str,
+    value: &Dynamic<'a>,
+) -> Option<Bool<'a>> {
+    let base = vc.module_env.resolve_base_type(type_name);
+    let int = value.as_int()?;
+    int_leaf_bound(vc.ctx, &base, &int)
+}
+
 /// `value` is an enum datatype constant: the conjunction holding every
 /// `u64`/`u32`/`i32` payload leaf inside its declared width, gated on the
 /// variant that owns it (`is_V(value) => bounds_V`). The widened

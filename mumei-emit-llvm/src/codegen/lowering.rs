@@ -474,6 +474,52 @@ pub(crate) fn array_elem_llvm_type<'a>(
             _ => context.i64_type().into(),
         }));
     };
+    if let Some(struct_def) = module_env.get_struct(&inner_base) {
+        fn scalar_struct_element(
+            type_name: &str,
+            module_env: &ModuleEnv,
+            visiting: &mut std::collections::HashSet<String>,
+        ) -> bool {
+            let base = module_env.resolve_base_type(type_name);
+            let lowered = lower(&base);
+            match lowered {
+                LoweredType::I64
+                | LoweredType::I32
+                | LoweredType::U64
+                | LoweredType::U32
+                | LoweredType::F64
+                | LoweredType::Bool
+                | LoweredType::Str => true,
+                LoweredType::Other(name) => {
+                    let Some(definition) = module_env.get_struct(&name) else {
+                        return false;
+                    };
+                    if !visiting.insert(definition.name.clone()) {
+                        return false;
+                    }
+                    let valid = definition
+                        .fields
+                        .iter()
+                        .all(|field| scalar_struct_element(&field.type_name, module_env, visiting));
+                    visiting.remove(&definition.name);
+                    valid
+                }
+                LoweredType::Array(_) | LoweredType::F32 => false,
+            }
+        }
+        if !scalar_struct_element(
+            &inner_base,
+            module_env,
+            &mut std::collections::HashSet::new(),
+        ) {
+            return Err(MumeiError::codegen(format!(
+                "array element struct '{inner_base}' must have only scalar leaves"
+            )));
+        }
+        return Ok(Some(
+            struct_llvm_type(context, struct_def, module_env).into(),
+        ));
+    }
     if let Some(enum_def) = module_env.get_enum(enum_base) {
         fn has_array_payload(
             type_name: &str,
