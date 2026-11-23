@@ -5998,36 +5998,40 @@ fn object_translation_json(
     } else {
         "metadata_only"
     };
-    // The `hir → llvm_ir` edge reports the per-atom model comparison's
-    // aggregate: `checked_correspondence` only when every compared atom
-    // proved equivalent, otherwise the honest fail-closed vocabulary.
-    // The item detail names divergent or uncovered atoms.
-    let hir_llvm_result = correspondence["checks"]
-        .as_array()
-        .and_then(|checks| {
-            checks
-                .iter()
-                .find(|check| check["item"].as_str() == Some("hir_llvm_model_correspondence"))
-        })
-        .and_then(|check| check["result"].as_str())
-        .map(|result| match result {
-            "checked" => "checked_correspondence",
-            // A divergent atom is validation that ran and failed —
-            // not an edge that never ran. Keep the two apart, as the
-            // check item's own detail does.
-            "inconsistent" => "inconsistent_correspondence",
-            _ => "unchecked_not_translation_validated",
-        })
-        .unwrap_or("unchecked_not_translation_validated");
+    // The `hir → llvm_ir` and `llvm_ir → object_code` edges report
+    // their check items' aggregates: `checked_correspondence` only
+    // when the item checked, otherwise the honest fail-closed
+    // vocabulary. The item detail names divergent or uncovered atoms.
+    let check_item_result = |item: &str| {
+        correspondence["checks"]
+            .as_array()
+            .and_then(|checks| {
+                checks
+                    .iter()
+                    .find(|check| check["item"].as_str() == Some(item))
+            })
+            .and_then(|check| check["result"].as_str())
+    };
+    let hir_llvm_result =
+        edge_result_for_item_result(check_item_result("hir_llvm_model_correspondence"));
+    let llvm_ir_object_result =
+        edge_result_for_item_result(check_item_result("llvm_ir_object_equivalence"));
     serde_json::json!({
         "status": status,
         "transformations": [
             {
+                // `validation` names the IR↔object model comparison the
+                // recheck runs per liftable function; `result` mirrors
+                // the `llvm_ir_object_equivalence` check item so a
+                // report whose functions are outside the subset,
+                // diverged, or undecidable does not claim this edge
+                // was validated.
                 "from": "llvm_ir",
                 "to": "object_code",
                 "relation": "llc_instruction_selection_register_allocation",
                 "output_identity": object_sha256,
-                "validation": "unchecked_not_translation_validated",
+                "validation": "checked_llvm_ir_object_model_correspondence",
+                "result": llvm_ir_object_result,
             },
             {
                 "from": "object_code",
@@ -6103,6 +6107,18 @@ fn object_translation_json(
             .collect::<Vec<_>>(),
         "correspondence": correspondence,
     })
+}
+
+/// Map a check item's `result` to the vocabulary a transformation
+/// edge reports: `inconsistent` means validation that ran and failed —
+/// not an edge that never ran, so the two stay apart; a missing item
+/// or any other result is fail-closed `unchecked`.
+fn edge_result_for_item_result(item_result: Option<&str>) -> &'static str {
+    match item_result {
+        Some("checked") => "checked_correspondence",
+        Some("inconsistent") => "inconsistent_correspondence",
+        _ => "unchecked_not_translation_validated",
+    }
 }
 
 fn object_machine_tv_source_atom_count(outcomes: &BTreeMap<String, FunctionOutcome>) -> usize {
@@ -6499,6 +6515,25 @@ fn publish(_: &Path, _: &Path) -> Result<(), BundleError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edge_result_for_item_result_keeps_inconsistent_apart_from_unchecked() {
+        assert_eq!(
+            edge_result_for_item_result(Some("checked")),
+            "checked_correspondence"
+        );
+        // Validation that ran and failed is not a skipped edge.
+        assert_eq!(
+            edge_result_for_item_result(Some("inconsistent")),
+            "inconsistent_correspondence"
+        );
+        for result in [Some("unchecked"), Some("unknown"), None] {
+            assert_eq!(
+                edge_result_for_item_result(result),
+                "unchecked_not_translation_validated"
+            );
+        }
+    }
 
     #[test]
     fn object_machine_tv_acceptance_decision_is_fail_closed() {

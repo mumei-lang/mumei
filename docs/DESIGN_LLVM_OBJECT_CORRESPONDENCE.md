@@ -1,12 +1,15 @@
 # `llvm_ir → object_code` 昇格設計メモ
 
-ステータス: 設計提案（実装なし）。`docs/DESIGN_OBJECT_TRANSLATION_CORRESPONDENCE.md`
+ステータス: Step 1（skipped 分解 + `checks_not_performed` 非 `.text` 明示、#1421）と
+Step 2（辺 `result`/`validation` 配線、本差分）実装済み。Step 3（`object_data_correspondence`
+項目）・Step 4（subset 拡張）は未着手。`docs/DESIGN_OBJECT_TRANSLATION_CORRESPONDENCE.md`
 の §4 条件 4(a) — 「machine-TV の比較対象を LLVM IR 再導出モデルに切り替える」
 本筋路線 — が Step 3a–3f スライス（#1382–#1398）として既に着地済みのため、
 本メモは残りの昇格条件と語彙・欠落領域を棚卸しする。
 `hir → llvm_ir` 側の昇格は `docs/DESIGN_HIR_LLVM_CORRESPONDENCE.md` と
-#1415 で完走済み。native-bundle の transformations で
-`unchecked_not_translation_validated` のまま残るのはこの辺のみ。
+#1415 で完走済み。本差分（Step 2）で native-bundle の transformations から
+`unchecked_not_translation_validated` のまま残る辺はなくなる
+（残域は `result`/`detail`/`checks_not_performed` が引き続き報告）。
 
 ## 1. 目的とスコープ
 

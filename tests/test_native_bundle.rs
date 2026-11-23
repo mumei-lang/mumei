@@ -594,10 +594,14 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     // appended after them.
     assert_eq!(transformations[0]["from"], "llvm_ir");
     assert_eq!(transformations[0]["to"], "object_code");
+    // `validation` names the IR<->object model comparison; `result`
+    // mirrors the `llvm_ir_object_equivalence` item: the bundle's
+    // liftable functions compared equivalent.
     assert_eq!(
         transformations[0]["validation"],
-        "unchecked_not_translation_validated"
+        "checked_llvm_ir_object_model_correspondence"
     );
+    assert_eq!(transformations[0]["result"], "checked_correspondence");
     assert_eq!(transformations[1]["from"], "object_code");
     assert_eq!(transformations[1]["to"], "linked_executable");
     // `validation` names the method; the check's outcome is a separate key.
@@ -772,6 +776,17 @@ fn hir_llvm_correspondence_covers_main_callers_and_generic_structs() {
         .find(|edge| edge["from"] == "hir" && edge["to"] == "llvm_ir")
         .unwrap();
     assert_eq!(hir_edge["result"], "checked_correspondence");
+    // The llvm_ir->object_code edge's result mirrors the
+    // llvm_ir_object_equivalence item the same way.
+    let object_edge = transformations
+        .iter()
+        .find(|edge| edge["from"] == "llvm_ir" && edge["to"] == "object_code")
+        .unwrap();
+    assert_eq!(object_edge["result"], "checked_correspondence");
+    assert_eq!(
+        object_edge["validation"],
+        "checked_llvm_ir_object_model_correspondence"
+    );
 }
 
 #[test]
