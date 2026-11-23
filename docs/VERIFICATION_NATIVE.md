@@ -2322,10 +2322,11 @@ inputs where the source itself is undefined — e.g. a 64-bit shift by
 64 or more, which x86 answers by masking — are excluded rather than
 reported as IR↔object differences. The comparison is
 scoped to the admitted signature subset — scalar 64-bit parameters
-(integer or f64 bit-pattern), scalar `i128`/`u128` on wide-scalar
-modules, all-`i64` aggregate results (register-resident or `sret`),
-scalar-`i64` call sites, and bounded local memory; loops and wider
-shapes stay out. Functions outside the subset, or whose IR fails to
+and scalar results carrying integer or f64 bit-patterns (f64 compares
+pass-through/select only; FP arithmetic itself stays out), scalar
+`i128`/`u128` on wide-scalar modules, all-`i64` aggregate results
+(register-resident or `sret`), scalar-`i64` call sites, and bounded
+local memory; loops and wider shapes stay out. Functions outside the subset, or whose IR fails to
 encode, record their verbatim `NotLiftable` reason
 (`unsupported_signature`, `unsupported_ir`, `unsupported_instruction`,
 `lift_failed`, `no_liftable_path`) in `detail`; a comparison
