@@ -18948,6 +18948,30 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
             "{wrapping_outcomes:?}"
         );
 
+        let inferred_refinement_erased = "type Nat = i64 where v >= 0;\n\
+            atom safe_add(a: Nat, b: Nat) requires: true; ensures: true; body: a + b;";
+        let inferred_outcomes = refined_module_outcomes_admission(
+            inferred_refinement_erased,
+            RefinedAdmission::CompositeV28,
+        );
+        assert!(!inferred_outcomes.is_empty(), "{inferred_outcomes:?}");
+        assert!(
+            inferred_outcomes
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat),
+            "{inferred_outcomes:?}"
+        );
+
+        let explicit_refinement = "type Nat = i64 where v >= 0;\n\
+            atom safe_add(a: Nat, b: Nat) -> Nat requires: true; \
+            ensures: true; body: a + b;";
+        let explicit_outcomes =
+            refined_module_outcomes_admission(explicit_refinement, RefinedAdmission::CompositeV28);
+        assert!(
+            explicit_outcomes.contains(&z3::SatResult::Sat),
+            "{explicit_outcomes:?}"
+        );
+
         let no_result_guarantee = "type Nat = i64 where v >= 0;\n\
             atom f_noensures(n: Nat) requires: true; ensures: true; body: n;\n\
             atom g(x: Nat) -> i64 requires: true; ensures: result >= 0; body: f_noensures(x);";
