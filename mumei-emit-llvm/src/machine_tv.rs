@@ -258,6 +258,28 @@ pub enum IrObjectEquivalence {
     NotLiftable(&'static str),
 }
 
+/// Whether a source model's signature is inside the direct
+/// IR ↔ object comparison's scalar-i64 subset (design memo §7 Step 3
+/// slice). Callers use this to record `skipped` without paying for an
+/// IR encode; `check_function_against_ir` re-checks it internally.
+pub fn ir_object_signature_liftable(model: &PureI64Body) -> bool {
+    model.inputs.len() <= MAX_ARGUMENT_COUNT
+        && model.inputs.iter().all(|input| input.get_size() == 64)
+        && model.result_shape.is_none()
+        // Exactly one integer 64-bit result leaf: a scalar i128 result
+        // (`[false, false]`) or an f64 result (`[true]`) is outside.
+        && model.result_leaf_doubles.as_slice() == [false]
+        // Every parameter a single integer 64-bit scalar leaf: wide
+        // leaves (`[false, false]` for i128/u128) and f64 (`[true]`)
+        // stay out of the subset.
+        && model.param_leaf_doubles.iter().all(|leaves| leaves.as_slice() == [false])
+        && model.param_shapes.iter().all(Option::is_none)
+        && model.array_params.iter().all(Option::is_none)
+        && model.call_sites.is_empty()
+        && model.loop_bound_exits.is_none()
+        && !model.bounded_memory
+}
+
 /// Compare an object function's lifted paths directly against its
 /// LLVM-IR encoding over shared `model.inputs` (design memo §7 Step 3
 /// slice). `ir_returns` is the encoder's `(path condition, return
@@ -266,12 +288,12 @@ pub enum IrObjectEquivalence {
 /// `translation_validation::encode_ir_function_for_comparison` on the
 /// same Z3 context.
 ///
-/// Scoped to scalar-i64 signatures: aggregates, f64 leaves, calls,
-/// loops, and bounded memory return `NotLiftable`. For every lifted
-/// path the machine return must equal the IR return of some covering
-/// edge whose definedness obligations hold; an uncovered path, a
-/// diverging edge, or a failed IR domain obligation each compare
-/// `Different`.
+/// Scoped to scalar-i64 signatures: aggregates, f64 leaves, wider
+/// inputs, calls, loops, and bounded memory return `NotLiftable`. For
+/// every lifted path the machine return must equal the IR return of
+/// some covering edge whose definedness obligations hold; an
+/// uncovered path, a diverging edge, or a failed IR domain
+/// obligation each compare `Different`.
 pub fn check_function_against_ir<'ctx>(
     bytes: &[u8],
     address: u64,
@@ -281,16 +303,7 @@ pub fn check_function_against_ir<'ctx>(
     call_targets: &BTreeMap<u64, CallTarget>,
     context: &'ctx Context,
 ) -> IrObjectEquivalence {
-    if model.inputs.len() > MAX_ARGUMENT_COUNT
-        || model.result_shape.is_some()
-        || model.result_leaf_doubles.iter().any(|leaf| *leaf)
-        || model.param_leaf_doubles.iter().flatten().any(|leaf| *leaf)
-        || model.param_shapes.iter().any(Option::is_some)
-        || model.array_params.iter().any(Option::is_some)
-        || !model.call_sites.is_empty()
-        || model.loop_bound_exits.is_some()
-        || model.bounded_memory
-    {
+    if !ir_object_signature_liftable(model) {
         return IrObjectEquivalence::NotLiftable("unsupported_signature");
     }
     if ir_returns.is_empty() || ir_returns.iter().any(|(_, value)| value.get_size() != 64) {
@@ -5857,6 +5870,26 @@ entry:
                 &BTreeMap::new(),
                 &context,
             ),
+            IrObjectEquivalence::NotLiftable("unsupported_signature")
+        );
+    }
+
+    #[test]
+    fn ir_object_equivalence_skips_wider_inputs() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // An i128 parameter produces a 128-bit input BV; the 64-bit
+        // comparison must refuse it before substituting.
+        let model = source_model_with_admission(
+            "atom wide(x: i128, y: i64) -> i64 requires: true; ensures: result == y; body: { y };",
+            &context,
+            RefinedAdmission::CompositeV21,
+        );
+        assert!(!ir_object_signature_liftable(&model));
+        assert_eq!(
+            check_function_against_ir(&[], 0, &model, &[], &[], &BTreeMap::new(), &context,),
             IrObjectEquivalence::NotLiftable("unsupported_signature")
         );
     }

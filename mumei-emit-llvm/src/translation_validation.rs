@@ -881,12 +881,83 @@ fn ir_definedness<'ctx>(encoder: &IrEncoder<'ctx, '_>) -> Vec<(Bool<'ctx>, Bool<
 /// `model.inputs` for the direct object comparison.
 pub type IrFunctionEncoding<'ctx> = (Vec<(Bool<'ctx>, BV<'ctx>)>, Vec<(Bool<'ctx>, Bool<'ctx>)>);
 
+/// An LLVM IR module parsed once so every recorded function can be
+/// encoded for the direct IR ↔ object comparison without reparsing.
+/// Holds the inkwell context alive behind the raw module reference.
+pub struct ParsedIrModule {
+    _context: LlvmContext,
+    raw: LLVMModuleRef,
+}
+
+impl ParsedIrModule {
+    /// Look up a function by symbol name.
+    ///
+    /// # Safety
+    /// The returned value is valid while this `ParsedIrModule` lives.
+    pub unsafe fn function(&self, function_name: &str) -> Result<LLVMValueRef> {
+        let name = std::ffi::CString::new(function_name)
+            .map_err(|_| ValidationError("LLVM IR function name"))?;
+        let raw = LLVMGetNamedFunction(self.raw, name.as_ptr());
+        if raw.is_null() {
+            return Err(ValidationError("function missing in LLVM IR"));
+        }
+        Ok(raw)
+    }
+}
+
+/// Parse LLVM IR bytes once for repeated per-function encodes.
+///
+/// # Safety
+/// Calls llvm-sys C APIs on the module parsed from `llvm_ir`; the
+/// caller must pass well-formed LLVM IR bytes.
+pub unsafe fn parse_ir_module_for_comparison(llvm_ir: &[u8]) -> Result<ParsedIrModule> {
+    let context = LlvmContext::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            llvm_ir,
+            "ir-object-compare.ll",
+        ))
+        .map_err(|_| ValidationError("LLVM IR parse failed"))?;
+    let raw = module.as_mut_ptr();
+    // Keep the C module alive for the struct's lifetime; the held
+    // context keeps every lookup valid.
+    std::mem::forget(module);
+    Ok(ParsedIrModule {
+        _context: context,
+        raw,
+    })
+}
+
+/// Encode one already-parsed IR function's return edges and
+/// definedness obligations over shared `model.inputs`; `Err` outside
+/// the encoder's IR subset — the caller records the function as not
+/// liftable.
+///
+/// # Safety
+/// `raw` must be a function inside a `ParsedIrModule` that still
+/// lives, and `model.inputs` must be bound to `context`.
+pub unsafe fn encode_parsed_function_for_comparison<'ctx>(
+    raw: LLVMValueRef,
+    model: &PureI64Body<'ctx>,
+    optimized: bool,
+    context: &'ctx Context,
+) -> Result<IrFunctionEncoding<'ctx>> {
+    let no_renames = BTreeMap::new();
+    let mut encoder = IrEncoder::new(context, &no_renames, false, optimized);
+    let returns = encoder.encode(
+        raw,
+        &model.inputs,
+        &model.param_shapes,
+        &model.param_leaf_doubles,
+        &model.array_params,
+    )?;
+    Ok((returns, ir_definedness(&encoder)))
+}
+
 /// Encode one LLVM IR function's return edges and definedness
 /// obligations for the direct IR ↔ object comparison (design memo §7
-/// Step 3 slice). Returns `(path condition, return value)` pairs and
-/// `(path condition, defined)` domain obligations bound to
-/// `model.inputs`; `Err` outside the encoder's IR subset — the caller
-/// records the function as not liftable.
+/// Step 3 slice). Parses `llvm_ir` each call; callers comparing
+/// several functions of one module should share a `ParsedIrModule`.
 ///
 /// # Safety
 /// Calls llvm-sys C APIs on a module it parses from `llvm_ir`; the
@@ -899,29 +970,9 @@ pub unsafe fn encode_ir_function_for_comparison<'ctx>(
     optimized: bool,
     context: &'ctx Context,
 ) -> Result<IrFunctionEncoding<'ctx>> {
-    let llvm_context = LlvmContext::create();
-    let module = llvm_context
-        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
-            llvm_ir,
-            "ir-object-compare.ll",
-        ))
-        .map_err(|_| ValidationError("LLVM IR parse failed"))?;
-    let name = std::ffi::CString::new(function_name)
-        .map_err(|_| ValidationError("LLVM IR function name"))?;
-    let raw = LLVMGetNamedFunction(module.as_mut_ptr(), name.as_ptr());
-    if raw.is_null() {
-        return Err(ValidationError("function missing in LLVM IR"));
-    }
-    let no_renames = BTreeMap::new();
-    let mut encoder = IrEncoder::new(context, &no_renames, false, optimized);
-    let returns = encoder.encode(
-        raw,
-        &model.inputs,
-        &model.param_shapes,
-        &model.param_leaf_doubles,
-        &model.array_params,
-    )?;
-    Ok((returns, ir_definedness(&encoder)))
+    let module = parse_ir_module_for_comparison(llvm_ir)?;
+    let raw = module.function(function_name)?;
+    encode_parsed_function_for_comparison(raw, model, optimized, context)
 }
 
 unsafe fn compare_function<'ctx>(

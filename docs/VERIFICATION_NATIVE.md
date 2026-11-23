@@ -2244,7 +2244,12 @@ definedness domains are checked for divergence in the IR→object
 direction only, so an object that produces a value where the IR is
 undefined reports `inconsistent`, while an IR edge that diverges where
 the source domain is unbounded may surface as `inconsistent` or
-`unchecked` pending review of the domain boundary). The comparison is
+`unchecked` pending review of the domain boundary). Divergence is
+reported only for inputs the source defines: the path assumptions
+assert the source parameter domain and definedness obligations, so
+inputs where the source itself is undefined — e.g. a 64-bit shift by
+64 or more, which x86 answers by masking — are excluded rather than
+reported as IR↔object differences. The comparison is
 scoped to scalar-i64 signatures — functions with aggregates, f64
 leaves, calls, loops, or bounded memory, or whose IR fails to encode,
 are `skipped` in `detail`; the item is `checked` when at least one

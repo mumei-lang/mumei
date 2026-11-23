@@ -4858,6 +4858,9 @@ fn llvm_ir_object_equivalence_results(
     let models =
         semantic_contract::encode_pure_i64_module(source_text, &context, true, data.admission)
             .ok()?;
+    // Parse the LLVM module once and share it across functions; models
+    // outside the scalar-i64 signature subset skip before the encode.
+    let mut parsed = None;
     let mut outcomes = BTreeMap::new();
     for model in &models {
         let symbol = tv::native_function_name(&model.function_name).to_owned();
@@ -4871,20 +4874,29 @@ fn llvm_ir_object_equivalence_results(
         let Some((address, bytes)) = object_function_bytes(&data.object_bytes, &symbol) else {
             continue;
         };
-        let call_targets = data
-            .object_surface
-            .call_targets
-            .get(&symbol)
-            .cloned()
-            .unwrap_or_default();
-        let outcome = unsafe {
-            tv::encode_ir_function_for_comparison(&data.llvm_bytes, &symbol, model, false, &context)
-        };
-        outcomes.insert(
-            symbol,
-            match outcome {
-                Err(_) => "skipped",
-                Ok((ir_returns, ir_definedness)) => {
+        let outcome = if !machine_tv::ir_object_signature_liftable(model) {
+            "skipped"
+        } else {
+            if parsed.is_none() {
+                parsed = unsafe { tv::parse_ir_module_for_comparison(&data.llvm_bytes) }.ok();
+            }
+            let encoded = parsed.as_ref().and_then(|module| unsafe {
+                module
+                    .function(&symbol)
+                    .and_then(|raw| {
+                        tv::encode_parsed_function_for_comparison(raw, model, false, &context)
+                    })
+                    .ok()
+            });
+            let call_targets = data
+                .object_surface
+                .call_targets
+                .get(&symbol)
+                .cloned()
+                .unwrap_or_default();
+            match encoded {
+                None => "skipped",
+                Some((ir_returns, ir_definedness)) => {
                     match machine_tv::check_function_against_ir(
                         &bytes,
                         address,
@@ -4899,8 +4911,9 @@ fn llvm_ir_object_equivalence_results(
                         machine_tv::IrObjectEquivalence::NotLiftable(_) => "skipped",
                     }
                 }
-            },
-        );
+            }
+        };
+        outcomes.insert(symbol, outcome);
     }
     Some(outcomes)
 }
