@@ -732,6 +732,48 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
 }
 
 #[test]
+fn hir_llvm_correspondence_covers_main_callers_and_generic_structs() {
+    // `caller` calls `main()`, which the bundle emitter renames to
+    // `__mumei_user_main` — the model comparison must meet the emitted
+    // member, not the source name. `pair_sum` takes `Pair<i64>`: the
+    // generic declaration's `T` specializes from the atom's own
+    // signature so a concrete all-i64 instantiation stays inside the
+    // leaf subset.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "struct Pair<T> { a: T, b: T }\n\
+         atom pair_sum(p: Pair<i64>) -> i64 requires: true; ensures: true; body: { p.a + p.b };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 7 };\n\
+         atom caller() -> i64 requires: true; ensures: true; body: { main() };\n",
+    );
+    let output = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let checks = descriptor["object_translation"]["correspondence"]["checks"]
+        .as_array()
+        .unwrap();
+    let hir_check = checks
+        .iter()
+        .find(|check| check["item"] == "hir_llvm_model_correspondence")
+        .unwrap();
+    assert_eq!(hir_check["result"], "checked");
+    assert_eq!(
+        hir_check["detail"],
+        "3 of 3 atoms equivalent within the leaf subset (0 outside)"
+    );
+    // The edge's result mirrors the check item's aggregate.
+    let transformations = descriptor["object_translation"]["transformations"]
+        .as_array()
+        .unwrap();
+    let hir_edge = transformations
+        .iter()
+        .find(|edge| edge["from"] == "hir" && edge["to"] == "llvm_ir")
+        .unwrap();
+    assert_eq!(hir_edge["result"], "checked_correspondence");
+}
+
+#[test]
 fn recheck_machine_tv_reports_module_direct_call_and_wrapper_outcomes() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build_source(root.path(), MODULE);

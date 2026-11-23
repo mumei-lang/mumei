@@ -2339,8 +2339,11 @@ within the leaf subset — atoms outside the subset are named in `detail`,
 never silently covered — `inconsistent` on any divergence, and
 `unchecked` when no source atoms or IR were on hand. The
 `hir → llvm_ir` transformation entry reports the same aggregate as
-`result`, so `validation: "checked_hir_llvm_model_correspondence"` names
-the method while `result` stays honest about coverage.
+`result` — `checked_correspondence` when every compared atom proved
+equivalent, `inconsistent_correspondence` on any divergence, and
+`unchecked_not_translation_validated` when validation could not run —
+so `validation: "checked_hir_llvm_model_correspondence"` names the
+method while `result` stays honest about coverage.
 
 Step 5 of the record pipeline surfaces the aggregate status on the text
 path too: `recheck-machine-tv` and `accept-object` without `--json`

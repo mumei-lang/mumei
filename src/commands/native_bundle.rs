@@ -5662,7 +5662,7 @@ fn hir_llvm_atom_outcomes(data: &ObjectRecheckData) -> Option<BTreeMap<String, &
     let llvm_ir = std::str::from_utf8(&data.llvm_bytes).ok()?;
     let mut env = verification::ModuleEnv::default();
     let mut atoms = Vec::new();
-    let mut structs = BTreeMap::<String, Vec<(String, String)>>::new();
+    let mut struct_defs = Vec::new();
     for item in parser::parse_module(source) {
         match &item {
             parser::Item::TypeDef(typedef) => env.register_type(typedef),
@@ -5673,21 +5673,18 @@ fn hir_llvm_atom_outcomes(data: &ObjectRecheckData) -> Option<BTreeMap<String, &
         }
         match item {
             parser::Item::Atom(atom) => atoms.push(atom),
-            parser::Item::StructDef(def) => {
-                structs.insert(
-                    def.name.clone(),
-                    def.fields
-                        .iter()
-                        .map(|field| (field.name.clone(), field.type_name.clone()))
-                        .collect(),
-                );
-            }
+            parser::Item::StructDef(def) => struct_defs.push(def),
             _ => {}
         }
     }
     let (module_header, members) = llvm_module_members(llvm_ir);
+    // Generic struct declarations specialize per instantiation at
+    // build time; the recheck applies the same substitution from each
+    // atom's own signature (`Pair<i64>` → field `T` binds `i64`) so a
+    // concrete all-i64 instantiation is not dropped by the raw `T`.
     let mut outcomes = BTreeMap::new();
     for atom in &atoms {
+        let structs = specialized_struct_map(atom, &struct_defs);
         // The bundle emitter renames the user `main` atom to
         // `__mumei_user_main` and adds a C `main` wrapper — the model
         // comparison must target the user member, not the wrapper.
@@ -5741,6 +5738,89 @@ fn hir_llvm_atom_outcomes(data: &ObjectRecheckData) -> Option<BTreeMap<String, &
     Some(outcomes)
 }
 
+/// The `structs` map for one atom: plain definitions as declared,
+/// generic definitions specialized by the instantiation the atom's
+/// own signature uses (`p: Pair<i64>` binds `T` to `i64`). A def the
+/// atom does not instantiate concretely keeps its raw field types and
+/// fails the encoder's leaf-subset admission honestly.
+fn specialized_struct_map(
+    atom: &parser::Atom,
+    defs: &[parser::StructDef],
+) -> BTreeMap<String, Vec<(String, String)>> {
+    // `Name<arg, ...>` → (Name, [args]); signature type strings are
+    // parser-produced, so a shallow split is a reliable shape.
+    let instantiation = |type_name: &str| -> Option<(String, Vec<String>)> {
+        let (name, rest) = type_name.split_once('<')?;
+        let args = rest
+            .strip_suffix('>')?
+            .split(',')
+            .map(|arg| arg.trim().to_owned())
+            .collect();
+        Some((name.to_owned(), args))
+    };
+    // The encoder admits a parameter by looking its type string up
+    // verbatim, so each entry keys on the whole instantiation
+    // (`Pair<i64>`), not the bare definition name. Nested arguments
+    // (`Box<Pair<i64>>` needs `Pair<i64>` admitted too) register
+    // recursively.
+    let mut instantiations = BTreeMap::<String, Vec<String>>::new();
+    let mut worklist: Vec<String> = atom
+        .params
+        .iter()
+        .filter_map(|param| param.type_name.clone())
+        .chain(atom.return_type.clone())
+        .collect();
+    while let Some(type_name) = worklist.pop() {
+        if let Some((name, args)) = instantiation(&type_name) {
+            worklist.extend(args.iter().cloned());
+            instantiations.entry(type_name).or_insert_with(|| {
+                defs.iter()
+                    .find(|def| def.name == name)
+                    .map(|_| args)
+                    .unwrap_or_default()
+            });
+        }
+    }
+    let mut map = BTreeMap::<String, Vec<(String, String)>>::new();
+    for def in defs {
+        map.insert(
+            def.name.clone(),
+            def.fields
+                .iter()
+                .map(|field| (field.name.clone(), field.type_name.clone()))
+                .collect(),
+        );
+    }
+    for (type_name, args) in &instantiations {
+        let Some(def) = defs.iter().find(|def| {
+            instantiation(type_name)
+                .map(|(name, _)| name == def.name)
+                .unwrap_or(false)
+        }) else {
+            continue;
+        };
+        if args.len() != def.type_params.len() {
+            continue;
+        }
+        map.insert(
+            type_name.clone(),
+            def.fields
+                .iter()
+                .map(|field| {
+                    let type_name = def
+                        .type_params
+                        .iter()
+                        .position(|param| param == &field.type_name)
+                        .map(|index| args[index].clone())
+                        .unwrap_or_else(|| field.type_name.clone());
+                    (field.name.clone(), type_name)
+                })
+                .collect(),
+        );
+    }
+    map
+}
+
 /// Splits an emitted LLVM IR module into its header (everything
 /// outside `define` blocks — target, declarations, attributes) and
 /// each `define` block keyed by function name with its direct `call`
@@ -5752,8 +5832,13 @@ fn llvm_module_members(llvm_ir: &str) -> (String, BTreeMap<String, (String, Vec<
     let mut lines = llvm_ir.lines();
     while let Some(line) = lines.next() {
         if !line.starts_with("define ") {
-            header.push_str(line);
-            header.push('\n');
+            // Global definitions (`@name = constant ...`) belong to the
+            // member that referenced them — an unrelated member's string
+            // literal in the header would fail every atom's module check.
+            if !line.starts_with('@') {
+                header.push_str(line);
+                header.push('\n');
+            }
             continue;
         }
         let name = line
@@ -5888,12 +5973,13 @@ fn object_translation_json(
                 .find(|check| check["item"].as_str() == Some("hir_llvm_model_correspondence"))
         })
         .and_then(|check| check["result"].as_str())
-        .map(|result| {
-            if result == "checked" {
-                "checked_correspondence"
-            } else {
-                "unchecked_not_translation_validated"
-            }
+        .map(|result| match result {
+            "checked" => "checked_correspondence",
+            // A divergent atom is validation that ran and failed —
+            // not an edge that never ran. Keep the two apart, as the
+            // check item's own detail does.
+            "inconsistent" => "inconsistent_correspondence",
+            _ => "unchecked_not_translation_validated",
         })
         .unwrap_or("unchecked_not_translation_validated");
     serde_json::json!({
@@ -6550,6 +6636,91 @@ entry:
             evaluation.outcomes.get("add"),
             Some(&FunctionOutcome::Equivalent)
         );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn hir_llvm_atom_outcomes_cover_main_calls_globals_and_generic_structs() {
+        // The recheck compares each atom's HIR against a sliced
+        // member subset of the bundle IR. This fixture pins the three
+        // edges that dropped atoms out of the subset:
+        //  - `caller` calls `main()`, which the emitter renames to
+        //    `__mumei_user_main` — the call rename map must translate;
+        //  - `@greeting` is an unrelated global: kept in the subset
+        //    header it would fail every atom's module check;
+        //  - `pair_sum` takes `Pair<i64>` — the generic declaration's
+        //    `T` must specialize to `i64` from the atom's signature.
+        let source = concat!(
+            "struct Pair<T> { a: T, b: T }\n",
+            "atom pair_sum(p: Pair<i64>) -> i64 requires: true; ensures: true; body: { p.a + p.b };\n",
+            "atom main() -> i64 requires: true; ensures: true; body: { 7 };\n",
+            "atom caller() -> i64 requires: true; ensures: true; body: { main() };\n",
+            "atom bad(x: i64) -> i64 requires: true; ensures: true; body: { x + 1 };\n",
+        );
+        let llvm_ir = r#"target triple = "x86_64-pc-linux-gnu"
+@greeting = internal constant [4 x i8] c"hi a "
+
+define i64 @__mumei_user_main() {
+entry:
+  ret i64 7
+}
+define i64 @caller() {
+entry:
+  %r = call i64 @__mumei_user_main()
+  ret i64 %r
+}
+define i64 @bad(i64 %x) {
+entry:
+  %r = sub i64 %x, 1
+  ret i64 %r
+}
+define i64 @pair_sum({ i64, i64 } %0) {
+entry:
+  %p.a = extractvalue { i64, i64 } %0, 0
+  %p.b = extractvalue { i64, i64 } %0, 1
+  %r = add i64 %p.a, %p.b
+  ret i64 %r
+}
+define i32 @main(i32 %argc, ptr %argv) {
+entry:
+  %r = call i64 @__mumei_user_main()
+  ret i32 0
+}
+"#;
+        let data = ObjectRecheckData {
+            stage: tempfile::tempdir().unwrap(),
+            family: RecordFamily::Single,
+            canonical_argv_compared: false,
+            admission: RefinedAdmission::Reject,
+            ir_surface: tv::IrFunctionSurface {
+                defined: BTreeSet::new(),
+                declared: BTreeSet::new(),
+                calls: BTreeMap::new(),
+                libc_calls: BTreeMap::new(),
+                call_edges_checkable: false,
+            },
+            object_surface: ObjectSymbolSurface {
+                defined: BTreeSet::new(),
+                undefined: BTreeSet::new(),
+                calls: BTreeMap::new(),
+                call_targets: BTreeMap::new(),
+                call_edges_checkable: false,
+            },
+            object_link_correspondence: false,
+            llvm_bytes: llvm_ir.as_bytes().to_vec(),
+            object_bytes: Vec::new(),
+            executable_bytes: Vec::new(),
+            object_translation: None,
+            resolved_call_sites: 0,
+            source_text: Some(source.to_owned()),
+        };
+        let outcomes = hir_llvm_atom_outcomes(&data).unwrap();
+        assert_eq!(outcomes.get("main"), Some(&"checked"));
+        assert_eq!(outcomes.get("caller"), Some(&"checked"));
+        assert_eq!(outcomes.get("pair_sum"), Some(&"checked"));
+        // A member that disagrees with its HIR is validation that ran
+        // and failed — named `inconsistent`, never `unchecked`.
+        assert_eq!(outcomes.get("bad"), Some(&"inconsistent"));
     }
 
     #[test]
