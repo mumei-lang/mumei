@@ -4206,9 +4206,9 @@ fn module_bundle_with_bounded_arrays_builds_as_v14_and_rechecks() {
         .unwrap();
     assert_eq!(equivalence["result"], "checked");
     let detail = equivalence["detail"].as_str().unwrap();
-    for function in ["sum", "pick", "main"] {
+    for symbol in ["sum", "pick", "__mumei_user_main"] {
         assert!(
-            detail.contains(&format!("{function}: equivalent")),
+            detail.contains(&format!("{symbol}: equivalent")),
             "{detail}"
         );
     }
