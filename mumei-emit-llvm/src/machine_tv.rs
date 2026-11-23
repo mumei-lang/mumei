@@ -6882,6 +6882,77 @@ entry:
   ret double %b
 }
 "#;
+        // NaN payloads compare bit-for-bit, not under the source
+        // model's `f64_values_match` NaN equivalence: a machine
+        // return carrying the canonical quiet NaN matches the
+        // canonical-NaN IR edge but reports `Different` against a
+        // payload-1 NaN edge even though both are NaN.
+        let quiet_nan_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define double @pick(double %a, double %b) {
+entry:
+  ret double 0x7FF8000000000000
+}
+"#;
+        let payload_nan_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define double @pick(double %a, double %b) {
+entry:
+  ret double 0x7FF8000000000001
+}
+"#;
+        // `ret double <const>` compiles to a rip-relative `movsd`
+        // the lifter does not model — spell the constant return in
+        // GPR form the lifter does cover.
+        let nan_address = 0u64;
+        let nan_bytes = [
+            0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8,
+            0x7f, // movabsq $0x7FF8000000000000, %rax
+            0x66, 0x48, 0x0f, 0x6e, 0xc0, // movq %rax, %xmm0
+            0xc3, // retq
+        ];
+        let nan_targets = BTreeMap::new();
+        for (ir, expected) in [
+            (quiet_nan_ir, FunctionOutcome::Equivalent),
+            (payload_nan_ir, FunctionOutcome::Different),
+        ] {
+            let (ir_returns, ir_definedness) = unsafe {
+                crate::translation_validation::encode_ir_function_for_comparison(
+                    ir.as_bytes(),
+                    "pick",
+                    &model,
+                    false,
+                    &context,
+                )
+            }
+            .unwrap();
+            assert_eq!(
+                check_function_with_frame_memory_against_ir(
+                    &nan_bytes,
+                    nan_address,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &nan_targets,
+                    &context,
+                )
+                .0,
+                expected
+            );
+            assert_eq!(
+                check_function_against_ir(
+                    &nan_bytes,
+                    nan_address,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &nan_targets,
+                    &context,
+                ),
+                match expected {
+                    FunctionOutcome::Equivalent => IrObjectEquivalence::Equivalent,
+                    _ => IrObjectEquivalence::Different,
+                }
+            );
+        }
         let (address, bytes, call_targets) = compiled_function_with_targets(matching_ir, "pick");
         for (ir, expected) in [
             (matching_ir, FunctionOutcome::Equivalent),
