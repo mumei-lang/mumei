@@ -5461,13 +5461,25 @@ fn object_translation_correspondence_checks(
             "no source model or LLVM IR available for direct comparison".to_owned(),
         )),
         Some(outcomes) => {
+            // Outcomes: `equivalent` / `different` / `unknown` /
+            // a skip reason (`unsupported_signature`, `unsupported_ir`,
+            // `unsupported_instruction`, or a future `NotLiftable`
+            // reason passed through verbatim). `unknown` means the
+            // comparison ran and the solver could not decide — it is
+            // not a skip and keeps the item `unchecked` (fail-closed;
+            // DESIGN_LLVM_OBJECT_CORRESPONDENCE.md §3-7).
             let compared = outcomes
                 .iter()
-                .filter(|(_, outcome)| **outcome != "skipped")
+                .filter(|(_, outcome)| matches!(**outcome, "equivalent" | "different"))
                 .count();
             let different: Vec<&String> = outcomes
                 .iter()
                 .filter(|(_, outcome)| **outcome == "different")
+                .map(|(name, _)| name)
+                .collect();
+            let unknown: Vec<&String> = outcomes
+                .iter()
+                .filter(|(_, outcome)| **outcome == "unknown")
                 .map(|(name, _)| name)
                 .collect();
             let detail = outcomes
@@ -5480,6 +5492,15 @@ fn object_translation_correspondence_checks(
                     "llvm_ir_object_equivalence",
                     "inconsistent",
                     format!("divergent functions ({})", detail),
+                ));
+            } else if !unknown.is_empty() {
+                checks.push(check(
+                    "llvm_ir_object_equivalence",
+                    "unchecked",
+                    format!(
+                        "{} function(s) attempted but undecidable ({detail})",
+                        unknown.len()
+                    ),
                 ));
             } else if compared == 0 {
                 checks.push(check(
@@ -5569,9 +5590,12 @@ fn object_translation_correspondence_checks(
 
 /// Direct LLVM-IR ↔ object-function comparison over the shared
 /// `model.inputs` (design memo §7 Step 3 slice): per function,
-/// `"equivalent"`, `"different"`, or `"skipped"` when the function is
-/// outside the admitted scalar-i64 subset or its IR could not be
-/// encoded. `None` when the checked source snapshot or LLVM IR is
+/// `"equivalent"`, `"different"`, `"unknown"` (the comparison ran and
+/// the solver could not decide — fail-closed, never counted as
+/// skipped), or the verbatim `NotLiftable` reason (`unsupported_signature`,
+/// `unsupported_ir`, `unsupported_instruction`) when the function is
+/// outside the admitted subset or its IR could not be encoded.
+/// `None` when the checked source snapshot or LLVM IR is
 /// unavailable — the item then records `unchecked`.
 fn llvm_ir_object_equivalence_results(
     data: &ObjectRecheckData,
@@ -5605,7 +5629,7 @@ fn llvm_ir_object_equivalence_results(
             continue;
         };
         let outcome = if !machine_tv::ir_object_signature_liftable(model) {
-            "skipped"
+            "unsupported_signature"
         } else {
             if parsed.is_none() {
                 parsed = unsafe { tv::parse_ir_module_for_comparison(&data.llvm_bytes) }.ok();
@@ -5625,7 +5649,7 @@ fn llvm_ir_object_equivalence_results(
                 .cloned()
                 .unwrap_or_default();
             match encoded {
-                None => "skipped",
+                None => "unsupported_ir",
                 Some((ir_returns, ir_definedness)) => {
                     match machine_tv::check_function_against_ir(
                         &bytes,
@@ -5638,7 +5662,8 @@ fn llvm_ir_object_equivalence_results(
                     ) {
                         machine_tv::IrObjectEquivalence::Equivalent => "equivalent",
                         machine_tv::IrObjectEquivalence::Different => "different",
-                        machine_tv::IrObjectEquivalence::NotLiftable(_) => "skipped",
+                        machine_tv::IrObjectEquivalence::NotLiftable("solver_unknown") => "unknown",
+                        machine_tv::IrObjectEquivalence::NotLiftable(reason) => reason,
                     }
                 }
             }
@@ -6135,6 +6160,7 @@ fn object_machine_tv_acceptance_checks(
     checks_not_performed.extend([
         "register_convention_validation",
         "optimizer_semantics",
+        "object_data_section_correspondence",
         "abi_runtime_semantics",
         "os_exit_status_observation",
         "os_stdout_observation",
@@ -8315,8 +8341,8 @@ entry:
         // the aggregate stays `checked_correspondence`.
         let equivalent = BTreeMap::from([
             ("helper".to_owned(), "equivalent"),
-            ("__mumei_user_main".to_owned(), "skipped"),
-            ("main".to_owned(), "skipped"),
+            ("__mumei_user_main".to_owned(), "unsupported_signature"),
+            ("main".to_owned(), "unsupported_signature"),
         ]);
         let hir_llvm = BTreeMap::from([
             ("helper".to_owned(), "checked"),
@@ -8419,7 +8445,7 @@ entry:
 
         // Nothing liftable keeps the item honestly `unchecked`, which
         // drops the aggregate back to unchecked_not_translation_validated.
-        let unliftable = BTreeMap::from([("helper".to_owned(), "skipped")]);
+        let unliftable = BTreeMap::from([("helper".to_owned(), "unsupported_signature")]);
         let report = object_translation_correspondence_checks(
             &ir_surface,
             &executable_bytes,
@@ -8432,6 +8458,36 @@ entry:
             results_of(&report)["llvm_ir_object_equivalence"],
             "unchecked"
         );
+
+        // An attempted-but-undecidable comparison (`unknown`) is not a
+        // skip: the item stays `unchecked` even when other functions
+        // compared equivalent (fail-closed).
+        let undecidable = BTreeMap::from([
+            ("helper".to_owned(), "equivalent"),
+            ("main".to_owned(), "unknown"),
+        ]);
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            Some(&undecidable),
+            Some(&hir_llvm),
+        );
+        assert_eq!(report["status"], "unchecked_not_translation_validated");
+        assert_eq!(
+            results_of(&report)["llvm_ir_object_equivalence"],
+            "unchecked"
+        );
+        let detail = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["item"] == "llvm_ir_object_equivalence")
+            .unwrap()["detail"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(detail.contains("main: unknown"), "{detail}");
 
         // A record missing a function is unmappable and count-mismatched.
         let mut short = record.clone();

@@ -2323,9 +2323,13 @@ inputs where the source itself is undefined — e.g. a 64-bit shift by
 reported as IR↔object differences. The comparison is
 scoped to scalar-i64 signatures — functions with aggregates, f64
 leaves, calls, loops, or bounded memory, or whose IR fails to encode,
-are `skipped` in `detail`; the item is `checked` when at least one
-function compared equivalent and none diverged, `inconsistent` when any
-function diverged, and `unchecked` when none could be lifted. An
+record their `NotLiftable` reason (`unsupported_signature`,
+`unsupported_ir`, `unsupported_instruction`) in `detail`; a comparison
+that ran but the solver could not decide records `unknown`. The item is
+`checked` when at least one function compared equivalent, none
+diverged, and none is `unknown`; `inconsistent` when any function
+diverged, and `unchecked` when none could be lifted or any stayed
+undecidable (`unknown` is fail-closed — never counted as skipped). An
 `inconsistent` item is
 reported in place; it is not promoted into a verdict or a performed check.
 A further item, `hir_llvm_model_correspondence`, runs the HIR-anchored
