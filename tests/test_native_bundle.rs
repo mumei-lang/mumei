@@ -4193,6 +4193,25 @@ fn module_bundle_with_bounded_arrays_builds_as_v14_and_rechecks() {
             "equivalent_within_profile"
         );
     }
+    // Step 3c: bounded-memory functions also enter the direct LLVM-IR
+    // comparison subset — the produced IR for the bounded arrays encodes
+    // and compares `equivalent` against the object code, recorded on the
+    // `llvm_ir_object_equivalence` item (inspection only, no verdict).
+    let checks = machine_tv["object_translation"]["correspondence"]["checks"]
+        .as_array()
+        .unwrap();
+    let equivalence = checks
+        .iter()
+        .find(|check| check["item"] == "llvm_ir_object_equivalence")
+        .unwrap();
+    assert_eq!(equivalence["result"], "checked");
+    let detail = equivalence["detail"].as_str().unwrap();
+    for symbol in ["sum", "pick", "__mumei_user_main"] {
+        assert!(
+            detail.contains(&format!("{symbol}: equivalent")),
+            "{detail}"
+        );
+    }
     assert!(machine_tv["register_convention_assumed"]
         .as_str()
         .unwrap()

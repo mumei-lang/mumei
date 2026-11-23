@@ -287,7 +287,11 @@ pub fn ir_object_signature_liftable(model: &PureI64Body) -> bool {
         && model.array_params.iter().all(Option::is_none)
         && model.call_sites.iter().all(scalar_i64_call_site)
         && model.loop_bound_exits.is_none()
-        && !model.bounded_memory
+    // Bounded memory (local `let a = [...]` cells) stays inside:
+    // the shared IR encoder models alloca/GEP/store/load over Z3
+    // arrays with in-bounds definedness obligations, and the
+    // frame-memory comparison asserts the same return-value edges
+    // (Step 3c of the expansion order).
 }
 
 /// Whether a source call site stays inside the direct comparison's
@@ -323,12 +327,11 @@ fn scalar_i64_call_site(site: &CallSite) -> bool {
 /// same Z3 context.
 ///
 /// Scoped to scalar-i64 signatures: aggregates, f64 leaves, wider
-/// inputs, non-scalar call sites, loops, and bounded memory return
-/// `NotLiftable`. For every lifted path the machine return must equal
-/// the IR return of some covering edge whose definedness obligations
-/// hold and whose call-argument obligations all hold; an uncovered
-/// path, a diverging edge, or a failed obligation each compare
-/// `Different`.
+/// inputs, non-scalar call sites, and loops return `NotLiftable`. For
+/// every lifted path the machine return must equal the IR return of
+/// some covering edge whose definedness obligations hold and whose
+/// call-argument obligations all hold; an uncovered path, a diverging
+/// edge, or a failed obligation each compare `Different`.
 pub fn check_function_against_ir<'ctx>(
     bytes: &[u8],
     address: u64,
@@ -6302,6 +6305,136 @@ entry:
             }),
             "call term does not use the source callee name `main`"
         );
+    }
+
+    #[test]
+    fn frame_memory_check_compares_bounded_memory_against_ir() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // Step 3c: bounded-memory atoms compare the same alloca-array
+        // encoding on both sides — a divergent stored value reports
+        // `Different`.
+        let model = source_model_named_with_admission(
+            "atom pick(a0: i64, i: i64) -> i64 requires: 0 <= i && i < 3; ensures: result == 7; body: { let a = [a0, 20, 30]; a[i] = 7; a[i] };",
+            "pick",
+            &context,
+            RefinedAdmission::CompositeV11,
+        );
+        assert!(model.bounded_memory);
+        let matching_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @pick(i64 %a0, i64 %i) {
+entry:
+  %a = alloca [3 x i64], align 8
+  %p0 = getelementptr [3 x i64], ptr %a, i64 0, i64 0
+  store i64 %a0, ptr %p0, align 8
+  %p1 = getelementptr [3 x i64], ptr %a, i64 0, i64 1
+  store i64 20, ptr %p1, align 8
+  %p2 = getelementptr [3 x i64], ptr %a, i64 0, i64 2
+  store i64 30, ptr %p2, align 8
+  %hi = icmp slt i64 %i, 3
+  %lo = icmp sge i64 %i, 0
+  %safe = and i1 %hi, %lo
+  br i1 %safe, label %store, label %loadcheck
+store:
+  %pi = getelementptr [3 x i64], ptr %a, i64 0, i64 %i
+  store i64 7, ptr %pi, align 8
+  br label %loadcheck
+loadcheck:
+  %hi2 = icmp slt i64 %i, 3
+  %lo2 = icmp sge i64 %i, 0
+  %safe2 = and i1 %hi2, %lo2
+  br i1 %safe2, label %load, label %oob
+load:
+  %pj = getelementptr [3 x i64], ptr %a, i64 0, i64 %i
+  %v = load i64, ptr %pj, align 8
+  br label %merge
+oob:
+  br label %merge
+merge:
+  %result = phi i64 [ %v, %load ], [ 0, %oob ]
+  ret i64 %result
+}
+"#;
+        let divergent_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @pick(i64 %a0, i64 %i) {
+entry:
+  %a = alloca [3 x i64], align 8
+  %p0 = getelementptr [3 x i64], ptr %a, i64 0, i64 0
+  store i64 %a0, ptr %p0, align 8
+  %p1 = getelementptr [3 x i64], ptr %a, i64 0, i64 1
+  store i64 20, ptr %p1, align 8
+  %p2 = getelementptr [3 x i64], ptr %a, i64 0, i64 2
+  store i64 30, ptr %p2, align 8
+  %hi = icmp slt i64 %i, 3
+  %lo = icmp sge i64 %i, 0
+  %safe = and i1 %hi, %lo
+  br i1 %safe, label %store, label %loadcheck
+store:
+  %pi = getelementptr [3 x i64], ptr %a, i64 0, i64 %i
+  store i64 8, ptr %pi, align 8
+  br label %loadcheck
+loadcheck:
+  %hi2 = icmp slt i64 %i, 3
+  %lo2 = icmp sge i64 %i, 0
+  %safe2 = and i1 %hi2, %lo2
+  br i1 %safe2, label %load, label %oob
+load:
+  %pj = getelementptr [3 x i64], ptr %a, i64 0, i64 %i
+  %v = load i64, ptr %pj, align 8
+  br label %merge
+oob:
+  br label %merge
+merge:
+  %result = phi i64 [ %v, %load ], [ 0, %oob ]
+  ret i64 %result
+}
+"#;
+        let (address, bytes, call_targets) = compiled_function_with_targets(matching_ir, "pick");
+        for (ir, expected) in [
+            (matching_ir, FunctionOutcome::Equivalent),
+            (divergent_ir, FunctionOutcome::Different),
+        ] {
+            let (ir_returns, ir_definedness) = unsafe {
+                crate::translation_validation::encode_ir_function_for_comparison(
+                    ir.as_bytes(),
+                    "pick",
+                    &model,
+                    false,
+                    &context,
+                )
+            }
+            .unwrap();
+            assert_eq!(
+                check_function_with_frame_memory_against_ir(
+                    &bytes,
+                    address,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &call_targets,
+                    &context,
+                )
+                .0,
+                expected
+            );
+            assert_eq!(
+                check_function_against_ir(
+                    &bytes,
+                    address,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &call_targets,
+                    &context,
+                ),
+                match expected {
+                    FunctionOutcome::Equivalent => IrObjectEquivalence::Equivalent,
+                    _ => IrObjectEquivalence::Different,
+                }
+            );
+        }
     }
 
     #[test]
