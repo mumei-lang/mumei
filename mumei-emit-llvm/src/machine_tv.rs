@@ -265,20 +265,34 @@ pub enum IrObjectEquivalence {
 }
 
 /// Whether a source model's signature is inside the direct
-/// IR ↔ object comparison's scalar-i64 subset (design memo §7 Step 3
-/// slice). Callers use this to record `skipped` without paying for an
-/// IR encode; `check_function_against_ir` re-checks it internally.
+/// IR ↔ object comparison's integer subset (design memo §7 Step 3
+/// slices): scalar-i64 parameters, scalar-i64 or register-resident
+/// integer-aggregate results, scalar-i64 call sites, bounded memory —
+/// no array params, wide leaves, doubles, sret results, or loops.
+/// Callers use this to record `skipped` without paying for an IR
+/// encode; `check_function_against_ir` re-checks it internally.
 pub fn ir_object_signature_liftable(model: &PureI64Body) -> bool {
+    let result_leaf_count = model.result_shape.unwrap_or(1);
     model.inputs.len() <= MAX_ARGUMENT_COUNT
         && model.inputs.iter().all(|input| input.get_size() == 64)
-        && model.result_shape.is_none()
-        // At most one integer 64-bit result leaf: a scalar i128 result
-        // (`[false, false]`) or an f64 result (`[true]`) is outside.
-        // An omitted return annotation leaves the list empty — an
-        // inferred-i64 body still compares; a genuinely void atom is
-        // already excluded by the source signature check upstream.
+        // Integer-leaf aggregate results enter the subset within the
+        // register-resident budget (rax/rdx/rcx): an `sret`
+        // memory-class result, an f64 or SSE leaf, and a scalar i128
+        // (`[false, false]` on a `None` shape) all stay outside.
+        && model
+            .result_shape
+            .is_none_or(|count| count <= INTEGER_RESULT_REGISTERS.len())
+        // Every declared result leaf an integer leaf: a scalar i128
+        // result (`[false, false]` on a `None` shape) or an f64 leaf
+        // (`[true]`) is outside. An omitted return annotation leaves
+        // the list empty — an inferred-i64 body still compares; a
+        // genuinely void atom is already excluded by the source
+        // signature check upstream. A 128-bit aggregate field stays
+        // indistinguishable here — `{i128}` and `{i64, i64}` both
+        // flatten to two `[false]` slots — so the encode-side
+        // `aggregate_all_i64_leaves` gate fails it closed instead.
         && model.result_leaf_doubles.iter().all(|leaf| !*leaf)
-        && model.result_leaf_doubles.len() <= 1
+        && model.result_leaf_doubles.len() <= result_leaf_count
         // Every parameter a single integer 64-bit scalar leaf: wide
         // leaves (`[false, false]` for i128/u128) and f64 (`[true]`)
         // stay out of the subset.
@@ -344,7 +358,13 @@ pub fn check_function_against_ir<'ctx>(
     if !ir_object_signature_liftable(model) {
         return IrObjectEquivalence::NotLiftable("unsupported_signature");
     }
-    if ir_returns.is_empty() || ir_returns.iter().any(|(_, value)| value.get_size() != 64) {
+    let result_leaf_count = model.result_shape.unwrap_or(1);
+    let result_bits = 64 * result_leaf_count as u32;
+    if ir_returns.is_empty()
+        || ir_returns
+            .iter()
+            .any(|(_, value)| value.get_size() != result_bits)
+    {
         return IrObjectEquivalence::NotLiftable("unsupported_ir");
     }
     let instructions = match disassemble(bytes, address) {
@@ -361,10 +381,10 @@ pub fn check_function_against_ir<'ctx>(
     }
     let substitutions = input_substitutions(model, &lifted.arguments);
     for path in &lifted.paths {
-        if path.return_values.len() != 1 {
+        if path.return_values.len() != result_leaf_count {
             return IrObjectEquivalence::NotLiftable("unsupported_signature");
         }
-        let machine_return = path.return_values[0].substitute(&substitutions);
+        let machine_return = aggregate_return_value(&path.return_values).substitute(&substitutions);
         let coverage: Vec<Bool> = ir_returns
             .iter()
             .map(|(condition, _)| condition.substitute(&substitutions))
@@ -461,7 +481,12 @@ pub fn check_function_with_frame_memory_against_ir<'ctx>(
             FrameMemoryUse::default(),
         );
     }
-    if ir_returns.is_empty() || ir_returns.iter().any(|(_, value)| value.get_size() != 64) {
+    let result_bits = 64 * model.result_shape.unwrap_or(1) as u32;
+    if ir_returns.is_empty()
+        || ir_returns
+            .iter()
+            .any(|(_, value)| value.get_size() != result_bits)
+    {
         return (
             FunctionOutcome::OutsideProfile("unsupported_ir"),
             None,
@@ -605,14 +630,14 @@ fn check_function_with_result_width<'ctx>(
         Ok(lifted) => lifted,
         Err(outcome) => return (outcome, None, FrameMemoryUse::default()),
     };
-    // The IR-edge mode covers scalar-i64 signatures only — enforced by
+    // The IR-edge mode covers scalar-i64 and register-resident integer
+    // aggregate signatures — enforced by
     // `check_function_with_frame_memory_against_ir`, the only caller
-    // that passes `expected_ir` — and exactly one return slot per
-    // lifted path.
+    // that passes `expected_ir` — with every return leaf modelled.
     let mut unknown_path = false;
     let mut unsupported_call_arguments = false;
     for path in &lifted.paths {
-        if expected_ir.is_some() && path.return_values.len() != 1 {
+        if expected_ir.is_some() && path.return_values.len() != model.result_shape.unwrap_or(1) {
             return (
                 FunctionOutcome::OutsideProfile("unsupported_signature"),
                 None,
@@ -1023,6 +1048,18 @@ fn aggregate_leaf<'ctx>(value: &BV<'ctx>, leaf_count: usize, leaf_index: usize) 
     value.extract(high, low)
 }
 
+/// A lifted path's per-leaf return values folded the way the IR
+/// encoder lays out an aggregate `ret`: leaf 0 in the high bits
+/// (`semantic_contract::aggregate_value`'s layout), so both sides
+/// compare one bit-vector per return edge.
+fn aggregate_return_value<'ctx>(values: &[BV<'ctx>]) -> BV<'ctx> {
+    let (first, rest) = values
+        .split_first()
+        .expect("lifted paths carry at least one return value");
+    rest.iter()
+        .fold(first.clone(), |acc, slot| acc.concat(slot))
+}
+
 fn assert_path_equivalence_query<'ctx>(
     solver: &Solver<'ctx>,
     model: &PureI64Body<'ctx>,
@@ -1049,7 +1086,7 @@ fn assert_path_equivalence_query<'ctx>(
         // this machine path with a matching return and discharged
         // definedness obligations — the same mismatch disjunction as
         // `check_function_against_ir`, negated into an equality claim.
-        let machine_return = &substituted_returns[0];
+        let machine_return = aggregate_return_value(&substituted_returns);
         let coverage: Vec<Bool> = ir_returns
             .iter()
             .map(|(condition, _)| condition.substitute(&substitutions))
@@ -6435,6 +6472,149 @@ merge:
                 }
             );
         }
+    }
+
+    #[test]
+    fn frame_memory_check_compares_aggregate_result_against_ir() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // A register-resident all-integer aggregate result (two `i64`
+        // leaves returning in rax/rdx) joins the comparison subset:
+        // the IR `ret {i64, i64}` encodes as its aggregate slots —
+        // leaf 0 high — and the machine side folds the same leaves,
+        // so a divergent leaf compares `Different`.
+        let model = source_model_named_with_admission(
+            "struct P { x: i64, y: i64 }\n\
+             atom make(a: i64, b: i64) -> P requires: true; ensures: true; body: { P { x: a, y: b + 1 } };",
+            "make",
+            &context,
+            RefinedAdmission::CompositeV6,
+        );
+        assert_eq!(model.result_shape, Some(2));
+        let matching_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i64 } @make(i64 %a, i64 %b) {
+entry:
+  %t = add i64 %b, 1
+  %p0 = insertvalue { i64, i64 } undef, i64 %a, 0
+  %p1 = insertvalue { i64, i64 } %p0, i64 %t, 1
+  ret { i64, i64 } %p1
+}
+"#;
+        let divergent_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i64 } @make(i64 %a, i64 %b) {
+entry:
+  %t = add i64 %b, 2
+  %p0 = insertvalue { i64, i64 } undef, i64 %a, 0
+  %p1 = insertvalue { i64, i64 } %p0, i64 %t, 1
+  ret { i64, i64 } %p1
+}
+"#;
+        let (address, bytes, call_targets) = compiled_function_with_targets(matching_ir, "make");
+        for (ir, expected) in [
+            (matching_ir, FunctionOutcome::Equivalent),
+            (divergent_ir, FunctionOutcome::Different),
+        ] {
+            let (ir_returns, ir_definedness) = unsafe {
+                crate::translation_validation::encode_ir_function_for_comparison(
+                    ir.as_bytes(),
+                    "make",
+                    &model,
+                    false,
+                    &context,
+                )
+            }
+            .unwrap();
+            assert_eq!(
+                check_function_with_frame_memory_against_ir(
+                    &bytes,
+                    address,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &call_targets,
+                    &context,
+                )
+                .0,
+                expected
+            );
+            assert_eq!(
+                check_function_against_ir(
+                    &bytes,
+                    address,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &call_targets,
+                    &context,
+                ),
+                match expected {
+                    FunctionOutcome::Equivalent => IrObjectEquivalence::Equivalent,
+                    _ => IrObjectEquivalence::Different,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn ir_object_equivalence_rejects_wide_aggregate_result() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // `{i128}` and `{i64, i64}` flatten to the same signature —
+        // two non-`double` 64-bit slots — so a count+kinds match
+        // cannot keep a 128-bit leaf out of the subset; the
+        // encode-side `aggregate_all_i64_leaves` gate fails it
+        // closed instead.
+        let model = source_model_named_with_admission(
+            "struct P { x: i64, y: i64 }\n\
+             atom make(a: i64, b: i64) -> P requires: true; ensures: true; body: { P { x: a, y: b } };",
+            "make",
+            &context,
+            RefinedAdmission::CompositeV6,
+        );
+        assert_eq!(model.result_shape, Some(2));
+        // `ret undef` keeps the body inside the shared gate, so the
+        // comparison subset's own return check is what rejects: the
+        // `{i128}` signature matches the model's field count and leaf
+        // kinds, and only `aggregate_all_i64_leaves` fails it closed.
+        let wide_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i128 } @make(i64 %a, i64 %b) {
+entry:
+  ret { i128 } undef
+}
+"#;
+        let error = unsafe {
+            crate::translation_validation::encode_ir_function_for_comparison(
+                wide_ir.as_bytes(),
+                "make",
+                &model,
+                false,
+                &context,
+            )
+        }
+        .unwrap_err();
+        assert_eq!(error.0, "LLVM return outside comparison subset");
+        // A `double` leaf is rejected too — earlier, at the shared
+        // signature check whose leaf kinds no longer match the model's.
+        let f64_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, double } @make(i64 %a, i64 %b) {
+entry:
+  ret { i64, double } undef
+}
+"#;
+        assert!(unsafe {
+            crate::translation_validation::encode_ir_function_for_comparison(
+                f64_ir.as_bytes(),
+                "make",
+                &model,
+                false,
+                &context,
+            )
+        }
+        .is_err());
     }
 
     #[test]

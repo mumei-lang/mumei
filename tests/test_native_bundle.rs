@@ -3889,6 +3889,26 @@ fn module_bundle_with_struct_results_builds_as_v6_and_rechecks() {
     assert_success(&check(&source, &bundle, &id));
     assert_success(&recheck(&source, &bundle, &id));
     assert_success(&recheck_llvm(&source, &bundle, &id));
+    let machine_tv = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&machine_tv);
+    let machine_tv: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
+    // Step 3d: a register-resident integer aggregate result joins the
+    // direct LLVM-IR comparison — `make` records `equivalent`, while
+    // callers whose struct-returning call site stays outside the
+    // scalar-i64 call subset record `skipped` (inspection only, no
+    // verdict).
+    let checks = machine_tv["object_translation"]["correspondence"]["checks"]
+        .as_array()
+        .unwrap();
+    let equivalence = checks
+        .iter()
+        .find(|check| check["item"] == "llvm_ir_object_equivalence")
+        .unwrap();
+    assert_eq!(equivalence["result"], "checked");
+    let detail = equivalence["detail"].as_str().unwrap();
+    assert!(detail.contains("make: equivalent"), "{detail}");
+    assert!(detail.contains("uselet: skipped"), "{detail}");
+    assert!(detail.contains("__mumei_user_main: skipped"), "{detail}");
     // A v6 record re-pinned as v5 is refused: v5 keeps struct values out.
     let mut record = module_record(&bundle);
     record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V5.into());
