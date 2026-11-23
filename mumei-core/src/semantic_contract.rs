@@ -10195,6 +10195,18 @@ fn module_atom_obligations<'ctx>(
                 .push(site_domain.implies(&site.result.bvsge(&BV::from_u64(context, 0, 64))));
         }
     }
+    // Calls evaluated inside the atom's own `requires`/`ensures`
+    // clauses create fresh result slots — a `[i64]` result's `arrlen`
+    // is nonnegative there too, or `len(f())` in a contract clause is
+    // unconstrained and the postcondition check refutes a true claim.
+    for site in requires_call_sites.iter().chain(ensures_call_sites.iter()) {
+        if site.result_shape == CallValueShape::Array {
+            assumptions.push(
+                site.guard
+                    .implies(&site.result.bvsge(&BV::from_u64(context, 0, 64))),
+            );
+        }
+    }
     for site in requires_call_sites.iter().chain(ensures_call_sites.iter()) {
         let Some(callee) = callees.get(&site.callee) else {
             return Err(SemanticContractError::Unsupported(

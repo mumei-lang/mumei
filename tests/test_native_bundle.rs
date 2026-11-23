@@ -7352,12 +7352,21 @@ body: len(make());
 
 atom main() -> i64
 requires: true;
-ensures: result == 0;
-body: 0;
+ensures: result == 2;
+body: use_it();
 "#,
     );
     assert_success(&check(&source, &bundle, &id));
     assert_success(&recheck(&source, &bundle, &id));
+    // `len(make())` must also survive codegen — the emitted program
+    // returns the array's length.
+    assert_eq!(
+        Command::new(bundle.join("program"))
+            .status()
+            .unwrap()
+            .code(),
+        Some(2)
+    );
 }
 
 #[test]
@@ -7379,12 +7388,21 @@ body: { let a = make(); len(a) };
 
 atom main() -> i64
 requires: true;
-ensures: result == 0;
-body: 0;
+ensures: result >= 0;
+body: use_it();
 "#,
     );
     assert_success(&check(&source, &bundle, &id));
     assert_success(&recheck(&source, &bundle, &id));
+    // The contract only guarantees nonnegativity; the emitted
+    // program still computes the concrete length.
+    assert_eq!(
+        Command::new(bundle.join("program"))
+            .status()
+            .unwrap()
+            .code(),
+        Some(3)
+    );
 }
 
 #[test]
