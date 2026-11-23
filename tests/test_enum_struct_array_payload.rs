@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::time::{Duration, Instant};
 
 fn run_command(command: &str, fixture_name: &str, bitvec_i64: bool) -> Output {
     let dir = tempfile::tempdir().expect("create verification directory");
@@ -66,7 +67,7 @@ fn struct_array_payloads_verify_in_both_integer_modes() {
 
 #[test]
 fn unsafe_and_unsupported_struct_array_payloads_fail_closed_in_both_modes() {
-    const EXPECTED_FAILURES: [&str; 27] = [
+    const EXPECTED_FAILURES: [&str; 29] = [
         "overclaimed_struct_array_length",
         "out_of_bounds_struct_array_index",
         "different_struct_fields_keep_lengths_separate",
@@ -80,6 +81,8 @@ fn unsafe_and_unsupported_struct_array_payloads_fail_closed_in_both_modes() {
         "direct_struct_array_payload_different_elements",
         "nested_enum_struct_array_equality_rejects_different_contents",
         "direct_struct_array_payload_stale_reconstruction",
+        "call_result_array_leaf_cache_ignored_after_store",
+        "match_result_array_leaf_cache_ignored_after_store",
         "match_result_shadowed_struct_array_does_not_reuse_outer",
         "block_tail_array_payload_shared_write_rejected",
         "alias_array_payload_shared_write_rejected",
@@ -136,6 +139,49 @@ fn unsafe_and_unsupported_struct_array_payloads_fail_closed_in_both_modes() {
             "direct struct-array reads must explain the supported match route (bitvec={bitvec_i64}):\n{payload:#}"
         );
     }
+}
+
+#[test]
+fn array_free_nested_enum_equality_finishes_quickly() {
+    let started = Instant::now();
+    let output = run_command("verify", "test_enum_payload_equality_work.mm", false);
+    let elapsed = started.elapsed();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "array-free nested enum equality must verify:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "array-free nested enum equality took {elapsed:?}:\n{stdout}\n{stderr}"
+    );
+}
+
+#[test]
+fn struct_array_enum_equality_budget_fails_closed() {
+    let output = run_command("verify", "test_enum_payload_equality_budget.mm", false);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "large nested struct-array enum equality must fail closed:\n{stdout}\n{stderr}"
+    );
+    let payload = verify_json(&output);
+    let diagnostic = payload["diagnostics"]
+        .as_array()
+        .and_then(|diagnostics| {
+            diagnostics
+                .iter()
+                .find(|entry| entry["atom"] == "struct_array_enum_equality_exceeds_budget")
+        })
+        .unwrap_or_else(|| panic!("missing equality budget diagnostic:\n{payload:#}"));
+    assert!(
+        diagnostic["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("work budget")),
+        "struct-array equality budget must return a type error:\n{payload:#}"
+    );
 }
 
 #[test]

@@ -110,6 +110,11 @@ enum GenericArrayPayloadE<T> {
     D(ps: [Point], value: T)
 }
 
+atom struct_array_call_source() -> [Point]
+requires: true;
+ensures: len(result) == 1 && result[0].x == 1;
+body: [Point { x: 1 }];
+
 atom overclaimed_struct_array_length(s: S) -> i64
 requires: len(s.xs) > 2;
 ensures: result > 3;
@@ -248,6 +253,35 @@ body: {
                 DirectArrayE::N => 0
             }
         },
+        DirectArrayE::N => 0
+    }
+};
+
+atom call_result_array_leaf_cache_ignored_after_store() -> i64
+requires: true;
+ensures: result == 1;
+body: {
+    let qs = struct_array_call_source();
+    qs[0].x = 9;
+    let e = DirectArrayE::D(qs);
+    match e {
+        DirectArrayE::D(payload) => payload[0].x,
+        DirectArrayE::N => 0
+    }
+};
+
+atom match_result_array_leaf_cache_ignored_after_store() -> i64
+requires: true;
+ensures: result == 1;
+body: {
+    let source = [Point { x: 1 }];
+    let qs = match C::One {
+        C::One => source
+    };
+    qs[0].x = 9;
+    let e = DirectArrayE::D(qs);
+    match e {
+        DirectArrayE::D(payload) => payload[0].x,
         DirectArrayE::N => 0
     }
 };

@@ -1333,9 +1333,14 @@ pub(crate) fn snapshot_struct_array_leaves<'a>(
     value: &Dynamic<'a>,
     declared_array_type: Option<&str>,
 ) -> MumeiResult<Option<StructArrayLeafSnapshot<'a>>> {
-    let result_element_type = value
-        .as_array()
-        .and_then(|array| call_result_struct_array_element_type(vc, &array));
+    let uses_unbound_result = matches!(expression, Expr::Call(_, _) | Expr::Match { .. });
+    let result_element_type = if uses_unbound_result {
+        value
+            .as_array()
+            .and_then(|array| call_result_struct_array_element_type(vc, &array))
+    } else {
+        None
+    };
     let element_type = declared_array_type
         .map(str::trim)
         .filter(|type_name| type_name.starts_with('[') && type_name.ends_with(']'))
@@ -1364,9 +1369,13 @@ pub(crate) fn snapshot_struct_array_leaves<'a>(
     let mut arrays = HashMap::with_capacity(leaves.len());
     for (path, leaf_type) in leaves {
         let range = z3_element_sort(vc, &leaf_type);
-        let result_array = value
-            .as_array()
-            .and_then(|array| call_result_struct_array(vc, &array, &path));
+        let result_array = if uses_unbound_result {
+            value
+                .as_array()
+                .and_then(|array| call_result_struct_array(vc, &array, &path))
+        } else {
+            None
+        };
         let array = if let Some(array) = result_array {
             array
         } else if let Some(array) = struct_array_leaf_for_expr(vc, env, expression, value, &path, 0)

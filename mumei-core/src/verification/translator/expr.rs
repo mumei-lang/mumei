@@ -2710,10 +2710,106 @@ fn array_value_equality<'a>(
     Ok(Bool::and(ctx, &[&len_eq, &contents_eq]))
 }
 
+const MAX_ENUM_PAYLOAD_EQUALITY_WORK: usize = 4096;
+
+#[derive(Default)]
+struct EnumPayloadEqualityWork {
+    work: usize,
+    struct_array_payloads: std::collections::HashMap<String, bool>,
+    visiting_types: std::collections::HashSet<String>,
+}
+
+impl EnumPayloadEqualityWork {
+    fn spend(&mut self) -> MumeiResult<()> {
+        self.work = self.work.saturating_add(1);
+        if self.work > MAX_ENUM_PAYLOAD_EQUALITY_WORK {
+            return Err(MumeiError::type_error(
+                "Enum payload equality exceeds its work budget",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn enum_type_contains_struct_array_payload(
+    vc: &VCtx<'_>,
+    enum_name: &str,
+    work: &mut EnumPayloadEqualityWork,
+) -> MumeiResult<bool> {
+    let resolved_name = vc.module_env.resolve_base_type(enum_name);
+    if let Some(&contains) = work.struct_array_payloads.get(&resolved_name) {
+        return Ok(contains);
+    }
+    if !work.visiting_types.insert(resolved_name.clone()) {
+        return Err(MumeiError::type_error(
+            "Recursive enum payload equality is not supported",
+        ));
+    }
+    let Some(enum_def) = vc.module_env.enums.get(&resolved_name) else {
+        work.visiting_types.remove(&resolved_name);
+        return Ok(false);
+    };
+    let mut contains = false;
+    for variant in &enum_def.variants {
+        work.spend()?;
+        for field in &variant.field_types {
+            work.spend()?;
+            let field_type = datatype::payload_field_type_name(field);
+            let Some(leaves) = datatype::field_leaf_types(&field_type, vc.module_env) else {
+                continue;
+            };
+            if leaves
+                .iter()
+                .any(|(name, base)| name.contains('#') && base.starts_with("array:"))
+            {
+                contains = true;
+                break;
+            }
+            for (_, base) in &leaves {
+                if let Some(inner_name) = base.strip_prefix("enum:") {
+                    if enum_type_contains_struct_array_payload(vc, inner_name, work)? {
+                        contains = true;
+                        break;
+                    }
+                }
+            }
+            if contains {
+                break;
+            }
+        }
+        if contains {
+            break;
+        }
+    }
+    work.visiting_types.remove(&resolved_name);
+    work.struct_array_payloads.insert(resolved_name, contains);
+    Ok(contains)
+}
+
 fn enum_payload_value_equality<'a>(
     vc: &VCtx<'a>,
     left: &Dynamic<'a>,
     right: &Dynamic<'a>,
+) -> MumeiResult<Option<Bool<'a>>> {
+    let Some(enum_def) = vc.module_env.enums.values().find(|enum_def| {
+        datatype::enum_datatype_sort(vc, enum_def).is_some_and(|sort| sort.sort == left.get_sort())
+    }) else {
+        return Ok(None);
+    };
+    let mut work = EnumPayloadEqualityWork::default();
+    if !enum_type_contains_struct_array_payload(vc, &enum_def.name, &mut work)? {
+        return Ok(None);
+    }
+    let equality = enum_payload_value_equality_inner(vc, left, right, &mut work)?
+        .ok_or_else(|| MumeiError::type_error("Unable to lower enum payload equality"))?;
+    Ok(Some(equality))
+}
+
+fn enum_payload_value_equality_inner<'a>(
+    vc: &VCtx<'a>,
+    left: &Dynamic<'a>,
+    right: &Dynamic<'a>,
+    work: &mut EnumPayloadEqualityWork,
 ) -> MumeiResult<Option<Bool<'a>>> {
     let Some(enum_def) = vc.module_env.enums.values().find(|enum_def| {
         datatype::enum_datatype_sort(vc, enum_def).is_some_and(|sort| sort.sort == left.get_sort())
@@ -2726,6 +2822,7 @@ fn enum_payload_value_equality<'a>(
     let mut has_array_payload = false;
     let mut variant_equalities = Vec::with_capacity(enum_def.variants.len());
     for (variant_idx, variant) in enum_def.variants.iter().enumerate() {
+        work.spend()?;
         let Some((_, left_tag, _, _)) = datatype::variant_tester_condition(vc, left, &variant.name)
         else {
             return Ok(None);
@@ -2737,6 +2834,7 @@ fn enum_payload_value_equality<'a>(
         };
         let mut payload_equalities = Vec::new();
         for (field_idx, field) in variant.field_types.iter().enumerate() {
+            work.spend()?;
             let field_type = datatype::payload_field_type_name(field);
             let Some(leaf_types) = datatype::field_leaf_types(&field_type, vc.module_env) else {
                 return Ok(None);
@@ -2748,6 +2846,7 @@ fn enum_payload_value_equality<'a>(
             };
             let mut compared_lengths = std::collections::HashSet::new();
             for (leaf_idx, (name, base)) in leaf_types.iter().enumerate() {
+                work.spend()?;
                 if base == "array_len" {
                     continue;
                 }
@@ -2773,12 +2872,30 @@ fn enum_payload_value_equality<'a>(
                             "Enum payload values have different field types",
                         ));
                     }
-                    let nested_enum_eq =
-                        if base.starts_with("enum:") && left_value.as_datatype().is_some() {
-                            enum_payload_value_equality(vc, &left_value, &right_value)?
+                    let nested_enum_eq = if let (Some(inner_name), true) = (
+                        base.strip_prefix("enum:"),
+                        left_value.as_datatype().is_some(),
+                    ) {
+                        if enum_type_contains_struct_array_payload(vc, inner_name, work)? {
+                            Some(
+                                enum_payload_value_equality_inner(
+                                    vc,
+                                    &left_value,
+                                    &right_value,
+                                    work,
+                                )?
+                                .ok_or_else(|| {
+                                    MumeiError::type_error(
+                                        "Unable to lower nested enum payload equality",
+                                    )
+                                })?,
+                            )
                         } else {
                             None
-                        };
+                        }
+                    } else {
+                        None
+                    };
                     if let Some(nested_enum_eq) = nested_enum_eq {
                         has_array_payload = true;
                         payload_equalities.push(nested_enum_eq);
