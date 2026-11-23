@@ -4462,7 +4462,7 @@ fn hir_atom(source: &str) -> mumei_core::hir::HirAtom {
 
 fn hir_outcome_with_structs(
     source: &str,
-    structs: &BTreeMap<String, Vec<String>>,
+    structs: &BTreeMap<String, Vec<(String, String)>>,
     ir: &str,
 ) -> Outcome {
     tv::validate_hir_pure_i64_leaf(&hir_atom(source), structs, ir, Options::default()).unwrap()
@@ -4487,8 +4487,14 @@ fn emitted_atom(source: &str) -> String {
     )
 }
 
-fn pair_env() -> BTreeMap<String, Vec<String>> {
-    BTreeMap::from([("Pair".to_string(), vec!["x".to_string(), "y".to_string()])])
+fn pair_env() -> BTreeMap<String, Vec<(String, String)>> {
+    BTreeMap::from([(
+        "Pair".to_string(),
+        vec![
+            ("x".to_string(), "i64".to_string()),
+            ("y".to_string(), "i64".to_string()),
+        ],
+    )])
 }
 
 fn pair_source(params: &str, result: &str, body: &str) -> String {
@@ -4541,11 +4547,20 @@ fn hir_leaf_compare_handles_aggregate_results() {
 fn hir_leaf_compare_rejects_aggregate_misuse() {
     // A whole aggregate cannot stand in a scalar position: not as a
     // scalar-typed tail, an operand, or a call argument.
+    // A real module, not the empty string — an empty module could not
+    // tell a wrong HIR-side admission apart from a missing comparison
+    // target. (The misuse bodies themselves do not codegen.)
+    let real_ir = emitted_atom(&pair_source("p: Pair", "i64", "p.x"));
     for body in ["p", "p + 1", "g(p)"] {
         let src = pair_source("p: Pair", "i64", body);
         assert!(
-            tv::validate_hir_pure_i64_leaf(&hir_atom(&src), &pair_env(), "", Options::default())
-                .is_err(),
+            tv::validate_hir_pure_i64_leaf(
+                &hir_atom(&src),
+                &pair_env(),
+                &real_ir,
+                Options::default()
+            )
+            .is_err(),
             "{body} stays outside the scalar subset"
         );
     }
@@ -4553,8 +4568,45 @@ fn hir_leaf_compare_rejects_aggregate_misuse() {
     // closed at the signature gate.
     let unknown = "struct Triple { a: i64, b: i64, c: i64 }\natom f(t: Triple) -> i64 requires: true; ensures: true; body: { t.a };";
     assert!(
-        tv::validate_hir_pure_i64_leaf(&hir_atom(unknown), &pair_env(), "", Options::default())
-            .is_err(),
+        tv::validate_hir_pure_i64_leaf(
+            &hir_atom(unknown),
+            &pair_env(),
+            &emitted_atom(unknown),
+            Options::default()
+        )
+        .is_err(),
         "unmapped struct params stay outside the subset"
+    );
+    // Map entries that are not non-empty all-i64 records are dropped
+    // from the admission, so a signature naming them fails closed the
+    // same way.
+    let wide = "struct Wide { a: i128 }
+atom f(w: Wide) -> i64 requires: true; ensures: true; body: { w.a };";
+    let wide_env = BTreeMap::from([(
+        "Wide".to_string(),
+        vec![("a".to_string(), "i128".to_string())],
+    )]);
+    assert!(
+        tv::validate_hir_pure_i64_leaf(
+            &hir_atom(wide),
+            &wide_env,
+            &emitted_atom(wide),
+            Options::default()
+        )
+        .is_err(),
+        "non-i64 leaf records are not admitted"
+    );
+    let empty = "struct Unit {}
+atom f() -> Unit requires: true; ensures: true; body: { Unit {} };";
+    let empty_env = BTreeMap::from([("Unit".to_string(), Vec::new())]);
+    assert!(
+        tv::validate_hir_pure_i64_leaf(
+            &hir_atom(empty),
+            &empty_env,
+            &emitted_atom(empty),
+            Options::default()
+        )
+        .is_err(),
+        "empty records are not admitted"
     );
 }

@@ -411,9 +411,12 @@ pub fn validate_pure_i64_optimized(
 /// `[i64]` parameters inside the i64 domain (`a[i]` as the
 /// bounds-checked read, `len(a)` as the stored count), and
 /// register-resident aggregates whose fields are all `i64` leaves —
-/// `structs` names them with their declaration-order field names, so a
-/// `Pair` parameter binds one input slot per leaf and a `Pair` result
-/// packs via `aggregate_value`. Anything wider fails closed as a
+/// `structs` names them with their declaration-order
+/// `(field name, field type)` pairs, so a `Pair` parameter binds one
+/// input slot per leaf and a `Pair` result packs via
+/// `aggregate_value`. An entry that is not a non-empty all-`i64`
+/// record is dropped from the admission, so a signature or literal
+/// naming it fails closed at the encoder's type gates. Anything wider fails closed as a
 /// validation error.
 ///
 /// The module sweep covers every member, not just the compared
@@ -423,7 +426,7 @@ pub fn validate_pure_i64_optimized(
 /// this is the stage check, not a profile attestation.
 pub fn validate_hir_pure_i64_leaf(
     atom: &mumei_core::hir::HirAtom,
-    structs: &std::collections::BTreeMap<String, Vec<String>>,
+    structs: &std::collections::BTreeMap<String, Vec<(String, String)>>,
     llvm_ir: &str,
     options: Options,
 ) -> Result<Outcome> {
@@ -1161,6 +1164,18 @@ pub unsafe fn encode_parsed_function_for_comparison<'ctx>(
     // would compare against the wrong field. `aggregate_all_i64_leaves`
     // fails closed on 128-bit and `double` leaves; both stay outside
     // for later slices.
+    // Aggregate parameters get the same all-`i64`-leaf gate the
+    // result has: `param_shapes`/`param_leaf_doubles` pin the leaf
+    // count and the double/integer kinds only, so a `{i128, i64}`
+    // formal would slip a wider field into a slot the model binds at
+    // 64 bits — count-and-kinds cannot pin widths, so a non-i64 leaf
+    // fails closed instead of reaching the compare as a sort error.
+    for index in 0..LLVMCountParams(raw) {
+        let param_type = LLVMTypeOf(LLVMGetParam(raw, index));
+        if aggregate_fields(param_type).is_some() && !aggregate_all_i64_leaves(param_type) {
+            return Err(ValidationError("LLVM param outside comparison subset"));
+        }
+    }
     let ret = LLVMGetReturnType(LLVMGlobalGetValueType(raw));
     if aggregate_fields(ret).is_some() {
         if !aggregate_all_i64_leaves(ret) {

@@ -8290,7 +8290,7 @@ impl<'ctx> PureI64Body<'ctx> {
 /// order the IR subset used.
 pub fn encode_hir_pure_i64_leaf<'ctx>(
     atom: &crate::hir::HirAtom,
-    structs: &BTreeMap<String, Vec<String>>,
+    structs: &BTreeMap<String, Vec<(String, String)>>,
     context: &'ctx Context,
 ) -> Result<PureI64Body<'ctx>, SemanticContractError> {
     use crate::hir::{HirBinOp, HirExpr, HirStmt};
@@ -8298,6 +8298,23 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
     if !atom.signature.effects.is_empty() {
         return Err(SemanticContractError::Unsupported("hir effects"));
     }
+    // The `structs` map is the caller's admission — `(field name,
+    // field type)` in declaration order. Only non-empty all-`i64`-leaf
+    // records are admissible: a wider leaf would bind a 64-bit input
+    // slot to part of a wider field, and an empty record would reach
+    // `aggregate_value` with no slots. Anything else drops out of the
+    // map, so a signature or literal naming it fails closed at the
+    // type gates below.
+    let structs: BTreeMap<String, Vec<String>> = structs
+        .iter()
+        .filter(|(_, fields)| !fields.is_empty() && fields.iter().all(|(_, ty)| ty == "i64"))
+        .map(|(name, fields)| {
+            (
+                name.clone(),
+                fields.iter().map(|(field, _)| field.clone()).collect(),
+            )
+        })
+        .collect();
     // Uniform-width scalar subset: every parameter and the result share
     // one declared scalar type — `i64`, `i128` or `u128` — optionally
     // alongside read-only `[i64]` array parameters (the bounded-memory
@@ -8781,7 +8798,7 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                 let bound = encode_value(
                     value,
                     &env,
-                    structs,
+                    &structs,
                     context,
                     &top_guard,
                     &mut definedness,
@@ -8807,7 +8824,7 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
     let (value, result_shape, result_leaf_doubles) = match encode_value(
         tail,
         &env,
-        structs,
+        &structs,
         context,
         &top_guard,
         &mut definedness,
