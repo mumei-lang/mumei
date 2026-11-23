@@ -412,6 +412,13 @@ pub fn check_function_with_frame_memory_against_ir<'ctx>(
     Option<CalleeSavedPreservation>,
     FrameMemoryUse,
 ) {
+    if !ir_object_signature_liftable(model) {
+        return (
+            FunctionOutcome::OutsideProfile("unsupported_signature"),
+            None,
+            FrameMemoryUse::default(),
+        );
+    }
     if ir_returns.is_empty() || ir_returns.iter().any(|(_, value)| value.get_size() != 64) {
         return (
             FunctionOutcome::OutsideProfile("unsupported_ir"),
@@ -556,11 +563,10 @@ fn check_function_with_result_width<'ctx>(
         Ok(lifted) => lifted,
         Err(outcome) => return (outcome, None, FrameMemoryUse::default()),
     };
-    // The IR-edge mode covers scalar-i64 signatures only: a scalar
-    // 64-bit model value, no aggregate result shape, and exactly one
-    // return slot per lifted path.
-    let expected_ir =
-        expected_ir.filter(|_| model.result_shape.is_none() && model.value.get_size() == 64);
+    // The IR-edge mode covers scalar-i64 signatures only — enforced by
+    // `check_function_with_frame_memory_against_ir`, the only caller
+    // that passes `expected_ir` — and exactly one return slot per
+    // lifted path.
     let mut unknown_path = false;
     let mut unsupported_call_arguments = false;
     for path in &lifted.paths {

@@ -5843,6 +5843,78 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_machine_tv_compares_scalar_i64_against_ir_encoding() {
+        // Step 3a: scalar-i64 functions take their expected return
+        // from the LLVM-IR encoding. A parseable but divergent IR
+        // reports `Different` even though the source model and the
+        // object agree — proving the IR path, not the source-model
+        // fallback, runs in the main evaluation.
+        let source = "atom add(x: i64, y: i64) -> i64 requires: true; ensures: result == x + y; body: { x + y };";
+        let matching_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @add(i64 %x, i64 %y) {
+entry:
+  %r = add i64 %x, %y
+  ret i64 %r
+}
+"#;
+        let divergent_ir = matching_ir.replace("add i64", "sub i64");
+
+        let stage = tempfile::tempdir().unwrap();
+        let ir_path = stage.path().join("in.ll");
+        let object_path = stage.path().join("in.o");
+        fs::write(&ir_path, matching_ir).unwrap();
+        mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ir_path, &object_path)
+            .unwrap();
+        let object_bytes = fs::read(&object_path).unwrap();
+        let object_surface = object_symbol_surface(&object_bytes).unwrap();
+        assert!(object_surface.defined.contains("add"));
+
+        let make_data = |llvm_bytes: Vec<u8>| ObjectRecheckData {
+            stage: tempfile::tempdir().unwrap(),
+            family: RecordFamily::Single,
+            canonical_argv_compared: false,
+            admission: RefinedAdmission::Reject,
+            ir_surface: tv::IrFunctionSurface {
+                defined: BTreeSet::new(),
+                declared: BTreeSet::new(),
+                calls: BTreeMap::new(),
+                libc_calls: BTreeMap::new(),
+                call_edges_checkable: false,
+            },
+            object_surface: object_surface.clone(),
+            object_link_correspondence: true,
+            llvm_bytes,
+            object_bytes: object_bytes.clone(),
+            executable_bytes: Vec::new(),
+            object_translation: None,
+            resolved_call_sites: 0,
+            source_text: Some(source.to_owned()),
+        };
+
+        // IR edges agree with the machine code.
+        let evaluation = evaluate_machine_tv(&make_data(matching_ir.as_bytes().to_vec())).unwrap();
+        assert_eq!(
+            evaluation.outcomes.get("add"),
+            Some(&FunctionOutcome::Equivalent)
+        );
+        // A parseable IR that disagrees with the object: only the
+        // IR-edge comparison can produce `Different` here, since the
+        // source model and the machine code agree.
+        let evaluation = evaluate_machine_tv(&make_data(divergent_ir.into_bytes())).unwrap();
+        assert_eq!(
+            evaluation.outcomes.get("add"),
+            Some(&FunctionOutcome::Different)
+        );
+        // Without IR the source-model fallback still proves
+        // equivalence (the claim is machine↔source either way).
+        let evaluation = evaluate_machine_tv(&make_data(Vec::new())).unwrap();
+        assert_eq!(
+            evaluation.outcomes.get("add"),
+            Some(&FunctionOutcome::Equivalent)
+        );
+    }
+
+    #[test]
     fn machine_tv_entry_wrapper_check_coverage_tracks_applicability_and_outcome() {
         assert_eq!(
             machine_tv_entry_wrapper_checks(false, None),
