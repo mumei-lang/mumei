@@ -4771,8 +4771,21 @@ fn object_translation_correspondence_checks(
         ));
     }
 
+    let any_inconsistent = checks
+        .iter()
+        .any(|check| check["result"].as_str() == Some("inconsistent"));
+    let all_checked = checks
+        .iter()
+        .all(|check| check["result"].as_str() == Some("checked"));
+    let status = if all_checked {
+        "checked_correspondence"
+    } else if any_inconsistent {
+        "inconsistent_correspondence"
+    } else {
+        "unchecked_not_translation_validated"
+    };
     serde_json::json!({
-        "status": "unchecked_not_translation_validated",
+        "status": status,
         "checks": checks,
     })
 }
@@ -4795,8 +4808,18 @@ fn object_translation_json(data: &ObjectRecheckData) -> serde_json::Value {
     } else {
         "unchecked_not_translation_validated"
     };
+    let correspondence = object_translation_correspondence_checks(
+        &data.ir_surface,
+        data.executable_bytes.as_slice(),
+        &record,
+    );
+    let status = if correspondence["status"].as_str() == Some("checked_correspondence") {
+        "checked_correspondence"
+    } else {
+        "metadata_only"
+    };
     serde_json::json!({
-        "status": "metadata_only",
+        "status": status,
         "transformations": [
             {
                 "from": "llvm_ir",
@@ -4837,11 +4860,7 @@ fn object_translation_json(data: &ObjectRecheckData) -> serde_json::Value {
                 "resolved_value": relocation.resolved_value,
             }))
             .collect::<Vec<_>>(),
-        "correspondence": object_translation_correspondence_checks(
-            &data.ir_surface,
-            data.executable_bytes.as_slice(),
-            &record,
-        ),
+        "correspondence": correspondence,
     })
 }
 
@@ -6859,10 +6878,6 @@ entry:
             .2;
 
         let results_of = |report: &serde_json::Value| -> BTreeMap<String, String> {
-            assert_eq!(
-                report["status"].as_str().unwrap(),
-                "unchecked_not_translation_validated"
-            );
             report["checks"]
                 .as_array()
                 .unwrap()
@@ -6875,11 +6890,10 @@ entry:
                 })
                 .collect()
         };
-        let results = results_of(&object_translation_correspondence_checks(
-            &ir_surface,
-            &executable_bytes,
-            record,
-        ));
+        let report =
+            object_translation_correspondence_checks(&ir_surface, &executable_bytes, record);
+        assert_eq!(report["status"], "checked_correspondence");
+        let results = results_of(&report);
         assert_eq!(
             results,
             BTreeMap::from([
@@ -6897,11 +6911,10 @@ entry:
         // A record missing a function is unmappable and count-mismatched.
         let mut short = record.clone();
         short.functions.pop();
-        let results = results_of(&object_translation_correspondence_checks(
-            &ir_surface,
-            &executable_bytes,
-            &short,
-        ));
+        let report =
+            object_translation_correspondence_checks(&ir_surface, &executable_bytes, &short);
+        assert_eq!(report["status"], "inconsistent_correspondence");
+        let results = results_of(&report);
         assert_eq!(results["function_coverage"], "inconsistent");
         assert_eq!(results["function_count"], "inconsistent");
 
@@ -6946,19 +6959,20 @@ entry:
         // A relocation without a recomputed value stays honestly unchecked.
         let mut unresolved = record.clone();
         unresolved.relocations[0].resolved_value = None;
-        let results = results_of(&object_translation_correspondence_checks(
-            &ir_surface,
-            &executable_bytes,
-            &unresolved,
-        ));
+        let report =
+            object_translation_correspondence_checks(&ir_surface, &executable_bytes, &unresolved);
+        assert_eq!(report["status"], "unchecked_not_translation_validated");
+        let results = results_of(&report);
         assert_eq!(results["relocation_resolved_values"], "unchecked");
 
         // Without an IR surface the function checks stay unchecked.
-        let results = results_of(&object_translation_correspondence_checks(
+        let report = object_translation_correspondence_checks(
             &tv::IrFunctionSurface::default(),
             &executable_bytes,
             record,
-        ));
+        );
+        assert_eq!(report["status"], "unchecked_not_translation_validated");
+        let results = results_of(&report);
         assert_eq!(results["function_coverage"], "unchecked");
         assert_eq!(results["function_count"], "unchecked");
     }
