@@ -5782,9 +5782,13 @@ fn loop_bundle_links_and_pins_runtime_but_keeps_runtime_out_of_claims() {
         .any(|file| file.file_name() == "mumei_runtime.c"));
     assert_success(&recheck_artifact(&source, &bundle, &id));
 
+    // The loop bundle links the embedded runtime: its `__mumei_*`
+    // helper and loader-import relocations resolve through the
+    // assumed-external path, so the link correspondence is checkable
+    // end to end instead of inconclusive.
     let object = recheck_object(&source, &bundle, &id, true);
-    assert_eq!(object.status.code(), Some(3));
-    assert!(String::from_utf8_lossy(&object.stderr).contains("link correspondence inconclusive"));
+    assert_success(&object);
+    assert!(String::from_utf8_lossy(&object.stdout).contains("object_link_correspondence"));
 
     let machine_tv = recheck_machine_tv(&source, &bundle, &id, true);
     assert_success(&machine_tv);
@@ -5814,7 +5818,7 @@ fn loop_bundle_links_and_pins_runtime_but_keeps_runtime_out_of_claims() {
     assert!(not_performed
         .iter()
         .any(|check| check == "runtime_cancellation_semantics"));
-    assert!(not_performed
+    assert!(!not_performed
         .iter()
         .any(|check| check == "object_link_correspondence"));
     assert!(!not_performed
@@ -6075,7 +6079,7 @@ fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
 }
 
 #[test]
-fn accept_object_accepts_loop_bundle_without_object_link() {
+fn accept_object_accepts_loop_bundle_with_object_link() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build_source(root.path(), WHILE_PROBE);
     let output = accept_object(&source, &bundle, &id, true);
@@ -6083,7 +6087,7 @@ fn accept_object_accepts_loop_bundle_without_object_link() {
     let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         descriptor["scope"],
-        "native_bundle_object_machine_code_translation_correspondence_without_object_link"
+        "native_bundle_object_machine_code_translation_correspondence"
     );
     assert_eq!(
         descriptor["input_domain"],
@@ -6108,11 +6112,11 @@ fn accept_object_accepts_loop_bundle_without_object_link() {
     assert!(performed
         .iter()
         .any(|check| check == "machine_code_entry_wrapper_tv"));
-    assert!(!performed
+    assert!(performed
         .iter()
         .any(|check| check == "object_link_correspondence"));
     let not_performed = descriptor["checks_not_performed"].as_array().unwrap();
-    assert!(not_performed
+    assert!(!not_performed
         .iter()
         .any(|check| check == "object_link_correspondence"));
     assert!(not_performed
@@ -6121,9 +6125,8 @@ fn accept_object_accepts_loop_bundle_without_object_link() {
     assert!(not_performed
         .iter()
         .any(|check| check == "runtime_cancellation_semantics"));
-    // The uncheckable-link path still emits the record through the tolerant
-    // parser: functions enumerated, relocations recorded, and the link edge
-    // honestly unvalidated.
+    // The checked-link path emits the full record: functions enumerated,
+    // relocations recorded, and the link edge reported as checked.
     let translation = &descriptor["object_translation"];
     let correspondence = &translation["correspondence"];
     let results: BTreeMap<String, &str> = correspondence["checks"]
@@ -6160,7 +6163,7 @@ fn accept_object_accepts_loop_bundle_without_object_link() {
         .unwrap();
     assert_eq!(
         link_edge["validation"],
-        "unchecked_not_translation_validated"
+        "checked_object_link_correspondence"
     );
     let functions = translation["functions"].as_array().unwrap();
     assert!(functions.len() >= 2);
@@ -6194,8 +6197,7 @@ fn accept_object_accepts_loop_bundle_without_object_link() {
     ));
 
     // The text path reports the same aggregate status — and one
-    // diagnostic per inconsistent item — also on the
-    // uncheckable-link path.
+    // diagnostic per inconsistent item — on the checked-link path too.
     let text = accept_object(&source, &bundle, &id, false);
     assert_success(&text);
     let text = String::from_utf8_lossy(&text.stdout);

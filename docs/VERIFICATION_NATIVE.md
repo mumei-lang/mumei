@@ -1936,7 +1936,10 @@ separate opt-in stage below.
 compares the reproduced `program.o` symbol surface and call edges with the
 pinned `program.ll`. The externally visible IR function definitions must equal
 the object's non-local defined text symbols, and each non-empty undefined
-object symbol must be declared in the IR. For each externally visible function,
+object symbol must be declared in the IR — or be a compiler-rt `__*ti3`
+helper, or a libc call the backend injects for an `llvm.memcpy.*`/
+`llvm.memmove.*`/`llvm.memset.*` intrinsic edge the same caller's IR
+surface records (`memcpy`/`memmove`/`memset`). For each externally visible function,
 the direct callees in the IR must equal the call-relocation targets inside that
 function's object byte range.
 
@@ -1945,11 +1948,23 @@ symbol in the reproduced executable: sizes must match, and function bytes must
 match except at supported four-byte x86-64 `PLT32`/`PC32` relocation fields.
 Each field must equal the resolved PC-relative value for its target's
 executable address. Only the program's own functions are compared; CRT/startup
-code, the dynamic loader, libc and external symbols are outside this check.
+code, the dynamic loader, libc and external symbols are outside this check
+(their relocation fields are still verified against the emitted PLT stubs).
 
 Local/private definitions, indirect calls, unsupported formats or relocations,
-external relocation targets, and ranges that cannot be sliced or assigned
-unambiguously make the relevant check inconclusive (exit 3). A symbol,
+external relocation targets that resolve to neither a linked executable
+symbol nor a loader import, and ranges that cannot be sliced or assigned
+unambiguously make the relevant check inconclusive (exit 3). A loader
+import — a global non-definition symbol in the executable's symbol or
+dynamic-symbol tables — resolves through the PLT stub the linker emits
+for it (the Nth `R_X86_64_JUMP_SLOT` in `.rela.plt` owns the Nth 16-byte
+`.plt.sec` stub, or the Nth `.plt` stub after the 16-byte resolver
+entry), so its call field is verified like any other target; an import
+whose stub cannot be located must still have its call field point inside
+the PLT region (any `.plt`, `.plt.sec` or `.plt.got` section —
+inter-section gaps do not count) — a field retargeted elsewhere is a
+mismatch — but keeps
+its field bytes unverified rather than making the check inconclusive. A symbol,
 call-edge, function-byte, size or resolved-call-target mismatch exits 1. This
 is the third bounded C10 Option B step. Non-call relocations and instruction
 semantics are not checked; this is not general linker-semantics or ABI
@@ -1971,7 +1986,8 @@ term. On each path, a machine call skips
 source sites whose guards are provably false on that path and matches the
 first site whose guard is provably true; an undecided guard is
 `conditional_call`.
-If an external runtime call target prevents linked-object correspondence,
+If an external runtime call target resolves to neither a linked executable
+symbol nor a loader import, it prevents linked-object correspondence and
 `recheck-object` remains inconclusive; machine-TV reports that link check as
 not performed and can still report the loop function as outside profile.
 
@@ -2255,10 +2271,21 @@ Neither is a verdict-bearing claim — the record stays a report and no check,
 grade or verdict is promoted. The items are `function_coverage` (every IR-defined
 function maps to exactly one record function and vice versa),
 `function_count`, `relocation_targets` (every relocation target resolves to a
-record function, a linked executable symbol, an IR-declared callee, or a
-compiler-rt helper), `relocation_bounds` (every relocation offset falls inside
+record function, a linked executable symbol, an IR-declared callee, a
+compiler-rt helper, or a loader import the link leaves to the dynamic
+linker — backend-injected calls such as `llvm.memcpy`'s `memcpy`
+relocation land here; each is resolvable through the assumed-external
+vocabulary and named in `detail` as
+`assumed-external: [names]`), `relocation_bounds` (every relocation offset falls inside
 an enumerated function's section range), `relocation_resolved_values`
-(every relocation's pc-relative value recomputed), and
+(every relocation's pc-relative value recomputed; an import's call field
+is verified against the PLT stub the linker emitted for it — the Nth
+`R_X86_64_JUMP_SLOT` in `.rela.plt` owns the Nth 16-byte `.plt.sec`
+stub, or the Nth `.plt` stub after the 16-byte resolver entry — and an
+import whose stub cannot be located stays honestly `unchecked` with its
+field bytes unverified, though the field must still point inside the PLT
+region (any `.plt`, `.plt.sec` or `.plt.got` section — inter-section
+gaps do not count) or the link check reports a mismatch), and
 `llvm_ir_object_equivalence` (the design memo's §7 Step 3 direct
 comparison: each source atom's LLVM-IR encoding and its object function,
 lifted by the machine-TV lifter, are compared over the shared

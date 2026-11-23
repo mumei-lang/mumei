@@ -3257,10 +3257,11 @@ fn object_symbol_surface(bytes: &[u8]) -> Result<ObjectSymbolSurface, ()> {
 
 fn object_symbols_correspond(ir: &tv::IrFunctionSurface, object: &ObjectSymbolSurface) -> bool {
     object.defined == ir.defined
-        && object
-            .undefined
-            .iter()
-            .all(|name| ir.declared.contains(name) || machine_tv::is_ti3_libcall(name))
+        && object.undefined.iter().all(|name| {
+            ir.declared.contains(name)
+                || machine_tv::is_ti3_libcall(name)
+                || ir.libc_calls.values().any(|callees| callees.contains(name))
+        })
 }
 
 fn object_call_edges_correspond(
@@ -3279,7 +3280,20 @@ fn object_call_edges_correspond(
         // when another function calls the helper explicitly.
         let ir_callees = ir.calls.get(caller);
         callees.retain(|name| {
-            !machine_tv::is_ti3_libcall(name) || ir_callees.is_some_and(|set| set.contains(name))
+            if machine_tv::is_ti3_libcall(name) {
+                return ir_callees.is_some_and(|set| set.contains(name));
+            }
+            // A `llvm.memcpy`-style intrinsic lowers to a libc call the
+            // IR never spells — the edge is backend-injected when the
+            // caller's intrinsic surface names it.
+            if ir
+                .libc_calls
+                .get(caller)
+                .is_some_and(|set| set.contains(name))
+            {
+                return false;
+            }
+            true
         });
     }
     (ir.call_edges_checkable && object.call_edges_checkable).then(|| ir.calls == object_calls)
@@ -3311,6 +3325,71 @@ fn object_link_corresponds(
                     .or_default()
                     .push((symbol.address(), symbol.size(), symbol.section_index()));
             }
+        }
+    }
+
+    // Symbols the link leaves to the loader (undefined imports). Calls
+    // to them resolve through a PLT stub the linker emits; the Nth
+    // R_X86_64_JUMP_SLOT entry in .rela.plt owns the Nth PLT stub —
+    // .plt.sec stubs are 16 bytes from the section base, classic .plt
+    // stubs follow the 16-byte resolver entry.
+    let executable_imports: BTreeSet<String> = executable_file
+        .symbols()
+        .chain(executable_file.dynamic_symbols())
+        .filter(|symbol| symbol.is_global() && !symbol.is_definition())
+        .filter_map(|symbol| symbol.name().ok().map(str::to_owned))
+        .collect();
+    let mut plt_stub_addresses = BTreeMap::<String, u64>::new();
+    // Accepted PLT areas for unlocatable-stub fields: every section the
+    // linker may place call stubs in (.plt/.plt.sec/.plt.got), kept as
+    // separate ranges so inter-section gaps stay rejected.
+    let mut plt_ranges = Vec::<(u64, u64)>::new();
+    for section in executable_file.sections() {
+        if !matches!(section.name(), Ok(".plt") | Ok(".plt.sec") | Ok(".plt.got")) {
+            continue;
+        }
+        let Some(section_end) = section.address().checked_add(section.size()) else {
+            continue;
+        };
+        plt_ranges.push((section.address(), section_end));
+    }
+    let plt_stub_layout = executable_file
+        .sections()
+        .find(|section| section.name() == Ok(".plt.sec"))
+        .map(|section| (section.address(), 0u64))
+        .or_else(|| {
+            executable_file
+                .sections()
+                .find(|section| section.name() == Ok(".plt"))
+                .map(|section| (section.address(), 16u64))
+        });
+    if let Some((plt_base, first_stub_offset)) = plt_stub_layout {
+        let dynsym_names: BTreeMap<u32, String> = executable_file
+            .dynamic_symbols()
+            .filter_map(|symbol| {
+                symbol
+                    .name()
+                    .ok()
+                    .map(|name| (symbol.index().0 as u32, name.to_owned()))
+            })
+            .collect();
+        let mut stub_index = 0u64;
+        for (_address, relocation) in executable_file.dynamic_relocations().into_iter().flatten() {
+            if !matches!(
+                relocation.flags(),
+                RelocationFlags::Elf { r_type }
+                    if r_type == object::elf::R_X86_64_JUMP_SLOT
+            ) {
+                continue;
+            }
+            if let RelocationTarget::Symbol(symbol_index) = relocation.target() {
+                if let Some(name) = dynsym_names.get(&(symbol_index.0 as u32)) {
+                    plt_stub_addresses
+                        .entry(name.clone())
+                        .or_insert(plt_base + first_stub_offset + stub_index * 16);
+                }
+            }
+            stub_index += 1;
         }
     }
 
@@ -3443,16 +3522,33 @@ fn object_link_corresponds(
                 // A compiler-rt `__*ti3` reference stays checkable when
                 // the linked executable carries exactly one symbol of
                 // that name — the relocation must then resolve to it.
-                if !machine_tv::is_ti3_libcall(target_name) {
+                if machine_tv::is_ti3_libcall(target_name) {
+                    let Some(candidates) = executable_symbols.get(target_name) else {
+                        return Ok(None);
+                    };
+                    if candidates.len() != 1 {
+                        return Ok(None);
+                    }
+                    executable_addresses.insert(target_name.to_owned(), candidates[0].0);
+                } else if let Some(&stub_address) = plt_stub_addresses.get(target_name) {
+                    // Loader imports resolve through the PLT stub the
+                    // linker emitted for them — verify the call field
+                    // points at that stub.
+                    executable_addresses.insert(target_name.to_owned(), stub_address);
+                } else if let Some(candidates) = executable_symbols.get(target_name) {
+                    // An object-external reference satisfied by a
+                    // definition in the linked executable (e.g. another
+                    // object on the link line).
+                    if candidates.len() != 1 {
+                        return Ok(None);
+                    }
+                    executable_addresses.insert(target_name.to_owned(), candidates[0].0);
+                } else if !executable_imports.contains(target_name) {
+                    // Neither a known callee nor a loader import — the
+                    // target is unverifiable, so the whole check stays
+                    // inconclusive.
                     return Ok(None);
                 }
-                let Some(candidates) = executable_symbols.get(target_name) else {
-                    return Ok(None);
-                };
-                if candidates.len() != 1 {
-                    return Ok(None);
-                }
-                executable_addresses.insert(target_name.to_owned(), candidates[0].0);
             }
             let Some(relative_offset) = offset.checked_sub(function.object_address) else {
                 return Ok(None);
@@ -3518,6 +3614,49 @@ fn object_link_corresponds(
             }
             let field_end = relocation.offset + 4;
             let Some(target_address) = executable_addresses.get(&relocation.target).copied() else {
+                // A loader import whose PLT stub could not be mapped:
+                // the call field must still point inside the PLT
+                // region — a field retargeted anywhere else is a real
+                // mismatch. When it does, the field bytes are left
+                // unverified and the relocation stays unchecked in
+                // `relocation_resolved_values`.
+                if executable_imports.contains(&relocation.target) {
+                    let Some(actual_bytes) =
+                        function.executable_bytes.get(relocation.offset..field_end)
+                    else {
+                        return Ok(None);
+                    };
+                    let Ok(actual_bytes) = <[u8; 4]>::try_from(actual_bytes) else {
+                        return Ok(None);
+                    };
+                    let actual_value = i64::from(i32::from_le_bytes(actual_bytes));
+                    let implied_target = i64::try_from(function.executable_address)
+                        .ok()
+                        .and_then(|address| {
+                            address.checked_add(u64::try_from(relocation.offset).ok()? as i64)
+                        })
+                        .and_then(|place| {
+                            place
+                                .checked_add(actual_value)
+                                .and_then(|target| target.checked_sub(relocation.addend))
+                        });
+                    let in_plt = implied_target
+                        .and_then(|target| u64::try_from(target).ok())
+                        .is_some_and(|target| {
+                            plt_ranges
+                                .iter()
+                                .any(|(start, end)| *start <= target && target < *end)
+                        });
+                    if !in_plt {
+                        return Ok(Some((
+                            false,
+                            resolved_call_sites,
+                            object_translation_record(&functions, &relocations),
+                        )));
+                    }
+                    compared_through = field_end;
+                    continue;
+                }
                 return Ok(None);
             };
             let Ok(relative_offset) = u64::try_from(relocation.offset) else {
@@ -4691,12 +4830,27 @@ fn object_translation_correspondence_checks(
         .as_ref()
         .map(executable_text_symbols)
         .unwrap_or_default();
+    // Symbols the link leaves to the loader — undefined imports and
+    // dynamic symbols. They resolve through the same
+    // assumed-external-callee vocabulary machine-TV uses for external
+    // calls, so they are resolvable here rather than inconsistent.
+    let executable_imports: BTreeSet<String> = executable_file
+        .as_ref()
+        .map(|file| {
+            file.symbols()
+                .chain(file.dynamic_symbols())
+                .filter(|symbol| symbol.is_global() && !symbol.is_definition())
+                .filter_map(|symbol| symbol.name().ok().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
     let resolvable_target = |target: &str| -> bool {
         record
             .functions
             .iter()
             .any(|function| function.object_symbol == target)
             || executable_symbols.contains_key(target)
+            || executable_imports.contains(target)
             || ir_surface.declared.contains(target)
             || machine_tv::is_ti3_libcall(target)
     };
@@ -4713,10 +4867,26 @@ fn object_translation_correspondence_checks(
             "executable could not be parsed".to_owned(),
         ));
     } else if unresolvable.is_empty() {
+        let assumed_external: Vec<&str> = record
+            .relocations
+            .iter()
+            .map(|relocation| relocation.target_symbol.as_str())
+            .filter(|target| executable_imports.contains(*target))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         checks.push(check(
             "relocation_targets",
             "checked",
-            format!("{} relocation targets resolvable", record.relocations.len()),
+            if assumed_external.is_empty() {
+                format!("{} relocation targets resolvable", record.relocations.len())
+            } else {
+                format!(
+                    "{} relocation targets resolvable ({} assumed-external: {assumed_external:?})",
+                    record.relocations.len(),
+                    assumed_external.len()
+                )
+            },
         ));
     } else {
         checks.push(check(
@@ -6029,6 +6199,7 @@ mod tests {
                 ("helper".to_owned(), BTreeSet::new()),
                 ("main".to_owned(), BTreeSet::new()),
             ]),
+            libc_calls: BTreeMap::new(),
             call_edges_checkable: true,
         };
         let object = |defined: &[&str], undefined: &[&str]| ObjectSymbolSurface {
@@ -6078,6 +6249,7 @@ mod tests {
             defined: BTreeSet::from(["div128".to_owned()]),
             declared: BTreeSet::new(),
             calls: BTreeMap::from([("div128".to_owned(), BTreeSet::new())]),
+            libc_calls: BTreeMap::new(),
             call_edges_checkable: true,
         };
         let object = ObjectSymbolSurface {
@@ -6128,6 +6300,7 @@ mod tests {
                     BTreeSet::from(["__udivti3".to_owned()]),
                 ),
             ]),
+            libc_calls: BTreeMap::new(),
             call_edges_checkable: true,
         };
         let other_object = ObjectSymbolSurface {
@@ -6163,6 +6336,7 @@ mod tests {
             defined: BTreeSet::from(["other".to_owned(), "visible".to_owned()]),
             declared: BTreeSet::from(["external_ref".to_owned()]),
             calls: calls.clone(),
+            libc_calls: BTreeMap::new(),
             call_edges_checkable: true,
         };
         let object = ObjectSymbolSurface {
@@ -7237,5 +7411,82 @@ entry:
         let results = results_of(&report);
         assert_eq!(results["function_coverage"], "unchecked");
         assert_eq!(results["function_count"], "unchecked");
+    }
+
+    #[test]
+    fn object_translation_correspondence_treats_loader_imports_as_assumed_external() {
+        let dir = tempfile::tempdir().unwrap();
+        let ir_path = dir.path().join("module.ll");
+        let object_path = dir.path().join("module.o");
+        let executable_path = dir.path().join("module");
+        // A `llvm.memcpy` call lowers to a backend-injected `memcpy`
+        // relocation the IR never declares. The link keeps it an import
+        // (libc), so the check reports it assumed-external rather than
+        // an unresolvable target.
+        let ir = br#"
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
+
+define i64 @copier() {
+entry:
+  %dst = alloca [4096 x i8]
+  %src = alloca [4096 x i8]
+  call void @llvm.memcpy.p0.p0.i64(ptr %dst, ptr %src, i64 4096, i1 false)
+  %byte = load i8, ptr %dst
+  %value = zext i8 %byte to i64
+  ret i64 %value
+}
+
+define i32 @main() {
+entry:
+  %value = call i64 @copier()
+  %exit = trunc i64 %value to i32
+  ret i32 %exit
+}
+"#;
+        fs::write(&ir_path, ir).unwrap();
+        mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ir_path, &object_path)
+            .unwrap();
+        linker::link_recorded(std::slice::from_ref(&object_path), &executable_path).unwrap();
+        let object_bytes = fs::read(&object_path).unwrap();
+        let executable_bytes = fs::read(&executable_path).unwrap();
+        let ir_surface = tv::ir_function_surface(ir).unwrap();
+        // The symbol and call-edge surfaces pass the CLI gates too:
+        // `llvm.memcpy`'s `memcpy` is a backend-injected libc call.
+        let object_surface = object_symbol_surface(&object_bytes).unwrap();
+        assert!(object_surface.undefined.contains("memcpy"));
+        assert!(object_symbols_correspond(&ir_surface, &object_surface));
+        assert_eq!(
+            object_call_edges_correspond(&ir_surface, &object_surface),
+            Some(true)
+        );
+        let (corresponds, resolved_call_sites, record_) =
+            object_link_corresponds(&object_bytes, &executable_bytes)
+                .unwrap()
+                .unwrap();
+        let record = &record_;
+        // The `memcpy` relocation is recorded, and its call field is
+        // verified to point at the PLT stub the linker emitted for it.
+        let memcpy_relocation = record
+            .relocations
+            .iter()
+            .find(|relocation| relocation.target_symbol == "memcpy")
+            .unwrap();
+        assert!(memcpy_relocation.resolved_value.is_some());
+        assert!(corresponds);
+        assert!(resolved_call_sites >= 1);
+
+        let report =
+            object_translation_correspondence_checks(&ir_surface, &executable_bytes, record, None);
+        let targets = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["item"] == "relocation_targets")
+            .unwrap();
+        assert_eq!(targets["result"], "checked");
+        assert!(targets["detail"]
+            .as_str()
+            .unwrap()
+            .contains("assumed-external: [\"memcpy\"]"));
     }
 }
