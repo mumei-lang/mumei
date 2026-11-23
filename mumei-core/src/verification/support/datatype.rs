@@ -1308,7 +1308,7 @@ fn prove_enum_payload_domain<'a>(
     Ok(())
 }
 
-fn check_enum_ctor_payload_domains<'a>(
+pub(crate) fn check_enum_ctor_payload_domains<'a>(
     vc: &VCtx<'a>,
     solver: &Solver<'a>,
     enum_def: &EnumDef,

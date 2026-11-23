@@ -2027,6 +2027,9 @@ fn enum_field_assign<'a>(
             }
         }
     }
+    if let Some(solver) = solver_opt {
+        datatype::check_enum_ctor_payload_domains(vc, solver, edef, variant, &leaf_args)?;
+    }
     let Some(rebuilt) = datatype::enum_ctor_apply_leaves(vc, edef, vidx, &leaf_args) else {
         return Ok(None);
     };

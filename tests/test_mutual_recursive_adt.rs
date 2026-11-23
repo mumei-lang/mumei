@@ -102,6 +102,28 @@ fn mutual_recursive_enums_verify_in_both_integer_modes() {
             );
         }
 
+        let output = run_verify(
+            "test_mutual_recursive_adt_write_domain_positive.mm",
+            bitvec_i64,
+        );
+        assert!(
+            output.status.success(),
+            "in-range recursive enum field writes should verify (bitvec_i64={bitvec_i64}):\n{}",
+            output_text(&output)
+        );
+        for name in [
+            "test_recursive_enum_write_domain_negative.mm",
+            "test_mutual_recursive_adt_write_domain_negative.mm",
+        ] {
+            let output = run_verify(name, bitvec_i64);
+            assert_normal_rejection(
+                &output,
+                name,
+                "value may be outside the 'u32' domain",
+                bitvec_i64,
+            );
+        }
+
         let output = run_verify("test_mutual_recursive_adt_out_of_range.mm", bitvec_i64);
         assert_normal_rejection(
             &output,
