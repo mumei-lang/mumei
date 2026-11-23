@@ -4,8 +4,8 @@ use crate::codegen::expr_emit::{
     LAMBDA_MARK,
 };
 use crate::codegen::lowering::{
-    array_elem_llvm_type, bitpreserve_cast, resolve_param_type, struct_llvm_type, wide_int_cast,
-    ArrayPtrMap,
+    array_elem_llvm_type, bitpreserve_cast, resolve_param_type, struct_llvm_type,
+    type_contains_array_enum, wide_int_cast, ArrayPtrMap,
 };
 use crate::codegen::pattern_emit::find_field_index;
 use crate::codegen::task_runtime::declare_task_group_should_cancel_current_extern;
@@ -18,6 +18,47 @@ use inkwell::IntPredicate;
 use mumei_core::hir::{collect_assigned_outer_variables_stmt, HirExpr, HirStmt};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
+
+fn enum_value_is_stack_backed(
+    expr: &HirExpr,
+    var_types: &HashMap<String, String>,
+    array_ptrs: &ArrayPtrMap<'_>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<bool> {
+    match expr {
+        HirExpr::VariantInit {
+            enum_name,
+            variant_name,
+            fields,
+        } => {
+            let Some(variant) = module_env
+                .get_enum(enum_name)
+                .and_then(|enum_def| enum_def.variants.iter().find(|v| v.name == *variant_name))
+            else {
+                return Ok(false);
+            };
+            for (field_type, field_expr) in variant.field_types.iter().zip(fields) {
+                let field_type = module_env.resolve_base_type(&field_type.display_name());
+                if field_type.starts_with('[') || field_type.starts_with("[]<") {
+                    let stack_backed = super::expr_emit::array_tail_binding(field_expr)
+                        .map(|name| {
+                            array_ptrs.stack_backed.contains(name) || !array_ptrs.contains_key(name)
+                        })
+                        .unwrap_or(true);
+                    if stack_backed {
+                        return Ok(true);
+                    }
+                }
+            }
+            Ok(false)
+        }
+        HirExpr::Variable(name) => Ok(array_ptrs.stack_backed.contains(name)),
+        _ => Ok(
+            super::expr_emit::infer_struct_type_name(expr, var_types, module_env)
+                .is_some_and(|type_name| type_contains_array_enum(module_env, &type_name)),
+        ),
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 fn emit_deep_aggregate_field_write<'ctx>(
@@ -547,6 +588,70 @@ pub(crate) fn compile_hir_stmt<'a>(
                 variables.insert(var.clone(), data_ptr);
                 return Ok(data_ptr);
             }
+            if let HirExpr::FieldAccess(inner, field_name) = value.as_ref() {
+                if let Some(enum_name) = infer_struct_type_name(inner, var_types, module_env) {
+                    let enum_name = module_env.resolve_base_type(&enum_name);
+                    if let Some(enum_def) = module_env.get_enum(&enum_name) {
+                        let mut field_type = None;
+                        for variant in &enum_def.variants {
+                            if let Some(index) = variant.fields.iter().position(|decl| {
+                                decl.split_once(':')
+                                    .is_some_and(|(name, _)| name.trim() == field_name)
+                            }) {
+                                if field_type.is_some() {
+                                    return Err(MumeiError::codegen(format!(
+                                        "enum field read '{field_name}' has an ambiguous payload owner"
+                                    )));
+                                }
+                                field_type = variant
+                                    .field_types
+                                    .get(index)
+                                    .map(|field| field.display_name());
+                            }
+                        }
+                        if let Some(field_type) = field_type {
+                            if let Some(elem_ty) =
+                                array_elem_llvm_type(context, &field_type, module_env)?
+                            {
+                                let source_stack_backed = match inner.as_ref() {
+                                    HirExpr::Variable(name) => {
+                                        array_ptrs.stack_backed.contains(name)
+                                    }
+                                    _ => true,
+                                };
+                                let field_value = compile_hir_expr(
+                                    context, builder, module, function, value, variables,
+                                    var_types, array_ptrs, module_env,
+                                )?;
+                                let BasicValueEnum::StructValue(fat_ptr) = field_value else {
+                                    return Err(MumeiError::codegen(format!(
+                                        "array payload field '{field_name}' is not a fat-pointer aggregate"
+                                    )));
+                                };
+                                let len = llvm!(builder.build_extract_value(
+                                    fat_ptr,
+                                    0,
+                                    &format!("{var}_len")
+                                ));
+                                let data = llvm!(builder.build_extract_value(
+                                    fat_ptr,
+                                    1,
+                                    &format!("{var}_data")
+                                ));
+                                array_ptrs.insert(var.clone(), (len, elem_ty, data));
+                                if source_stack_backed {
+                                    array_ptrs.stack_backed.insert(var.clone());
+                                } else {
+                                    array_ptrs.stack_backed.remove(var);
+                                }
+                                variables.insert(var.clone(), len);
+                                var_types.insert(var.clone(), field_type);
+                                return Ok(len);
+                            }
+                        }
+                    }
+                }
+            }
             // `let a = arr` — the binding aliases the tracked fat pointer so
             // `a[i]`/`len(a)`/`a[i] = x` hit the source's slots.
             if let HirExpr::Variable(src) = value.as_ref() {
@@ -606,6 +711,8 @@ pub(crate) fn compile_hir_stmt<'a>(
                 context, builder, module, function, value, variables, var_types, array_ptrs,
                 module_env,
             )?;
+            let stack_backed_enum =
+                enum_value_is_stack_backed(value, var_types, array_ptrs, module_env)?;
             // `let x: i128 = …` (`pure-i64-composite/v21`): the declared
             // 128-bit leaf binds a native `i128` — a literal or narrower
             // RHS zero-extends into the slot.
@@ -630,6 +737,9 @@ pub(crate) fn compile_hir_stmt<'a>(
             };
             array_ptrs.remove(var.as_str());
             array_ptrs.stack_backed.remove(var.as_str());
+            if stack_backed_enum {
+                array_ptrs.stack_backed.insert(var.clone());
+            }
             variables.insert(var.clone(), val);
             let inferred_ty = declared_base
                 .clone()
@@ -1153,6 +1263,8 @@ pub(crate) fn compile_hir_stmt<'a>(
                 context, builder, module, function, value, variables, var_types, array_ptrs,
                 module_env,
             )?;
+            let stack_backed_enum =
+                enum_value_is_stack_backed(value, var_types, array_ptrs, module_env)?;
             if was_str {
                 // A `Str` binding reassigned to a non-array value keeps
                 // its pre-v13 emit semantics; drop the stale fat pointer
@@ -1174,6 +1286,10 @@ pub(crate) fn compile_hir_stmt<'a>(
                 _ => val,
             };
             variables.insert(var.clone(), val);
+            array_ptrs.stack_backed.remove(var.as_str());
+            if stack_backed_enum {
+                array_ptrs.stack_backed.insert(var.clone());
+            }
             if let Some(struct_ty) = infer_struct_type_name(value, var_types, module_env) {
                 var_types.insert(var.clone(), struct_ty);
             } else {
