@@ -3340,21 +3340,32 @@ fn object_link_corresponds(
         .filter_map(|symbol| symbol.name().ok().map(str::to_owned))
         .collect();
     let mut plt_stub_addresses = BTreeMap::<String, u64>::new();
+    // Accepted PLT area for unlocatable-stub fields: the union of every
+    // section the linker may place call stubs in (.plt/.plt.sec/.plt.got).
     let mut plt_range: Option<(u64, u64)> = None;
+    for section in executable_file.sections() {
+        if !matches!(section.name(), Ok(".plt") | Ok(".plt.sec") | Ok(".plt.got")) {
+            continue;
+        }
+        let Some(section_end) = section.address().checked_add(section.size()) else {
+            continue;
+        };
+        plt_range = Some(match plt_range {
+            Some((low, high)) => (low.min(section.address()), high.max(section_end)),
+            None => (section.address(), section_end),
+        });
+    }
     let plt_stub_layout = executable_file
         .sections()
         .find(|section| section.name() == Ok(".plt.sec"))
-        .map(|section| (section.address(), section.size(), 0u64))
+        .map(|section| (section.address(), 0u64))
         .or_else(|| {
             executable_file
                 .sections()
                 .find(|section| section.name() == Ok(".plt"))
-                .map(|section| (section.address(), section.size(), 16u64))
+                .map(|section| (section.address(), 16u64))
         });
-    if let Some((plt_base, plt_size, first_stub_offset)) = plt_stub_layout {
-        plt_range = plt_base
-            .checked_add(plt_size)
-            .map(|plt_end| (plt_base, plt_end));
+    if let Some((plt_base, first_stub_offset)) = plt_stub_layout {
         let dynsym_names: BTreeMap<u32, String> = executable_file
             .dynamic_symbols()
             .filter_map(|symbol| {
