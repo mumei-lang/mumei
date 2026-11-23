@@ -8610,6 +8610,7 @@ capability model は Stage 1 のみが opt-in 拡張として上積みされて�
 
 - ✅ **追補（2026-11-22, 37）— 追補（36）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: 新規なし。mumei-agent: C06 — map の `remove_entry`/`pop_first`/`pop_last` の `Option<(K,V)>` ペア、`Option::replace`、`VecDeque::swap_remove_*`/`Vec`/`VecDeque::swap_remove` の payload、Option head テーブルの `HashSet`/`BTreeSet`/`BinaryHeap`/`LinkedList` への拡大（[mumei-agent#1247](https://github.com/mumei-lang/mumei-agent/pull/1247)）。mumei-demo: 新規シナリオなし。
 - ✅ **追補（2026-11-22, 38）— 追補（37）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: 新規なし。mumei-agent: C06 — 集合演算の要素スペルと BTreeMap `range` のペア（[mumei-agent#1249](https://github.com/mumei-lang/mumei-agent/pull/1249)。`HashSet<(P,Q),H>` の hasher arg 分離、`union`/`range` 経由の `enumerate` ペア、`rev`/`take` 等の preserving adapter 越しの pair 伝搬、turbofish `m.range::<K,_>(..)` の callee unwrap）。mumei-demo: 新規シナリオなし。
+- ✅ **追補（2026-11-22, 39）— 追補（38）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: 新規なし。mumei-agent: C06 — `Option::ok_or`/`ok_or_else` の `Result<P, E>` payload（`Ok` 引数をレシーバ注釈位置で `crate::` 修飾、`errors::E {}` リテラルの scoped パス保持）（[mumei-agent#1250](https://github.com/mumei-lang/mumei-agent/pull/1250)）。mumei-demo: 新規シナリオなし。
 
 
 **関連ファイル**:
