@@ -3778,26 +3778,30 @@ Most of these files are negative fixtures, so the expected gain in proved files
 is small. Measure it after the inference change.
 
 Measured after the inference change (mumei#1411, develop post-merge, under
-`CompositeV29`, same 698-file corpus): `admit_pure_i64_atoms` now admits 179
-files; the `explicit owned scalar i64 signature required` bucket holds 72
-files. Among those 72 files, 89 atoms omit their return type — the fixpoint
-resolves 46 of them to `i64` (call chains plus `len`), so a caller's omitted
-return is no longer the blocker there. The remaining 43 uninferable omitted
-atoms sit mostly on `task`/`task_group` tails and lambda/`call(f, ..)` tails —
-shapes that stay outside the profile by design — and 47 of the 72 files have
-every declared return in `{None, i64}` yet still fail on co-present features
-(concurrency bodies, generics, refined-alias returns, non-i64 parameters). The
-residual signature gate is therefore feature-bound, not inference-bound;
-further omitted-return inference would admit little without those profiles.
+`CompositeV29`, same corpus — all git-tracked `.mm` files, now 698):
+`admit_pure_i64_atoms` now admits 179 files; the `explicit owned scalar i64
+signature required` bucket holds 72 files. Across those files 89 atoms omit
+their return type — the fixpoint resolves 46 to `i64` (call chains plus
+`len`), infers 2 to a non-`i64` type and leaves 41 uninferable, mostly on
+`task`/`task_group` tails and lambda/`call(f, ..)` tails — shapes that stay
+outside the profile by design. File-level, 47 of the 72 have every declared
+return in `{None, i64}` and 31 of them fully resolve to `i64` under the
+fixpoint, so an omitted return is no longer their blocker at all; the rest
+fail on co-present features (concurrency bodies, generics, refined-alias
+returns, non-i64 parameters). The residual signature gate is therefore
+feature-bound, not inference-bound; further omitted-return inference would
+admit little without those profiles.
 
 Design memos for the residual shapes measured after v27:
 - **Array returns and array call results (5 files):** implemented —
   `mumei.pure-i64-composite/v29` plus module profile `v30` (#1409) admit
-  `-> [i64]` results on top of the heap-backed fat-pointer codegen (#1403):
-  the callee returns `{ i64, ptr }` backed by a `malloc` + `llvm.memcpy`
-  buffer (no dangling `alloca`), callers bind call/if results as arrays, and
-  contract call sites model `len`/`store` uninterpreted with `len >= 0`.
-  Machine TV keeps `[i64]`-returning members and their callers inconclusive.
+  `-> [i64]` results on top of the fat-pointer codegen (#1403): locally
+  constructed arrays are copied into a `malloc` + `llvm.memcpy` buffer so the
+  returned `{ i64, ptr }` no longer dangles, while an array parameter
+  returned unchanged reuses the caller's pointer; callers bind call/if
+  results as arrays, and contract call sites model `len`/`store`
+  uninterpreted with `len >= 0`. Machine TV keeps `[i64]`-returning members
+  and their callers inconclusive.
 - **`[u32]` and other narrow element kinds (3 files):** 1 positive file.
   It passes an array as a call argument, and one file uses a lambda. A
   narrow-element read can assume the zero-extended element range. Passing
