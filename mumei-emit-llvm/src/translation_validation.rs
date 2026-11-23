@@ -997,7 +997,7 @@ pub unsafe fn encode_parsed_function_for_comparison<'ctx>(
     // liftable rather than silently binding a mis-shaped encoding.
     let ret = LLVMGetReturnType(LLVMGlobalGetValueType(raw));
     if aggregate_fields(ret).is_some() || width(ret)? != 64 {
-        return Err(ValidationError("unsupported LLVM signature"));
+        return Err(ValidationError("LLVM return outside comparison subset"));
     }
     let mut block = LLVMGetFirstBasicBlock(raw);
     while !block.is_null() {

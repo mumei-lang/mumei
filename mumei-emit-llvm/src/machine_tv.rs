@@ -6037,8 +6037,12 @@ entry:
         // subset excludes: an `i128` return (the gate allows 64|128
         // bits for a scalar result) and a checked direct call both
         // encode unless the comparison path rejects them itself.
-        for outside_subset_ir in [
-            r#"target triple = "x86_64-unknown-linux-gnu"
+        // Assert the error names the comparison-only gate: the shared
+        // validation gate admits both shapes, so an `is_err` alone
+        // could hide an earlier parse or header failure.
+        for (outside_subset_ir, expected) in [
+            (
+                r#"target triple = "x86_64-unknown-linux-gnu"
 define i128 @helper(i64 %x, i64 %y) {
 entry:
   %a = zext i64 %x to i128
@@ -6047,7 +6051,10 @@ entry:
   ret i128 %r
 }
 "#,
-            r#"target triple = "x86_64-unknown-linux-gnu"
+                "return outside comparison subset",
+            ),
+            (
+                r#"target triple = "x86_64-unknown-linux-gnu"
 define i64 @callee(i64 %x) {
 entry:
   ret i64 %x
@@ -6058,8 +6065,10 @@ entry:
   ret i64 %r
 }
 "#,
+                "call outside comparison subset",
+            ),
         ] {
-            assert!(unsafe {
+            let error = unsafe {
                 crate::translation_validation::encode_ir_function_for_comparison(
                     outside_subset_ir.as_bytes(),
                     "helper",
@@ -6068,7 +6077,11 @@ entry:
                     &context,
                 )
             }
-            .is_err());
+            .unwrap_err();
+            assert!(
+                format!("{error:?}").contains(expected),
+                "unexpected error: {error:?}"
+            );
         }
     }
 
