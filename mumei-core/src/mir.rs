@@ -295,6 +295,10 @@ struct LowerCtx {
     env_names: std::collections::BTreeSet<String>,
     /// Callee parameter modes used to materialize call-site loans.
     callee_modes: std::collections::HashMap<String, Vec<MirParamMode>>,
+    /// Atom name → return type (declared or already inferred), used only
+    /// by return-type inference so a body like `other(x)` can resolve
+    /// the callee's declared or previously inferred result type.
+    callee_returns: std::collections::HashMap<String, String>,
     /// Variable names that had no binding when they were referenced —
     /// surfaced to the caller as `MirBody::unbound_names` (fail-closed).
     unbound_names: std::collections::BTreeSet<String>,
@@ -364,6 +368,7 @@ impl LowerCtx {
             enum_defs,
             env_names,
             callee_modes,
+            callee_returns: std::collections::HashMap::new(),
             unbound_names: std::collections::BTreeSet::new(),
             next_local: 0,
             next_block: 0,
@@ -664,6 +669,26 @@ impl LowerCtx {
                         .or_else(|| self.infer_hir_branch_ty_in(&arm.body, locals))
                 })
             }
+            // A call yields the callee's declared or already inferred
+            // return type — populated by the module-level fixpoint in
+            // `inferred_i64_return_atoms`; empty in plain lowering.
+            // `len` is a builtin, not an atom: it always returns i64.
+            HirExpr::Call { name, .. } => {
+                if name == "len" {
+                    Some("i64".to_string())
+                } else {
+                    self.callee_returns.get(name).map(|ty| match ty.as_str() {
+                        // Integer-width spellings are all i64 at the
+                        // contract level — a callee declared `-> i32`
+                        // still yields an i64 result, so a caller like
+                        // `if f { narrow() } else { 0 }` infers i64 and
+                        // stays inside the pure-i64 signature gate.
+                        "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "i128"
+                        | "u128" => "i64".to_string(),
+                        _ => ty.clone(),
+                    })
+                }
+            }
             // P25: `recv(ch)` yields the channel's declared payload type.
             HirExpr::ChanRecv { channel } => match channel.as_ref() {
                 HirExpr::Variable(name) => locals
@@ -788,8 +813,28 @@ pub fn infer_atom_return_type(atom: &crate::parser::Atom) -> Option<String> {
     infer_return_type_from_hir(&atom.params, &hir.body)
 }
 
+/// As `infer_atom_return_type`, but calls resolve through
+/// `callee_returns` (atom name → declared or already inferred result
+/// type) so bodies like `other(x)` infer their result type.
+pub fn infer_atom_return_type_with(
+    atom: &crate::parser::Atom,
+    callee_returns: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    let hir = crate::hir::lower_atom_to_hir(atom);
+    infer_return_type_from_hir_in(&atom.params, &hir.body, callee_returns)
+}
+
 pub fn infer_return_type_from_hir(params: &[Param], body: &HirStmt) -> Option<String> {
+    infer_return_type_from_hir_in(params, body, &std::collections::HashMap::new())
+}
+
+pub fn infer_return_type_from_hir_in(
+    params: &[Param],
+    body: &HirStmt,
+    callee_returns: &std::collections::HashMap<String, String>,
+) -> Option<String> {
     let mut ctx = LowerCtx::new();
+    ctx.callee_returns = callee_returns.clone();
     for param in params {
         let pname = param.name.as_str();
         ctx.alloc_local(Some(pname.to_string()), param.type_name.clone());
