@@ -2272,11 +2272,15 @@ the promotion result in a separate `result` key —
 item checked and the design memo's promotion conditions all ran:
 the function-enumeration and relocation-record correspondence items
 checked, the link correspondence ran, and the canonical argv
-reproduction compared; `inconsistent_correspondence` when the item or
-any of those gates found a divergence; `unchecked_not_translation_validated`
+reproduction compared; `inconsistent_correspondence` when the
+`llvm_ir_object_equivalence` item or any of the correspondence gate
+items found a divergence; `unchecked_not_translation_validated`
 otherwise — so a report whose functions are outside the liftable
 subset, solver-undecidable, or missing a promotion gate does
-not claim the edge was validated. The link
+not claim the edge was validated. A link or canonical-argv mismatch
+never appears in this field: it ends the recheck pipeline as
+`Different` before a report exists, while a skipped link or argv
+comparison leaves the edge unchecked rather than inconsistent. The link
 edge names the `checked_object_link_correspondence` method only when that
 check ran and reports the check's outcome in a separate `result` key so
 method and result are never conflated in one field.

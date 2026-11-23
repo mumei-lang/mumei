@@ -595,8 +595,8 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     assert_eq!(transformations[0]["from"], "llvm_ir");
     assert_eq!(transformations[0]["to"], "object_code");
     // `validation` names the IR<->object model comparison; `result`
-    // mirrors the `llvm_ir_object_equivalence` item: the bundle's
-    // liftable functions compared equivalent.
+    // reports the memo's promotion conditions: the bundle's liftable
+    // functions compared equivalent and every gate item ran.
     assert_eq!(
         transformations[0]["validation"],
         "checked_llvm_ir_object_model_correspondence"
@@ -1460,6 +1460,24 @@ fn canonical_link_arguments_are_pinned_and_reproduced() {
         .unwrap()
         .iter()
         .any(|entry| entry == "canonical_link_argument_vector_reproduction"));
+
+    // The recheck still succeeds on the unpinned record — but the
+    // llvm_ir -> object_code edge must not report checked, because the
+    // argv reproduction the promotion conditions require did not run.
+    let output = recheck_machine_tv(&source, &bundle, &unpinned_id, true);
+    assert_success(&output);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let edge = &report["object_translation"]["transformations"][0];
+    assert_eq!(edge["from"], "llvm_ir");
+    assert_eq!(edge["to"], "object_code");
+    assert_eq!(
+        edge["validation"].as_str().unwrap(),
+        "checked_llvm_ir_object_model_correspondence"
+    );
+    assert_eq!(
+        edge["result"].as_str().unwrap(),
+        "unchecked_not_translation_validated"
+    );
 
     // A wrong pin fails the reproduction check.
     record["link_build"]["canonical_arguments_sha256"] = serde_json::json!("0".repeat(64));
