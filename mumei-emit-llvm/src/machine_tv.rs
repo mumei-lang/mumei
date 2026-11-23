@@ -265,11 +265,12 @@ pub enum IrObjectEquivalence {
 }
 
 /// Whether a source model's signature is inside the direct
-/// IR ↔ object comparison's integer subset (design memo §7 Step 3
-/// slices): scalar-i64 parameters, scalar-i64 or all-integer aggregate
-/// results (register-resident or `sret` memory-class), scalar-i64 call
-/// sites, bounded memory — no array params, wide leaves, doubles, or
-/// loops.
+/// IR ↔ object comparison's subset (design memo §7 Step 3
+/// slices): scalar parameters (one 64-bit leaf, integer or f64
+/// bit-pattern), scalar or all-integer aggregate results
+/// (register-resident or `sret` memory-class), scalar-i64 call
+/// sites, bounded memory — no array params, doubles inside
+/// aggregates, FP arithmetic, or loops.
 /// Admission is semantic, not only inspection: a signature inside this
 /// subset makes `evaluate_machine_tv` compare the lifted machine code
 /// against the IR encoding instead of the source model, and the
@@ -296,30 +297,40 @@ pub fn ir_object_signature_liftable(model: &PureI64Body) -> bool {
             count <= INTEGER_RESULT_REGISTERS.len()
                 || sret_result_leaf_count(model) == Some(count)
         })
-        // Every declared result leaf an integer leaf: an f64 leaf
-        // (`[true]`) is outside; a scalar i128 result (`[false,
-        // false]` on a `None` shape, only produced when the module
-        // enables wide scalars) compares as its full 128-bit edge.
-        // An omitted return annotation leaves the list empty — an
-        // inferred-i64 body still compares; a genuinely void atom is
-        // already excluded by the source signature check upstream. A
-        // 128-bit aggregate field stays indistinguishable here —
+        // Every declared aggregate result leaf an integer leaf: an
+        // f64 leaf (`[true]`) inside a struct result is outside, and
+        // a 128-bit aggregate field stays indistinguishable here —
         // `{i128}` and `{i64, i64}` both flatten to two `[false]`
         // slots — so the encode-side `aggregate_all_i64_leaves` gate
-        // fails it closed instead.
-        && model.result_leaf_doubles.iter().all(|leaf| !*leaf)
+        // fails both closed anyway. A scalar result admits either
+        // leaf kind: an f64 leaf compares its IEEE-754 bit pattern
+        // (pass-through/select only — FP arithmetic stays gated out
+        // by `f64_arithmetic: false` on the encode call), and an
+        // i128 result (`[false, false]` on a `None` shape, only
+        // produced when the module enables wide scalars) compares as
+        // its full 128-bit edge. An omitted return annotation leaves
+        // the list empty — an inferred-i64 body still compares; a
+        // genuinely void atom is already excluded by the source
+        // signature check upstream.
+        && match model.result_shape {
+            Some(_) => model.result_leaf_doubles.iter().all(|leaf| !*leaf),
+            None => true,
+        }
         && model.result_leaf_doubles.len() <= result_leaf_count
         && (model.result_shape.is_some()
             || model.result_leaf_doubles.len() <= 1
             || (model.has_wide_scalar_features
                 && model.result_leaf_doubles.len() == 2
                 && model.value.get_size() == 128))
-        // Every parameter a scalar integer leaf: one 64-bit leaf, or
-        // the two 64-bit leaves an `i128`/`u128` scalar flattens to
-        // (`pure-i64-composite/v21`, `lo` then `hi`) — f64 (`[true]`)
-        // and composite parameters stay out of the subset.
+        // Every parameter a scalar leaf: one 64-bit leaf of either
+        // class — integer (`[false]`) or f64 bit-pattern (`[true]`,
+        // bound to an xmm register on the machine side and pinned to
+        // a `double` IR parameter by the shared leaf-kind check) —
+        // or the two 64-bit leaves an `i128`/`u128` scalar flattens
+        // to (`pure-i64-composite/v21`, `lo` then `hi`). Composite
+        // parameters stay out of the subset.
         && model.param_leaf_doubles.iter().all(|leaves| {
-            leaves.as_slice() == [false]
+            leaves.len() == 1
                 || (model.has_wide_scalar_features && leaves.as_slice() == [false, false])
         })
         && model.param_shapes.iter().all(Option::is_none)
@@ -365,11 +376,14 @@ fn scalar_i64_call_site(site: &CallSite) -> bool {
 /// `translation_validation::encode_ir_function_for_comparison` on the
 /// same Z3 context.
 ///
-/// Scoped to 64-bit scalar signatures (plus scalar `i128`/`u128` on
-/// wide-scalar modules, compared as one 128-bit `rdx:rax` edge) and
-/// all-`i64` aggregate results (register-resident or `sret`
-/// memory-class): f64 leaves, composite or wider-than-128 inputs,
-/// non-scalar call sites, and loops return `NotLiftable`. For
+/// Scoped to 64-bit scalar signatures (integer and f64
+/// bit-pattern leaves — f64 compares pass-through/select only, FP
+/// arithmetic is gated out by `f64_arithmetic: false` on the encode
+/// call; plus scalar `i128`/`u128` on wide-scalar modules, compared
+/// as one 128-bit `rdx:rax` edge) and all-`i64` aggregate results
+/// (register-resident or `sret` memory-class): aggregate f64
+/// leaves, composite or wider-than-128 inputs, non-scalar call
+/// sites, and loops return `NotLiftable`. For
 /// every lifted path the machine return must equal the IR return of
 /// some covering edge whose definedness obligations hold and whose
 /// call-argument obligations all hold; an uncovered path, a diverging
@@ -6836,6 +6850,82 @@ entry:
             )
         }
         .is_err());
+    }
+
+    #[test]
+    fn frame_memory_check_compares_scalar_f64_against_ir() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // A scalar `f64` signature compares its IEEE-754 bit
+        // pattern: xmm-bound parameters and the xmm0 result are one
+        // 64-bit leaf each, pinned to `double` IR parameters by the
+        // shared leaf-kind check. Pass-through and `select` only —
+        // FP arithmetic stays gated out by `f64_arithmetic: false`.
+        let model = source_model_named_with_admission(
+            "atom pick(a: f64, b: f64) -> f64 requires: true; ensures: result == a; body: { a };",
+            "pick",
+            &context,
+            RefinedAdmission::CompositeV19,
+        );
+        assert!(ir_object_signature_liftable(&model));
+        let matching_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define double @pick(double %a, double %b) {
+entry:
+  ret double %a
+}
+"#;
+        let divergent_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define double @pick(double %a, double %b) {
+entry:
+  ret double %b
+}
+"#;
+        let (address, bytes, call_targets) = compiled_function_with_targets(matching_ir, "pick");
+        for (ir, expected) in [
+            (matching_ir, FunctionOutcome::Equivalent),
+            (divergent_ir, FunctionOutcome::Different),
+        ] {
+            let (ir_returns, ir_definedness) = unsafe {
+                crate::translation_validation::encode_ir_function_for_comparison(
+                    ir.as_bytes(),
+                    "pick",
+                    &model,
+                    false,
+                    &context,
+                )
+            }
+            .unwrap();
+            assert_eq!(
+                check_function_with_frame_memory_against_ir(
+                    &bytes,
+                    address,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &call_targets,
+                    &context,
+                )
+                .0,
+                expected
+            );
+            assert_eq!(
+                check_function_against_ir(
+                    &bytes,
+                    address,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &call_targets,
+                    &context,
+                ),
+                match expected {
+                    FunctionOutcome::Equivalent => IrObjectEquivalence::Equivalent,
+                    _ => IrObjectEquivalence::Different,
+                }
+            );
+        }
     }
 
     #[test]
