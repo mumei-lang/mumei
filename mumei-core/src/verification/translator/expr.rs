@@ -2715,7 +2715,7 @@ const MAX_ENUM_PAYLOAD_EQUALITY_WORK: usize = 4096;
 #[derive(Default)]
 struct EnumPayloadEqualityWork {
     work: usize,
-    struct_array_payloads: std::collections::HashMap<String, bool>,
+    array_payload_types: std::collections::HashMap<String, bool>,
     visiting_types: std::collections::HashSet<String>,
 }
 
@@ -2731,14 +2731,14 @@ impl EnumPayloadEqualityWork {
     }
 }
 
-fn enum_type_contains_struct_array_payload(
+fn enum_type_needs_leafwise_equality(
     vc: &VCtx<'_>,
     enum_name: &str,
     work: &mut EnumPayloadEqualityWork,
 ) -> MumeiResult<bool> {
     let resolved_name = vc.module_env.resolve_base_type(enum_name);
-    if let Some(&contains) = work.struct_array_payloads.get(&resolved_name) {
-        return Ok(contains);
+    if let Some(&needs_leafwise_equality) = work.array_payload_types.get(&resolved_name) {
+        return Ok(needs_leafwise_equality);
     }
     if !work.visiting_types.insert(resolved_name.clone()) {
         return Err(MumeiError::type_error(
@@ -2749,7 +2749,7 @@ fn enum_type_contains_struct_array_payload(
         work.visiting_types.remove(&resolved_name);
         return Ok(false);
     };
-    let mut contains = false;
+    let mut needs_leafwise_equality = false;
     for variant in &enum_def.variants {
         work.spend()?;
         for field in &variant.field_types {
@@ -2758,32 +2758,30 @@ fn enum_type_contains_struct_array_payload(
             let Some(leaves) = datatype::field_leaf_types(&field_type, vc.module_env) else {
                 continue;
             };
-            if leaves
-                .iter()
-                .any(|(name, base)| name.contains('#') && base.starts_with("array:"))
-            {
-                contains = true;
+            if leaves.iter().any(|(_, base)| base.starts_with("array:")) {
+                needs_leafwise_equality = true;
                 break;
             }
             for (_, base) in &leaves {
                 if let Some(inner_name) = base.strip_prefix("enum:") {
-                    if enum_type_contains_struct_array_payload(vc, inner_name, work)? {
-                        contains = true;
+                    if enum_type_needs_leafwise_equality(vc, inner_name, work)? {
+                        needs_leafwise_equality = true;
                         break;
                     }
                 }
             }
-            if contains {
+            if needs_leafwise_equality {
                 break;
             }
         }
-        if contains {
+        if needs_leafwise_equality {
             break;
         }
     }
     work.visiting_types.remove(&resolved_name);
-    work.struct_array_payloads.insert(resolved_name, contains);
-    Ok(contains)
+    work.array_payload_types
+        .insert(resolved_name, needs_leafwise_equality);
+    Ok(needs_leafwise_equality)
 }
 
 fn enum_payload_value_equality<'a>(
@@ -2797,7 +2795,7 @@ fn enum_payload_value_equality<'a>(
         return Ok(None);
     };
     let mut work = EnumPayloadEqualityWork::default();
-    if !enum_type_contains_struct_array_payload(vc, &enum_def.name, &mut work)? {
+    if !enum_type_needs_leafwise_equality(vc, &enum_def.name, &mut work)? {
         return Ok(None);
     }
     let equality = enum_payload_value_equality_inner(vc, left, right, &mut work)?
@@ -2876,7 +2874,7 @@ fn enum_payload_value_equality_inner<'a>(
                         base.strip_prefix("enum:"),
                         left_value.as_datatype().is_some(),
                     ) {
-                        if enum_type_contains_struct_array_payload(vc, inner_name, work)? {
+                        if enum_type_needs_leafwise_equality(vc, inner_name, work)? {
                             Some(
                                 enum_payload_value_equality_inner(
                                     vc,
