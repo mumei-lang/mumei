@@ -7333,6 +7333,61 @@ fn array_result_module_builds_as_v30_and_rechecks() {
 }
 
 #[test]
+fn array_result_len_of_inline_call_rechecks() {
+    // `len(make())` — an inline call to a `[i64]`-returning callee
+    // reads the fat-pointer `len` slot, so the source recheck must
+    // accept it rather than reject the module as out-of-profile.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        r#"atom make() -> [i64]
+requires: true;
+ensures: len(result) == 2;
+body: [1, 2];
+
+atom use_it() -> i64
+requires: true;
+ensures: result == 2;
+body: len(make());
+
+atom main() -> i64
+requires: true;
+ensures: result == 0;
+body: 0;
+"#,
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+}
+
+#[test]
+fn array_result_call_len_is_nonnegative_in_caller_ensures() {
+    // The fat-pointer `arrlen` slot is nonnegative even when the
+    // callee's contract does not state a length — `len(a) >= 0` must
+    // hold in the caller's postcondition, not be refuted.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        r#"atom make() -> [i64]
+requires: true;
+body: [1, 2, 3];
+
+atom use_it() -> i64
+requires: true;
+ensures: result >= 0;
+body: { let a = make(); len(a) };
+
+atom main() -> i64
+requires: true;
+ensures: result == 0;
+body: 0;
+"#,
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+}
+
+#[test]
 fn array_result_violating_ensures_is_refuted() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source.mm");

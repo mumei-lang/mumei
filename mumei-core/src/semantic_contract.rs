@@ -10185,6 +10185,15 @@ fn module_atom_obligations<'ctx>(
         }
         let site_domain = Bool::and(context, &[&site.guard, &exits_domain]);
         assumptions.push(site_domain.implies(&callee_post));
+        if site.result_shape == CallValueShape::Array {
+            // A `[i64]` call result's `len` application is
+            // nonnegative — the fat-pointer `arrlen` slot's domain.
+            // The same invariant `call_result_bounds` feeds the
+            // site's own domain obligations must also be visible
+            // where the caller's postcondition reads `len(a)`.
+            assumptions
+                .push(site_domain.implies(&site.result.bvsge(&BV::from_u64(context, 0, 64))));
+        }
     }
     for site in requires_call_sites.iter().chain(ensures_call_sites.iter()) {
         let Some(callee) = callees.get(&site.callee) else {
@@ -13348,6 +13357,29 @@ fn source_expr<'ctx>(
                         }
                     }),
                     Expr::ArrayLit(elems) => Some(BV::from_u64(ctx, elems.len() as u64, 64)),
+                    // `len(make())` — an inline call to a `[i64]`-
+                    // returning callee evaluates to its fat-pointer
+                    // `len` slot, the same value `let a = make();
+                    // len(a)` reads off the binding.
+                    Expr::Call(callee, _) if call_returns.returns_array(callee) => {
+                        match source_expr(
+                            &args[0],
+                            ctx,
+                            env,
+                            guard,
+                            definedness,
+                            depth + 1,
+                            &BTreeSet::new(),
+                            written,
+                            loop_exits,
+                            call_sites,
+                            call_returns,
+                            enums,
+                        )? {
+                            SourceValue::Array { len, .. } => Some(len),
+                            _ => None,
+                        }
+                    }
                     _ => None,
                 };
                 if let Some(len) = len {
