@@ -2178,6 +2178,20 @@ edge is named `checked_object_link_correspondence` only when that check ran.
 Emitting this record performs no `object_translation_correspondence` check —
 it stays absent from both check lists as before.
 
+Step 2 adds `object_translation.correspondence`: an inspection of the emitted
+metadata that stays honestly unvalidated. `correspondence.status` is always
+`unchecked_not_translation_validated`; each entry of `correspondence.checks`
+reports one item's `result` — `checked` when the comparison ran and passed,
+`unchecked` when it could not run, or `inconsistent` with the offending names
+or offsets in `detail`. The items are `function_coverage` (every IR-defined
+function maps to exactly one record function and vice versa),
+`function_count`, `relocation_targets` (every relocation target resolves to a
+record function, a linked executable symbol, an IR-declared callee, or a
+compiler-rt helper), `relocation_bounds` (every relocation offset falls inside
+an enumerated function's section range), and `relocation_resolved_values`
+(every relocation's pc-relative value recomputed). An `inconsistent` item is
+reported in place; it is not promoted into a verdict or a performed check.
+
 Scalar f64 leaves are admitted only under a record profile that admits f64
 arithmetic. The bounded SSE2 profile handles register-only `movsd`, `movapd`,
 `movaps`, `movq`, `addsd`, `subsd`, `mulsd`, `divsd`, and `cmpeqsd`; f64
