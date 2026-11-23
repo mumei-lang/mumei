@@ -1166,10 +1166,11 @@ pub(crate) fn array_len_for_expr<'a>(
         Some(crate::parser::ast::Expr::Block(stmt)) => {
             branch_tail_len(vc, env, stmt, value, 0, solver_opt)
         }
-        Some(crate::parser::ast::Expr::Match { arms, .. }) => {
-            match_arm_lens(vc, env, arms, value, 0, solver_opt)
-                .unwrap_or_else(|| fresh_array_len(vc, solver_opt))
-        }
+        Some(crate::parser::ast::Expr::Match { arms, .. }) => value
+            .as_array()
+            .and_then(|array| call_result_len(vc, &array))
+            .or_else(|| match_arm_lens(vc, env, arms, value, 0, solver_opt))
+            .unwrap_or_else(|| fresh_array_len(vc, solver_opt)),
         _ => value
             .as_array()
             .map(|arr| array_len_for_value(vc, env, &arr, solver_opt))
@@ -1332,10 +1333,19 @@ pub(crate) fn snapshot_struct_array_leaves<'a>(
     value: &Dynamic<'a>,
     declared_array_type: Option<&str>,
 ) -> MumeiResult<Option<StructArrayLeafSnapshot<'a>>> {
+    let uses_unbound_result = is_unbound_array_result_expression(expression);
+    let result_element_type = if uses_unbound_result {
+        value
+            .as_array()
+            .and_then(|array| call_result_struct_array_element_type(vc, &array))
+    } else {
+        None
+    };
     let element_type = declared_array_type
         .map(str::trim)
         .filter(|type_name| type_name.starts_with('[') && type_name.ends_with(']'))
         .map(|type_name| array_element_type_from_annotation(Some(type_name), vc.module_env))
+        .or(result_element_type)
         .or_else(|| array_element_type_from_expr(vc, expression));
     let Some(element_type) = element_type else {
         return Ok(None);
@@ -1359,26 +1369,35 @@ pub(crate) fn snapshot_struct_array_leaves<'a>(
     let mut arrays = HashMap::with_capacity(leaves.len());
     for (path, leaf_type) in leaves {
         let range = z3_element_sort(vc, &leaf_type);
-        let array =
-            if let Some(array) = struct_array_leaf_for_expr(vc, env, expression, value, &path, 0) {
-                array
-            } else {
-                match expression {
-                    Expr::Variable(source) => {
-                        struct_array_leaf_array(vc, source, &path, &leaf_type, env)
-                    }
-                    Expr::ArrayLit(_) => {
-                        return Err(MumeiError::type_error(format!(
-                            "struct array literal is missing leaf '{path}'"
-                        )))
-                    }
-                    _ => z3_fresh_array_for_range(
-                        vc.ctx,
-                        &format!("__struct_arr_arg_snapshot#{snapshot_id}#{path}"),
-                        &range,
-                    ),
+        let result_array = if uses_unbound_result {
+            value
+                .as_array()
+                .and_then(|array| call_result_struct_array(vc, &array, &path))
+        } else {
+            None
+        };
+        let array = if let Some(array) = result_array {
+            array
+        } else if let Some(array) = struct_array_leaf_for_expr(vc, env, expression, value, &path, 0)
+        {
+            array
+        } else {
+            match expression {
+                Expr::Variable(source) => {
+                    struct_array_leaf_array(vc, source, &path, &leaf_type, env)
                 }
-            };
+                Expr::ArrayLit(_) => {
+                    return Err(MumeiError::type_error(format!(
+                        "struct array literal is missing leaf '{path}'"
+                    )))
+                }
+                _ => z3_fresh_array_for_range(
+                    vc.ctx,
+                    &format!("__struct_arr_arg_snapshot#{snapshot_id}#{path}"),
+                    &range,
+                ),
+            }
+        };
         if array.get_sort().array_range() != Some(range) {
             return Err(MumeiError::type_error(format!(
                 "struct array argument leaf '{path}' has an incompatible sort"
@@ -1476,6 +1495,7 @@ pub(crate) fn wire_array_slots_with_struct_leaf_snapshot<'a>(
     env.insert(array_len_key(name), len);
     let elem_ty = leaf_snapshot
         .map(|snapshot| snapshot.element_type.clone())
+        .or_else(|| call_result_struct_array_element_type(vc, &arr))
         .or_else(|| value.and_then(|value| array_element_type_from_expr(vc, value)))
         .unwrap_or(elem_ty);
     validate_array_element_type(vc, &elem_ty)?;
@@ -1531,7 +1551,15 @@ pub(crate) fn wire_array_slots_with_struct_leaf_snapshot<'a>(
     Ok(())
 }
 
-fn array_element_type_from_expr(vc: &VCtx<'_>, value: &Expr) -> Option<String> {
+fn is_unbound_array_result_expression(expression: &Expr) -> bool {
+    match expression {
+        Expr::Call(_, _) | Expr::Match { .. } => true,
+        Expr::Block(stmt) => stmt_tail_expr(stmt).is_some_and(is_unbound_array_result_expression),
+        _ => false,
+    }
+}
+
+pub(crate) fn array_element_type_from_expr(vc: &VCtx<'_>, value: &Expr) -> Option<String> {
     match value {
         Expr::Variable(source) => Some(array_element_type_name(source, vc)),
         Expr::Block(stmt) => {
@@ -1783,10 +1811,24 @@ fn struct_array_leaf_for_expr<'a>(
     if depth >= TAIL_LEN_DEPTH {
         return None;
     }
+    if matches!(expression, Expr::Match { .. }) {
+        if let Some(array) = val_node
+            .as_array()
+            .and_then(|array| call_result_struct_array(vc, &array, leaf_path))
+        {
+            return Some(array);
+        }
+    }
     match expression {
         Expr::Variable(source) => env
             .get(&struct_array_leaf_key(source, leaf_path))
             .and_then(|value| value.as_array()),
+        Expr::FieldAccess(_, _) => {
+            let arr = val_node.as_array()?;
+            let source = array_root_name(&arr)?;
+            env.get(&struct_array_leaf_key(&source, leaf_path))
+                .and_then(|value| value.as_array())
+        }
         Expr::ArrayLit(_) => {
             let arr = val_node.as_array()?;
             let source = array_root_name(&arr)?;
@@ -2020,6 +2062,35 @@ pub(crate) fn call_result_struct_array<'a>(
         .borrow()
         .get(&(array_root_ast(arr) as usize))
         .and_then(|result| result.struct_leaves.get(leaf_path).cloned())
+}
+
+pub(crate) fn call_result_struct_array_element_type<'a>(
+    vc: &VCtx<'a>,
+    arr: &z3::ast::Array<'a>,
+) -> Option<String> {
+    vc.call_result_lens
+        .borrow()
+        .get(&(array_root_ast(arr) as usize))
+        .and_then(|result| result.struct_element_type.clone())
+}
+
+pub(crate) fn register_array_result<'a>(
+    vc: &VCtx<'a>,
+    arr: &z3::ast::Array<'a>,
+    len: Dynamic<'a>,
+    struct_element_type: Option<String>,
+    struct_leaves: HashMap<String, z3::ast::Array<'a>>,
+) {
+    let value: Dynamic<'a> = arr.clone().into();
+    vc.call_result_lens.borrow_mut().insert(
+        array_root_ast(arr) as usize,
+        crate::verification::translator::context::CallResultArray {
+            len: Some(len),
+            _keep: value,
+            struct_leaves,
+            struct_element_type,
+        },
+    );
 }
 
 /// Replace `name`'s tracked array chain — and every `__z3_arr_*`/`env[x]`

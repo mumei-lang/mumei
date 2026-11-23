@@ -85,7 +85,9 @@ use std::path::Path;
 /// includes the carrier in loop havoc, so cached verdicts must be re-derived.
 /// Version 41 havocs every struct-array leaf after a potentially writing call,
 /// so cached verdicts must be re-derived.
-pub const VERIFIER_POLICY_VERSION: u32 = 41;
+/// Version 42 represents struct-array enum payloads with leaf arrays and rejects
+/// direct reads, so cached verdicts must be re-derived.
+pub const VERIFIER_POLICY_VERSION: u32 = 42;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -3368,7 +3370,7 @@ body: { p.a };\n";
         let baseline = proof_hash_for(source, "g");
         assert_eq!(
             baseline,
-            "ddfc1b9295c44bf252bc4ee1744430b0620781b2ee94e84565472146b691ba7d"
+            "e7919cb92f8919300cbe050c1ce83ab83520554db3878305fd70f5bc211111e1"
         );
         let changed = proof_hash_for(
             &source.replace(
@@ -3381,7 +3383,7 @@ body: { p.a };\n";
     }
 
     #[test]
-    fn effect_free_proof_hash_matches_policy_version_41() {
+    fn effect_free_proof_hash_matches_policy_version_42() {
         let source = "atom main(x: i64) -> i64\n\
                       requires: true;\n\
                       ensures: result == x;\n\
@@ -3390,7 +3392,7 @@ body: { p.a };\n";
 
         assert_eq!(
             hash,
-            "7ee33236ff291489b81a48d44ab486ed95bf489a252e2bc315be491927b8dea5"
+            "fddcfb44b0968dd0e5adb9c1a30f6e170eb50c24bf9f98999bda02fb578d0251"
         );
         assert!(!dependency_hashes_for(source, "main")
             .keys()

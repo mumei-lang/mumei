@@ -20,6 +20,50 @@ struct Words {
     xs: [u64]
 }
 
+struct Pt {
+    x: i64,
+    c: Color
+}
+
+struct CachePoint {
+    x: i64
+}
+
+struct WidePt {
+    x: i64,
+    n: u32
+}
+
+enum Color {
+    R,
+    G(v: u32)
+}
+
+enum DirectArrayE {
+    D(ps: [Pt]),
+    N
+}
+
+enum CacheArrayE {
+    D(ps: [CachePoint]),
+    N
+}
+
+enum InnerArrayE {
+    D(ps: [Pt]),
+    N
+}
+
+enum OuterArrayE {
+    D(inner: InnerArrayE),
+    N
+}
+
+enum DirectWideE {
+    D(ps: [WidePt]),
+    N
+}
+
 enum E {
     D(s: S),
     N
@@ -208,3 +252,135 @@ atom struct_array_length_callee(p: S) -> i64
 requires: len(p.xs) > 0;
 ensures: result > 0;
 body: len(p.xs);
+
+atom direct_struct_array_payload_match(ps: [Pt]) -> i64
+requires: len(ps) > 0 && ps[0].x == 3;
+ensures: result == 3;
+body: {
+    let e = DirectArrayE::D(ps);
+    match e {
+        DirectArrayE::D(q) => q[0].x,
+        DirectArrayE::N => 0
+    }
+};
+
+atom direct_struct_array_payload_literal() -> i64
+requires: true;
+ensures: result == 3;
+body: {
+    let e = DirectArrayE::D([Pt { x: 3, c: Color::R }]);
+    match e {
+        DirectArrayE::D(ps) => ps[0].x,
+        DirectArrayE::N => 0
+    }
+};
+
+atom direct_struct_array_payload_roundtrip(ps: [Pt]) -> bool
+requires: len(ps) > 0 && ps[0].x == 3;
+ensures: result == true;
+body: {
+    let e = DirectArrayE::D(ps);
+    match e {
+        DirectArrayE::D(q) => q[0].x == 3,
+        DirectArrayE::N => false
+    }
+};
+
+atom direct_struct_array_payload_forall(ps: [Pt]) -> bool
+requires: forall(i, 0, len(ps), ps[i].x >= 0);
+ensures: result == true;
+body: {
+    let e = DirectArrayE::D(ps);
+    match e {
+        DirectArrayE::D(q) => forall(i, 0, len(q), q[i].x >= 0),
+        DirectArrayE::N => true
+    }
+};
+
+atom direct_struct_array_enum_leaf(ps: [Pt]) -> u32
+requires: len(ps) > 0 && ps[0].c == Color::G(7);
+ensures: result == 7;
+body: {
+    let e = DirectArrayE::D(ps);
+    match e {
+        DirectArrayE::D(q) => match q[0].c {
+            Color::G(v) => v,
+            Color::R => 0
+        },
+        DirectArrayE::N => 0
+    }
+};
+
+atom direct_struct_array_payload_callee(ps: [Pt]) -> i64
+requires: len(ps) > 0 && ps[0].x == 3;
+ensures: result == 3;
+body: {
+    let e = DirectArrayE::D(ps);
+    match e {
+        DirectArrayE::D(q) => struct_array_first_x(q),
+        DirectArrayE::N => 0
+    }
+};
+
+atom match_result_struct_array_leaf_snapshot() -> i64
+requires: true;
+ensures: result == 9;
+body: {
+    let outer = [Pt { x: 1, c: Color::R }];
+    let e = DirectArrayE::D([Pt { x: 9, c: Color::R }]);
+    let selected = match e {
+        DirectArrayE::D(payload) => payload,
+        DirectArrayE::N => outer
+    };
+    selected[0].x
+};
+
+atom cache_array_call_source() -> [CachePoint]
+requires: true;
+ensures: len(result) == 1 && result[0].x == 1;
+body: [CachePoint { x: 1 }];
+
+atom call_result_array_leaf_cache_tracks_store() -> i64
+requires: true;
+ensures: result == 9;
+body: {
+    let qs = cache_array_call_source();
+    qs[0].x = 9;
+    let e = CacheArrayE::D(qs);
+    match e {
+        CacheArrayE::D(payload) => payload[0].x,
+        CacheArrayE::N => 0
+    }
+};
+
+atom match_result_array_leaf_cache_tracks_store() -> i64
+requires: true;
+ensures: result == 9;
+body: {
+    let source = [CachePoint { x: 1 }];
+    let qs = match Color::R {
+        Color::R => source,
+        Color::G(_) => source
+    };
+    qs[0].x = 9;
+    let e = CacheArrayE::D(qs);
+    match e {
+        CacheArrayE::D(payload) => payload[0].x,
+        CacheArrayE::N => 0
+    }
+};
+
+atom direct_struct_array_payload_equality_unchanged(ps: [Pt]) -> bool
+requires: len(ps) > 0;
+ensures: result == true;
+body: DirectArrayE::D(ps) == DirectArrayE::D(ps);
+
+atom nested_enum_struct_array_equality_is_extensional(xs: [Pt], ys: [Pt]) -> bool
+requires: InnerArrayE::D(xs) == InnerArrayE::D(ys);
+ensures: result == true;
+body: OuterArrayE::D(InnerArrayE::D(xs)) == OuterArrayE::D(InnerArrayE::D(ys));
+
+atom struct_array_first_x(ps: [Pt]) -> i64
+requires: len(ps) > 0;
+ensures: result == ps[0].x;
+body: ps[0].x;

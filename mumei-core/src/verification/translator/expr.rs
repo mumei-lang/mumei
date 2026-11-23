@@ -12,6 +12,149 @@ use serde_json::json;
 use z3::ast::Ast as _;
 use z3::{FuncDecl, Sort};
 
+#[derive(Clone)]
+struct MatchArrayResult<'a> {
+    len: z3::ast::Dynamic<'a>,
+    struct_element_type: Option<String>,
+    struct_leaves: std::collections::HashMap<String, z3::ast::Array<'a>>,
+}
+
+#[inline(never)]
+fn merge_match_array_results<'a>(
+    arms: &[(z3::ast::Bool<'a>, Option<MatchArrayResult<'a>>)],
+) -> Result<Option<MatchArrayResult<'a>>, MumeiError> {
+    if arms.iter().any(|(_, arm)| arm.is_some()) && arms.iter().any(|(_, arm)| arm.is_none()) {
+        return Err(MumeiError::type_error(
+            "match branches have incompatible array results",
+        ));
+    }
+    let mut result: Option<MatchArrayResult<'a>> = None;
+    for (cond, arm) in arms.iter().rev() {
+        let Some(arm) = arm else {
+            if result.is_some() {
+                return Err(MumeiError::type_error(
+                    "match branches have incompatible array results",
+                ));
+            }
+            continue;
+        };
+        result = Some(match result {
+            Some(else_result) => {
+                if arm.struct_element_type != else_result.struct_element_type
+                    || arm
+                        .struct_leaves
+                        .keys()
+                        .collect::<std::collections::HashSet<_>>()
+                        != else_result
+                            .struct_leaves
+                            .keys()
+                            .collect::<std::collections::HashSet<_>>()
+                    || arm.len.get_sort() != else_result.len.get_sort()
+                {
+                    return Err(MumeiError::type_error(
+                        "match branches have incompatible array results",
+                    ));
+                }
+                let len = cond.ite(&arm.len, &else_result.len);
+                let mut struct_leaves =
+                    std::collections::HashMap::with_capacity(arm.struct_leaves.len());
+                for (path, array) in &arm.struct_leaves {
+                    let else_array = else_result.struct_leaves.get(path).ok_or_else(|| {
+                        MumeiError::type_error(
+                            "match branches have incompatible struct-array leaves",
+                        )
+                    })?;
+                    let array_value: z3::ast::Dynamic<'a> = array.clone().into();
+                    let else_value: z3::ast::Dynamic<'a> = else_array.clone().into();
+                    let merged = cond.ite(&array_value, &else_value);
+                    let merged = merged.as_array().ok_or_else(|| {
+                        MumeiError::type_error(
+                            "match branches have incompatible struct-array leaves",
+                        )
+                    })?;
+                    struct_leaves.insert(path.clone(), merged);
+                }
+                MatchArrayResult {
+                    len,
+                    struct_element_type: arm.struct_element_type.clone(),
+                    struct_leaves,
+                }
+            }
+            None => arm.clone(),
+        });
+    }
+    Ok(result)
+}
+
+#[inline(never)]
+fn match_arm_array_result<'a>(
+    vc: &VCtx<'a>,
+    body: &Stmt,
+    body_value: &Dynamic<'a>,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> MumeiResult<Option<MatchArrayResult<'a>>> {
+    let Some(array) = body_value.as_array() else {
+        return Ok(None);
+    };
+    let tail = array_value_tail_expr(body);
+    let len = tail
+        .map(|tail| {
+            super::z3_types::array_len_for_expr(vc, env, Some(tail), body_value, solver_opt)
+        })
+        .unwrap_or_else(|| super::z3_types::array_len_for_value(vc, env, &array, solver_opt));
+    let element_type = tail
+        .and_then(|tail| super::z3_types::array_element_type_from_expr(vc, tail))
+        .map(|element_type| vc.module_env.resolve_base_type(&element_type));
+    let struct_element_type = element_type.filter(|element_type| {
+        super::z3_types::array_element_sort_from_type(element_type, vc.module_env, vc.ieee754_f64)
+            == ArrayElementSort::Struct
+    });
+    let struct_leaves = if let Some(element_type) = &struct_element_type {
+        let tail = tail.ok_or_else(|| {
+            MumeiError::type_error("match result struct array has no resolvable tail expression")
+        })?;
+        let snapshot =
+            super::z3_types::snapshot_struct_array_leaves(vc, env, tail, body_value, None)?
+                .ok_or_else(|| {
+                    MumeiError::type_error(format!(
+                        "match result struct array '{element_type}' has no leaf snapshot"
+                    ))
+                })?;
+        let leaf_types = super::z3_types::struct_array_leaf_types(element_type, vc.module_env)
+            .ok_or_else(|| {
+                MumeiError::type_error(format!(
+                    "array element struct '{element_type}' must have only scalar leaves"
+                ))
+            })?;
+        let mut arrays = std::collections::HashMap::with_capacity(leaf_types.len());
+        for (path, _) in leaf_types {
+            let array = snapshot.leaf_array(&path).ok_or_else(|| {
+                MumeiError::type_error(format!(
+                    "match result struct array is missing leaf '{path}'"
+                ))
+            })?;
+            arrays.insert(path, array);
+        }
+        arrays
+    } else {
+        std::collections::HashMap::new()
+    };
+    Ok(Some(MatchArrayResult {
+        len,
+        struct_element_type,
+        struct_leaves,
+    }))
+}
+
+#[inline(never)]
+fn invoke_match_lowering<'a, F>(lowering: F) -> MumeiResult<Dynamic<'a>>
+where
+    F: FnOnce() -> MumeiResult<Dynamic<'a>>,
+{
+    lowering()
+}
+
 struct LocalArrayElementTypeGuard<'a> {
     types: &'a std::cell::RefCell<std::collections::HashMap<String, String>>,
     name: String,
@@ -164,17 +307,89 @@ fn array_argument_aliases<'a>(
     });
 
     for (key, tracked) in env {
-        let Some(name) = key.strip_prefix("__z3_arr_") else {
-            continue;
-        };
         if tracked.as_array().is_some_and(|array| {
             roots.contains(&(super::z3_types::array_root_ast(&array) as usize))
         }) {
-            sources.insert(name.to_string());
+            if let Some(name) = key.strip_prefix("__z3_arr_") {
+                sources.insert(name.to_string());
+            } else if !key.starts_with("__") {
+                sources.insert(key.clone());
+            }
         }
     }
 
     sources
+}
+
+fn array_source_is_declared_array(vc: &VCtx<'_>, name: &str, env: &Env<'_>) -> bool {
+    let tracked_key = format!("__z3_arr_{name}");
+    if env
+        .get(&tracked_key)
+        .and_then(|value| value.as_array())
+        .is_some()
+        || env.get(name).and_then(|value| value.as_array()).is_some()
+        || env.contains_key(&super::z3_types::array_len_key(name))
+        || vc.local_array_elem_types.borrow().contains_key(name)
+        || vc.current_atom.is_some_and(|atom| {
+            atom.params.iter().any(|param| {
+                param.name == name
+                    && param
+                        .type_name
+                        .as_deref()
+                        .is_some_and(|type_name| type_name.starts_with('['))
+            })
+        })
+    {
+        return true;
+    }
+    let expression = parse_expression(name);
+    crate::verification::support::datatype::declared_type_of_expr(vc, &expression)
+        .is_some_and(|type_name| type_name.trim().starts_with('['))
+}
+
+fn mark_array_value_sources_shared<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    expression: &Expr,
+    value: &Dynamic<'a>,
+) -> MumeiResult<()> {
+    if value.as_array().is_none() {
+        return Ok(());
+    }
+    let mut sources = std::collections::HashSet::new();
+    collect_array_value_sources(expression, &mut sources);
+    let unresolved = sources
+        .iter()
+        .filter(|name| {
+            array_source_is_declared_array(vc, name, env)
+                && env
+                    .get(&format!("__z3_arr_{name}"))
+                    .and_then(|value| value.as_array())
+                    .or_else(|| env.get(*name).and_then(|value| value.as_array()))
+                    .is_none()
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(name) = unresolved.first() {
+        return Err(MumeiError::type_error(format!(
+            "array payload source '{name}' cannot be resolved for shared-buffer tracking"
+        )));
+    }
+
+    let aliases = array_argument_aliases(expression, value, env);
+    if sources
+        .iter()
+        .any(|name| array_source_is_declared_array(vc, name, env))
+        && aliases.is_empty()
+    {
+        return Err(MumeiError::type_error(
+            "array payload source cannot be resolved for shared-buffer tracking",
+        ));
+    }
+    for name in aliases {
+        super::z3_types::mark_array_shared(vc.ctx, env, &name);
+    }
+    Ok(())
 }
 
 fn reject_later_array_argument_mutation<'a>(
@@ -2495,6 +2710,292 @@ fn array_value_equality<'a>(
     Ok(Bool::and(ctx, &[&len_eq, &contents_eq]))
 }
 
+const MAX_ENUM_PAYLOAD_EQUALITY_WORK: usize = 4096;
+
+#[derive(Default)]
+struct EnumPayloadEqualityWork {
+    work: usize,
+    array_payload_types: std::collections::HashMap<String, bool>,
+    visiting_types: std::collections::HashSet<String>,
+}
+
+impl EnumPayloadEqualityWork {
+    fn spend(&mut self) -> MumeiResult<()> {
+        self.work = self.work.saturating_add(1);
+        if self.work > MAX_ENUM_PAYLOAD_EQUALITY_WORK {
+            return Err(MumeiError::type_error(
+                "Enum payload equality exceeds its work budget",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn enum_type_needs_leafwise_equality(
+    vc: &VCtx<'_>,
+    enum_name: &str,
+    work: &mut EnumPayloadEqualityWork,
+) -> MumeiResult<bool> {
+    let resolved_name = vc.module_env.resolve_base_type(enum_name);
+    if let Some(&needs_leafwise_equality) = work.array_payload_types.get(&resolved_name) {
+        return Ok(needs_leafwise_equality);
+    }
+    if !work.visiting_types.insert(resolved_name.clone()) {
+        return Err(MumeiError::type_error(
+            "Recursive enum payload equality is not supported",
+        ));
+    }
+    let Some(enum_def) = vc.module_env.enums.get(&resolved_name) else {
+        work.visiting_types.remove(&resolved_name);
+        return Ok(false);
+    };
+    let mut needs_leafwise_equality = false;
+    for variant in &enum_def.variants {
+        work.spend()?;
+        for field in &variant.field_types {
+            work.spend()?;
+            let field_type = datatype::payload_field_type_name(field);
+            let Some(leaves) = datatype::field_leaf_types(&field_type, vc.module_env) else {
+                continue;
+            };
+            if leaves.iter().any(|(_, base)| base.starts_with("array:")) {
+                needs_leafwise_equality = true;
+                break;
+            }
+            for (_, base) in &leaves {
+                if let Some(inner_name) = base.strip_prefix("enum:") {
+                    if enum_type_needs_leafwise_equality(vc, inner_name, work)? {
+                        needs_leafwise_equality = true;
+                        break;
+                    }
+                }
+            }
+            if needs_leafwise_equality {
+                break;
+            }
+        }
+        if needs_leafwise_equality {
+            break;
+        }
+    }
+    work.visiting_types.remove(&resolved_name);
+    work.array_payload_types
+        .insert(resolved_name, needs_leafwise_equality);
+    Ok(needs_leafwise_equality)
+}
+
+fn enum_payload_value_equality<'a>(
+    vc: &VCtx<'a>,
+    left: &Dynamic<'a>,
+    right: &Dynamic<'a>,
+) -> MumeiResult<Option<Bool<'a>>> {
+    let Some(enum_def) = vc.module_env.enums.values().find(|enum_def| {
+        datatype::enum_datatype_sort(vc, enum_def).is_some_and(|sort| sort.sort == left.get_sort())
+    }) else {
+        return Ok(None);
+    };
+    let mut work = EnumPayloadEqualityWork::default();
+    if !enum_type_needs_leafwise_equality(vc, &enum_def.name, &mut work)? {
+        return Ok(None);
+    }
+    let equality = enum_payload_value_equality_inner(vc, left, right, &mut work)?
+        .ok_or_else(|| MumeiError::type_error("Unable to lower enum payload equality"))?;
+    Ok(Some(equality))
+}
+
+fn enum_payload_value_equality_inner<'a>(
+    vc: &VCtx<'a>,
+    left: &Dynamic<'a>,
+    right: &Dynamic<'a>,
+    work: &mut EnumPayloadEqualityWork,
+) -> MumeiResult<Option<Bool<'a>>> {
+    let Some(enum_def) = vc.module_env.enums.values().find(|enum_def| {
+        datatype::enum_datatype_sort(vc, enum_def).is_some_and(|sort| sort.sort == left.get_sort())
+    }) else {
+        return Ok(None);
+    };
+    let Some(sort) = datatype::enum_datatype_sort(vc, enum_def) else {
+        return Ok(None);
+    };
+    let mut has_array_payload = false;
+    let mut variant_equalities = Vec::with_capacity(enum_def.variants.len());
+    for (variant_idx, variant) in enum_def.variants.iter().enumerate() {
+        work.spend()?;
+        let Some((_, left_tag, _, _)) = datatype::variant_tester_condition(vc, left, &variant.name)
+        else {
+            return Ok(None);
+        };
+        let Some((_, right_tag, _, _)) =
+            datatype::variant_tester_condition(vc, right, &variant.name)
+        else {
+            return Ok(None);
+        };
+        let mut payload_equalities = Vec::new();
+        for (field_idx, field) in variant.field_types.iter().enumerate() {
+            work.spend()?;
+            let field_type = datatype::payload_field_type_name(field);
+            let Some(leaf_types) = datatype::field_leaf_types(&field_type, vc.module_env) else {
+                return Ok(None);
+            };
+            let Some((offset, _)) =
+                datatype::payload_leaf_range(enum_def, vc.module_env, variant_idx, field_idx)
+            else {
+                return Ok(None);
+            };
+            let mut compared_lengths = std::collections::HashSet::new();
+            for (leaf_idx, (name, base)) in leaf_types.iter().enumerate() {
+                work.spend()?;
+                if base == "array_len" {
+                    continue;
+                }
+                let Some(array_type) = base.strip_prefix("array:") else {
+                    let Some(left_value) = datatype::variant_selector_apply(
+                        &sort,
+                        variant_idx,
+                        offset + leaf_idx,
+                        left,
+                    ) else {
+                        return Ok(None);
+                    };
+                    let Some(right_value) = datatype::variant_selector_apply(
+                        &sort,
+                        variant_idx,
+                        offset + leaf_idx,
+                        right,
+                    ) else {
+                        return Ok(None);
+                    };
+                    if left_value.get_sort() != right_value.get_sort() {
+                        return Err(MumeiError::type_error(
+                            "Enum payload values have different field types",
+                        ));
+                    }
+                    let nested_enum_eq = if let (Some(inner_name), true) = (
+                        base.strip_prefix("enum:"),
+                        left_value.as_datatype().is_some(),
+                    ) {
+                        if enum_type_needs_leafwise_equality(vc, inner_name, work)? {
+                            Some(
+                                enum_payload_value_equality_inner(
+                                    vc,
+                                    &left_value,
+                                    &right_value,
+                                    work,
+                                )?
+                                .ok_or_else(|| {
+                                    MumeiError::type_error(
+                                        "Unable to lower nested enum payload equality",
+                                    )
+                                })?,
+                            )
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(nested_enum_eq) = nested_enum_eq {
+                        has_array_payload = true;
+                        payload_equalities.push(nested_enum_eq);
+                    } else {
+                        payload_equalities.push(left_value._eq(&right_value));
+                    }
+                    continue;
+                };
+                has_array_payload = true;
+                let Some(length_idx) = datatype::array_payload_length_index(&leaf_types, leaf_idx)
+                else {
+                    return Ok(None);
+                };
+                if compared_lengths.insert(length_idx) {
+                    let Some(left_len) = datatype::variant_selector_apply(
+                        &sort,
+                        variant_idx,
+                        offset + length_idx,
+                        left,
+                    ) else {
+                        return Ok(None);
+                    };
+                    let Some(right_len) = datatype::variant_selector_apply(
+                        &sort,
+                        variant_idx,
+                        offset + length_idx,
+                        right,
+                    ) else {
+                        return Ok(None);
+                    };
+                    let len_eq = if left_len.get_sort() == right_len.get_sort() {
+                        left_len._eq(&right_len)
+                    } else if let (Some(l), Some(r)) =
+                        (as_int_like(&left_len), as_int_like(&right_len))
+                    {
+                        l._eq(&r)
+                    } else {
+                        return Err(MumeiError::type_error(
+                            "Enum payload array lengths are not comparable",
+                        ));
+                    };
+                    payload_equalities.push(len_eq);
+                }
+                let Some(left_array) =
+                    datatype::variant_selector_apply(&sort, variant_idx, offset + leaf_idx, left)
+                        .and_then(|value| value.as_array())
+                else {
+                    return Ok(None);
+                };
+                let Some(right_array) =
+                    datatype::variant_selector_apply(&sort, variant_idx, offset + leaf_idx, right)
+                        .and_then(|value| value.as_array())
+                else {
+                    return Ok(None);
+                };
+                if left_array.get_sort() != right_array.get_sort() {
+                    return Err(MumeiError::type_error(format!(
+                        "Enum payload array leaf '{name}' has mismatched types"
+                    )));
+                }
+                let Some(len) =
+                    datatype::variant_selector_apply(&sort, variant_idx, offset + length_idx, left)
+                else {
+                    return Ok(None);
+                };
+                let Some(len) = as_int_like(&len) else {
+                    return Err(MumeiError::type_error(
+                        "Enum payload array length is not an integer",
+                    ));
+                };
+                let index = Int::fresh_const(vc.ctx, "enum_payload_index");
+                let in_bounds = Bool::and(
+                    vc.ctx,
+                    &[&index.ge(&Int::from_i64(vc.ctx, 0)), &index.lt(&len)],
+                );
+                let left_value = left_array.select(&index);
+                let right_value = right_array.select(&index);
+                let Some(element_eq) = array_eq_element(vc.ctx, &left_value, &right_value) else {
+                    return Err(MumeiError::type_error(format!(
+                        "Enum payload array leaf '{name}' cannot be compared"
+                    )));
+                };
+                payload_equalities.push(z3::ast::forall_const(
+                    vc.ctx,
+                    &[&index],
+                    &[],
+                    &in_bounds.implies(&element_eq),
+                ));
+                let _ = array_type;
+            }
+        }
+        let payload_refs: Vec<&Bool> = payload_equalities.iter().collect();
+        let payload_eq = Bool::and(vc.ctx, &payload_refs);
+        variant_equalities.push(Bool::and(vc.ctx, &[&left_tag, &right_tag, &payload_eq]));
+    }
+    if !has_array_payload {
+        return Ok(None);
+    }
+    let variant_refs: Vec<&Bool> = variant_equalities.iter().collect();
+    Ok(Some(Bool::or(vc.ctx, &variant_refs)))
+}
+
 fn enum_payload_field_read<'a>(
     vc: &VCtx<'a>,
     inner_expr: &Expr,
@@ -2617,9 +3118,17 @@ fn enum_payload_field_read<'a>(
     if field_leaves.len() != payload_width {
         return Ok(None);
     }
-    let direct_array_payload = datatype::array_payload_element_type(&field_leaves).is_some();
+    let direct_struct_array_payload =
+        datatype::struct_array_payload_element_type(&field_type, vc.module_env);
+    let direct_array_payload = datatype::array_payload_element_type(&field_leaves).is_some()
+        || direct_struct_array_payload.is_some();
+    if path.len() == 1 && direct_struct_array_payload.is_some() {
+        return Err(MumeiError::type_error(
+            "direct reads of struct-array enum payloads are not supported; destructure the payload with match",
+        ));
+    }
 
-    let mut terminal_type = field_type;
+    let mut terminal_type = field_type.clone();
     for segment in &path[1..] {
         let resolved = vc.module_env.resolve_base_type(&terminal_type);
         let Some(sdef) = vc.module_env.get_struct(&resolved).or_else(|| {
@@ -4861,6 +5370,7 @@ pub(crate) fn expr_to_z3<'a>(
                                     len: result_len.clone(),
                                     _keep: result_z3.clone(),
                                     struct_leaves: result_struct_arrays.clone(),
+                                    struct_element_type: None,
                                 },
                             );
                         }
@@ -5279,6 +5789,9 @@ pub(crate) fn expr_to_z3<'a>(
                             let mut payload_snapshots = Vec::with_capacity(args.len());
                             for (i, arg) in args.iter().enumerate() {
                                 let arg_z3 = expr_to_z3(vc, arg, env, solver_opt)?;
+                                if arg_z3.as_array().is_some() {
+                                    mark_array_value_sources_shared(vc, env, arg, &arg_z3)?;
+                                }
                                 let payload_snapshot = enum_ctor
                                     .and_then(|(enum_def, idx)| enum_def.variants.get(idx))
                                     .and_then(|variant| variant.field_types.get(i))
@@ -5290,9 +5803,6 @@ pub(crate) fn expr_to_z3<'a>(
                                         if datatype::array_payload_element_type(&field_leaves)
                                             .is_some()
                                         {
-                                            if let Expr::Variable(name) = arg {
-                                                super::z3_types::mark_array_shared(ctx, env, name);
-                                            }
                                             let array = match arg {
                                                 Expr::Variable(name) => env
                                                     .get(&format!("__z3_arr_{name}"))
@@ -5312,6 +5822,22 @@ pub(crate) fn expr_to_z3<'a>(
                                             Some(datatype::PayloadSnapshot {
                                                 leaves: vec![array_ast.into(), len],
                                             })
+                                        } else if datatype::struct_array_payload_element_type(
+                                            &field_type,
+                                            vc.module_env,
+                                        )
+                                        .is_some()
+                                        {
+                                            datatype::struct_array_payload_leaves(
+                                                vc,
+                                                env,
+                                                &field_type,
+                                                arg,
+                                                &arg_z3,
+                                                solver_opt,
+                                            )
+                                            .ok()?
+                                            .map(|leaves| datatype::PayloadSnapshot { leaves })
                                         } else if vc.module_env.structs.contains_key(
                                             &vc.module_env.resolve_base_type(&field_type),
                                         ) {
@@ -6023,7 +6549,8 @@ pub(crate) fn expr_to_z3<'a>(
                             && r.as_datatype().is_some()
                             && l.get_sort() == r.get_sort() =>
                     {
-                        let eq = l._eq(&r);
+                        let eq =
+                            enum_payload_value_equality(vc, &l, &r)?.unwrap_or_else(|| l._eq(&r));
                         return Ok(if matches!(op, Op::Neq) {
                             eq.not().into()
                         } else {
@@ -6434,7 +6961,7 @@ pub(crate) fn expr_to_z3<'a>(
             }
             Ok(handle)
         }
-        Expr::Match { target, arms } => {
+        Expr::Match { target, arms } => invoke_match_lowering(|| {
             let target_z3 = expr_to_z3(vc, target, env, solver_opt)?;
 
             // Declared enum type of the scrutinee, when it's a bare
@@ -6497,6 +7024,7 @@ pub(crate) fn expr_to_z3<'a>(
                 }
             }
 
+            let array_elem_types_before_match = vc.local_array_elem_types.borrow().clone();
             // ========================================================
             // Z3 網羅性チェック (Exhaustiveness Check)
             // ========================================================
@@ -6506,6 +7034,7 @@ pub(crate) fn expr_to_z3<'a>(
                 let mut arm_conditions: Vec<Bool> = Vec::new();
                 let mut coverage_negations: Vec<Bool> = Vec::new();
                 let enum_types_before_coverage = vc.local_enum_types.borrow().clone();
+                let array_elem_types_before_coverage = array_elem_types_before_match.clone();
                 for arm in arms {
                     *vc.local_enum_types.borrow_mut() = enum_types_before_coverage.clone();
                     // This coverage pass binds payload names only to make
@@ -6515,6 +7044,7 @@ pub(crate) fn expr_to_z3<'a>(
                     // match. Snapshot/restore per arm like the arm pass
                     // below does.
                     let int_types_before_check = vc.local_int_types.borrow().clone();
+                    let array_elem_types_before_check = vc.local_array_elem_types.borrow().clone();
                     let cond = pattern_to_z3_condition(
                         ctx,
                         &arm.pattern,
@@ -6561,6 +7091,8 @@ pub(crate) fn expr_to_z3<'a>(
                         }
                         vc.check_i64_overflow.set(check_i64);
                         *vc.local_enum_types.borrow_mut() = enum_types_before_guard;
+                        *vc.local_array_elem_types.borrow_mut() =
+                            array_elem_types_before_check.clone();
                         let guard_z3 = guard_z3?
                             .as_bool()
                             .ok_or(MumeiError::type_error("Guard must be boolean"))?;
@@ -6570,10 +7102,12 @@ pub(crate) fn expr_to_z3<'a>(
                     };
                     *vc.local_int_types.borrow_mut() = int_types_before_check;
                     *vc.local_enum_types.borrow_mut() = enum_types_before_coverage.clone();
+                    *vc.local_array_elem_types.borrow_mut() = array_elem_types_before_check;
                     coverage_negations.push(full_cond.not());
                     arm_conditions.push(full_cond);
                 }
                 *vc.local_enum_types.borrow_mut() = enum_types_before_coverage;
+                *vc.local_array_elem_types.borrow_mut() = array_elem_types_before_coverage;
 
                 // 網羅性: ¬(P_1 ∨ ... ∨ P_n) が Unsat か？
                 let arm_refs: Vec<&Bool> = arm_conditions.iter().collect();
@@ -6642,6 +7176,8 @@ pub(crate) fn expr_to_z3<'a>(
             // are then folded into an ite chain from the last arm outward.
             let mut accumulated_negations: Vec<Bool> = Vec::new();
             let mut arm_results: Vec<(Bool, Dynamic)> = Vec::with_capacity(arms.len());
+            let mut arm_array_results: Vec<(Bool, Option<MatchArrayResult>)> =
+                Vec::with_capacity(arms.len());
             // Per-arm writes to pre-existing vars fold back under first-match
             // precedence: collected forward, then merged last-to-first so an
             // earlier arm's state overrides a later arm's (the accumulated
@@ -6798,23 +7334,19 @@ pub(crate) fn expr_to_z3<'a>(
                         stack.pop();
                     }
                 }
+                let body_val = body_val?;
+                let array_result =
+                    match_arm_array_result(vc, &arm.body, &body_val, &mut arm_env, solver_opt)?;
                 *vc.local_array_elem_types.borrow_mut() = array_elem_types_before_arm;
                 *vc.local_enum_types.borrow_mut() = enum_types_before_arms.clone();
-                let body_val = body_val?;
                 *vc.local_int_types.borrow_mut() = int_types_before_arm.clone();
-                for key in arm_bound
-                    .iter()
-                    .filter(|key| key.starts_with("__array_len#"))
-                {
-                    if let Some(len) = arm_env.get(key) {
-                        env.insert(key.clone(), len.clone());
-                    }
-                }
                 arm_states.push((full_cond.clone(), arm_env, arm_bound));
+                arm_array_results.push((full_cond.clone(), array_result));
                 arm_results.push((full_cond.clone(), body_val));
                 accumulated_negations.push(full_cond.not());
             }
             *vc.local_enum_types.borrow_mut() = enum_types_before_arms;
+            *vc.local_array_elem_types.borrow_mut() = array_elem_types_before_match;
 
             // Fold the arm values into an ite chain from the last arm
             // outward: `ite(c_1, b_1, ite(c_2, b_2, ... b_n))`, and fold the
@@ -6839,8 +7371,27 @@ pub(crate) fn expr_to_z3<'a>(
             }
             *vc.local_lambdas.borrow_mut() = lambdas_before;
 
-            result.ok_or_else(|| MumeiError::verification("Match expression has no arms"))
-        }
+            let result =
+                result.ok_or_else(|| MumeiError::verification("Match expression has no arms"))?;
+            let array_result = merge_match_array_results(&arm_array_results)?;
+            if let Some(array) = result.as_array() {
+                let array_result = array_result.ok_or_else(|| {
+                    MumeiError::type_error("could not resolve array metadata for match result")
+                })?;
+                super::z3_types::register_array_result(
+                    vc,
+                    &array,
+                    array_result.len,
+                    array_result.struct_element_type,
+                    array_result.struct_leaves,
+                );
+            } else if array_result.is_some() {
+                return Err(MumeiError::type_error(
+                    "match branches have incompatible array results",
+                ));
+            }
+            Ok(result)
+        }),
 
         // =================================================================
         // 非同期処理 + リソース管理の Z3 検証
@@ -7558,6 +8109,7 @@ pub(crate) fn expr_to_z3<'a>(
                                 len: result_len.clone(),
                                 _keep: result_z3.clone(),
                                 struct_leaves: result_struct_arrays.clone(),
+                                struct_element_type: None,
                             },
                         );
                     }

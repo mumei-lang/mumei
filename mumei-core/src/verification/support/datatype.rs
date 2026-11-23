@@ -66,6 +66,16 @@ pub(crate) fn is_self_recursive_adt(enum_def: &EnumDef, module_env: &ModuleEnv) 
     if !enum_def.type_params.is_empty()
         || enum_def.name.contains('<')
         || enum_def.variants.is_empty()
+        || enum_def.variants.iter().any(|variant| {
+            variant.field_types.iter().any(|field| {
+                !is_direct_self_field(enum_def, field, module_env)
+                    && struct_array_payload_element_type(
+                        &payload_field_type_name(field),
+                        module_env,
+                    )
+                    .is_some()
+            })
+        })
         || !enum_def.variants.iter().any(|variant| {
             !variant
                 .field_types
@@ -220,17 +230,39 @@ pub(crate) fn array_payload_element_type(leaves: &[(String, String)]) -> Option<
     }
 }
 
+pub(crate) fn struct_array_payload_element_type(
+    field_type: &str,
+    module_env: &ModuleEnv,
+) -> Option<String> {
+    let resolved = module_env.resolve_base_type(field_type);
+    let element_type = resolved.strip_prefix('[')?.strip_suffix(']')?.trim();
+    let element_type = module_env.resolve_base_type(element_type);
+    crate::verification::translator::z3_types::struct_array_leaf_types(&element_type, module_env)?;
+    Some(element_type)
+}
+
+pub(crate) fn array_payload_length_index(
+    leaves: &[(String, String)],
+    array_index: usize,
+) -> Option<usize> {
+    let (name, base) = leaves.get(array_index)?;
+    base.strip_prefix("array:")?;
+    let array_name = name.split_once('#').map(|(root, _)| root).unwrap_or(name);
+    let length_name = format!("{array_name}#len");
+    leaves
+        .iter()
+        .position(|(candidate, base)| candidate == &length_name && base == "array_len")
+}
+
 /// Iterate the array/length sibling pairs in a flattened payload leaf list.
-/// The length name is the array leaf's path with `#len` appended, including
-/// the direct-payload pair `""` / `"#len"`.
+/// Each array leaf is paired with the shared length leaf for its root array;
+/// direct `[T]` payloads use `""` / `"#len"`.
 pub(crate) fn array_payload_leaf_pairs<'a>(
     leaves: &'a [(String, String)],
 ) -> impl Iterator<Item = (usize, &'a str)> + 'a {
-    leaves.windows(2).enumerate().filter_map(|(index, pair)| {
-        let (name, base) = &pair[0];
+    leaves.iter().enumerate().filter_map(|(index, (_, base))| {
         let element_type = base.strip_prefix("array:")?;
-        let len_name = format!("{name}#len");
-        (pair[1].0 == len_name && pair[1].1 == "array_len").then_some((index, element_type))
+        array_payload_length_index(leaves, index).map(|_| (index, element_type))
     })
 }
 
@@ -242,7 +274,10 @@ pub(crate) fn assert_payload_array_lengths<'a>(
     leaf_values: &[Dynamic<'a>],
 ) {
     for (array_index, _) in array_payload_leaf_pairs(leaf_types) {
-        let Some(length) = leaf_values.get(array_index + 1) else {
+        let Some(length_index) = array_payload_length_index(leaf_types, array_index) else {
+            continue;
+        };
+        let Some(length) = leaf_values.get(length_index) else {
             continue;
         };
         if let Some(nonnegative) =
@@ -295,9 +330,36 @@ fn collect_field_leaves(
         .and_then(|ty| ty.strip_suffix(']'))
         .map(str::trim)
     {
+        if !field_is_scalar(element_type, module_env) {
+            if name.is_empty() {
+                let struct_leaves = struct_array_leaf_types_fueled(
+                    element_type,
+                    module_env,
+                    visiting,
+                    work,
+                    fuel,
+                    memo,
+                )?;
+                let len_name = format!("{name}#len");
+                if leaves.len() + struct_leaves.len() + 1 > MAX_PAYLOAD_LEAVES
+                    || !seen.insert(len_name.clone())
+                {
+                    return None;
+                }
+                for (path, leaf_type) in struct_leaves {
+                    let leaf_name = format!("{name}#{path}");
+                    if !seen.insert(leaf_name.clone()) {
+                        return None;
+                    }
+                    leaves.push((leaf_name, format!("array:{leaf_type}")));
+                }
+                leaves.push((len_name, "array_len".to_string()));
+                return Some(());
+            }
+            return None;
+        }
         let len_name = format!("{name}#len");
-        if !field_is_scalar(element_type, module_env)
-            || leaves.len() + 2 > MAX_PAYLOAD_LEAVES
+        if leaves.len() + 2 > MAX_PAYLOAD_LEAVES
             || !seen.insert(name.clone())
             || !seen.insert(len_name.clone())
         {
@@ -355,6 +417,48 @@ fn collect_field_leaves(
     Some(())
 }
 
+fn struct_array_leaf_types_fueled(
+    element_type: &str,
+    module_env: &ModuleEnv,
+    visiting: &mut std::collections::HashSet<String>,
+    work: &mut usize,
+    fuel: u8,
+    memo: &mut FiniteFuelMemo,
+) -> Option<Vec<(String, String)>> {
+    let resolved = module_env.resolve_base_type(element_type);
+    let base = type_name_base(&resolved);
+    let sdef = module_env
+        .get_struct(&resolved)
+        .or_else(|| module_env.get_struct(base))?;
+    if !visiting.insert(base.to_string()) {
+        return None;
+    }
+    let mut leaves = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for field in &sdef.fields {
+        collect_field_leaves(
+            &field.type_name,
+            module_env,
+            field.name.clone(),
+            &mut leaves,
+            visiting,
+            &mut seen,
+            work,
+            fuel,
+            memo,
+        )?;
+    }
+    visiting.remove(base);
+    if leaves.is_empty()
+        || leaves
+            .iter()
+            .any(|(_, leaf_type)| leaf_type.starts_with("array:") || leaf_type == "array_len")
+    {
+        return None;
+    }
+    Some(leaves)
+}
+
 /// The declared leaf values of a struct-typed payload value, in
 /// `field_leaf_types` order. The value's flat env bindings
 /// (`__struct_<handle>_<path>` entries, incl. deeper `<field>_<leaf>`
@@ -397,6 +501,59 @@ pub(crate) fn flattened_value_leaves<'a>(
         }
     }
     Some(values)
+}
+
+pub(crate) fn struct_array_payload_leaves<'a>(
+    vc: &VCtx<'a>,
+    env: &mut crate::verification::types::Env<'a>,
+    field_type: &str,
+    expression: &Expr,
+    value: &Dynamic<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> MumeiResult<Option<Vec<Dynamic<'a>>>> {
+    let Some(element_type) = struct_array_payload_element_type(field_type, vc.module_env) else {
+        return Ok(None);
+    };
+    let Some(snapshot) = crate::verification::translator::z3_types::snapshot_struct_array_leaves(
+        vc, env, expression, value, None,
+    )?
+    else {
+        return Ok(None);
+    };
+    if snapshot.element_type() != element_type {
+        return Ok(None);
+    }
+    let Some(array) = value.as_array() else {
+        return Ok(None);
+    };
+    let length = crate::verification::translator::z3_types::array_len_for_expr(
+        vc,
+        env,
+        Some(expression),
+        &value.clone(),
+        solver_opt,
+    );
+    let Some(leaves) = field_leaf_types(field_type, vc.module_env) else {
+        return Ok(None);
+    };
+    let mut values = Vec::with_capacity(leaves.len());
+    for (name, base) in leaves {
+        if base == "array_len" {
+            values.push(length.clone());
+        } else if base.starts_with("array:") {
+            let Some(path) = name.strip_prefix('#') else {
+                return Ok(None);
+            };
+            let Some(leaf) = snapshot.leaf_array(path) else {
+                return Ok(None);
+            };
+            values.push(leaf.into());
+        } else {
+            return Ok(None);
+        }
+    }
+    crate::verification::translator::z3_types::register_array_value_len(env, &array, length);
+    Ok(Some(values))
 }
 
 /// `(accessor_name, sort)` pairs one declared payload field contributes to
@@ -654,20 +811,31 @@ fn enum_leaf_domain_for<'a>(
                 let base = &leaves[leaf_idx].1;
                 if let Some(element_type) = base.strip_prefix("array:") {
                     let array = variant_selector_apply(&sort, vidx, accessor_idx, value)?;
-                    let length = variant_selector_apply(&sort, vidx, accessor_idx + 1, value)?;
+                    let length_index = array_payload_length_index(&leaves, leaf_idx)?;
+                    let length_accessor = accessor_idx + length_index.saturating_sub(leaf_idx);
+                    let length = variant_selector_apply(&sort, vidx, length_accessor, value)?;
                     let nonnegative =
                         crate::verification::translator::nonneg_constraint(vc.ctx, &length)?;
                     bounds.push(nonnegative);
                     if *budget > 0 {
-                        if let Some(bound) =
+                        let domain = if let Some(enum_type) = element_type.strip_prefix("enum:") {
+                            let _ = enum_type;
+                            enum_array_leaf_domain(vc, &array, &length)
+                        } else {
                             array_int_leaf_domain(vc, &array, &length, element_type)
-                        {
+                        };
+                        if let Some(bound) = domain {
                             *budget = budget.saturating_sub(1);
                             bounds.push(bound);
                         }
                     }
-                    accessor_idx += 2;
-                    leaf_idx += 2;
+                    accessor_idx += 1;
+                    leaf_idx += 1;
+                    continue;
+                }
+                if base == "array_len" {
+                    accessor_idx += 1;
+                    leaf_idx += 1;
                     continue;
                 }
                 let sel = variant_selector_apply(&sort, vidx, accessor_idx, value);
@@ -936,6 +1104,7 @@ fn expand_ctor_args<'a>(
             )));
         };
         if array_payload_element_type(&field_leaves).is_some()
+            || struct_array_payload_element_type(&field_type, vc.module_env).is_some()
             || vc.module_env.structs.contains_key(&base)
         {
             let Some(snapshot) = payload_snapshots.get(i).and_then(Option::as_ref) else {
@@ -943,7 +1112,8 @@ fn expand_ctor_args<'a>(
                     "enum constructor payload '{field_type}' has no value snapshot"
                 )));
             };
-            if array_payload_element_type(&field_leaves).is_some()
+            if (array_payload_element_type(&field_leaves).is_some()
+                || struct_array_payload_element_type(&field_type, vc.module_env).is_some())
                 && snapshot
                     .leaves
                     .first()
@@ -1047,7 +1217,7 @@ fn check_enum_ctor_payload_domains<'a>(
                 "enum constructor payload '{field_type}' has no flattened leaves"
             ))
         })?;
-        for (leaf_name, leaf_type) in leaf_types {
+        for (leaf_idx, (leaf_name, leaf_type)) in leaf_types.iter().enumerate() {
             if leaf_type == "array_len" {
                 offset += 1;
                 continue;
@@ -1056,10 +1226,21 @@ fn check_enum_ctor_payload_domains<'a>(
                 MumeiError::type_error("enum constructor is missing a payload leaf")
             })?;
             if let Some(element_type) = leaf_type.strip_prefix("array:") {
-                let length = leaf_args.get(offset + 1).ok_or_else(|| {
-                    MumeiError::type_error("enum constructor is missing an array length leaf")
-                })?;
-                if let Some(domain) = array_int_leaf_domain(vc, value, length, element_type) {
+                let length_idx =
+                    array_payload_length_index(&leaf_types, leaf_idx).ok_or_else(|| {
+                        MumeiError::type_error("enum constructor is missing an array length leaf")
+                    })?;
+                let length = leaf_args
+                    .get(offset + length_idx.saturating_sub(leaf_idx))
+                    .ok_or_else(|| {
+                        MumeiError::type_error("enum constructor is missing an array length leaf")
+                    })?;
+                let domain = if element_type.starts_with("enum:") {
+                    enum_array_leaf_domain(vc, value, length)
+                } else {
+                    array_int_leaf_domain(vc, value, length, element_type)
+                };
+                if let Some(domain) = domain {
                     let leaf_payload_name = if leaf_name.is_empty() {
                         payload_name.clone()
                     } else {
@@ -1083,7 +1264,7 @@ fn check_enum_ctor_payload_domains<'a>(
             } else {
                 (
                     leaf_type.clone(),
-                    scalar_int_leaf_domain(vc, &leaf_type, value),
+                    scalar_int_leaf_domain(vc, leaf_type, value),
                 )
             };
             if let Some(domain) = domain {
