@@ -405,9 +405,11 @@ pub fn validate_pure_i64_optimized(
 /// Admission is the leaf subset only (`encode_hir_pure_i64_leaf`):
 /// uniform-width scalar signatures (`i64`, `i128`/`u128` at their
 /// two-slot carriers, or `f64` pass-through leaves), `let` bindings,
-/// short-circuit `&&`/`||`/`=>`, tail `if` branches, and i64-carrying
+/// short-circuit `&&`/`||`/`=>`, tail `if` branches, i64-carrying
 /// uninterpreted call sites (ordered operations over a call result
-/// stay outside until callee signatures are wired in). Anything wider
+/// stay outside until callee signatures are wired in), and read-only
+/// `[i64]` parameters inside the i64 domain (`a[i]` as the
+/// bounds-checked read, `len(a)` as the stored count). Anything wider
 /// fails closed as a validation error. The return is the bare outcome:
 /// this is the stage check, not a profile attestation.
 pub fn validate_hir_pure_i64_leaf(
@@ -440,7 +442,18 @@ pub fn validate_hir_pure_i64_leaf(
         .ok_or(ValidationError("missing source function"))?;
     // The module is parsed/verified and remains alive for every raw LLVM query.
     let (outcome, _) = unsafe {
-        check_module(module.as_mut_ptr(), false, false, false, false)?;
+        check_module(
+            module.as_mut_ptr(),
+            model.bounded_memory,
+            false,
+            false,
+            false,
+            &BTreeMap::from([(
+                model.function_name.clone(),
+                model.array_params.iter().map(Option::is_some).collect(),
+            )]),
+            model.array_params.iter().any(|a| a.is_some()),
+        )?;
         compare_function(
             &context,
             function.as_value_ref(),
@@ -448,7 +461,7 @@ pub fn validate_hir_pure_i64_leaf(
             &BTreeMap::new(),
             false,
             false,
-            false,
+            model.array_params.iter().any(|a| a.is_some()),
         )?
     };
     Ok(outcome)
@@ -515,6 +528,8 @@ fn validate(
                 model.bounded_memory,
                 false,
                 optimized,
+                false,
+                &BTreeMap::new(),
                 false,
             )?;
         }
@@ -629,7 +644,29 @@ fn validate_module(
     // the bounded-memory whitelist — sibling members are potential call
     // targets and re-gate on their own model at comparison time.
     let any_memory = models.iter().any(|model| model.bounded_memory);
-    unsafe { check_module(module.as_mut_ptr(), any_memory, false, optimized, false)? };
+    let array_param_members: BTreeMap<String, Vec<bool>> = models
+        .iter()
+        .map(|model| {
+            (
+                model.function_name.clone(),
+                model.array_params.iter().map(Option::is_some).collect(),
+            )
+        })
+        .collect();
+    let any_array_params = models
+        .iter()
+        .any(|model| model.array_params.iter().any(Option::is_some));
+    unsafe {
+        check_module(
+            module.as_mut_ptr(),
+            any_memory,
+            false,
+            optimized,
+            false,
+            &array_param_members,
+            any_array_params,
+        )?
+    };
     let mut functions = Vec::new();
     let mut any_definedness = false;
     let mut any_param_domain = false;
@@ -1673,6 +1710,8 @@ unsafe fn check_module(
     f64_arithmetic: bool,
     optimized: bool,
     str_leaves: bool,
+    array_param_members: &BTreeMap<String, Vec<bool>>,
+    array_params_admitted: bool,
 ) -> Result<()> {
     check_module_environment(module, str_leaves)?;
     let mut member = LLVMGetFirstFunction(module);
@@ -1700,6 +1739,11 @@ unsafe fn check_module(
             member = LLVMGetNextFunction(member);
             continue;
         }
+        let member_name = callee_name(member);
+        let array_param_mask = member_name
+            .as_ref()
+            .and_then(|name| array_param_members.get(name))
+            .map(Vec::as_slice);
         check_function(
             member,
             LLVMCountParams(member) as usize,
@@ -1710,7 +1754,8 @@ unsafe fn check_module(
                 bounded_memory,
                 f64_arithmetic,
                 optimized,
-                ..CheckGates::default()
+                array_param_mask,
+                array_params_admitted,
             },
         )?;
         member = LLVMGetNextFunction(member);

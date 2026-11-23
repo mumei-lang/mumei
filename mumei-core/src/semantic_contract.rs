@@ -8276,7 +8276,11 @@ impl<'ctx> PureI64Body<'ctx> {
 /// result share one declared type — `i64`, `i128`/`u128` (carried as
 /// the two-slot `[lo, hi]` leaves `param_env` uses), or `f64`
 /// pass-through leaves whose IEEE-754 bit patterns only variables and
-/// lets may carry. The body is a flat block of `let` bindings plus a
+/// lets may carry — optionally alongside read-only `[i64]` array
+/// parameters inside the i64 domain (`a[i]` is the bounds-checked
+/// `ite(0 <= i < len, select, 0)` read the emitter's merged
+/// `phi(loaded, 0)` produces and `len(a)` its stored count;
+/// whole-array use and writes stay outside). The body is a flat block of `let` bindings plus a
 /// tail expression; expressions are `Number` / `Variable` / `BinaryOp`
 /// / single-expression `IfThenElse` / i64-carrying uninterpreted call
 /// sites. Ordered operations (`<` `<=` `>` `>=` `/` `%`) over a
@@ -8294,30 +8298,69 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
         return Err(SemanticContractError::Unsupported("hir effects"));
     }
     // Uniform-width scalar subset: every parameter and the result share
-    // one declared scalar type — `i64`, `i128` or `u128`. Mixing widths
-    // or signedness inside a signature stays outside this slice (the
-    // widening conventions are a later slice), as do all other types.
+    // one declared scalar type — `i64`, `i128` or `u128` — optionally
+    // alongside read-only `[i64]` array parameters (the bounded-memory
+    // leaf). Mixing widths or signedness inside a signature stays
+    // outside this slice (the widening conventions are a later slice),
+    // as do all other types.
+    let array_param: Vec<bool> = atom
+        .signature
+        .params
+        .iter()
+        .map(|p| p.ty.as_deref() == Some("[i64]"))
+        .collect();
+    let has_array = array_param.iter().any(|a| *a);
     let mut tys: Vec<Option<&str>> = atom
         .signature
         .params
         .iter()
+        .filter(|p| p.ty.as_deref() != Some("[i64]"))
         .map(|p| p.ty.as_deref())
         .collect();
     tys.push(atom.signature.return_type.as_deref());
     // `f64` leaves are their own pass-through subset: every parameter
     // and the result is `f64`, and the body may only carry them through
     // (variables and lets — FP arithmetic stays outside this slice).
-    let float = !tys.is_empty() && tys.iter().all(|ty| *ty == Some("f64"));
+    let float = !has_array && !tys.is_empty() && tys.iter().all(|ty| *ty == Some("f64"));
     let width = match tys.first() {
         None | Some(None) | Some(Some("i64")) | Some(Some("f64")) => 64,
         Some(Some("i128")) | Some(Some("u128")) => 128,
         _ => return Err(SemanticContractError::Unsupported("hir param type")),
     };
     let signed = !float && !tys.contains(&Some("u128"));
+    if has_array && !(width == 64 && signed) {
+        // `[i64]` parameters are the bounded-memory leaf of the i64
+        // domain only — wide or float scalars with arrays stay outside.
+        return Err(SemanticContractError::Unsupported(
+            "hir array param outside i64",
+        ));
+    }
+    enum HirLeafValue<'ctx> {
+        Scalar(BV<'ctx>, bool),
+        Array(BV<'ctx>, Array<'ctx>),
+    }
     let mut inputs = Vec::new();
-    let mut env: HashMap<String, (BV<'ctx>, bool)> = HashMap::new();
+    let mut env: HashMap<String, HirLeafValue<'ctx>> = HashMap::new();
+    let mut array_params: Vec<Option<(BV<'ctx>, Array<'ctx>)>> = Vec::new();
     let mut param_leaf_doubles = Vec::new();
-    for param in &atom.signature.params {
+    for (i, param) in atom.signature.params.iter().enumerate() {
+        if array_param[i] {
+            // The same read-only `[i64]` convention `param_env` binds:
+            // a nonnegative length leaf plus a cell store, read via the
+            // bounds-checked `ite` read — no input slot is consumed.
+            let len = array_param_len(context, &atom.signature.name, &param.name);
+            let store = Array::new_const(
+                context,
+                format!("array_param_{}_{}_store", atom.signature.name, param.name),
+                &Sort::bitvector(context, 64),
+                &Sort::bitvector(context, 64),
+            );
+            array_params.push(Some((len.clone(), store.clone())));
+            env.insert(param.name.clone(), HirLeafValue::Array(len, store));
+            param_leaf_doubles.push(vec![false]);
+            continue;
+        }
+        array_params.push(None);
         match (param.ty.as_deref(), width, signed, float) {
             (None | Some("i64"), 64, _, false) => {}
             (Some("f64"), 64, _, true) => {}
@@ -8333,12 +8376,15 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
             let hi = BV::new_const(context, format!("param.{}.hi", param.name), 64);
             inputs.push(lo.clone());
             inputs.push(hi.clone());
-            env.insert(param.name.clone(), (hi.concat(&lo), false));
+            env.insert(
+                param.name.clone(),
+                HirLeafValue::Scalar(hi.concat(&lo), false),
+            );
             param_leaf_doubles.push(vec![false, false]);
         } else {
             let input = BV::new_const(context, format!("param.{}", param.name), 64);
             inputs.push(input.clone());
-            env.insert(param.name.clone(), (input, false));
+            env.insert(param.name.clone(), HirLeafValue::Scalar(input, false));
             param_leaf_doubles.push(vec![float]);
         }
     }
@@ -8352,7 +8398,7 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
 
     fn encode_expr<'ctx>(
         expr: &HirExpr,
-        env: &HashMap<String, (BV<'ctx>, bool)>,
+        env: &HashMap<String, HirLeafValue<'ctx>>,
         context: &'ctx Context,
         guard: &Bool<'ctx>,
         definedness: &mut Vec<Bool<'ctx>>,
@@ -8386,10 +8432,29 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                 },
                 false,
             )),
-            HirExpr::Variable(name) => env
-                .get(name)
-                .cloned()
-                .ok_or(SemanticContractError::Unsupported("hir free variable")),
+            HirExpr::Variable(name) => match env.get(name) {
+                Some(HirLeafValue::Scalar(value, call)) => Ok((value.clone(), *call)),
+                // Whole-value array use (as a call argument, operand or
+                // result) stays outside the bounded-memory leaf.
+                Some(HirLeafValue::Array(..)) => {
+                    Err(SemanticContractError::Unsupported("hir whole-array value"))
+                }
+                None => Err(SemanticContractError::Unsupported("hir free variable")),
+            },
+            HirExpr::ArrayAccess(name, index) => {
+                // The bounds-checked read the emitter produces: the
+                // merged `phi(loaded, 0)` yields 0 out of bounds, so the
+                // source model records no definedness obligation — the
+                // same `array_read` convention.
+                let Some(HirLeafValue::Array(len, store)) = env.get(name) else {
+                    return Err(SemanticContractError::Unsupported(
+                        "hir access on a non-array binding",
+                    ));
+                };
+                let (i, i_call) =
+                    encode_expr(index, env, context, guard, definedness, call_sites, scalar)?;
+                Ok((array_read(context, store, len, &i), i_call))
+            }
             HirExpr::BinaryOp(lhs, op, rhs) => {
                 let (l, l_call) =
                     encode_expr(lhs, env, context, guard, definedness, call_sites, scalar)?;
@@ -8520,6 +8585,15 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                 Ok((c._eq(&zero).not().ite(&t, &e), c_call || t_call || e_call))
             }
             HirExpr::Call { name, args, .. } => {
+                // `len(a)` on a `[i64]` parameter reads its stored
+                // element count — the emitted `arrlen` slot load.
+                if name == "len" && args.len() == 1 {
+                    if let HirExpr::Variable(var) = &args[0] {
+                        if let Some(HirLeafValue::Array(len, _)) = env.get(var) {
+                            return Ok((len.clone(), false));
+                        }
+                    }
+                }
                 // The same uninterpreted site the source encoder and the
                 // IR `call` encoding produce: `mumei_call_<name>_<arity>`
                 // applied to the encoded args. The callee's own body is a
@@ -8587,7 +8661,7 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                     &mut call_sites,
                     scalar,
                 )?;
-                env.insert(var.clone(), bound);
+                env.insert(var.clone(), HirLeafValue::Scalar(bound.0, bound.1));
             }
             HirStmt::Expr(e) => {
                 encode_expr(
@@ -8617,7 +8691,18 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
     body.inputs = inputs;
     body.definedness = definedness;
     body.call_sites = call_sites;
-    body.array_params = vec![None; atom.signature.params.len()];
+    body.array_params = array_params;
+    body.array_len_domain = atom
+        .signature
+        .params
+        .iter()
+        .filter(|param| param.ty.as_deref() == Some("[i64]"))
+        .map(|param| {
+            array_param_len(context, &atom.signature.name, &param.name)
+                .bvsge(&BV::from_u64(context, 0, 64))
+        })
+        .collect();
+    body.bounded_memory = has_array;
     body.param_shapes = vec![None; atom.signature.params.len()];
     body.param_leaf_doubles = param_leaf_doubles;
     body.result_leaf_doubles = vec![float];

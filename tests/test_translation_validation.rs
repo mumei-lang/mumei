@@ -4403,3 +4403,44 @@ fn hir_leaf_compare_rejects_ordered_ops_over_call_results() {
         "ordered ops over a call result stay outside the subset"
     );
 }
+
+#[test]
+fn hir_leaf_compare_handles_bounded_array_reads() {
+    // `a[i]` is the emitter's bounds-check + load + merged `phi(loaded, 0)`
+    // — an out-of-bounds read yields 0 on both sides.
+    let src = source("a: [i64], i: i64", "a[i]");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+    // The same read on the wrong element is a genuine mismatch.
+    let wrong = emitted(&source("a: [i64], i: i64", "a[i] + 1"));
+    assert_eq!(hir_outcome(&src, &wrong), Outcome::Different);
+}
+
+#[test]
+fn hir_leaf_compare_binds_array_length() {
+    // `len(a)` reads the stored element count — the `arrlen` slot.
+    let src = source("a: [i64]", "len(a)");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn hir_leaf_compare_rejects_array_writes_and_whole_values() {
+    // `[i64]` parameters are read-only in this profile: a store stays
+    // outside the leaf subset, and so does passing `a` itself as a value.
+    for body in ["a[0] = 1; a[i]", "g(a)"] {
+        let src = source("a: [i64], i: i64", body);
+        let Item::Atom(atom) = parse_module_checked(&src).unwrap().remove(0) else {
+            panic!("atom")
+        };
+        let hir = lower_atom_to_hir(&atom);
+        assert!(
+            tv::validate_hir_pure_i64_leaf(&hir, "", Options::default()).is_err(),
+            "{body} stays outside the read-only leaf subset"
+        );
+    }
+}
