@@ -3768,16 +3768,21 @@ is small. Measure it after the inference change.
 
 Design memos for the residual shapes measured after v27. None of them is implemented:
 - **Array returns and array call results (5 files):** held because of
-  codegen. `-> [i64]` atoms return `{ i64, ptr }` pointing at an `alloca`
-  in the callee's frame, which dangles after the return. Caller code cannot
-  bind a call result as an array (`len()` of the bound local and fat-pointer
-  lookup both fail), so neither positive file builds. A profile slice would
-  give 0 sidecars and would attach contracts to memory-unsafe IR. A
-  codegen change comes first: a caller-provided buffer or a heap allocation
-  with defined ownership for returned arrays. After that, the profile model
-  is: `result` as a read-only array in `ensures`, and call results as
-  uninterpreted `len`/`store` applications with a nonnegative-length
-  assumption.
+  codegen, which has two separate gaps.
+  - When the tail is an array literal or a local binding, a `-> [i64]` atom
+    returns `{ i64, ptr }` pointing at an `alloca` in the callee's frame. That
+    pointer dangles after the return. Returning an array parameter unchanged
+    reuses the caller's pointer and is not affected.
+  - Caller code cannot bind a call result as an array: `len()` of the bound
+    local and the fat-pointer lookup both fail. Because of this, neither
+    positive file builds.
+
+  A profile slice would therefore produce 0 sidecars, and it would attach
+  contracts to memory-unsafe IR. A codegen change comes first: a
+  caller-provided buffer, or a heap allocation with defined ownership, for
+  returned arrays. The profile model after that: `result` is a read-only
+  array in `ensures`, and call results are uninterpreted `len`/`store`
+  applications with a nonnegative-length assumption.
 - **`[u32]` and other narrow element kinds (3 files):** 1 positive file.
   It passes an array as a call argument, and one file uses a lambda. A
   narrow-element read can assume the zero-extended element range. Passing
@@ -3792,21 +3797,28 @@ Design memos for the residual shapes measured after v27. None of them is impleme
 - **Tuple result (1 file):** a tuple return needs a product sort in the
   contract and a struct-return ABI mapping. Held for a single file.
 
-Residual limitations of the bounded-loop model, common to every profile
-(`LOOP_BOUND` = 4):
+Residual limitations of the bounded-loop model, common to every profile.
+`LOOP_BOUND` = 4 counts guard evaluations, including the final false one, so
+a loop exits within the bound only after at most 3 body iterations:
 - Obligations cover only inputs whose loops exit within the unroll bound.
-  Inputs that need more iterations are outside the checked domain, and the
-  contract says nothing about them.
-- Recheck rejects an empty checked domain in two places. #1355 checks the
-  source domain together with loop exits. #1366 checks the same domain under
-  every postcondition hypothesis: `requires`, callee `ensures` and callback
-  assumptions. Neither check proves that the checked domain covers all
-  inputs that satisfy `requires`. A partially covered domain is accepted
-  within the bound, not rejected.
+  The contract says nothing about inputs that need more iterations, because
+  they are outside the checked domain.
+- The module-obligation recheck rejects an empty checked domain in two
+  steps. This recheck is used by native module and multifile bundles,
+  `recheck-sidecar` and `accept-sidecar`.
+  - #1355 checks the source domain together with loop exits.
+  - #1366 checks the same domain under every postcondition hypothesis:
+    `requires`, callee `ensures` and callback assumptions.
+
+  Neither step proves that the checked domain covers every input that
+  satisfies `requires`. A partially covered domain is accepted within the
+  bound, not rejected.
+- The single-atom source recheck (zero-argument `main` bundles) checks only
+  the counterexample formula and has no empty-domain step.
 - Loop-exit terms needed to assume a callee's `ensures` are required at the
   caller. This can reject a caller that does not need that `ensures`, which
   fails closed.
-- An `unknown` solver result on either domain check is reported as
+- An `unknown` solver result on either domain step is reported as
   inconclusive, not accepted.
 
 `mumei build --semantic-contract` is an opt-in production sidecar. It binds the
