@@ -69,6 +69,13 @@ ensures: result == 2;
 body: { count(2) };
 "#;
 
+const REQUIRES_EMPTY_BOUNDED_LOOP_SOURCE: &str = r#"
+atom count(n: i64) -> i64
+requires: n >= 10 && n <= 20;
+ensures: result == 999;
+body: { let i = 0; while i < n invariant: i >= 0 && i <= n decreases: n - i { i = i + 1 }; i };
+"#;
+
 const ARRAY_PARAM_SOURCE: &str = r#"
 atom at(a: [i64], i: i64) -> i64
 requires: i >= 0 && i < len(a);
@@ -862,6 +869,29 @@ fn sidecar_recheck_rejects_an_empty_loop_exit_domain_and_accepts_a_bounded_loop_
     );
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["recheck"], "consistent");
+}
+
+#[test]
+fn sidecar_recheck_rejects_requires_empty_of_bounded_loop_exits() {
+    let dir = tempfile::tempdir().unwrap();
+    let (source, artifact, sidecar) = write_sidecar_fixture(
+        dir.path(),
+        "count.mm",
+        REQUIRES_EMPTY_BOUNDED_LOOP_SOURCE,
+        "count.ll",
+    );
+
+    let output = run_sidecar_recheck(&sidecar, &source, &artifact, true);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("postcondition hypotheses and loop exits empty on all inputs"));
+
+    let accepted = sidecar_accept_command(&sidecar, &source, &artifact, true)
+        .output()
+        .unwrap();
+    assert_eq!(accepted.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&accepted.stderr)
+        .contains("postcondition hypotheses and loop exits empty on all inputs"));
 }
 
 #[test]

@@ -9441,6 +9441,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
 pub struct ModuleAtomObligations<'ctx> {
     pub atom: String,
     pub domain: Bool<'ctx>,
+    pub postcondition_hypotheses: Bool<'ctx>,
     pub loop_exits: Bool<'ctx>,
     pub obligations: Vec<Bool<'ctx>>,
 }
@@ -10166,7 +10167,11 @@ fn module_atom_obligations<'ctx>(
     assumptions.extend(requires_exits.iter().chain(ensures_exits.iter()).cloned());
     assumptions.extend(source_domain.iter().cloned());
     let assumption = Bool::and(context, &assumptions.iter().collect::<Vec<_>>());
-    let mut obligations = vec![Bool::and(context, &[&requires, &assumption, &post.not()])];
+    let postcondition_hypotheses = Bool::and(context, &[&requires, &assumption]);
+    let mut obligations = vec![Bool::and(
+        context,
+        &[&postcondition_hypotheses, &post.not()],
+    )];
     for defined in &requires_definedness {
         obligations.push(Bool::and(
             context,
@@ -10193,6 +10198,7 @@ fn module_atom_obligations<'ctx>(
     Ok(ModuleAtomObligations {
         atom: atom.name.clone(),
         domain: source_domain_formula,
+        postcondition_hypotheses,
         loop_exits,
         obligations,
     })
