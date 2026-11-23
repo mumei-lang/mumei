@@ -972,9 +972,10 @@ pub unsafe fn encode_parsed_function_for_comparison<'ctx>(
     // Reuse the validation gate so an arity or signature mismatch on
     // the IR side fails closed as a encode error instead of silently
     // comparing a mis-bound function (design memo §7 Step 3a). The
-    // comparison subset is scalar-i64 with no array params and no
-    // calls: the model-side pre-gate keeps such models out, and the
-    // same restriction is applied to the IR surface here.
+    // comparison subset is scalar-i64 and register-resident integer
+    // aggregates, with scalar-i64 calls and bounded memory admitted by
+    // the same gates; the model-side pre-gate keeps wider models out,
+    // and the same restriction is applied to the IR surface here.
     let array_param_mask: Vec<bool> = model.array_params.iter().map(Option::is_some).collect();
     check_function(
         raw,
@@ -991,12 +992,16 @@ pub unsafe fn encode_parsed_function_for_comparison<'ctx>(
         },
     )?;
     // The shared gate admits a 128-bit scalar return and a checked
-    // direct call; both stay outside the scalar-i64 comparison subset.
-    // An `i128`-returning IR is not compared — it is rejected here so
-    // the caller records the function as not liftable rather than
-    // silently binding a mis-shaped encoding.
+    // direct call; an `i128` return stays outside the comparison
+    // subset. Register-resident integer aggregates are compared: the
+    // shared gate already matched the aggregate's field count and leaf
+    // kinds against `model.result_shape`/`result_leaf_doubles`, and the
+    // model-side `ir_object_signature_liftable` pre-gate keeps the
+    // leaves within the three-register integer budget, so an aggregate
+    // `ret` encodes as its `aggregate_value` slots and compares leaf by
+    // leaf. A scalar return still requires width 64.
     let ret = LLVMGetReturnType(LLVMGlobalGetValueType(raw));
-    if aggregate_fields(ret).is_some() || width(ret)? != 64 {
+    if aggregate_fields(ret).is_none() && width(ret)? != 64 {
         return Err(ValidationError("LLVM return outside comparison subset"));
     }
     // Scalar-i64 calls are compared: `check_call` already restricts
