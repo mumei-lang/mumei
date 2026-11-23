@@ -9106,6 +9106,36 @@ entry:
         assert_eq!(result, "unchecked");
         assert!(detail.contains("anonymous data bytes"), "{detail}");
 
+        // The same outcome must hold when the object carries *only*
+        // anonymous data — no named data symbols at all. A module of a
+        // single `unnamed_addr` string constant compiles to exactly
+        // that: `.rodata.str1.1` bytes with an empty symbol map.
+        let anonymous_ir_path = dir.path().join("anonymous.ll");
+        let anonymous_object_path = dir.path().join("anonymous.o");
+        let anonymous_ir = br#"@lone = private unnamed_addr constant [4 x i8] c"hey\00""#;
+        fs::write(&anonymous_ir_path, anonymous_ir).unwrap();
+        mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(
+            &anonymous_ir_path,
+            &anonymous_object_path,
+        )
+        .unwrap();
+        let anonymous_object = fs::read(&anonymous_object_path).unwrap();
+        let anonymous_surface = object_data_surface(&anonymous_object).unwrap();
+        assert!(anonymous_surface.symbols.is_empty());
+        assert!(!anonymous_surface.section_contents.is_empty());
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            None,
+            None,
+            Some(&no_globals),
+            &anonymous_object,
+        );
+        let (result, detail) = item(&report);
+        assert_eq!(result, "unchecked");
+        assert!(detail.contains("anonymous data bytes"), "{detail}");
+
         // A named symbol whose bytes disagree is a real inconsistency.
         let mut with_diverged = ir_data.clone();
         with_diverged.insert("counter".to_owned(), Some(vec![1, 2, 3, 4]));
