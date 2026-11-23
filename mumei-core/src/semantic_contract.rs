@@ -233,6 +233,12 @@ pub const PURE_I64_COMPOSITE_PROFILE_V27: &str = "mumei.pure-i64-composite/v27";
 /// Inferred refined-alias returns erased to their scalar base for
 /// semantic-contract sidecars (`pure-i64-composite/v28`).
 pub const PURE_I64_COMPOSITE_PROFILE_V28: &str = "mumei.pure-i64-composite/v28";
+/// Read-only `[i64]` call and atom results (`pure-i64-composite/v29`):
+/// the result is an uninterpreted `(len, store)` pair with a
+/// nonnegative-length assumption — `len(result)` and `result[i]` reads
+/// in `ensures` observe that pair, while the array itself cannot be
+/// written, compared, or forwarded through scalar positions.
+pub const PURE_I64_COMPOSITE_PROFILE_V29: &str = "mumei.pure-i64-composite/v29";
 
 /// Maximum byte length a `Str` literal may declare under
 /// `pure-i64-composite/v13`: one cell per byte under the
@@ -351,6 +357,9 @@ pub enum RefinedAdmission {
     /// `CompositeV28` additionally admits omitted returns inferred as
     /// refined aliases over `i64`, erasing the unproven refinement.
     CompositeV28,
+    /// `CompositeV29` additionally admits read-only `[i64]` atom and
+    /// call results (`pure-i64-composite/v29`).
+    CompositeV29,
 }
 
 impl RefinedAdmission {
@@ -542,6 +551,14 @@ impl RefinedAdmission {
     /// are admitted after erasing the alias refinement.
     pub fn admits_inferred_refined_returns(self) -> bool {
         self >= Self::CompositeV28
+    }
+
+    /// Whether `[i64]` atom and call results are admitted
+    /// (`pure-i64-composite/v29`) — the result reads as an
+    /// uninterpreted `(len, store)` pair under a nonnegative-length
+    /// assumption.
+    pub fn admits_array_results(self) -> bool {
+        self >= Self::CompositeV29
     }
 }
 
@@ -862,6 +879,7 @@ pub fn module_source_profile(
     let effect_features_used = uses_effect_features(&items);
     let array_params_used = uses_array_params(&items);
     let fn_params_used = uses_fn_params(&items);
+    let array_results_used = uses_array_results(&items);
     Ok(fragment_profile(
         true,
         inferred_i64_return_used,
@@ -869,6 +887,7 @@ pub fn module_source_profile(
         effect_features_used,
         array_params_used,
         fn_params_used,
+        array_results_used,
         &refined,
         &structs,
         &enums,
@@ -1198,6 +1217,7 @@ fn admit_pure_i64_atoms(
             admission.admits_effects(),
             admission.admits_array_params(),
             admission.admits_fn_params(),
+            admission.admits_array_results(),
         )?;
         // Every atom's contract is checked against the complete callee map,
         // not only the tail's: module validation compares each atom
@@ -1342,6 +1362,13 @@ fn uses_fn_params(items: &[Item]) -> bool {
             .params
             .iter()
             .any(|param| param.type_ref.as_ref().is_some_and(|ty| ty.is_fn_type())),
+        _ => false,
+    })
+}
+
+fn uses_array_results(items: &[Item]) -> bool {
+    items.iter().any(|item| match item {
+        Item::Atom(atom) => atom.return_type.as_deref() == Some("[i64]"),
         _ => false,
     })
 }
@@ -1717,6 +1744,7 @@ fn fragment_profile(
     effect_features_used: bool,
     array_params_used: bool,
     fn_params_used: bool,
+    array_results_used: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
@@ -1738,6 +1766,10 @@ fn fragment_profile(
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if array_results_used {
+        // A read-only `[i64]` atom or call result is only ever
+        // admitted under v29 — the strongest claim the ladder makes.
+        PURE_I64_COMPOSITE_PROFILE_V29
     } else if inferred_refined_return_used {
         PURE_I64_COMPOSITE_PROFILE_V28
     } else if fn_params_used {
@@ -1958,6 +1990,7 @@ fn atom_contract(
         .params
         .iter()
         .any(|param| param.type_ref.as_ref().is_some_and(|ty| ty.is_fn_type()));
+    let array_results_used = effective_return_type(&atom, inferred_i64_return) == Some("[i64]");
     let profile = fragment_profile(
         allow_wrapping_arithmetic,
         inferred_i64_return_used,
@@ -1965,6 +1998,7 @@ fn atom_contract(
         effect_features_used,
         array_param_len_nonnegative,
         fn_params_used,
+        array_results_used,
         refined,
         structs,
         enums,
@@ -2909,6 +2943,7 @@ fn return_kind(return_type: Option<&str>, refined: &RefinedEnv) -> ScalarKind {
         Some("f64") => ScalarKind::F64,
         Some("i128") => ScalarKind::I128,
         Some("u128") => ScalarKind::U128,
+        Some("[i64]") => ScalarKind::ArrayI64,
         Some(name) => refined
             .get(name)
             .map(|alias| alias.kind)
@@ -3161,6 +3196,15 @@ impl<'ctx> CallShapes<'ctx> {
         matches!(
             self.returns.get(name),
             Some(ValueKind::Scalar(ScalarKind::F64))
+        )
+    }
+
+    /// The callee's result is a read-only `[i64]` (`pure-i64-composite/v29`) —
+    /// an uninterpreted `(len, store)` pair on the fat-pointer ABI.
+    fn returns_array(&self, name: &str) -> bool {
+        matches!(
+            self.returns.get(name),
+            Some(ValueKind::Scalar(ScalarKind::ArrayI64))
         )
     }
 
@@ -3926,6 +3970,7 @@ fn validate_atom(
     admit_effects: bool,
     admit_array_params: bool,
     admit_fn_params: bool,
+    admit_array_results: bool,
 ) -> Result<(), SemanticContractError> {
     // A declared subrange integer result lowers to an i64 return like
     // the parameters — the emitter emits no truncation, so the checked
@@ -3940,6 +3985,10 @@ fn validate_atom(
         Some("f64") => admit_f64,
         Some("i128" | "u128") => admit_wide,
         Some("bool") | Some("i8" | "i16" | "i32" | "u8" | "u16" | "u32") => admit_widened,
+        // An admitted `[i64]` result (`pure-i64-composite/v29`) returns
+        // a read-only array the obligation treats as a `len`/`store`
+        // pair — heap-backed by the codegen fat-pointer ABI.
+        Some("[i64]") => admit_array_results,
         // An admitted struct result (`pure-i64-composite/v3`) returns
         // the struct's field slots. An admitted enum result
         // (`pure-i64-composite/v6`) returns its tag plus payload slots.
@@ -7974,6 +8023,10 @@ pub enum CallValueShape {
     Enum {
         leaf_count: usize,
     },
+    /// A read-only `[i64]` call result (`pure-i64-composite/v29`): the
+    /// site's `result` is the uninterpreted `len` application and the
+    /// element store is a separate array-sorted application.
+    Array,
 }
 
 impl CallValueShape {
@@ -7982,6 +8035,7 @@ impl CallValueShape {
             Self::Scalar { leaf_count }
             | Self::Struct { leaf_count, .. }
             | Self::Enum { leaf_count } => leaf_count,
+            Self::Array => 1,
         }
     }
 }
@@ -8000,6 +8054,11 @@ pub struct CallSite<'ctx> {
     pub has_composite_arguments_or_result: bool,
     pub result: BV<'ctx>,
     pub result_is_double: bool,
+    /// The uninterpreted element-store application for a `[i64]`
+    /// result (`pure-i64-composite/v29`) — `Some` only when
+    /// `result_shape` is `CallValueShape::Array`; `result` then carries
+    /// the nonnegative `len` application.
+    pub result_store: Option<Array<'ctx>>,
     pub result_shape: CallValueShape,
     pub result_leaf_doubles: Vec<bool>,
     pub guard: Bool<'ctx>,
@@ -8116,6 +8175,11 @@ pub struct PureI64Body<'ctx> {
     pub has_non_i64_scalar_features: bool,
     /// True when the admitted module uses i128 or u128 leaves.
     pub has_wide_scalar_features: bool,
+    /// A `-> [i64]` body's result as its `(len, element store)` pair
+    /// (`pure-i64-composite/v29`) — `Some` only when the declared
+    /// return is `[i64]`; `value` then carries the `len` application.
+    /// Machine TV treats such a body as outside profile.
+    pub array_result: Option<(BV<'ctx>, Array<'ctx>)>,
 }
 
 impl<'ctx> PureI64Body<'ctx> {
@@ -8156,6 +8220,7 @@ impl<'ctx> PureI64Body<'ctx> {
             has_f64_features: false,
             has_non_i64_scalar_features: false,
             has_wide_scalar_features: false,
+            array_result: None,
         }
     }
 }
@@ -8461,6 +8526,7 @@ fn encode_atom_body<'ctx>(
         .str_bound
         .set(atom.str_bound.unwrap_or(STR_BOUND));
     call_returns.perform_definedness.borrow_mut().clear();
+    let mut array_result = None;
     let value = match source_stmt(
         &body,
         context,
@@ -8484,10 +8550,14 @@ fn encode_atom_body<'ctx>(
         SourceValue::Boolean(value) => {
             value.ite(&BV::from_u64(context, 1, 64), &BV::from_u64(context, 0, 64))
         }
-        SourceValue::Array { .. } => {
-            return Err(SemanticContractError::Unsupported(
-                "array value in a result position",
-            ))
+        SourceValue::Array { store, len, .. } => {
+            if result_type != Some("[i64]") {
+                return Err(SemanticContractError::Unsupported(
+                    "array value in a result position",
+                ));
+            }
+            array_result = Some((len.clone(), store));
+            len
         }
         SourceValue::Callback { .. } => {
             return Err(SemanticContractError::Unsupported(
@@ -8577,50 +8647,56 @@ fn encode_atom_body<'ctx>(
                     .map(|(slot, _)| slot.bvule(&BV::from_u64(context, 1, 64)))
                     .collect()
             }
-            match call_returns.result_fields(&site.callee) {
-                Some(fields) => {
-                    let leaf_kinds = call_returns.flattened_kinds(fields);
-                    bool_slot_bounds(
-                        split_slots(&site.result, leaf_kinds.len())
-                            .into_iter()
-                            .zip(leaf_kinds)
-                            .map(|(slot, kind)| (slot, kind == ScalarKind::Bool))
-                            .collect(),
-                        context,
-                    )
-                }
-                None => match call_returns.result_enum(&site.callee) {
-                    // An enum-valued call result carries the 0/1
-                    // convention on each `bool` payload slot, and the
-                    // layout invariant on the tag: every constructed
-                    // enum carries an in-range variant ordinal.
-                    Some((_, variants)) => {
-                        let kinds = call_returns.enum_layout_leaf_kinds(variants);
-                        let leaves = split_slots(&site.result, 1 + kinds.len());
-                        let mut bounds = Vec::new();
-                        if let Some(tag) = leaves.first() {
-                            bounds.push(tag.bvult(&BV::from_u64(
-                                context,
-                                variants.len() as u64,
-                                64,
-                            )));
-                        }
-                        bounds.extend(bool_slot_bounds(
-                            leaves
+            // A `[i64]` call result's `len` application is nonnegative
+            // — the domain the fat-pointer ABI's `arrlen` slot carries.
+            if site.result_shape == CallValueShape::Array {
+                vec![site.result.bvsge(&BV::from_u64(context, 0, 64))]
+            } else {
+                match call_returns.result_fields(&site.callee) {
+                    Some(fields) => {
+                        let leaf_kinds = call_returns.flattened_kinds(fields);
+                        bool_slot_bounds(
+                            split_slots(&site.result, leaf_kinds.len())
                                 .into_iter()
-                                .skip(1)
-                                .zip(kinds.iter())
-                                .map(|(slot, kind)| (slot, *kind == ScalarKind::Bool))
+                                .zip(leaf_kinds)
+                                .map(|(slot, kind)| (slot, kind == ScalarKind::Bool))
                                 .collect(),
                             context,
-                        ));
-                        bounds
+                        )
                     }
-                    None => bool_slot_bounds(
-                        vec![(site.result.clone(), call_returns.returns_bool(&site.callee))],
-                        context,
-                    ),
-                },
+                    None => match call_returns.result_enum(&site.callee) {
+                        // An enum-valued call result carries the 0/1
+                        // convention on each `bool` payload slot, and the
+                        // layout invariant on the tag: every constructed
+                        // enum carries an in-range variant ordinal.
+                        Some((_, variants)) => {
+                            let kinds = call_returns.enum_layout_leaf_kinds(variants);
+                            let leaves = split_slots(&site.result, 1 + kinds.len());
+                            let mut bounds = Vec::new();
+                            if let Some(tag) = leaves.first() {
+                                bounds.push(tag.bvult(&BV::from_u64(
+                                    context,
+                                    variants.len() as u64,
+                                    64,
+                                )));
+                            }
+                            bounds.extend(bool_slot_bounds(
+                                leaves
+                                    .into_iter()
+                                    .skip(1)
+                                    .zip(kinds.iter())
+                                    .map(|(slot, kind)| (slot, *kind == ScalarKind::Bool))
+                                    .collect(),
+                                context,
+                            ));
+                            bounds
+                        }
+                        None => bool_slot_bounds(
+                            vec![(site.result.clone(), call_returns.returns_bool(&site.callee))],
+                            context,
+                        ),
+                    },
+                }
             }
         })
         .collect();
@@ -8644,6 +8720,7 @@ fn encode_atom_body<'ctx>(
         value,
         call_sites,
         call_result_bounds,
+        array_result,
         definedness,
         perform_definedness,
         param_domain,
@@ -9852,7 +9929,7 @@ fn module_atom_obligations<'ctx>(
     loop_exit_terms.extend(requires_exits.iter().cloned());
     env.insert(
         "result".to_string(),
-        result_value(&atom.name, &body.value, context, call_returns),
+        body_result_value(&atom.name, body, context, call_returns),
     );
     // `ensures` reads post-write composite fields — the same post-state
     // the verifier's env and the emitted code observe. Scalar rebinds
@@ -10055,7 +10132,7 @@ fn module_atom_obligations<'ctx>(
         }
         ensures_env.insert(
             "result".to_string(),
-            result_value(&callee.name, &site.result, context, call_returns),
+            call_site_result_value(site, &callee.name, context, call_returns),
         );
         let callee_ensures =
             parse_expression_checked(&callee.ensures).map_err(|_| SemanticContractError::Parse)?;
@@ -10108,6 +10185,27 @@ fn module_atom_obligations<'ctx>(
         }
         let site_domain = Bool::and(context, &[&site.guard, &exits_domain]);
         assumptions.push(site_domain.implies(&callee_post));
+        if site.result_shape == CallValueShape::Array {
+            // A `[i64]` call result's `len` application is
+            // nonnegative — the fat-pointer `arrlen` slot's domain.
+            // The same invariant `call_result_bounds` feeds the
+            // site's own domain obligations must also be visible
+            // where the caller's postcondition reads `len(a)`.
+            assumptions
+                .push(site_domain.implies(&site.result.bvsge(&BV::from_u64(context, 0, 64))));
+        }
+    }
+    // Calls evaluated inside the atom's own `requires`/`ensures`
+    // clauses create fresh result slots — a `[i64]` result's `arrlen`
+    // is nonnegative there too, or `len(f())` in a contract clause is
+    // unconstrained and the postcondition check refutes a true claim.
+    for site in requires_call_sites.iter().chain(ensures_call_sites.iter()) {
+        if site.result_shape == CallValueShape::Array {
+            assumptions.push(
+                site.guard
+                    .implies(&site.result.bvsge(&BV::from_u64(context, 0, 64))),
+            );
+        }
     }
     for site in requires_call_sites.iter().chain(ensures_call_sites.iter()) {
         let Some(callee) = callees.get(&site.callee) else {
@@ -10315,7 +10413,7 @@ fn atom_obligation<'ctx>(
     .boolean()?;
     env.insert(
         "result".to_string(),
-        result_value(&atom.name, &body.value, context, call_returns),
+        body_result_value(&atom.name, body, context, call_returns),
     );
     // Same post-state composite view as `module_atom_obligations`.
     for (name, value) in &body.post_writes {
@@ -11690,6 +11788,22 @@ pub fn call_field_decl<'ctx>(
     )
 }
 
+/// The uninterpreted function a `[i64]`-returning call's element
+/// store applies — one per call site over the same argument tuple the
+/// `len` application (a `call_field_decl` slot) sees, so a source
+/// `callee(args)[i]` reads `store(args)[i]` on both the source and
+/// LLVM sides (`pure-i64-composite/v29`).
+pub fn call_array_store_decl<'ctx>(ctx: &'ctx Context, name: &str, arity: usize) -> FuncDecl<'ctx> {
+    let domain: Vec<Sort> = (0..arity).map(|_| Sort::bitvector(ctx, 64)).collect();
+    let refs: Vec<&Sort> = domain.iter().collect();
+    FuncDecl::new(
+        ctx,
+        format!("mumei_call_array:{name}:{arity}"),
+        &refs,
+        &Sort::array(ctx, &Sort::bitvector(ctx, 64), &Sort::bitvector(ctx, 64)),
+    )
+}
+
 /// A struct value's field slots as one bitvector: slot 0 in the most
 /// significant 64 bits, each later slot below it. Both the source
 /// model and the LLVM encoder compare struct results in this layout.
@@ -11930,6 +12044,55 @@ fn seed_merged_alloc<'ctx>(
 /// The `result` binding of an atom's (or call site's) result value:
 /// a struct result splits into its field slots, a `bool` result reads
 /// the 0/1 convention, an i64 result binds directly.
+/// A `[i64]` result binds as its `(len, element store)` pair — the
+/// same `SourceValue::Array` shape a parameter array carries, so
+/// `len(result)` and `result[i]` in `ensures` read through the
+/// uninterpreted applications (`pure-i64-composite/v29`).
+fn array_result_source<'ctx>(
+    len: &BV<'ctx>,
+    store: &Array<'ctx>,
+    call_returns: &CallShapes<'ctx>,
+) -> SourceValue<'ctx> {
+    let alloc = call_returns.fresh_array_alloc();
+    call_returns
+        .alloc_stores
+        .borrow_mut()
+        .insert(alloc, store.clone());
+    SourceValue::Array {
+        store: store.clone(),
+        len: len.clone(),
+        elem: ScalarKind::I64,
+        parameter: false,
+        alloc,
+    }
+}
+
+fn body_result_value<'ctx>(
+    atom: &str,
+    body: &PureI64Body<'ctx>,
+    ctx: &'ctx Context,
+    call_returns: &CallShapes<'ctx>,
+) -> SourceValue<'ctx> {
+    if let Some((len, store)) = &body.array_result {
+        array_result_source(len, store, call_returns)
+    } else {
+        result_value(atom, &body.value, ctx, call_returns)
+    }
+}
+
+fn call_site_result_value<'ctx>(
+    site: &CallSite<'ctx>,
+    callee: &str,
+    ctx: &'ctx Context,
+    call_returns: &CallShapes<'ctx>,
+) -> SourceValue<'ctx> {
+    if let (CallValueShape::Array, Some(store)) = (site.result_shape, &site.result_store) {
+        array_result_source(&site.result, store, call_returns)
+    } else {
+        result_value(callee, &site.result, ctx, call_returns)
+    }
+}
+
 fn result_value<'ctx>(
     atom: &str,
     value: &BV<'ctx>,
@@ -13206,6 +13369,29 @@ fn source_expr<'ctx>(
                         }
                     }),
                     Expr::ArrayLit(elems) => Some(BV::from_u64(ctx, elems.len() as u64, 64)),
+                    // `len(make())` — an inline call to a `[i64]`-
+                    // returning callee evaluates to its fat-pointer
+                    // `len` slot, the same value `let a = make();
+                    // len(a)` reads off the binding.
+                    Expr::Call(callee, _) if call_returns.returns_array(callee) => {
+                        match source_expr(
+                            &args[0],
+                            ctx,
+                            env,
+                            guard,
+                            definedness,
+                            depth + 1,
+                            &BTreeSet::new(),
+                            written,
+                            loop_exits,
+                            call_sites,
+                            call_returns,
+                            enums,
+                        )? {
+                            SourceValue::Array { len, .. } => Some(len),
+                            _ => None,
+                        }
+                    }
                     _ => None,
                 };
                 if let Some(len) = len {
@@ -13460,6 +13646,7 @@ fn source_expr<'ctx>(
                     has_composite_arguments_or_result: true,
                     result: aggregate_value(&slots),
                     result_is_double: false,
+                    result_store: None,
                     result_shape: CallValueShape::Struct {
                         leaf_count,
                         has_enum: call_returns.fields_contain_enum(fields),
@@ -13508,6 +13695,7 @@ fn source_expr<'ctx>(
                     has_composite_arguments_or_result: true,
                     result: aggregate_value(&slots),
                     result_is_double: false,
+                    result_store: None,
                     result_shape: CallValueShape::Enum {
                         leaf_count: slots.len(),
                     },
@@ -13519,6 +13707,52 @@ fn source_expr<'ctx>(
                     name: enum_name.to_owned(),
                     tag: slots[0].clone(),
                     slots: call_returns.seed_enum_slots(variants, &mut slots[1..].iter(), ctx),
+                });
+            }
+            // A `[i64]`-returning call applies two uninterpreted
+            // functions over the argument tuple: the `len` slot (a
+            // `call_field_decl` index-0 application the nonnegative
+            // bound pins) and the element store (`pure-i64-composite/v29`).
+            if call_returns.returns_array(name) {
+                let len = call_field_decl(ctx, name, applied.len(), 0)
+                    .apply(&refs)
+                    .as_bv()
+                    .ok_or(SemanticContractError::Unsupported(
+                        "source call result kind",
+                    ))?;
+                let Some(store) = call_array_store_decl(ctx, name, applied.len())
+                    .apply(&refs)
+                    .as_array()
+                else {
+                    return Err(SemanticContractError::Unsupported(
+                        "source call result kind",
+                    ));
+                };
+                call_sites.push(CallSite {
+                    callee: name.clone(),
+                    args: applied.clone(),
+                    arg_leaf_doubles: arg_leaf_doubles.clone(),
+                    argument_shapes: argument_shapes.clone(),
+                    has_composite_arguments_or_result: has_composite_arguments,
+                    result: len.clone(),
+                    result_is_double: false,
+                    result_store: Some(store.clone()),
+                    result_shape: CallValueShape::Array,
+                    result_leaf_doubles: vec![false],
+                    guard: guard.clone(),
+                    callback_arguments: callback_arguments.clone(),
+                });
+                let alloc = call_returns.fresh_array_alloc();
+                call_returns
+                    .alloc_stores
+                    .borrow_mut()
+                    .insert(alloc, store.clone());
+                return Ok(SourceValue::Array {
+                    store,
+                    len,
+                    elem: ScalarKind::I64,
+                    parameter: false,
+                    alloc,
                 });
             }
             // A wide scalar result is two consecutive 64-bit slots —
@@ -13543,6 +13777,7 @@ fn source_expr<'ctx>(
                     has_composite_arguments_or_result: has_composite_arguments,
                     result: aggregate_value(&slots),
                     result_is_double: false,
+                    result_store: None,
                     result_shape: CallValueShape::Scalar { leaf_count: 2 },
                     result_leaf_doubles: vec![false; 2],
                     guard: guard.clone(),
@@ -13568,6 +13803,7 @@ fn source_expr<'ctx>(
                 has_composite_arguments_or_result: has_composite_arguments,
                 result: value.clone(),
                 result_is_double: call_returns.returns_f64(name),
+                result_store: None,
                 result_shape: CallValueShape::Scalar { leaf_count: 1 },
                 result_leaf_doubles: vec![call_returns.returns_f64(name)],
                 guard: guard.clone(),

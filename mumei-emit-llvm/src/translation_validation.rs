@@ -8,7 +8,8 @@ use inkwell::{
 use llvm_sys::{core::*, prelude::*, LLVMIntPredicate, LLVMOpcode, LLVMTypeKind};
 use mumei_core::semantic_contract::{
     aggregate_value, call_field_decl, encode_pure_i64_body, encode_pure_i64_module,
-    module_source_profile, PureI64Body, RefinedAdmission, LOOP_BOUND, PURE_I64_WRAPPING_PROFILE,
+    module_source_profile, CallValueShape, PureI64Body, RefinedAdmission, LOOP_BOUND,
+    PURE_I64_WRAPPING_PROFILE,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use z3::{
@@ -753,6 +754,28 @@ pub fn validate_native_module(
             )
         })
         .collect();
+    // Members touching an admitted `[i64]` result — returning one or
+    // calling one — are outside the machine-checked profile: their
+    // fat-pointer/malloc lowering never clears the structural whitelist,
+    // and the per-atom comparison already fails closed on the same
+    // models, so the structural scan skips them instead of erroring.
+    let array_result_members: BTreeSet<String> = models
+        .iter()
+        .filter(|model| {
+            model.array_result.is_some()
+                || model
+                    .call_sites
+                    .iter()
+                    .any(|site| site.result_shape == CallValueShape::Array)
+        })
+        .map(|model| {
+            if model.function_name == "main" {
+                "__mumei_user_main".to_string()
+            } else {
+                model.function_name.clone()
+            }
+        })
+        .collect();
     unsafe {
         check_native_module_multi(
             module.as_mut_ptr(),
@@ -760,8 +783,11 @@ pub fn validate_native_module(
             any_memory,
             admission.admits_f64_arithmetic(),
             admission.admits_str_leaves(),
-            &array_param_members,
-            admission.admits_array_params(),
+            &NativeModuleMembers {
+                array_params: &array_param_members,
+                array_params_admitted: admission.admits_array_params(),
+                array_results: &array_result_members,
+            },
         )?
     };
     let call_renames = native_call_renames(true);
@@ -788,16 +814,24 @@ pub fn validate_native_module(
         let function = module
             .get_function(member_name)
             .ok_or(ValidationError("missing source function"))?;
-        let (member_outcome, ir_definedness) = unsafe {
-            compare_function(
-                &context,
-                function.as_value_ref(),
-                model,
-                &call_renames,
-                admission.admits_f64_arithmetic(),
-                false,
-                admission.admits_array_params(),
-            )?
+        let (member_outcome, ir_definedness) = if array_result_members.contains(member_name) {
+            // `[i64]`-returning members and their callers are outside
+            // the machine-checked profile — the fat-pointer lowering
+            // never encodes — so the member reports inconclusive, the
+            // same gate `supports_signature` fails closed on.
+            (Outcome::Inconclusive, Vec::new())
+        } else {
+            unsafe {
+                compare_function(
+                    &context,
+                    function.as_value_ref(),
+                    model,
+                    &call_renames,
+                    admission.admits_f64_arithmetic(),
+                    false,
+                    admission.admits_array_params(),
+                )?
+            }
         };
         any_definedness |= !model.definedness.is_empty() || !ir_definedness.is_empty();
         any_param_domain |= !model.param_domain.is_empty();
@@ -2545,14 +2579,19 @@ unsafe fn check_native_module(module: LLVMModuleRef, user_main: LLVMValueRef) ->
 /// keeps its fixed call/trunc/ret shape against `__mumei_user_main`,
 /// and every other member is screened by the shared function profile
 /// against its own arity — each is a potential call target.
+struct NativeModuleMembers<'a> {
+    array_params: &'a BTreeMap<String, Vec<bool>>,
+    array_params_admitted: bool,
+    array_results: &'a BTreeSet<String>,
+}
+
 unsafe fn check_native_module_multi(
     module: LLVMModuleRef,
     user_main: LLVMValueRef,
     bounded_memory: bool,
     f64_arithmetic: bool,
     str_leaves: bool,
-    array_param_members: &BTreeMap<String, Vec<bool>>,
-    array_params_admitted: bool,
+    members: &NativeModuleMembers,
 ) -> Result<()> {
     check_module_environment(module, str_leaves)?;
     let main = LLVMGetNamedFunction(module, c"main".as_ptr());
@@ -2575,12 +2614,28 @@ unsafe fn check_native_module_multi(
         // not an obligation.
         if member != main
             && !(LLVMIsDeclaration(member) != 0
-                && callee_name(member).as_deref() == Some(CANCEL_POLL_INTRINSIC))
+                && (callee_name(member).as_deref() == Some(CANCEL_POLL_INTRINSIC)
+                    // `[i64]`-returning members lower through heap-backed
+                    // fat pointers: the module's allocator/copy
+                    // declarations only serve those skipped members, so
+                    // they are admitted alongside them and nowhere else.
+                    || (!members.array_results.is_empty()
+                        && matches!(
+                            callee_name(member).as_deref(),
+                            Some("malloc") | Some("llvm.memcpy.p0.p0.i64")
+                        ))))
         {
             let member_name = callee_name(member);
+            if member_name
+                .as_ref()
+                .is_some_and(|name| members.array_results.contains(name))
+            {
+                member = LLVMGetNextFunction(member);
+                continue;
+            }
             let array_param_mask = member_name
                 .as_ref()
-                .and_then(|name| array_param_members.get(name))
+                .and_then(|name| members.array_params.get(name))
                 .map(Vec::as_slice);
             check_function(
                 member,
@@ -2592,7 +2647,7 @@ unsafe fn check_native_module_multi(
                     bounded_memory,
                     f64_arithmetic,
                     array_param_mask,
-                    array_params_admitted,
+                    array_params_admitted: members.array_params_admitted,
                     ..CheckGates::default()
                 },
             )?;

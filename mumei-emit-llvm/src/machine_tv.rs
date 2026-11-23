@@ -576,6 +576,7 @@ pub fn check_entry_wrapper_with_preservation(
         has_composite_arguments_or_result: false,
         result: value,
         result_is_double: false,
+        result_store: None,
         result_shape: CallValueShape::Scalar { leaf_count: 1 },
         result_leaf_doubles: vec![false],
         guard: Bool::from_bool(context, true),
@@ -786,7 +787,7 @@ pub fn function_has_reachable_cycle(
 }
 
 pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
-    if model.array_params.iter().any(Option::is_some) {
+    if model.array_params.iter().any(Option::is_some) || model.array_result.is_some() {
         return false;
     }
     let parameter_leaf_count = model
@@ -4220,6 +4221,9 @@ fn call_value_shape_supported_with_leaf_bound(
         } => (1..=aggregate_leaf_bound).contains(&leaf_count),
         CallValueShape::Enum { leaf_count, .. } => (1..=aggregate_leaf_bound).contains(&leaf_count),
         CallValueShape::Struct { .. } => false,
+        // Machine TV does not yet model a `[i64]` call result's
+        // `(len, store)` pair — outside the checked profile.
+        CallValueShape::Array => false,
     }
 }
 
@@ -4450,6 +4454,11 @@ fn lift_call<'ctx>(
     for shape in &call_site.argument_shapes {
         let leaf_count = shape.leaf_count();
         match *shape {
+            // No call site can carry an array argument — `check_call`
+            // rejects them — but keep the match total fail-closed.
+            CallValueShape::Array => {
+                return Err(FunctionOutcome::OutsideProfile("call_arguments"));
+            }
             CallValueShape::Struct { .. } | CallValueShape::Enum { .. } => {
                 let leaf_end = leaf_index
                     .checked_add(leaf_count)
@@ -10918,6 +10927,7 @@ entry:
             has_composite_arguments_or_result: false,
             result: float_result,
             result_is_double: true,
+            result_store: None,
             result_shape: CallValueShape::Scalar { leaf_count: 1 },
             result_leaf_doubles: vec![true],
             guard: Bool::from_bool(&context, true),
@@ -11116,6 +11126,7 @@ entry:
             has_composite_arguments_or_result: false,
             result,
             result_is_double: true,
+            result_store: None,
             result_shape: CallValueShape::Scalar { leaf_count: 1 },
             result_leaf_doubles: vec![true],
             guard: Bool::from_bool(&context, true),

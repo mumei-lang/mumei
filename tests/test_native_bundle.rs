@@ -7319,6 +7319,172 @@ fn array_parameter_module_builds_as_v29_and_machine_tv_is_inconclusive() {
         .success());
 }
 
+const ARRAY_RESULT_MODULE: &str = r#"
+atom pair(x: i64) -> [i64]
+requires: true;
+ensures: len(result) == 2 && result[0] == x && result[1] == x;
+body: [x, x];
+
+atom use_pair(y: i64) -> i64
+requires: y >= 0 && y <= 100;
+ensures: result == y + y;
+body: { let p = pair(y); p[0] + p[1] };
+
+atom main() -> i64
+requires: true;
+ensures: result == 4;
+body: use_pair(2);
+"#;
+
+#[test]
+fn array_result_module_builds_as_v30_and_rechecks() {
+    let root = tempfile::tempdir().unwrap();
+    mumei_core::semantic_contract::extract_pure_i64_module_contracts(
+        ARRAY_RESULT_MODULE,
+        "source.mm",
+        None,
+        mumei_core::semantic_contract::RefinedAdmission::CompositeV29,
+    )
+    .expect("array-result module must extract under CompositeV29");
+    let (source, bundle, id) = build_source(root.path(), ARRAY_RESULT_MODULE);
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MODULE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V30);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V29
+    );
+    // Members touching `[i64]` results are outside the machine-checked
+    // profile, so the LLVM recheck stays inconclusive — identity and
+    // source postconditions still check out.
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    let llvm_out = recheck_llvm(&source, &bundle, &id);
+    assert!(!llvm_out.status.success());
+    assert!(String::from_utf8_lossy(&llvm_out.stderr).contains("inconclusive"));
+    assert_eq!(
+        Command::new(bundle.join("program"))
+            .status()
+            .unwrap()
+            .code(),
+        Some(4)
+    );
+
+    // A caller proving against the callee's instantiated array ensures
+    // fails closed when the body's own contract disagrees.
+    let mut downgraded = module_record(&bundle);
+    downgraded["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V29.into());
+    let bytes = serde_json::to_vec_pretty(&downgraded).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!recheck(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
+fn array_result_len_of_inline_call_rechecks() {
+    // `len(make())` — an inline call to a `[i64]`-returning callee
+    // reads the fat-pointer `len` slot, so the source recheck must
+    // accept it rather than reject the module as out-of-profile.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        r#"atom make() -> [i64]
+requires: true;
+ensures: len(result) == 2;
+body: [1, 2];
+
+atom use_it() -> i64
+requires: true;
+ensures: result == 2;
+body: len(make());
+
+atom main() -> i64
+requires: true;
+ensures: result == 2;
+body: use_it();
+"#,
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    // `len(make())` must also survive codegen — the emitted program
+    // returns the array's length.
+    assert_eq!(
+        Command::new(bundle.join("program"))
+            .status()
+            .unwrap()
+            .code(),
+        Some(2)
+    );
+}
+
+#[test]
+fn array_result_call_len_is_nonnegative_in_caller_ensures() {
+    // The fat-pointer `arrlen` slot is nonnegative even when the
+    // callee's contract does not state a length — `len(a) >= 0` must
+    // hold in the caller's postcondition, not be refuted.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        r#"atom make() -> [i64]
+requires: true;
+body: [1, 2, 3];
+
+atom use_it() -> i64
+requires: true;
+ensures: result >= 0;
+body: { let a = make(); len(a) };
+
+atom main() -> i64
+requires: true;
+ensures: result >= 0;
+body: use_it();
+"#,
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    // The contract only guarantees nonnegativity; the emitted
+    // program still computes the concrete length.
+    assert_eq!(
+        Command::new(bundle.join("program"))
+            .status()
+            .unwrap()
+            .code(),
+        Some(3)
+    );
+}
+
+#[test]
+fn array_result_violating_ensures_is_refuted() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        &source,
+        r#"atom pair(x: i64) -> [i64]
+requires: true;
+ensures: len(result) == 3;
+body: [x, x];
+
+atom main() -> i64
+requires: true;
+ensures: result == 0;
+body: 0;
+"#,
+    )
+    .unwrap();
+    // `len(result) == 3` disagrees with the literal's length — the
+    // contract layer must refute the build rather than emit a record.
+    let output = cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]);
+    assert!(!output.status.success());
+}
+
 #[test]
 fn module_bundle_rejects_inferred_non_i64_return() {
     let root = tempfile::tempdir().unwrap();
