@@ -884,14 +884,14 @@ fn sidecar_recheck_rejects_requires_empty_of_bounded_loop_exits() {
     let output = run_sidecar_recheck(&sidecar, &source, &artifact, true);
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("requires and loop exits empty on all inputs"));
+        .contains("postcondition hypotheses and loop exits empty on all inputs"));
 
     let accepted = sidecar_accept_command(&sidecar, &source, &artifact, true)
         .output()
         .unwrap();
     assert_eq!(accepted.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&accepted.stderr)
-        .contains("requires and loop exits empty on all inputs"));
+        .contains("postcondition hypotheses and loop exits empty on all inputs"));
 }
 
 #[test]

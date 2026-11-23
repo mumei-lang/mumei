@@ -1803,7 +1803,9 @@ fn check_atom_loop_exit_domain(
     solver.assert(&atom.loop_exits);
     match solver.check() {
         z3::SatResult::Sat => Ok(inconclusive),
-        z3::SatResult::Unsat => Err(BundleError("requires and loop exits empty on all inputs")),
+        z3::SatResult::Unsat => Err(BundleError(
+            "postcondition hypotheses and loop exits empty on all inputs",
+        )),
         z3::SatResult::Unknown => Ok(true),
     }
 }
@@ -2272,7 +2274,10 @@ mod source_recheck_tests {
             assert_eq!(solver.check(), SatResult::Unsat);
         }
         let error = check_module_loop_exit_domains(&atoms, &solver).unwrap_err();
-        assert_eq!(error.0, "requires and loop exits empty on all inputs");
+        assert_eq!(
+            error.0,
+            "postcondition hypotheses and loop exits empty on all inputs"
+        );
 
         solver.reset();
         solver.assert(&atom.domain);
@@ -2329,7 +2334,10 @@ mod source_recheck_tests {
         }
 
         let error = check_module_loop_exit_domains(&atoms, &solver).unwrap_err();
-        assert_eq!(error.0, "requires and loop exits empty on all inputs");
+        assert_eq!(
+            error.0,
+            "postcondition hypotheses and loop exits empty on all inputs"
+        );
     }
 
     #[test]
