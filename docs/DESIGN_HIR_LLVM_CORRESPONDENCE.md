@@ -76,10 +76,11 @@ Ancak HIR'in kendisi referans alınırsa iki yarı (`source→HIR` ve
    memory → aggregate/sret → i128 → f64 leaf の順、各段 fail-closed
    で `outside_profile`）。
 2. **比較**: `compare_function` LLVM fonksiyonunu içeride encode edip
-   source modeliyle karşılaştırır — iki encode modeli doğrudan almaz;
-   encoded-HIR ↔ encoded-IR için aynı karşılaştırma çekirdeğini
-   (covering-edge return eşitliği + definedness yön kontrolü) saran
-   yeni bir iki-model girişi gerekir.
+   source modeliyle karşılaştırır — HIR encoder `PureI64Body` üretirse
+   aynı giriş doğrudan yeniden kullanılır (ek bir iki-model
+   karşılaştırıcı gerekmez). Uygulama bunu doğruladı:
+   `encode_hir_pure_i64_leaf` + `validate_hir_pure_i64_leaf` sarmalı
+   (#1408).
 3. **語彙**: 新しい validation 名（候補
    `checked_hir_llvm_model_correspondence`）— 新語彙なので採用時に
    承認を取る。実行されなかった場合の fail-closed は
