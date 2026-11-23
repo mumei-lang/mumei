@@ -4166,6 +4166,78 @@ fn machine_tv_acceptance_decision(
     }
 }
 
+/// Design memo §7 Step 2: emit the source↔machine within-profile gate
+/// as metadata — whether every source-atom function came back
+/// `equivalent_within_profile`, which functions did not, and the
+/// residual unchecked domains. Recording only: no verdict, grade or
+/// checks-list change.
+fn source_machine_tv_within_profile_json(
+    evaluation: &MachineTvEvaluation,
+    unchecked_domains: &[&str],
+    object_link_correspondence: bool,
+) -> serde_json::Value {
+    let accepted =
+        machine_tv_acceptance_decision(&evaluation.outcomes, evaluation.entry_wrapper_applicable)
+            == ObjectMachineTvAcceptanceDecision::Accepted;
+    let mut non_equivalent = Vec::new();
+    for (name, outcome) in &evaluation.outcomes {
+        let (label, reason) = match outcome {
+            FunctionOutcome::Equivalent => continue,
+            FunctionOutcome::Different => ("different", None),
+            FunctionOutcome::Unknown => ("unknown", None),
+            FunctionOutcome::OutsideProfile(reason) => ("outside_profile", Some(*reason)),
+        };
+        non_equivalent.push(match reason {
+            Some(reason) => {
+                serde_json::json!({"name": name, "outcome": label, "reason": reason})
+            }
+            None => serde_json::json!({"name": name, "outcome": label}),
+        });
+    }
+    let status = if accepted {
+        "checked_source_machine_tv_within_profile"
+    } else {
+        "unchecked_not_translation_validated"
+    };
+    serde_json::json!({
+        "status": status,
+        "non_equivalent_functions": non_equivalent,
+        "unchecked_domains": unchecked_domains,
+        // The gate covers source↔machine equivalence only; the link
+        // edge's own status is named explicitly so consumers do not read
+        // `checked` as covering it.
+        "object_link_correspondence": if object_link_correspondence {
+            "checked_object_link_correspondence"
+        } else {
+            "unchecked_not_translation_validated"
+        },
+    })
+}
+
+/// Text-path counterpart of `source_machine_tv_within_profile_json`:
+/// one line naming the gate status and the residual domain count.
+fn source_machine_tv_within_profile_line(
+    evaluation: &MachineTvEvaluation,
+    unchecked_domain_count: usize,
+) -> String {
+    let accepted =
+        machine_tv_acceptance_decision(&evaluation.outcomes, evaluation.entry_wrapper_applicable)
+            == ObjectMachineTvAcceptanceDecision::Accepted;
+    let status = if accepted {
+        "checked_source_machine_tv_within_profile"
+    } else {
+        "unchecked_not_translation_validated"
+    };
+    let residual = evaluation
+        .outcomes
+        .values()
+        .filter(|outcome| **outcome != FunctionOutcome::Equivalent)
+        .count();
+    format!(
+        "Source machine-TV within profile: {status} ({residual} non-equivalent functions, {unchecked_domain_count} unchecked domains)."
+    )
+}
+
 fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, &'static str> {
     let source_text = data
         .source_text
@@ -4585,6 +4657,11 @@ fn write_machine_tv(
             "input_domain": evaluation.input_domain,
             "functions": evaluation.functions,
             "object_translation": object_translation_json(&data),
+            "source_machine_tv": source_machine_tv_within_profile_json(
+                &evaluation,
+                &checks_not_performed,
+                data.object_link_correspondence,
+            ),
             "checks_performed": checks_performed,
             "checks_not_performed": checks_not_performed,
         });
@@ -4610,6 +4687,15 @@ fn write_machine_tv(
             evaluation.counts.object_function_count,
             evaluation.counts.equivalent_bounded_loop_count,
             evaluation.scope,
+        );
+        // Mirrors the JSON descriptor's checks_not_performed list: the
+        // seven fixed domains, object_link_correspondence when the link
+        // check did not run, plus the coverage list.
+        let unchecked_domain_count =
+            7 + usize::from(!data.object_link_correspondence) + evaluation.coverage.1.len();
+        println!(
+            "{}",
+            source_machine_tv_within_profile_line(&evaluation, unchecked_domain_count)
         );
         for line in object_translation_correspondence_text(&data) {
             println!("{line}");
@@ -5356,6 +5442,11 @@ fn write_object_machine_tv_acceptance(
             "input_domain": &evaluation.input_domain,
             "functions": &evaluation.functions,
             "object_translation": object_translation_json(data),
+            "source_machine_tv": source_machine_tv_within_profile_json(
+                evaluation,
+                &checks_not_performed,
+                data.object_link_correspondence,
+            ),
         });
         let mut bytes = serde_json::to_vec_pretty(&descriptor)
             .map_err(|_| BundleError("cannot encode native object acceptance descriptor"))?;
@@ -5383,6 +5474,20 @@ fn write_object_machine_tv_acceptance(
         };
         println!(
             "Acceptance scope excludes producer authenticity, historical execution, {wrapper_exclusion}register-convention validation, optimizer/ABI/runtime/OS observations, grade promotion, and Lean checks; scope: {scope}."
+        );
+        // Same residual-domain count as the JSON descriptor's
+        // checks_not_performed — producer authenticity, register
+        // convention and the other fixed domains included.
+        let (_, unchecked_domains) = object_machine_tv_acceptance_checks(
+            data.family,
+            data.canonical_argv_compared,
+            data.object_link_correspondence,
+            wrapper_equivalent,
+            &evaluation.coverage,
+        );
+        println!(
+            "{}",
+            source_machine_tv_within_profile_line(evaluation, unchecked_domains.len())
         );
         for line in object_translation_correspondence_text(data) {
             println!("{line}");
@@ -7488,5 +7593,63 @@ entry:
             .as_str()
             .unwrap()
             .contains("assumed-external: [\"memcpy\"]"));
+    }
+
+    #[test]
+    fn source_machine_tv_names_link_edge_status_separately() {
+        // The gate covers source↔machine equivalence only — its `checked`
+        // status must never be read as covering the link edge. With the
+        // link check unperformed the record names it unchecked even when
+        // every function compared equivalent.
+        let mut outcomes = BTreeMap::new();
+        outcomes.insert("main".to_owned(), FunctionOutcome::Equivalent);
+        let evaluation = MachineTvEvaluation {
+            functions: BTreeMap::new(),
+            outcomes,
+            counts: MachineTvCounts {
+                equivalent_count: 1,
+                equivalent_callee_saved_count: 0,
+                equivalent_callee_saved_preserved_count: 0,
+                equivalent_leaf_count: 1,
+                equivalent_call_count: 0,
+                equivalent_forward_branch_count: 0,
+                equivalent_acyclic_branch_count: 0,
+                equivalent_conditional_call_count: 0,
+                equivalent_bounded_loop_count: 0,
+                equivalent_source_loop_count: 0,
+                equivalent_refined_signature_count: 0,
+                equivalent_f64_leaf_count: 0,
+                equivalent_composite_aggregate_count: 0,
+                equivalent_f64_composite_aggregate_count: 0,
+                equivalent_wide_composite_aggregate_count: 0,
+                equivalent_wide_composite_aggregate_convention_count: 0,
+                equivalent_wide_scalar_count: 0,
+                equivalent_red_zone_frame_memory_count: 0,
+                equivalent_allocated_frame_memory_count: 0,
+                object_function_count: 1,
+            },
+            coverage: (vec![], vec!["object_link_correspondence"]),
+            input_domain: String::new(),
+            scope: "test",
+            entry_wrapper_applicable: false,
+        };
+        let unchecked = source_machine_tv_within_profile_json(
+            &evaluation,
+            &["object_link_correspondence"],
+            false,
+        );
+        assert_eq!(
+            unchecked["status"],
+            "checked_source_machine_tv_within_profile"
+        );
+        assert_eq!(
+            unchecked["object_link_correspondence"],
+            "unchecked_not_translation_validated"
+        );
+        let checked = source_machine_tv_within_profile_json(&evaluation, &[], true);
+        assert_eq!(
+            checked["object_link_correspondence"],
+            "checked_object_link_correspondence"
+        );
     }
 }
