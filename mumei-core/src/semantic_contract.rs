@@ -9593,7 +9593,8 @@ fn callback_contract_subsumption<'ctx>(
             "callback function type outside profile",
         ))?;
     let signature = callback_signature(ty, refined)?;
-    let mut env = HashMap::new();
+    let mut callback_env = HashMap::new();
+    let mut target_env = HashMap::new();
     let mut argument_domains = Vec::new();
     for (index, leaf) in signature.params.iter().enumerate() {
         let value = BV::new_const(
@@ -9606,11 +9607,11 @@ fn callback_contract_subsumption<'ctx>(
         );
         argument_domains.extend(callback_leaf_domain(leaf, &value, context, refined)?);
         let source = callback_value(leaf.kind, value, context);
-        env.insert(format!("arg{index}"), source.clone());
+        callback_env.insert(format!("arg{index}"), source.clone());
         if index == 0 {
-            env.insert("x".to_owned(), source.clone());
+            callback_env.insert("x".to_owned(), source.clone());
         } else if index == 1 {
-            env.insert("y".to_owned(), source.clone());
+            callback_env.insert("y".to_owned(), source.clone());
         }
         let target_param = target
             .params
@@ -9618,7 +9619,7 @@ fn callback_contract_subsumption<'ctx>(
             .ok_or(SemanticContractError::Unsupported(
                 "callback signature mismatch",
             ))?;
-        env.insert(target_param.name.clone(), source.clone());
+        target_env.insert(target_param.name.clone(), source);
     }
     let result = BV::new_const(
         context,
@@ -9635,22 +9636,22 @@ fn callback_contract_subsumption<'ctx>(
             .collect::<Vec<_>>(),
     );
     let result_value = callback_value(signature.result.kind, result, context);
-    env.insert("result".to_owned(), result_value);
+    callback_env.insert("result".to_owned(), result_value.clone());
+    target_env.insert("result".to_owned(), result_value);
     let (callback_requires, callback_requires_definedness) = encode_callback_clause(
         callback_param.fn_contract_requires.as_deref(),
-        &env,
+        &callback_env,
         call_returns,
         context,
         enums,
     )?;
     let (callback_ensures, callback_ensures_definedness) = encode_callback_clause(
         callback_param.fn_contract_ensures.as_deref(),
-        &env,
+        &callback_env,
         call_returns,
         context,
         enums,
     )?;
-    let target_env = env.clone();
     let (target_requires, target_requires_definedness) = encode_callback_clause(
         Some(&target.requires),
         &target_env,
@@ -18604,6 +18605,40 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
                 "{outcomes:?}"
             );
         }
+    }
+
+    #[test]
+    fn composite_v27_callback_subsumption_separates_positional_aliases_from_target_names() {
+        let source = |target_requires: &str| {
+            format!(
+                "atom g(y: i64, x: i64) -> i64 requires: {target_requires}; \
+                ensures: true; body: 0;\n\
+                atom apply(f: atom_ref(i64, i64) -> i64) -> i64 requires: true; \
+                ensures: true; contract(f): requires: x > y; body: 0;\n\
+                atom main() -> i64 requires: true; ensures: true; \
+                body: apply(atom_ref(g));"
+            )
+        };
+
+        let false_subsumption = source("x >= y");
+        let outcomes =
+            refined_module_outcomes_admission(&false_subsumption, RefinedAdmission::CompositeV27);
+        assert!(
+            outcomes.iter().any(|result| *result == z3::SatResult::Sat),
+            "{outcomes:?}"
+        );
+
+        let matching_subsumption = source("y > x");
+        let outcomes = refined_module_outcomes_admission(
+            &matching_subsumption,
+            RefinedAdmission::CompositeV27,
+        );
+        assert!(
+            outcomes
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat),
+            "{outcomes:?}"
+        );
     }
 
     #[test]
