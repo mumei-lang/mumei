@@ -1670,10 +1670,9 @@ skipping them.
 
 The length model assumes nonnegative lengths. This is an in-language
 producer invariant, not a check performed at FFI boundaries. Native
-module and multifile bundles pin V26 sources at profile v29; sidecar
-production, recheck and acceptance use CompositeV27 when callback
-parameters are present. Callback-free V26/V27 sidecar bytes remain
-unchanged.
+module and multifile bundles pin V26 sources at profile v29. Sidecar
+production, recheck and acceptance use CompositeV28; sources without
+array-returning atoms retain their V26/V27 contract bytes.
 
 ### Scalar callback parameters in semantic-contract sidecars (v27)
 
@@ -1712,6 +1711,29 @@ CompositeV26 and reject callback-parameter sources; V27 does not expand
 native-bundle or LLVM correspondence guarantees. Sidecar identity still binds
 only the sidecar and emitted artifact bytes as documented above; callback
 contracts are not runtime checked.
+
+### Exact `[i64]` array returns in semantic-contract sidecars (v28)
+
+The C03 `mumei.pure-i64-composite/v28` profile is limited to semantic-
+contract sidecars. It admits explicitly declared `[i64]` atom returns and
+array call results, including local arrays, aliases and branch/block
+merges. Array results are owned local arrays, so indexed reads and writes
+follow the existing local-array model. An array-returning callee's
+`requires` is a call-site obligation and its `ensures` is assumed at the
+guarded call site with `result` bound as a read-only array. Result
+`len` and indexed reads are supported; indexed reads carry guarded
+bounds-definedness obligations. Stable `callres_<callee>_len(args...)` and
+`callres_<callee>_store(args...)` applications make identical calls agree.
+The guarded `array_result_len_nonnegative` assumption is disclosed and
+relies on in-language producers.
+
+Only exact declared `[i64]` returns are admitted. Returning a parameter
+array, array arguments, arrays flowing through callbacks, `perform` or
+lambdas, indirect `call(atom_ref(..))` array returns, and whole-array uses
+remain rejected. Native-bundle production/recheck and LLVM translation
+validation remain pinned to CompositeV26; V28 does not add native-bundle
+or LLVM correspondence guarantees. V27/V28 contract bytes remain
+identical for sources without array-returning atoms.
 
 Nothing deeper is claimed: the fragment admitted by the profile grew,
 the guarantees did not — the same identity-plus-recheck scopes apply,

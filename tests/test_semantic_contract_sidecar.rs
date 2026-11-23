@@ -1,7 +1,7 @@
 use mumei_core::semantic_contract::{
     extract_pure_i64_module_contracts, RefinedAdmission, PURE_I64_COMPOSITE_PROFILE_V24,
     PURE_I64_COMPOSITE_PROFILE_V25, PURE_I64_COMPOSITE_PROFILE_V26, PURE_I64_COMPOSITE_PROFILE_V27,
-    SEMANTIC_CONTRACT_VERSION,
+    PURE_I64_COMPOSITE_PROFILE_V28, SEMANTIC_CONTRACT_VERSION,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -626,6 +626,52 @@ fn array_parameter_sidecar_uses_v26_rechecks_accepts_and_binds_signature() {
         .as_array()
         .unwrap()
         .contains(&Value::String("producer_signature_binding".to_owned())));
+}
+
+#[test]
+fn array_return_sidecar_builds_rechecks_and_accepts_under_v28() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "atom make3(n: i64) -> [i64] requires: n >= 0; \
+        ensures: len(result) == 3; body: [1, 2, 3];\n\
+        atom caller_len(n: i64) -> i64 requires: n >= 0; \
+        ensures: result == 3; body: len(make3(n));\n\
+        atom main() -> i64 requires: true; ensures: result == 3; body: caller_len(0);";
+    let input = write_input(dir.path(), "array_returns.mm", source);
+    let output_base = dir.path().join("array_returns");
+    succeeds(run_build(&input, &output_base, true));
+
+    let artifact = dir.path().join("array_returns_main.ll");
+    assert!(artifact.is_file());
+    let sidecar = artifact.with_extension("semantic-contract.json");
+    let sidecar_value: Value = serde_json::from_slice(&fs::read(&sidecar).unwrap()).unwrap();
+    let contracts = sidecar_value["contracts"].as_array().unwrap();
+    assert!(!contracts.is_empty());
+    assert!(contracts
+        .iter()
+        .all(|contract| contract["profile"] == PURE_I64_COMPOSITE_PROFILE_V28));
+    assert!(contracts.iter().all(|contract| contract["assumptions"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("array_result_len_nonnegative".to_owned()))));
+
+    let recheck = succeeds(run_sidecar_recheck(&sidecar, &input, &artifact, true));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&recheck.stdout).unwrap()["recheck"],
+        "consistent"
+    );
+    let accepted = sidecar_accept_command(&sidecar, &input, &artifact, true)
+        .output()
+        .unwrap();
+    assert!(
+        accepted.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&accepted.stdout),
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&accepted.stdout).unwrap()["accepted"],
+        true
+    );
 }
 
 #[test]

@@ -3699,6 +3699,65 @@ fn native_bundle_rejects_scalar_callback_parameter_sources() {
 }
 
 #[test]
+fn native_bundle_rejects_array_return_sources_outside_composite_v26() {
+    let root = tempfile::tempdir().unwrap();
+    let source_path = root.path().join("array_returns.mm");
+    let bundle = root.path().join("bundle");
+    let source = "atom make3(n: i64) -> [i64] requires: n >= 0; \
+        ensures: len(result) == 3; body: [1, 2, 3];\n\
+        atom caller_len(n: i64) -> i64 requires: n >= 0; \
+        ensures: result == 3; body: len(make3(n));\n\
+        atom main() -> i64 requires: true; ensures: result == 3; body: caller_len(0);";
+    fs::write(&source_path, source).unwrap();
+
+    let contracts = extract_pure_i64_module_contracts(
+        source,
+        "array_returns.mm",
+        None,
+        RefinedAdmission::CompositeV28,
+    )
+    .expect("array-return source should extract under CompositeV28");
+    assert!(!contracts.is_empty());
+
+    assert!(matches!(
+        extract_pure_i64_module_contracts(
+            source,
+            "array_returns.mm",
+            None,
+            RefinedAdmission::CompositeV26,
+        ),
+        Err(
+            mumei_core::semantic_contract::SemanticContractError::Unsupported(
+                "explicit owned scalar i64 signature required"
+            )
+        )
+    ));
+
+    let output = cli(&[
+        "native-bundle",
+        "build",
+        source_path.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]);
+    let output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "native bundles must stay on CompositeV26; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output_text.contains("unsupported or invalid module source"),
+        "native bundle should retain its generic profile rejection; output: {output_text}"
+    );
+}
+
+#[test]
 fn module_bundle_with_struct_and_single_main_takes_the_module_path() {
     // A lone `main` beside a struct declaration is still a composite
     // module — the single-atom path rejects every non-atom item.

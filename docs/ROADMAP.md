@@ -3723,6 +3723,20 @@ types and call forms fail closed. Callback-free V26/V27 sidecar output remains
 byte-identical. Native bundles and translation validation remain on
 CompositeV26 and do not support callback parameters.
 
+The C03 `mumei.pure-i64-composite/v28` profile is limited to semantic-contract
+sidecars and admits exact declared `[i64]` returns and array call results.
+Owned results reuse the local-array model for aliases, branch merges, reads
+and writes; callee `requires` are call-site obligations and guarded `ensures`
+are assumed with `result` bound as a read-only array. Stable
+`callres_<callee>_len(args...)` and `callres_<callee>_store(args...)`
+applications make repeated calls agree. The guarded
+`array_result_len_nonnegative` assumption is disclosed. Parameter-array
+returns, array arguments, callback/`perform`/lambda flows,
+`call(atom_ref(..))` array returns and whole-value uses remain rejected.
+Native bundles and LLVM translation validation remain pinned to
+CompositeV26. V27/V28 contract bytes are identical for sources without
+array-returning atoms.
+
 Remaining signature rejections after v27 (for #651), measured on develop at
 #1355 under CompositeV26: 105 `.mm` files fail with `explicit owned scalar i64
 signature required`. The classifier re-confirmed 104 of them: 71 have one
