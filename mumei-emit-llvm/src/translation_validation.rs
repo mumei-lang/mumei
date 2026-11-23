@@ -992,26 +992,52 @@ pub unsafe fn encode_parsed_function_for_comparison<'ctx>(
     )?;
     // The shared gate admits a 128-bit scalar return and a checked
     // direct call; both stay outside the scalar-i64 comparison subset.
-    // An `i128`-returning or call-bearing IR is not compared — it is
-    // rejected here so the caller records the function as not
-    // liftable rather than silently binding a mis-shaped encoding.
+    // An `i128`-returning IR is not compared — it is rejected here so
+    // the caller records the function as not liftable rather than
+    // silently binding a mis-shaped encoding.
     let ret = LLVMGetReturnType(LLVMGlobalGetValueType(raw));
     if aggregate_fields(ret).is_some() || width(ret)? != 64 {
         return Err(ValidationError("LLVM return outside comparison subset"));
     }
+    // Scalar-i64 calls are compared: `check_call` already restricts
+    // them to direct calls of the callee's declared type with no
+    // operand bundles, tail markers, or call-site attributes, and the
+    // encoder models them as `call_decl` uninterpreted applications.
+    // A call returning or taking anything but scalar 64-bit leaves is
+    // outside the subset.
     let mut block = LLVMGetFirstBasicBlock(raw);
     while !block.is_null() {
         let mut inst = LLVMGetFirstInstruction(block);
         while !inst.is_null() {
             if LLVMGetInstructionOpcode(inst) == LLVMOpcode::LLVMCall {
-                return Err(ValidationError("LLVM call outside comparison subset"));
+                let call_type = LLVMTypeOf(inst);
+                let scalar_result = LLVMGetTypeKind(call_type) == LLVMTypeKind::LLVMIntegerTypeKind
+                    && LLVMGetIntTypeWidth(call_type) == 64;
+                let scalar_args = (0..LLVMGetNumArgOperands(inst)).all(|index| {
+                    let arg_type = LLVMTypeOf(LLVMGetOperand(inst, index));
+                    LLVMGetTypeKind(arg_type) == LLVMTypeKind::LLVMIntegerTypeKind
+                        && LLVMGetIntTypeWidth(arg_type) == 64
+                });
+                // An unused call result carries its actual arguments
+                // nowhere in the encoded return term, so the IR and
+                // machine sides could pass different actuals and still
+                // compare `Equivalent`. Reject it instead of asserting
+                // arg obligations the subset cannot map to call sites.
+                if !scalar_result || !scalar_args || LLVMGetFirstUse(inst).is_null() {
+                    return Err(ValidationError("LLVM call outside comparison subset"));
+                }
             }
             inst = LLVMGetNextInstruction(inst);
         }
         block = LLVMGetNextBasicBlock(block);
     }
-    let no_renames = BTreeMap::new();
-    let mut encoder = IrEncoder::new(context, &no_renames, false, optimized);
+    // The native emitter renames the user `main` atom to
+    // `__mumei_user_main`; the source model's call sites name their
+    // callee `main`, so the encoder needs the same rename map the
+    // shared validation path uses or every call to `main` compares
+    // `Different`.
+    let call_renames = native_call_renames(true);
+    let mut encoder = IrEncoder::new(context, &call_renames, false, optimized);
     let returns = encoder.encode(
         raw,
         &model.inputs,

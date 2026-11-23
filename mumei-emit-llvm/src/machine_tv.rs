@@ -285,9 +285,33 @@ pub fn ir_object_signature_liftable(model: &PureI64Body) -> bool {
         && model.param_leaf_doubles.iter().all(|leaves| leaves.as_slice() == [false])
         && model.param_shapes.iter().all(Option::is_none)
         && model.array_params.iter().all(Option::is_none)
-        && model.call_sites.is_empty()
+        && model.call_sites.iter().all(scalar_i64_call_site)
         && model.loop_bound_exits.is_none()
         && !model.bounded_memory
+}
+
+/// Whether a source call site stays inside the direct comparison's
+/// scalar-i64 subset: every argument and the result are single
+/// non-double 64-bit leaves, with no composite shape or callback
+/// parameter. Both sides encode such a call as the same
+/// `call_decl(callee, arity)` uninterpreted application over
+/// `model.inputs`, and the lifter's `call_argument_obligations` check
+/// the machine's actual arguments against the source ones — the
+/// memo's arg-match obligation (design memo §3.1).
+fn scalar_i64_call_site(site: &CallSite) -> bool {
+    site.callback_arguments.is_empty()
+        && !site.has_composite_arguments_or_result
+        && matches!(site.result_shape, CallValueShape::Scalar { leaf_count: 1 })
+        && site.result.get_size() == 64
+        && !site.result_is_double
+        && site.result_leaf_doubles.as_slice() == [false]
+        && site.arg_leaf_doubles.len() == site.args.len()
+        && site.arg_leaf_doubles.iter().all(|is_double| !*is_double)
+        && site
+            .argument_shapes
+            .iter()
+            .all(|shape| matches!(shape, CallValueShape::Scalar { leaf_count: 1 }))
+        && site.argument_shapes.len() == site.args.len()
 }
 
 /// Compare an object function's lifted paths directly against its
@@ -299,11 +323,12 @@ pub fn ir_object_signature_liftable(model: &PureI64Body) -> bool {
 /// same Z3 context.
 ///
 /// Scoped to scalar-i64 signatures: aggregates, f64 leaves, wider
-/// inputs, calls, loops, and bounded memory return `NotLiftable`. For
-/// every lifted path the machine return must equal the IR return of
-/// some covering edge whose definedness obligations hold; an
-/// uncovered path, a diverging edge, or a failed IR domain
-/// obligation each compare `Different`.
+/// inputs, non-scalar call sites, loops, and bounded memory return
+/// `NotLiftable`. For every lifted path the machine return must equal
+/// the IR return of some covering edge whose definedness obligations
+/// hold and whose call-argument obligations all hold; an uncovered
+/// path, a diverging edge, or a failed obligation each compare
+/// `Different`.
 pub fn check_function_against_ir<'ctx>(
     bytes: &[u8],
     address: u64,
@@ -355,6 +380,20 @@ pub fn check_function_against_ir<'ctx>(
             let condition = condition.substitute(&substitutions);
             let defined = defined.substitute(&substitutions);
             mismatches.push(Bool::and(context, &[&condition, &defined.not()]));
+        }
+        // A machine call whose actual arguments do not match the
+        // source call site's expected ones is a mismatch — the
+        // arg-match obligation (design memo §3.1). Scalar-i64 paths
+        // carry no sret or exact-f64 obligations, but they are
+        // asserted for completeness.
+        mismatches.extend(
+            path.call_argument_obligations
+                .iter()
+                .chain(&path.exact_f64_call_argument_obligations)
+                .map(|obligation| obligation.substitute(&substitutions).not()),
+        );
+        if let Some(obligation) = &path.sret_pointer_obligation {
+            mismatches.push(obligation.substitute(&substitutions).not());
         }
         let mismatches_refs = mismatches.iter().collect::<Vec<_>>();
         let result = check_query_with_simplify_fallback(context, |solver| {
@@ -6027,41 +6066,35 @@ entry:
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
         config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
         let context = Context::new(&config);
-        // A calling atom is outside the scalar-i64 no-call subset.
-        let caller = source_model_named(
-            "atom helper(x: i64) -> i64 requires: true; ensures: true; body: { x + 1 };\n\
-             atom caller(x: i64) -> i64 requires: true; ensures: true; body: { helper(x) };",
+        // A call site with a multi-leaf (`i128`) argument is outside
+        // the scalar-i64 call subset.
+        let caller = source_model_named_with_admission(
+            "atom helper(x: i128) -> i64 requires: true; ensures: true; body: { 0 };\n\
+             atom caller(x: i128) -> i64 requires: true; ensures: true; body: { helper(x) };",
             "caller",
             &context,
+            RefinedAdmission::CompositeV21,
         );
-        let ir = r#"target triple = "x86_64-unknown-linux-gnu"
-define i64 @helper(i64 %x) {
-entry:
-  %r = add i64 %x, 1
-  ret i64 %r
-}
-"#;
-        let (address, bytes) = compiled_function(ir);
-        let (returns, defined) = unsafe {
-            crate::translation_validation::encode_ir_function_for_comparison(
-                ir.as_bytes(),
-                "helper",
-                &caller,
-                false,
-                &context,
-            )
-        }
-        .unwrap();
+        assert!(!ir_object_signature_liftable(&caller));
         assert_eq!(
-            check_function_against_ir(
-                &bytes,
-                address,
-                &caller,
-                &returns,
-                &defined,
-                &BTreeMap::new(),
-                &context,
-            ),
+            check_function_against_ir(&[], 0, &caller, &[], &[], &BTreeMap::new(), &context,),
+            IrObjectEquivalence::NotLiftable("unsupported_signature")
+        );
+
+        // A composite-argument call site inside an otherwise scalar
+        // caller is rejected by the call-site gate itself — the
+        // caller's own parameters stay inside the scalar-i64 subset.
+        let struct_caller = source_model_named_with_admission(
+            "struct P { x: i64, y: i64 }\n\
+             atom helper(p: P) -> i64 requires: true; ensures: true; body: { p.x };\n\
+             atom caller(x: i64) -> i64 requires: true; ensures: true; body: { helper(P { x: x, y: 0 }) };",
+            "caller",
+            &context,
+            RefinedAdmission::CompositeV21,
+        );
+        assert!(!ir_object_signature_liftable(&struct_caller));
+        assert_eq!(
+            check_function_against_ir(&[], 0, &struct_caller, &[], &[], &BTreeMap::new(), &context,),
             IrObjectEquivalence::NotLiftable("unsupported_signature")
         );
     }
@@ -6147,6 +6180,131 @@ entry:
     }
 
     #[test]
+    fn frame_memory_check_compares_scalar_call_results_against_ir() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // Step 3b: scalar-i64 call sites compare as the same
+        // `call_decl` uninterpreted applications on both sides. An IR
+        // that passes a different actual argument encodes a different
+        // application and reports `Different` — the arg-match
+        // obligation is verified, not assumed.
+        let source = "atom callee(x: i64) -> i64 requires: true; ensures: true; body: { x };\n\
+            atom caller(x: i64) -> i64 requires: true; ensures: true; body: { callee(x) };";
+        let model = source_model_named(source, "caller", &context);
+        assert_eq!(model.call_sites.len(), 1);
+        let matching_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @callee(i64 %x) {
+entry:
+  ret i64 %x
+}
+define i64 @caller(i64 %x) {
+entry:
+  %result = call i64 @callee(i64 %x)
+  ret i64 %result
+}
+"#;
+        let divergent_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @callee(i64 %x) {
+entry:
+  ret i64 %x
+}
+define i64 @caller(i64 %x) {
+entry:
+  %result = call i64 @callee(i64 0)
+  ret i64 %result
+}
+"#;
+        let (address, bytes, call_targets) = compiled_function_with_targets(matching_ir, "caller");
+        for (ir, expected) in [
+            (matching_ir, FunctionOutcome::Equivalent),
+            (divergent_ir, FunctionOutcome::Different),
+        ] {
+            let (ir_returns, ir_definedness) = unsafe {
+                crate::translation_validation::encode_ir_function_for_comparison(
+                    ir.as_bytes(),
+                    "caller",
+                    &model,
+                    false,
+                    &context,
+                )
+            }
+            .unwrap();
+            assert_eq!(
+                check_function_with_frame_memory_against_ir(
+                    &bytes,
+                    address,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &call_targets,
+                    &context,
+                )
+                .0,
+                expected
+            );
+            assert_eq!(
+                check_function_against_ir(
+                    &bytes,
+                    address,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &call_targets,
+                    &context,
+                ),
+                match expected {
+                    FunctionOutcome::Equivalent => IrObjectEquivalence::Equivalent,
+                    _ => IrObjectEquivalence::Different,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn encode_ir_for_comparison_renames_native_main_callee() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // The binary emitter renames the user `main` to
+        // `__mumei_user_main`, while the source model's call site
+        // binds `call_decl("main", ...)`. Without the native rename
+        // map the encoded term is a different uninterpreted function
+        // and every call to `main` compares `Different`.
+        let source = "atom main(x: i64) -> i64 requires: true; ensures: true; body: { main(x) };";
+        let model = source_model_named(source, "main", &context);
+        let ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @__mumei_user_main(i64 %x) {
+entry:
+  %r = call i64 @__mumei_user_main(i64 %x)
+  ret i64 %r
+}
+"#;
+        let (returns, _defined) = unsafe {
+            crate::translation_validation::encode_ir_function_for_comparison(
+                ir.as_bytes(),
+                "__mumei_user_main",
+                &model,
+                false,
+                &context,
+            )
+        }
+        .unwrap();
+        let expected = mumei_core::semantic_contract::call_decl(&context, "main", 1)
+            .apply(&[&model.inputs[0]])
+            .as_bv()
+            .unwrap();
+        assert!(
+            returns.iter().any(|(_condition, value)| {
+                value._eq(&expected).simplify().as_bool() == Some(true)
+            }),
+            "call term does not use the source callee name `main`"
+        );
+    }
+
+    #[test]
     fn ir_object_equivalence_rejects_ir_arity_mismatch() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
@@ -6186,13 +6344,37 @@ entry:
             }
             .is_err());
         }
+        // A direct call whose result and arguments are scalar 64-bit
+        // leaves stays inside the comparison subset (Step 3b).
+        assert!(unsafe {
+            crate::translation_validation::encode_ir_function_for_comparison(
+                r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @callee(i64 %x) {
+entry:
+  ret i64 %x
+}
+define i64 @helper(i64 %x, i64 %y) {
+entry:
+  %r = call i64 @callee(i64 %x)
+  ret i64 %r
+}
+"#
+                .as_bytes(),
+                "helper",
+                &model,
+                false,
+                &context,
+            )
+        }
+        .is_ok());
         // The shared gate admits shapes the scalar-i64 comparison
         // subset excludes: an `i128` return (the gate allows 64|128
-        // bits for a scalar result) and a checked direct call both
-        // encode unless the comparison path rejects them itself.
-        // Assert the error names the comparison-only gate: the shared
-        // validation gate admits both shapes, so an `is_err` alone
-        // could hide an earlier parse or header failure.
+        // bits for a scalar result) and a call whose result is not a
+        // 64-bit scalar both encode unless the comparison path
+        // rejects them itself. Assert the error names the
+        // comparison-only gate: the shared validation gate admits
+        // both shapes, so an `is_err` alone could hide an earlier
+        // parse or header failure.
         for (outside_subset_ir, expected) in [
             (
                 r#"target triple = "x86_64-unknown-linux-gnu"
@@ -6208,14 +6390,15 @@ entry:
             ),
             (
                 r#"target triple = "x86_64-unknown-linux-gnu"
-define i64 @callee(i64 %x) {
+define i128 @callee(i64 %x) {
 entry:
-  ret i64 %x
+  %r = zext i64 %x to i128
+  ret i128 %r
 }
 define i64 @helper(i64 %x, i64 %y) {
 entry:
-  %r = call i64 @callee(i64 %x)
-  ret i64 %r
+  %w = call i128 @callee(i64 %x)
+  ret i64 %x
 }
 "#,
                 "call outside comparison subset",
