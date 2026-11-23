@@ -7594,4 +7594,62 @@ entry:
             .unwrap()
             .contains("assumed-external: [\"memcpy\"]"));
     }
+
+    #[test]
+    fn source_machine_tv_names_link_edge_status_separately() {
+        // The gate covers source↔machine equivalence only — its `checked`
+        // status must never be read as covering the link edge. With the
+        // link check unperformed the record names it unchecked even when
+        // every function compared equivalent.
+        let mut outcomes = BTreeMap::new();
+        outcomes.insert("main".to_owned(), FunctionOutcome::Equivalent);
+        let evaluation = MachineTvEvaluation {
+            functions: BTreeMap::new(),
+            outcomes,
+            counts: MachineTvCounts {
+                equivalent_count: 1,
+                equivalent_callee_saved_count: 0,
+                equivalent_callee_saved_preserved_count: 0,
+                equivalent_leaf_count: 1,
+                equivalent_call_count: 0,
+                equivalent_forward_branch_count: 0,
+                equivalent_acyclic_branch_count: 0,
+                equivalent_conditional_call_count: 0,
+                equivalent_bounded_loop_count: 0,
+                equivalent_source_loop_count: 0,
+                equivalent_refined_signature_count: 0,
+                equivalent_f64_leaf_count: 0,
+                equivalent_composite_aggregate_count: 0,
+                equivalent_f64_composite_aggregate_count: 0,
+                equivalent_wide_composite_aggregate_count: 0,
+                equivalent_wide_composite_aggregate_convention_count: 0,
+                equivalent_wide_scalar_count: 0,
+                equivalent_red_zone_frame_memory_count: 0,
+                equivalent_allocated_frame_memory_count: 0,
+                object_function_count: 1,
+            },
+            coverage: (vec![], vec!["object_link_correspondence"]),
+            input_domain: String::new(),
+            scope: "test",
+            entry_wrapper_applicable: false,
+        };
+        let unchecked = source_machine_tv_within_profile_json(
+            &evaluation,
+            &["object_link_correspondence"],
+            false,
+        );
+        assert_eq!(
+            unchecked["status"],
+            "checked_source_machine_tv_within_profile"
+        );
+        assert_eq!(
+            unchecked["object_link_correspondence"],
+            "unchecked_not_translation_validated"
+        );
+        let checked = source_machine_tv_within_profile_json(&evaluation, &[], true);
+        assert_eq!(
+            checked["object_link_correspondence"],
+            "checked_object_link_correspondence"
+        );
+    }
 }
