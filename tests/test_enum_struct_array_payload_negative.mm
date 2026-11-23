@@ -71,6 +71,16 @@ enum DirectArrayE {
     N
 }
 
+enum InnerArrayE {
+    D(ps: [Point]),
+    N
+}
+
+enum OuterArrayE {
+    D(inner: InnerArrayE),
+    N
+}
+
 struct WidePoint {
     n: u32
 }
@@ -219,6 +229,11 @@ atom direct_struct_array_payload_different_elements(xs: [Point], ys: [Point]) ->
 requires: len(xs) > 0 && len(ys) > 0 && xs[0].x != ys[0].x;
 ensures: result == true;
 body: DirectArrayE::D(xs) == DirectArrayE::D(ys);
+
+atom nested_enum_struct_array_equality_rejects_different_contents(xs: [Point], ys: [Point]) -> bool
+requires: len(xs) > 0 && len(ys) > 0 && xs[0].x != ys[0].x;
+ensures: result == true;
+body: OuterArrayE::D(InnerArrayE::D(xs)) == OuterArrayE::D(InnerArrayE::D(ys));
 
 atom direct_struct_array_payload_stale_reconstruction(ps: [Point]) -> i64
 requires: len(ps) > 0 && ps[0].x == 3;

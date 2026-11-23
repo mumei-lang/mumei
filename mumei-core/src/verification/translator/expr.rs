@@ -2558,7 +2558,18 @@ fn enum_payload_value_equality<'a>(
                             "Enum payload values have different field types",
                         ));
                     }
-                    payload_equalities.push(left_value._eq(&right_value));
+                    let nested_enum_eq =
+                        if base.starts_with("enum:") && left_value.as_datatype().is_some() {
+                            enum_payload_value_equality(vc, &left_value, &right_value)?
+                        } else {
+                            None
+                        };
+                    if let Some(nested_enum_eq) = nested_enum_eq {
+                        has_array_payload = true;
+                        payload_equalities.push(nested_enum_eq);
+                    } else {
+                        payload_equalities.push(left_value._eq(&right_value));
+                    }
                     continue;
                 };
                 has_array_payload = true;

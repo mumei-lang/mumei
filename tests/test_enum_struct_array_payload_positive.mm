@@ -40,6 +40,16 @@ enum DirectArrayE {
     N
 }
 
+enum InnerArrayE {
+    D(ps: [Pt]),
+    N
+}
+
+enum OuterArrayE {
+    D(inner: InnerArrayE),
+    N
+}
+
 enum DirectWideE {
     D(ps: [WidePt]),
     N
@@ -307,6 +317,11 @@ atom direct_struct_array_payload_equality_unchanged(ps: [Pt]) -> bool
 requires: len(ps) > 0;
 ensures: result == true;
 body: DirectArrayE::D(ps) == DirectArrayE::D(ps);
+
+atom nested_enum_struct_array_equality_is_extensional(xs: [Pt], ys: [Pt]) -> bool
+requires: InnerArrayE::D(xs) == InnerArrayE::D(ys);
+ensures: result == true;
+body: OuterArrayE::D(InnerArrayE::D(xs)) == OuterArrayE::D(InnerArrayE::D(ys));
 
 atom struct_array_first_x(ps: [Pt]) -> i64
 requires: len(ps) > 0;
