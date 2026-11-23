@@ -164,17 +164,89 @@ fn array_argument_aliases<'a>(
     });
 
     for (key, tracked) in env {
-        let Some(name) = key.strip_prefix("__z3_arr_") else {
-            continue;
-        };
         if tracked.as_array().is_some_and(|array| {
             roots.contains(&(super::z3_types::array_root_ast(&array) as usize))
         }) {
-            sources.insert(name.to_string());
+            if let Some(name) = key.strip_prefix("__z3_arr_") {
+                sources.insert(name.to_string());
+            } else if !key.starts_with("__") {
+                sources.insert(key.clone());
+            }
         }
     }
 
     sources
+}
+
+fn array_source_is_declared_array(vc: &VCtx<'_>, name: &str, env: &Env<'_>) -> bool {
+    let tracked_key = format!("__z3_arr_{name}");
+    if env
+        .get(&tracked_key)
+        .and_then(|value| value.as_array())
+        .is_some()
+        || env.get(name).and_then(|value| value.as_array()).is_some()
+        || env.contains_key(&super::z3_types::array_len_key(name))
+        || vc.local_array_elem_types.borrow().contains_key(name)
+        || vc.current_atom.is_some_and(|atom| {
+            atom.params.iter().any(|param| {
+                param.name == name
+                    && param
+                        .type_name
+                        .as_deref()
+                        .is_some_and(|type_name| type_name.starts_with('['))
+            })
+        })
+    {
+        return true;
+    }
+    let expression = parse_expression(name);
+    crate::verification::support::datatype::declared_type_of_expr(vc, &expression)
+        .is_some_and(|type_name| type_name.trim().starts_with('['))
+}
+
+fn mark_array_value_sources_shared<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    expression: &Expr,
+    value: &Dynamic<'a>,
+) -> MumeiResult<()> {
+    if value.as_array().is_none() {
+        return Ok(());
+    }
+    let mut sources = std::collections::HashSet::new();
+    collect_array_value_sources(expression, &mut sources);
+    let unresolved = sources
+        .iter()
+        .filter(|name| {
+            array_source_is_declared_array(vc, name, env)
+                && env
+                    .get(&format!("__z3_arr_{name}"))
+                    .and_then(|value| value.as_array())
+                    .or_else(|| env.get(*name).and_then(|value| value.as_array()))
+                    .is_none()
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(name) = unresolved.first() {
+        return Err(MumeiError::type_error(format!(
+            "array payload source '{name}' cannot be resolved for shared-buffer tracking"
+        )));
+    }
+
+    let aliases = array_argument_aliases(expression, value, env);
+    if sources
+        .iter()
+        .any(|name| array_source_is_declared_array(vc, name, env))
+        && aliases.is_empty()
+    {
+        return Err(MumeiError::type_error(
+            "array payload source cannot be resolved for shared-buffer tracking",
+        ));
+    }
+    for name in aliases {
+        super::z3_types::mark_array_shared(vc.ctx, env, &name);
+    }
+    Ok(())
 }
 
 fn reject_later_array_argument_mutation<'a>(
@@ -5458,6 +5530,9 @@ pub(crate) fn expr_to_z3<'a>(
                             let mut payload_snapshots = Vec::with_capacity(args.len());
                             for (i, arg) in args.iter().enumerate() {
                                 let arg_z3 = expr_to_z3(vc, arg, env, solver_opt)?;
+                                if arg_z3.as_array().is_some() {
+                                    mark_array_value_sources_shared(vc, env, arg, &arg_z3)?;
+                                }
                                 let payload_snapshot = enum_ctor
                                     .and_then(|(enum_def, idx)| enum_def.variants.get(idx))
                                     .and_then(|variant| variant.field_types.get(i))
@@ -5469,9 +5544,6 @@ pub(crate) fn expr_to_z3<'a>(
                                         if datatype::array_payload_element_type(&field_leaves)
                                             .is_some()
                                         {
-                                            if let Expr::Variable(name) = arg {
-                                                super::z3_types::mark_array_shared(ctx, env, name);
-                                            }
                                             let array = match arg {
                                                 Expr::Variable(name) => env
                                                     .get(&format!("__z3_arr_{name}"))
@@ -5497,9 +5569,6 @@ pub(crate) fn expr_to_z3<'a>(
                                         )
                                         .is_some()
                                         {
-                                            if let Expr::Variable(name) = arg {
-                                                super::z3_types::mark_array_shared(ctx, env, name);
-                                            }
                                             datatype::struct_array_payload_leaves(
                                                 vc,
                                                 env,

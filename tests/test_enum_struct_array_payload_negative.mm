@@ -252,6 +252,34 @@ body: {
     }
 };
 
+atom block_tail_array_payload_shared_write_rejected(ps: [Point]) -> i64
+requires: len(ps) > 0;
+ensures: result == 0;
+body: {
+    let e = DirectArrayE::D({ ps });
+    ps[0].x = 1;
+    0
+};
+
+atom alias_array_payload_shared_write_rejected(ps: [Point]) -> i64
+requires: len(ps) > 0;
+ensures: result == 0;
+body: {
+    let alias = ps;
+    let e = DirectArrayE::D(alias);
+    ps[0].x = 1;
+    0
+};
+
+atom branch_array_payload_shared_write_rejected(ps: [Point], qs: [Point], choose: bool) -> i64
+requires: len(ps) > 0 && len(qs) > 0;
+ensures: result == 0;
+body: {
+    let e = DirectArrayE::D(if choose { ps } else { qs });
+    ps[0].x = 1;
+    0
+};
+
 atom tagged_direct_struct_array_payload_read_remains_closed(e: DirectArrayE) -> i64
 requires: match e {
     DirectArrayE::D(ps) => len(ps) > 0 && ps[0].x == 12,
