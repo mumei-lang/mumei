@@ -5994,6 +5994,48 @@ entry:
     }
 
     #[test]
+    fn ir_object_equivalence_rejects_ir_arity_mismatch() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // The direct-comparison encoder reuses the validation header
+        // gate: an IR function whose parameter count differs from the
+        // source signature fails to encode instead of binding inputs
+        // to the wrong positions.
+        let model = source_model(
+            "atom add(x: i64, y: i64) -> i64 requires: true; ensures: result == x + y; body: { x + y };",
+            &context,
+        );
+        for arity_ir in [
+            r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @helper(i64 %x) {
+entry:
+  ret i64 %x
+}
+"#,
+            r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @helper(i64 %x, i64 %y, i64 %z) {
+entry:
+  %r = add i64 %x, %y
+  ret i64 %r
+}
+"#,
+        ] {
+            assert!(unsafe {
+                crate::translation_validation::encode_ir_function_for_comparison(
+                    arity_ir.as_bytes(),
+                    "helper",
+                    &model,
+                    false,
+                    &context,
+                )
+            }
+            .is_err());
+        }
+    }
+
+    #[test]
     fn integer_struct_pairs_match_real_llvm_codegen_and_preserve_leaf_order() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
