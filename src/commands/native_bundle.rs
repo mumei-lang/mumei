@@ -5684,7 +5684,11 @@ fn object_translation_correspondence_checks(
             "IR data globals or object data symbols unavailable".to_owned(),
         )),
         (Some(globals), Some(surface)) if globals.is_empty() => {
-            checks.push(if surface.symbols.is_empty() {
+            // Anonymous data sections carry bytes that no object
+            // symbol names; with no IR globals they cannot be matched,
+            // so only a fully empty data surface verifies.
+            let anonymous_bytes: usize = surface.section_contents.values().map(Vec::len).sum();
+            checks.push(if surface.symbols.is_empty() && anonymous_bytes == 0 {
                 check(
                     "object_data_correspondence",
                     "checked",
@@ -5695,7 +5699,7 @@ fn object_translation_correspondence_checks(
                     "object_data_correspondence",
                     "unchecked",
                     format!(
-                        "{} object data symbols with no IR globals to compare",
+                        "{} object data symbols and {anonymous_bytes} anonymous data bytes with no IR globals to compare",
                         surface.symbols.len()
                     ),
                 )
@@ -9070,6 +9074,37 @@ entry:
         let (result, detail) = item(&report);
         assert_eq!(result, "unchecked");
         assert!(detail.contains("opaque: underivable"), "{detail}");
+
+        // Integer widths whose byte-store size is not a power of two
+        // (`i24` allocates 4 bytes but stores 3) are underivable too —
+        // comparing them against the object's padded image would
+        // report a false `inconsistent`.
+        let padded = tv::ir_data_globals(
+            br#"@pair = global [2 x i24] [i24 1, i24 2]
+@word = global i24 7
+@aligned = global i64 7"#,
+        )
+        .unwrap();
+        assert_eq!(padded["pair"], None);
+        assert_eq!(padded["word"], None);
+        assert_eq!(padded["aligned"], Some(7u64.to_le_bytes().to_vec()));
+
+        // Object data with no IR globals stays unverifiable when the
+        // sections hold anonymous bytes — only a fully empty surface
+        // is trivially checked.
+        let no_globals: BTreeMap<String, Option<Vec<u8>>> = BTreeMap::new();
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            None,
+            None,
+            Some(&no_globals),
+            &object_bytes,
+        );
+        let (result, detail) = item(&report);
+        assert_eq!(result, "unchecked");
+        assert!(detail.contains("anonymous data bytes"), "{detail}");
 
         // A named symbol whose bytes disagree is a real inconsistency.
         let mut with_diverged = ir_data.clone();

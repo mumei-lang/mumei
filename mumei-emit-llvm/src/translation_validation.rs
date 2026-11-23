@@ -242,7 +242,8 @@ pub fn ir_data_globals(ir: &[u8]) -> std::result::Result<BTreeMap<String, Option
 
 /// Byte content of a constant initializer, or `None` when the shape
 /// cannot be rendered byte-exactly without a target data layout
-/// (pointers, structs, non-native floats).
+/// (pointers, structs, non-native floats, integer widths whose
+/// byte-store size is not a power of two).
 unsafe fn data_initializer_bytes(value: LLVMValueRef) -> Option<Vec<u8>> {
     if !LLVMIsAConstantDataSequential(value).is_null() {
         // `LLVMGetAsString` covers i8-element strings (the `str_lit`
@@ -269,8 +270,18 @@ unsafe fn data_initializer_bytes(value: LLVMValueRef) -> Option<Vec<u8>> {
         if width == 0 || width > 64 {
             return None;
         }
+        // LLVM pads an integer's object allocation up to the next
+        // power-of-two alignment (`i24` stores 3 bytes but allocates
+        // 4). Only widths whose store size is itself a power of two
+        // have store size == alloc size, so they stay byte-exact
+        // without the target data layout; `i24`/`i48`/... report
+        // underivable rather than comparing against padded bytes.
+        let bytes = width.div_ceil(8);
+        if bytes > 8 || !bytes.is_power_of_two() {
+            return None;
+        }
         let bits = LLVMConstIntGetZExtValue(value);
-        return Some(bits.to_le_bytes()[..width.div_ceil(8) as usize].to_vec());
+        return Some(bits.to_le_bytes()[..bytes as usize].to_vec());
     }
     if !LLVMIsAConstantFP(value).is_null() {
         let mut loses_flag = 0;
@@ -307,7 +318,8 @@ unsafe fn type_store_bytes(ty: LLVMTypeRef) -> Option<usize> {
     match LLVMGetTypeKind(ty) {
         LLVMTypeKind::LLVMIntegerTypeKind => {
             let width = LLVMGetIntTypeWidth(ty);
-            (width != 0 && width <= 64).then_some(width.div_ceil(8) as usize)
+            let bytes = width.div_ceil(8);
+            (width != 0 && bytes <= 8 && bytes.is_power_of_two()).then_some(bytes as usize)
         }
         LLVMTypeKind::LLVMFloatTypeKind => Some(4),
         LLVMTypeKind::LLVMDoubleTypeKind => Some(8),

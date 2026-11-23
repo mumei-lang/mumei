@@ -2381,9 +2381,12 @@ that outcome as `merged`. The item is `checked` when every derivable
 global verified (and trivially `checked` when neither side defines
 any data), `inconsistent` on byte divergence, and `unchecked` when a
 global is missing from the object or its initializer is outside the
-derivable shapes — integers up to 64 bits, f32/f64, i8 strings, and
-uniform-element arrays of those; pointers, structs and wider shapes
-stay `underivable` in `detail`, never zero-filled. This item stays
+derivable shapes — power-of-two-byte integers up to 64 bits (i8–i64;
+`i24`-style widths whose store size is not a power of two allocate
+padded bytes LLVM does not describe without a data layout, so they
+stay `underivable`), f32/f64, i8 strings, and uniform-element arrays
+of those; pointers, structs and wider shapes stay `underivable` in
+`detail`, never zero-filled. This item stays
 out of the `llvm_ir → object_code` edge's promotion gate — the
 relation name covers instruction selection only.
 
