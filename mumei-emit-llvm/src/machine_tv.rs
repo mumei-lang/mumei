@@ -6576,34 +6576,45 @@ entry:
             RefinedAdmission::CompositeV6,
         );
         assert_eq!(model.result_shape, Some(2));
-        for wide_ir in [
-            r#"target triple = "x86_64-unknown-linux-gnu"
+        // `ret undef` keeps the body inside the shared gate, so the
+        // comparison subset's own return check is what rejects: the
+        // `{i128}` signature matches the model's field count and leaf
+        // kinds, and only `aggregate_all_i64_leaves` fails it closed.
+        let wide_ir = r#"target triple = "x86_64-unknown-linux-gnu"
 define { i128 } @make(i64 %a, i64 %b) {
 entry:
-  %s = zext i64 %a to i128
-  %p0 = insertvalue { i128 } undef, i128 %s, 0
-  ret { i128 } %p0
+  ret { i128 } undef
 }
-"#,
-            r#"target triple = "x86_64-unknown-linux-gnu"
+"#;
+        let error = unsafe {
+            crate::translation_validation::encode_ir_function_for_comparison(
+                wide_ir.as_bytes(),
+                "make",
+                &model,
+                false,
+                &context,
+            )
+        }
+        .unwrap_err();
+        assert_eq!(error.0, "LLVM return outside comparison subset");
+        // A `double` leaf is rejected too — earlier, at the shared
+        // signature check whose leaf kinds no longer match the model's.
+        let f64_ir = r#"target triple = "x86_64-unknown-linux-gnu"
 define { i64, double } @make(i64 %a, i64 %b) {
 entry:
-  %p0 = insertvalue { i64, double } undef, i64 %a, 0
-  ret { i64, double } %p0
+  ret { i64, double } undef
 }
-"#,
-        ] {
-            assert!(unsafe {
-                crate::translation_validation::encode_ir_function_for_comparison(
-                    wide_ir.as_bytes(),
-                    "make",
-                    &model,
-                    false,
-                    &context,
-                )
-            }
-            .is_err());
+"#;
+        assert!(unsafe {
+            crate::translation_validation::encode_ir_function_for_comparison(
+                f64_ir.as_bytes(),
+                "make",
+                &model,
+                false,
+                &context,
+            )
         }
+        .is_err());
     }
 
     #[test]
