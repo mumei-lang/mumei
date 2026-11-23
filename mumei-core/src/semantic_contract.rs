@@ -1545,6 +1545,7 @@ fn inferred_i64_return_atoms(
     if !admission.admits_inferred_i64_returns() {
         return BTreeSet::new();
     }
+    let callee_returns = atom_return_types(items);
     let mut inferred = items
         .iter()
         .filter_map(|item| {
@@ -1552,12 +1553,52 @@ fn inferred_i64_return_atoms(
                 return None;
             };
             (atom.return_type.is_none()
-                && crate::mir::infer_atom_return_type(atom).as_deref() == Some("i64"))
+                && callee_returns.get(&atom.name).is_some_and(|ty| ty == "i64"))
             .then(|| atom.name.clone())
         })
         .collect::<BTreeSet<_>>();
     inferred.extend(inferred_refined_return_atoms(items, refined, admission));
     inferred
+}
+
+/// Atom name → return type: declared types first, then a fixpoint that
+/// infers each omitted return through callees already in the map. A
+/// chain `b() = a()` where `a` is inferred i64 lets `b` infer too;
+/// cycles with no declared anchor stay `None` (fail-closed).
+fn atom_return_types(items: &[Item]) -> BTreeMap<String, String> {
+    let mut returns: BTreeMap<String, String> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Atom(atom) => atom
+                .return_type
+                .as_ref()
+                .map(|ty| (atom.name.clone(), ty.clone())),
+            _ => None,
+        })
+        .collect();
+    loop {
+        let mut changed = false;
+        for item in items {
+            let Item::Atom(atom) = item else {
+                continue;
+            };
+            if returns.contains_key(&atom.name) {
+                continue;
+            }
+            let map: std::collections::HashMap<String, String> = returns
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if let Some(ty) = crate::mir::infer_atom_return_type_with(atom, &map) {
+                returns.insert(atom.name.clone(), ty);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    returns
 }
 
 fn inferred_refined_return_atoms(
@@ -1568,14 +1609,15 @@ fn inferred_refined_return_atoms(
     if !admission.admits_inferred_refined_returns() {
         return BTreeSet::new();
     }
+    let callee_returns = atom_return_types(items);
     items
         .iter()
         .filter_map(|item| {
             let Item::Atom(atom) = item else {
                 return None;
             };
-            let inferred = crate::mir::infer_atom_return_type(atom)?;
-            let alias = refined.get(&inferred)?;
+            let inferred = callee_returns.get(&atom.name)?;
+            let alias = refined.get(inferred)?;
             (atom.return_type.is_none() && alias.base == "i64" && !alias.conjuncts.is_empty())
                 .then(|| atom.name.clone())
         })
@@ -18064,6 +18106,32 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
                 None,
                 RefinedAdmission::CompositeV24
             ),
+            Err(SemanticContractError::Unsupported(
+                "explicit owned scalar i64 signature required"
+            ))
+        ));
+    }
+
+    #[test]
+    fn composite_v24_infers_omitted_returns_through_call_chains() {
+        // `top` calls `mid`, which calls `base` — all three omit the
+        // return type. Inference reaches `i64` transitively through the
+        // callee return-type map, so the module is admitted.
+        let source = "atom base(x: i64) requires: true; ensures: result == x; body: x;\n\
+            atom mid(y: i64) requires: true; ensures: result == y; body: base(y);\n\
+            atom top(z: i64) requires: true; ensures: result == z; body: mid(z);\n\
+            atom main() -> i64 requires: true; ensures: result == 2; body: top(2);";
+        let contracts =
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV24)
+                .unwrap();
+        assert_eq!(contracts.len(), 4);
+        // A cycle with no declared anchor stays uninferred — the
+        // signature gate still rejects it (fail-closed).
+        let cyclic = "atom a() requires: true; ensures: result == 0; body: b();\n\
+            atom b() requires: true; ensures: result == 0; body: a();\n\
+            atom main() -> i64 requires: true; ensures: result == 0; body: 0;";
+        assert!(matches!(
+            extract_pure_i64_module_contracts(cyclic, "m.mm", None, RefinedAdmission::CompositeV24),
             Err(SemanticContractError::Unsupported(
                 "explicit owned scalar i64 signature required"
             ))
