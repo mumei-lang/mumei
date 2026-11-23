@@ -1333,7 +1333,7 @@ pub(crate) fn snapshot_struct_array_leaves<'a>(
     value: &Dynamic<'a>,
     declared_array_type: Option<&str>,
 ) -> MumeiResult<Option<StructArrayLeafSnapshot<'a>>> {
-    let uses_unbound_result = matches!(expression, Expr::Call(_, _) | Expr::Match { .. });
+    let uses_unbound_result = is_unbound_array_result_expression(expression);
     let result_element_type = if uses_unbound_result {
         value
             .as_array()
@@ -1549,6 +1549,14 @@ pub(crate) fn wire_array_slots_with_struct_leaf_snapshot<'a>(
         clear_struct_array_leaf_slots(env, name);
     }
     Ok(())
+}
+
+fn is_unbound_array_result_expression(expression: &Expr) -> bool {
+    match expression {
+        Expr::Call(_, _) | Expr::Match { .. } => true,
+        Expr::Block(stmt) => stmt_tail_expr(stmt).is_some_and(is_unbound_array_result_expression),
+        _ => false,
+    }
 }
 
 pub(crate) fn array_element_type_from_expr(vc: &VCtx<'_>, value: &Expr) -> Option<String> {
