@@ -400,11 +400,16 @@ pub fn validate_pure_i64_optimized(
     validate(source, llvm_ir, options, false, true)
 }
 
-/// Compare a `HirAtom`'s scalar-i64 leaf body with the same-named
+/// Compare a `HirAtom`'s scalar leaf body with the same-named
 /// function in `llvm_ir` — the `hir → llvm_ir` correspondence check.
-/// Admission is the leaf subset only (`encode_hir_pure_i64_leaf`);
-/// anything wider fails closed as a validation error. The return is the
-/// bare outcome: this is the stage check, not a profile attestation.
+/// Admission is the leaf subset only (`encode_hir_pure_i64_leaf`):
+/// uniform-width scalar signatures (`i64`, `i128`/`u128` at their
+/// two-slot carriers, or `f64` pass-through leaves), `let` bindings,
+/// short-circuit `&&`/`||`/`=>`, tail `if` branches, and i64-carrying
+/// uninterpreted call sites (ordered operations over a call result
+/// stay outside until callee signatures are wired in). Anything wider
+/// fails closed as a validation error. The return is the bare outcome:
+/// this is the stage check, not a profile attestation.
 pub fn validate_hir_pure_i64_leaf(
     atom: &mumei_core::hir::HirAtom,
     llvm_ir: &str,

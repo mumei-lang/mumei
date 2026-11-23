@@ -4363,3 +4363,40 @@ fn hir_leaf_compare_rejects_f64_operations_and_wrong_ret() {
         "an i64 return where f64 is declared fails the kind gate"
     );
 }
+
+#[test]
+fn hir_leaf_compare_i128_upper_half_divergence() {
+    let src = source_ret("x: i128", "i128", "x");
+    // Only the upper half differs: bit 64 set — invisible below 2^64.
+    let ir = pin("define i128 @f(i128 %x) { %r = or i128 %x, 18446744073709551616\n ret i128 %r }");
+    assert_eq!(hir_outcome(&src, &ir), Outcome::Different);
+}
+
+#[test]
+fn hir_leaf_compare_u128_negative_literal_zero_extends() {
+    // `x + -1` in u128: the emitter zero-extends the 64-bit literal, so
+    // this is x + (2^64-1), not x - 1 — a sext model would misjudge both.
+    let src = source_ret("x: u128", "u128", "x + -1");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+    let ir = pin("define i128 @f(i128 %x) { %r = add i128 %x, -1\n ret i128 %r }");
+    assert_eq!(hir_outcome(&src, &ir), Outcome::Different);
+}
+
+#[test]
+fn hir_leaf_compare_rejects_ordered_ops_over_call_results() {
+    // `g` may be a u64-returning callee — ordered ops over its result
+    // need the callee signature env, so they fail closed for now.
+    let src = source("x: i64, y: i64", "g(x) > y");
+    let Item::Atom(atom) = parse_module_checked(&src).unwrap().remove(0) else {
+        panic!("atom")
+    };
+    let hir = lower_atom_to_hir(&atom);
+    let ir = pin("declare i64 @g(i64)\ndefine i64 @f(i64 %x, i64 %y) { %c = call i64 @g(i64 %x)\n %cmp = icmp sgt i64 %c, %y\n %r = zext i1 %cmp to i64\n ret i64 %r }");
+    assert!(
+        tv::validate_hir_pure_i64_leaf(&hir, &ir, Options::default()).is_err(),
+        "ordered ops over a call result stay outside the subset"
+    );
+}

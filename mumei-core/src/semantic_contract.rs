@@ -8272,12 +8272,18 @@ impl<'ctx> PureI64Body<'ctx> {
 /// existing IR comparison (the comparison encodes the LLVM function
 /// against this model's shared inputs).
 ///
-/// Admission is the scalar-i64 leaf subset: parameters and the result
-/// are `i64`; the body is a flat block of `let` bindings plus a tail
-/// expression; expressions are `Number` / `Variable` / `BinaryOp` /
-/// single-expression `IfThenElse`. Anything outside fails closed as
-/// `Unsupported` — wider admission follows the same staged order the IR
-/// subset used.
+/// Admission is the uniform-scalar leaf subset: parameters and the
+/// result share one declared type — `i64`, `i128`/`u128` (carried as
+/// the two-slot `[lo, hi]` leaves `param_env` uses), or `f64`
+/// pass-through leaves whose IEEE-754 bit patterns only variables and
+/// lets may carry. The body is a flat block of `let` bindings plus a
+/// tail expression; expressions are `Number` / `Variable` / `BinaryOp`
+/// / single-expression `IfThenElse` / i64-carrying uninterpreted call
+/// sites. Ordered operations (`<` `<=` `>` `>=` `/` `%`) over a
+/// call-derived operand stay outside because the callee's declared
+/// signedness needs the module signature env. Anything outside fails
+/// closed as `Unsupported` — wider admission follows the same staged
+/// order the IR subset used.
 pub fn encode_hir_pure_i64_leaf<'ctx>(
     atom: &crate::hir::HirAtom,
     context: &'ctx Context,
@@ -8309,7 +8315,7 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
     };
     let signed = !float && !tys.contains(&Some("u128"));
     let mut inputs = Vec::new();
-    let mut env: HashMap<String, BV<'ctx>> = HashMap::new();
+    let mut env: HashMap<String, (BV<'ctx>, bool)> = HashMap::new();
     let mut param_leaf_doubles = Vec::new();
     for param in &atom.signature.params {
         match (param.ty.as_deref(), width, signed, float) {
@@ -8327,12 +8333,12 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
             let hi = BV::new_const(context, format!("param.{}.hi", param.name), 64);
             inputs.push(lo.clone());
             inputs.push(hi.clone());
-            env.insert(param.name.clone(), hi.concat(&lo));
+            env.insert(param.name.clone(), (hi.concat(&lo), false));
             param_leaf_doubles.push(vec![false, false]);
         } else {
             let input = BV::new_const(context, format!("param.{}", param.name), 64);
             inputs.push(input.clone());
-            env.insert(param.name.clone(), input);
+            env.insert(param.name.clone(), (input, false));
             param_leaf_doubles.push(vec![float]);
         }
     }
@@ -8346,13 +8352,18 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
 
     fn encode_expr<'ctx>(
         expr: &HirExpr,
-        env: &HashMap<String, BV<'ctx>>,
+        env: &HashMap<String, (BV<'ctx>, bool)>,
         context: &'ctx Context,
         guard: &Bool<'ctx>,
         definedness: &mut Vec<Bool<'ctx>>,
         call_sites: &mut Vec<CallSite<'ctx>>,
         scalar: (u32, bool, bool),
-    ) -> Result<BV<'ctx>, SemanticContractError> {
+    ) -> Result<(BV<'ctx>, bool), SemanticContractError> {
+        // The second component tracks whether the value depends on a
+        // call result: a call site is an uninterpreted i64 carrier, but
+        // the emitter orders compares/divides by the *callee's* declared
+        // signedness, which this slice cannot see — so ordered
+        // operations over a call-derived operand stay outside it.
         let (width, signed, float) = scalar;
         let zero = BV::from_i64(context, 0, width);
         let one = BV::from_i64(context, 1, width);
@@ -8364,13 +8375,24 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
             return Err(SemanticContractError::Unsupported("hir f64 op"));
         }
         match expr {
-            HirExpr::Number(n) => Ok(BV::from_i64(context, *n, width)),
+            HirExpr::Number(n) => Ok((
+                if width == 128 && !signed {
+                    // `u128` literals arrive as 64-bit tokens the emitter
+                    // zero-extends (`zext`), like `widen_literal_operands`.
+                    BV::from_u64(context, *n as u64, 64).zero_ext(64)
+                } else {
+                    // i64/i128 literals sign-extend (`sext`) — `-1` is -1.
+                    BV::from_i64(context, *n, width)
+                },
+                false,
+            )),
             HirExpr::Variable(name) => env
                 .get(name)
                 .cloned()
                 .ok_or(SemanticContractError::Unsupported("hir free variable")),
             HirExpr::BinaryOp(lhs, op, rhs) => {
-                let l = encode_expr(lhs, env, context, guard, definedness, call_sites, scalar)?;
+                let (l, l_call) =
+                    encode_expr(lhs, env, context, guard, definedness, call_sites, scalar)?;
                 // `&&`/`||`/`=>` short-circuit like the emitter and the
                 // source encoder: the right operand's partial operations
                 // bind only when the left one lets it run.
@@ -8381,52 +8403,71 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                     HirBinOp::Or => Bool::and(context, &[guard, &l._eq(&zero)]),
                     _ => guard.clone(),
                 };
-                let r = encode_expr(rhs, env, context, &r_guard, definedness, call_sites, scalar)?;
+                let (r, r_call) =
+                    encode_expr(rhs, env, context, &r_guard, definedness, call_sites, scalar)?;
+                if (l_call || r_call)
+                    && matches!(
+                        op,
+                        HirBinOp::Div
+                            | HirBinOp::Rem
+                            | HirBinOp::Gt
+                            | HirBinOp::Lt
+                            | HirBinOp::Ge
+                            | HirBinOp::Le
+                    )
+                {
+                    return Err(SemanticContractError::Unsupported(
+                        "ordered op over a call result",
+                    ));
+                }
                 let l_nz = l._eq(&zero).not();
                 let r_nz = r._eq(&zero).not();
-                Ok(match op {
-                    HirBinOp::Add => l.bvadd(&r),
-                    HirBinOp::Sub => l.bvsub(&r),
-                    HirBinOp::Mul => l.bvmul(&r),
-                    HirBinOp::Div | HirBinOp::Rem => {
-                        // The same obligations the source side binds, each
-                        // under its path guard: a nonzero divisor and —
-                        // signed only — no MIN / -1 overflow.
-                        definedness.push(guard.implies(&r_nz));
-                        if signed {
-                            let min = if width == 64 {
-                                BV::from_i64(context, i64::MIN, width)
-                            } else {
-                                BV::from_str(
-                                    context,
-                                    width,
-                                    "170141183460469231731687303715884105728",
-                                )
-                                .ok_or(SemanticContractError::Encoding)?
-                            };
-                            let neg_one = BV::from_i64(context, -1, width);
-                            definedness.push(guard.implies(
-                                &Bool::and(context, &[&l._eq(&min), &r._eq(&neg_one)]).not(),
-                            ));
+                Ok((
+                    match op {
+                        HirBinOp::Add => l.bvadd(&r),
+                        HirBinOp::Sub => l.bvsub(&r),
+                        HirBinOp::Mul => l.bvmul(&r),
+                        HirBinOp::Div | HirBinOp::Rem => {
+                            // The same obligations the source side binds, each
+                            // under its path guard: a nonzero divisor and —
+                            // signed only — no MIN / -1 overflow.
+                            definedness.push(guard.implies(&r_nz));
+                            if signed {
+                                let min = if width == 64 {
+                                    BV::from_i64(context, i64::MIN, width)
+                                } else {
+                                    BV::from_str(
+                                        context,
+                                        width,
+                                        "170141183460469231731687303715884105728",
+                                    )
+                                    .ok_or(SemanticContractError::Encoding)?
+                                };
+                                let neg_one = BV::from_i64(context, -1, width);
+                                definedness.push(guard.implies(
+                                    &Bool::and(context, &[&l._eq(&min), &r._eq(&neg_one)]).not(),
+                                ));
+                            }
+                            match (op, signed) {
+                                (HirBinOp::Div, true) => l.bvsdiv(&r),
+                                (HirBinOp::Rem, true) => l.bvsrem(&r),
+                                (HirBinOp::Div, false) => l.bvudiv(&r),
+                                _ => l.bvurem(&r),
+                            }
                         }
-                        match (op, signed) {
-                            (HirBinOp::Div, true) => l.bvsdiv(&r),
-                            (HirBinOp::Rem, true) => l.bvsrem(&r),
-                            (HirBinOp::Div, false) => l.bvudiv(&r),
-                            _ => l.bvurem(&r),
-                        }
-                    }
-                    HirBinOp::Eq => as_i64(l._eq(&r)),
-                    HirBinOp::Neq => as_i64(l._eq(&r).not()),
-                    HirBinOp::Gt => as_i64(if signed { l.bvsgt(&r) } else { l.bvugt(&r) }),
-                    HirBinOp::Lt => as_i64(if signed { l.bvslt(&r) } else { l.bvult(&r) }),
-                    HirBinOp::Ge => as_i64(if signed { l.bvsge(&r) } else { l.bvuge(&r) }),
-                    HirBinOp::Le => as_i64(if signed { l.bvsle(&r) } else { l.bvule(&r) }),
-                    HirBinOp::And => as_i64(Bool::and(context, &[&l_nz, &r_nz])),
-                    HirBinOp::Or => as_i64(Bool::or(context, &[&l_nz, &r_nz])),
-                    HirBinOp::Implies => as_i64(l_nz.implies(&r_nz)),
-                    _ => return Err(SemanticContractError::Unsupported("hir op")),
-                })
+                        HirBinOp::Eq => as_i64(l._eq(&r)),
+                        HirBinOp::Neq => as_i64(l._eq(&r).not()),
+                        HirBinOp::Gt => as_i64(if signed { l.bvsgt(&r) } else { l.bvugt(&r) }),
+                        HirBinOp::Lt => as_i64(if signed { l.bvslt(&r) } else { l.bvult(&r) }),
+                        HirBinOp::Ge => as_i64(if signed { l.bvsge(&r) } else { l.bvuge(&r) }),
+                        HirBinOp::Le => as_i64(if signed { l.bvsle(&r) } else { l.bvule(&r) }),
+                        HirBinOp::And => as_i64(Bool::and(context, &[&l_nz, &r_nz])),
+                        HirBinOp::Or => as_i64(Bool::or(context, &[&l_nz, &r_nz])),
+                        HirBinOp::Implies => as_i64(l_nz.implies(&r_nz)),
+                        _ => return Err(SemanticContractError::Unsupported("hir op")),
+                    },
+                    l_call || r_call,
+                ))
             }
             HirExpr::IfThenElse {
                 cond,
@@ -8453,11 +8494,12 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                 ) else {
                     return Err(SemanticContractError::Unsupported("hir if branch"));
                 };
-                let c = encode_expr(cond, env, context, guard, definedness, call_sites, scalar)?;
+                let (c, c_call) =
+                    encode_expr(cond, env, context, guard, definedness, call_sites, scalar)?;
                 let c_nz = c._eq(&zero).not();
                 let then_guard = Bool::and(context, &[guard, &c_nz]);
                 let else_guard = Bool::and(context, &[guard, &c_nz.not()]);
-                let t = encode_expr(
+                let (t, t_call) = encode_expr(
                     then_e,
                     env,
                     context,
@@ -8466,7 +8508,7 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                     call_sites,
                     scalar,
                 )?;
-                let e = encode_expr(
+                let (e, e_call) = encode_expr(
                     else_e,
                     env,
                     context,
@@ -8475,7 +8517,7 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                     call_sites,
                     scalar,
                 )?;
-                Ok(c._eq(&zero).not().ite(&t, &e))
+                Ok((c._eq(&zero).not().ite(&t, &e), c_call || t_call || e_call))
             }
             HirExpr::Call { name, args, .. } => {
                 // The same uninterpreted site the source encoder and the
@@ -8491,15 +8533,9 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                 }
                 let mut applied = Vec::with_capacity(args.len());
                 for arg in args {
-                    applied.push(encode_expr(
-                        arg,
-                        env,
-                        context,
-                        guard,
-                        definedness,
-                        call_sites,
-                        scalar,
-                    )?);
+                    applied.push(
+                        encode_expr(arg, env, context, guard, definedness, call_sites, scalar)?.0,
+                    );
                 }
                 let refs: Vec<&dyn Ast> = applied.iter().map(|v| v as &dyn Ast).collect();
                 let value = call_decl(context, name, applied.len())
@@ -8519,7 +8555,7 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                     guard: guard.clone(),
                     callback_arguments: Vec::new(),
                 });
-                Ok(value)
+                Ok((value, true))
             }
             _ => Err(SemanticContractError::Unsupported("hir expression")),
         }
@@ -8567,7 +8603,7 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
             _ => return Err(SemanticContractError::Unsupported("hir statement")),
         }
     }
-    let value = encode_expr(
+    let (value, _) = encode_expr(
         tail,
         &env,
         context,
