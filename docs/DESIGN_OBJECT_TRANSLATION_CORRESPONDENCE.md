@@ -243,7 +243,13 @@ mumei native-bundle recheck-machine-tv bundle loop.mm --expected-build-id "$buil
   fail-closed）。`output_identity` は `None` — artifact digest は
   descriptor の `object_translation.transformations` が pin 済み。
   `checked_*` は transformation.validation の値（手法の記述）で
-  verdict・昇格語彙ではない
+  verdict・昇格語彙ではない。観測面: descriptor の
+  `object_translation.transformations` に `source_atom→machine_code`
+  を追加して3段すべてを出力し（machine code はメモリ評価のみで
+  digest なし）、link 辺は手法名 `validation` と結果 `result` を
+  分離した。prepare 系の contract オブジェクトは digest 化のみに
+  使われ単体ではシリアライズされないため、emit の観測面は
+  descriptor 側が担う
 - 外部 relocation（libc import）の assumption 語彙を
   `machine_code_callee_saved_preservation_assumed_for_external_callees` と
   共通化するか

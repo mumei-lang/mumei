@@ -5644,6 +5644,16 @@ fn object_translation_json(data: &ObjectRecheckData) -> serde_json::Value {
         "status": status,
         "transformations": [
             {
+                // Machine code is evaluated in memory during the
+                // machine-TV check and never persisted, so there is no
+                // artifact digest to pin for this edge.
+                "from": "source_atom",
+                "to": "machine_code",
+                "relation": "machine_code_translation_validation",
+                "output_identity": null,
+                "validation": "checked_source_machine_tv_within_profile",
+            },
+            {
                 "from": "llvm_ir",
                 "to": "object_code",
                 "relation": "llc_instruction_selection_register_allocation",
@@ -5656,6 +5666,14 @@ fn object_translation_json(data: &ObjectRecheckData) -> serde_json::Value {
                 "relation": "static_link_relocation_placement",
                 "output_identity": executable_sha256,
                 "validation": link_validation,
+                // `validation` names the method applied; the outcome of
+                // the link-correspondence check is reported separately
+                // so the two are never conflated in one field.
+                "result": if data.object_link_correspondence {
+                    "checked_correspondence"
+                } else {
+                    "unchecked_not_translation_validated"
+                },
             },
         ],
         "functions": record
