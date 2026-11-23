@@ -572,6 +572,43 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
             "machine_code_callee_saved_preservation_assumed_for_external_callees",
         ])
     );
+    // Step 1 metadata-only object translation record: the producer lists
+    // the transformation relations (kept honestly unvalidated or named by
+    // the link check), the function correspondence table and the
+    // relocation records — without claiming object_translation_correspondence.
+    let object_translation = &descriptor["object_translation"];
+    assert_eq!(object_translation["status"], "metadata_only");
+    let transformations = object_translation["transformations"].as_array().unwrap();
+    assert_eq!(transformations.len(), 2);
+    assert_eq!(transformations[0]["from"], "llvm_ir");
+    assert_eq!(transformations[0]["to"], "object_code");
+    assert_eq!(
+        transformations[0]["validation"],
+        "unchecked_not_translation_validated"
+    );
+    assert_eq!(transformations[1]["from"], "object_code");
+    assert_eq!(transformations[1]["to"], "linked_executable");
+    assert_eq!(
+        transformations[1]["validation"],
+        "checked_object_link_correspondence"
+    );
+    let functions = object_translation["functions"].as_array().unwrap();
+    assert_eq!(functions.len(), 2);
+    let main_record = functions
+        .iter()
+        .find(|function| function["object_symbol"] == "__mumei_user_main")
+        .unwrap();
+    assert_eq!(main_record["object_section"], ".text");
+    assert!(main_record["object_size"].as_u64().unwrap() > 0);
+    assert!(main_record["executable_address"].as_u64().is_some());
+    let relocations = object_translation["relocations"].as_array().unwrap();
+    assert!(!relocations.is_empty());
+    for relocation in relocations {
+        assert_eq!(relocation["object_section"], ".text");
+        assert!(relocation["object_offset"].as_u64().is_some());
+        assert!(relocation["target_symbol"].as_str().is_some());
+        assert!(relocation["addend"].as_i64().is_some());
+    }
 }
 
 #[test]
@@ -5898,6 +5935,38 @@ fn accept_object_accepts_loop_bundle_without_object_link() {
     assert!(not_performed
         .iter()
         .any(|check| check == "runtime_cancellation_semantics"));
+    // The uncheckable-link path still emits the metadata-only record through
+    // the tolerant parser: functions enumerated, relocations recorded, and the
+    // link edge honestly unvalidated.
+    let translation = &descriptor["object_translation"];
+    assert_eq!(translation["status"], "metadata_only");
+    let transformations = translation["transformations"].as_array().unwrap();
+    assert_eq!(transformations.len(), 2);
+    let link_edge = transformations
+        .iter()
+        .find(|edge| edge["relation"] == "static_link_relocation_placement")
+        .unwrap();
+    assert_eq!(
+        link_edge["validation"],
+        "unchecked_not_translation_validated"
+    );
+    let functions = translation["functions"].as_array().unwrap();
+    assert!(functions.len() >= 2);
+    let names: Vec<&str> = functions
+        .iter()
+        .map(|function| function["ir_function"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"loop_count") && names.contains(&"main"));
+    for function in functions {
+        assert!(function["object_symbol"].is_string());
+        assert!(function["object_section"].is_string());
+        assert!(function["object_offset"].is_number());
+    }
+    for relocation in translation["relocations"].as_array().unwrap() {
+        assert!(relocation["object_section"].is_string());
+        assert!(relocation["object_offset"].is_number());
+        assert!(relocation["target_symbol"].is_string());
+    }
 }
 
 #[test]
