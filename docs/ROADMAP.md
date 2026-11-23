@@ -3723,6 +3723,49 @@ types and call forms fail closed. Callback-free V26/V27 sidecar output remains
 byte-identical. Native bundles and translation validation remain on
 CompositeV26 and do not support callback parameters.
 
+Remaining signature rejections after v27 (for #651), measured on develop at
+#1355 under CompositeV26: 105 `.mm` files fail with `explicit owned scalar i64
+signature required`. The classifier re-confirmed 104 of them: 71 have one
+blocker and 33 have more than one. "Only" counts files where the blocker is the
+sole cause; "Any" counts every file that has the blocker.
+
+| Blocker | Only | Any | Kind | Next step |
+|---|---:|---:|---|---|
+| `atom_ref` / fn parameter | 14 | 23 | profile | Sidecar-only v27 above; lambdas and callback values stay rejected |
+| `Str` parameter | 14 | 15 | profile, low yield | Design only, not implemented (see below) |
+| Omitted return, not inferable | 19 | 42 | type inference | Separate compiler task (see below) |
+| `[T]` beyond v26 | 13 | 31 | profile | Array returns and array call results (5), `[u32]` and other narrow elements (3), struct/enum elements (4), nested `[[i64]]` (1) |
+| `ref` / `ref mut` parameter | 4 | 19 | ownership / aliasing | `ref` on a scalar could be modeled as a value; `ref mut` needs write-back modeling. Most of these files are borrow-checker negative fixtures that the value contract cannot express |
+| Omitted return inferred as a refined alias | 4 | 8 | profile (small v24 extension) | Admit an inferred refined alias over i64 as an i64 return, with the refinement as a result obligation |
+| `[Str]` | 2 | 2 | profile | Depends on `Str` parameters |
+| Untyped parameter | 0 | 2 | language / type inference | Not a profile issue |
+| Tuple result | 1 | 1 | profile | Tuples are outside the profile; low yield |
+
+The `Str` design, if it is resumed:
+- A `Str` input is immutable UTF-8 byte memory with no interior NUL. This
+  matches the LLVM ABI, a bare pointer to a NUL-terminated buffer.
+- `len(s)` is the byte length, as `strlen` computes it, not the number of
+  Unicode scalars.
+- Only `len`, `is_empty` and comparisons against literals would be admitted.
+- Indexing a parameter stays rejected, because the verifier and codegen do not
+  share a byte model for `Str` parameters.
+- Implementation is deferred because this slice would admit 4 negative fixtures
+  and no positive file.
+
+The 84 omitted-return atoms that cannot be inferred (in 42 files) break down by
+the form of the tail expression:
+- 38 call another atom, often one whose return is also omitted. Interprocedural
+  inference would cover these.
+- 17 are `len(..)` on an array or untyped parameter. Inferring `len` as i64
+  would cover these.
+- 18 are `task` or `task_group` results. These stay outside the profile even
+  with better inference.
+- 11 are `call(f, ..)` or lambda calls. These need inference from the fn type,
+  plus v27; lambdas stay out.
+
+Most of these files are negative fixtures, so the expected gain in proved files
+is small. Measure it after the inference change.
+
 `mumei build --semantic-contract` is an opt-in production sidecar. It binds the
 exact emitted `.ll` bytes by SHA-256 only; correspondence remains unchecked,
 and it is not default output. `mumei evidence recheck-sidecar` freshly checks
