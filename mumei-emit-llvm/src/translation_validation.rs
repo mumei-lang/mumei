@@ -489,7 +489,10 @@ pub fn validate_hir_pure_i64_leaf(
             &context,
             function.as_value_ref(),
             &model,
-            &BTreeMap::new(),
+            // The bundle emitter renames the user `main` member to
+            // `__mumei_user_main`; a source call `main()` must meet
+            // `call @__mumei_user_main` rather than compare Different.
+            &native_call_renames(true),
             false,
             false,
             model.array_params.iter().any(|a| a.is_some()),
