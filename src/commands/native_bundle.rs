@@ -3064,6 +3064,12 @@ struct ObjectLinkRelocation {
     // applied field was located, for non-Text entries resolved by
     // the slot search. `None` until a unique slot is claimed.
     applied_offset: Option<u64>,
+    // `assumed_external_callee` when the target is a loader import —
+    // the relocation's runtime binding stays an assumption in the
+    // same `assumed_*` category machine-TV uses for external callees
+    // (it claims resolution-by-loader only, not register preservation,
+    // so the longer callee-saved name is deliberately not reused).
+    assumption: Option<&'static str>,
 }
 
 /// Report name for a relocation entry's ELF kind. PC32/PLT32 get
@@ -3116,6 +3122,8 @@ struct ObjectRelocationRecord {
     // the unique-slot search; `None` for code relocations (their site
     // is derived from the owning function) and unresolved entries.
     applied_offset: Option<u64>,
+    // Same assumption marker as `ObjectLinkRelocation.assumption`.
+    assumption: Option<&'static str>,
 }
 
 fn object_translation_record(
@@ -3144,6 +3152,7 @@ fn object_translation_record(
                 addend: relocation.addend,
                 resolved_value: relocation.resolved_value,
                 applied_offset: relocation.applied_offset,
+                assumption: relocation.assumption,
             })
             .collect(),
     }
@@ -3561,12 +3570,15 @@ fn object_link_corresponds(
                     offset_in_section: offset,
                     offset: usize::MAX,
                     kind,
-                    target: target_name,
+                    target: target_name.clone(),
                     target_section,
                     target_value,
                     addend: relocation.addend(),
                     resolved_value: None,
                     applied_offset: None,
+                    assumption: executable_imports
+                        .contains(target_name.as_str())
+                        .then_some("assumed_external_callee"),
                 });
                 continue;
             }
@@ -3654,6 +3666,9 @@ fn object_link_corresponds(
                 addend: relocation.addend(),
                 resolved_value: None,
                 applied_offset: None,
+                assumption: executable_imports
+                    .contains(target_name)
+                    .then_some("assumed_external_callee"),
             });
         }
     }
@@ -4967,6 +4982,14 @@ fn object_translation_parse(
             .filter(|addresses| addresses.len() == 1)
             .map(|addresses| addresses[0])
     };
+    // Loader imports (global non-definition symbols) keep the same
+    // `assumed_external_callee` marker the strict path records.
+    let executable_imports: BTreeSet<String> = executable_file
+        .symbols()
+        .chain(executable_file.dynamic_symbols())
+        .filter(|symbol| symbol.is_global() && !symbol.is_definition())
+        .filter_map(|symbol| symbol.name().ok().map(str::to_owned))
+        .collect();
     for symbol in object_file.symbols() {
         if !symbol.is_global() || !symbol.is_definition() || symbol.kind() != SymbolKind::Text {
             continue;
@@ -5035,10 +5058,13 @@ fn object_translation_parse(
                 object_section: section_name.clone(),
                 object_offset: offset,
                 kind,
-                target_symbol: target_name,
+                target_symbol: target_name.clone(),
                 addend: relocation.addend(),
                 resolved_value,
                 applied_offset: None,
+                assumption: executable_imports
+                    .contains(target_name.as_str())
+                    .then_some("assumed_external_callee"),
             });
         }
     }
@@ -5681,6 +5707,7 @@ fn object_translation_json(data: &ObjectRecheckData) -> serde_json::Value {
                 "addend": relocation.addend,
                 "resolved_value": relocation.resolved_value,
                 "applied_offset": relocation.applied_offset,
+                "assumption": relocation.assumption,
             }))
             .collect::<Vec<_>>(),
         "correspondence": correspondence,
@@ -8046,6 +8073,15 @@ entry:
             .find(|relocation| relocation.target_symbol == "memcpy")
             .unwrap();
         assert!(memcpy_relocation.resolved_value.is_some());
+        // The import carries the shared `assumed_*` category marker;
+        // internal targets carry none.
+        assert_eq!(
+            memcpy_relocation.assumption,
+            Some("assumed_external_callee")
+        );
+        assert!(record.relocations.iter().all(|relocation| relocation
+            .assumption
+            .is_none_or(|a| a == "assumed_external_callee")));
         assert!(corresponds);
         assert!(resolved_call_sites >= 1);
 

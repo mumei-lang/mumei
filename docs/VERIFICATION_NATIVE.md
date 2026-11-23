@@ -2276,7 +2276,11 @@ compiler-rt helper, or a loader import the link leaves to the dynamic
 linker — backend-injected calls such as `llvm.memcpy`'s `memcpy`
 relocation land here; each is resolvable through the assumed-external
 vocabulary and named in `detail` as
-`assumed-external: [names]`), `relocation_bounds` (every relocation offset falls inside
+`assumed-external: [names]`; the relocation record itself marks these
+targets with `assumption: "assumed_external_callee"` — the same
+`assumed_*` assumption category machine-TV uses for external callees,
+under a distinct name because the claim is loader resolution only,
+not callee-saved register preservation), `relocation_bounds` (every relocation offset falls inside
 an enumerated function's section range), `relocation_resolved_values`
 (every relocation's pc-relative value recomputed; an import's call field
 is verified against the PLT stub the linker emitted for it — the Nth

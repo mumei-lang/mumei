@@ -5968,6 +5968,21 @@ fn loop_bundle_links_and_pins_runtime_but_keeps_runtime_out_of_claims() {
         .iter()
         .any(|check| check == "machine_code_tv_cyclic_control_flow_functions"));
 
+    // The `assumption` field is emitted on every relocation — the
+    // `assumed_external_callee` marker belongs to loader imports only
+    // (covered for real imports in the lib memcpy test); internal
+    // targets carry null.
+    for relocation in descriptor["object_translation"]["relocations"]
+        .as_array()
+        .unwrap()
+    {
+        assert!(
+            relocation["assumption"].is_null()
+                || relocation["assumption"] == "assumed_external_callee",
+            "unexpected assumption marker: {relocation}"
+        );
+    }
+
     let original_record = fs::read(bundle.join(RECORD_FILE)).unwrap();
     let mut runtime_setting_mismatch = record.clone();
     runtime_setting_mismatch["settings"]["runtime"] =
