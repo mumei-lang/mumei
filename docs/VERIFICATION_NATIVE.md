@@ -2258,6 +2258,14 @@ function diverged, and `unchecked` when none could be lifted. An
 `inconsistent` item is
 reported in place; it is not promoted into a verdict or a performed check.
 
+Step 5 of the record pipeline surfaces the aggregate status on the text
+path too: `recheck-machine-tv` and `accept-object` without `--json`
+print `Object translation correspondence: <status> (N of M items
+checked).` and one `inconsistent: <item> — <detail>` diagnostic line per
+inconsistent item, so a divergence is named without reading the JSON
+descriptor. The lines are a report only — they change neither the
+record nor any verdict, grade, or performed-check claim.
+
 Scalar f64 leaves are admitted only under a record profile that admits f64
 arithmetic. The bounded SSE2 profile handles register-only `movsd`, `movapd`,
 `movaps`, `movq`, `addsd`, `subsd`, `mulsd`, `divsd`, and `cmpeqsd`; f64
