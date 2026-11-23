@@ -269,8 +269,8 @@ pub fn ir_object_signature_liftable(model: &PureI64Body) -> bool {
         // At most one integer 64-bit result leaf: a scalar i128 result
         // (`[false, false]`) or an f64 result (`[true]`) is outside.
         // An omitted return annotation leaves the list empty — an
-        // inferred-i64 body still compares; a genuinely void member
-        // fails closed later in the IR encode.
+        // inferred-i64 body still compares; a genuinely void atom is
+        // already excluded by the source signature check upstream.
         && model.result_leaf_doubles.iter().all(|leaf| !*leaf)
         && model.result_leaf_doubles.len() <= 1
         // Every parameter a single integer 64-bit scalar leaf: wide
