@@ -4357,7 +4357,10 @@ fn hir_leaf_compare_rejects_f64_operations_and_wrong_ret() {
         panic!("atom")
     };
     let hir = lower_atom_to_hir(&atom);
-    let ir = pin("define i64 @f(double %x) { %i = bitcast double %x to i64\n ret i64 %i }");
+    // `ret i64 0` is fully inside the instruction subset — only the
+    // declared-kind check on the return rejects it; without that gate
+    // this would compare `Different` instead of erroring.
+    let ir = pin("define i64 @f(double %x) { ret i64 0 }");
     assert!(
         tv::validate_hir_pure_i64_leaf(&hir, &ir, Options::default()).is_err(),
         "an i64 return where f64 is declared fails the kind gate"

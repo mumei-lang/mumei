@@ -8623,6 +8623,10 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
     body.result_leaf_doubles = vec![float];
     body.has_wide_scalar_features = width == 128;
     body.has_non_i64_scalar_features = width == 128 || float;
+    // Mirror the source-side feature flags: a uniform-f64 signature is
+    // the f64 feature (the comparison reads leaf kinds directly, but
+    // the flags should agree with what `has_f64_features` reports).
+    body.has_f64_features = float;
     Ok(body)
 }
 
