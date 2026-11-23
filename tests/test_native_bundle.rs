@@ -5964,14 +5964,35 @@ fn accept_object_accepts_loop_bundle_without_object_link() {
         .any(|check| check == "runtime_cancellation_semantics"));
     // The uncheckable-link path still emits the record through the tolerant
     // parser: functions enumerated, relocations recorded, and the link edge
-    // honestly unvalidated. The aggregate status records checked_correspondence
-    // only when every correspondence item checked (resolved values may stay
-    // unchecked on this path).
+    // honestly unvalidated.
     let translation = &descriptor["object_translation"];
-    assert!(matches!(
-        translation["status"].as_str().unwrap(),
-        "metadata_only" | "checked_correspondence"
-    ));
+    let correspondence = &translation["correspondence"];
+    let results: BTreeMap<String, &str> = correspondence["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|check| {
+            (
+                check["item"].as_str().unwrap().to_owned(),
+                check["result"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    let expected_status = if results.values().all(|result| *result == "checked") {
+        "checked_correspondence"
+    } else if results.values().any(|result| *result == "inconsistent") {
+        "inconsistent_correspondence"
+    } else {
+        "unchecked_not_translation_validated"
+    };
+    // The aggregate statuses are derived from the item results, never fixed.
+    assert_eq!(correspondence["status"], expected_status);
+    let expected_translation_status = if expected_status == "checked_correspondence" {
+        "checked_correspondence"
+    } else {
+        "metadata_only"
+    };
+    assert_eq!(translation["status"], expected_translation_status);
     let transformations = translation["transformations"].as_array().unwrap();
     assert_eq!(transformations.len(), 2);
     let link_edge = transformations
@@ -5999,24 +6020,6 @@ fn accept_object_accepts_loop_bundle_without_object_link() {
         assert!(relocation["object_offset"].is_number());
         assert!(relocation["target_symbol"].is_string());
     }
-    // Step 2 correspondence inspection also covers the fallback record; the
-    // aggregate stays honestly unvalidated when any item is unchecked.
-    let correspondence = &translation["correspondence"];
-    assert!(matches!(
-        correspondence["status"].as_str().unwrap(),
-        "unchecked_not_translation_validated" | "checked_correspondence"
-    ));
-    let results: BTreeMap<String, &str> = correspondence["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|check| {
-            (
-                check["item"].as_str().unwrap().to_owned(),
-                check["result"].as_str().unwrap(),
-            )
-        })
-        .collect();
     for item in [
         "function_coverage",
         "function_count",
@@ -6025,6 +6028,7 @@ fn accept_object_accepts_loop_bundle_without_object_link() {
     ] {
         assert_eq!(results.get(item).copied(), Some("checked"), "{item}");
     }
+    // Unresolved relocation values may stay honestly unchecked on this path.
     assert!(matches!(
         results.get("relocation_resolved_values").copied(),
         Some("checked") | Some("unchecked")

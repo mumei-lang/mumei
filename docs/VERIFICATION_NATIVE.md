@@ -2182,7 +2182,9 @@ Step 2 adds `object_translation.correspondence`: an inspection of the emitted
 metadata. Each entry of `correspondence.checks`
 reports one item's `result` — `checked` when the comparison ran and passed,
 `unchecked` when it could not run, or `inconsistent` with the offending names
-or offsets in `detail`. Step 3 aggregates those results:
+or offsets in `detail`. Step 3 of the record pipeline (aggregate status
+wiring; unrelated to the design memo's §7 Step 3, direct LLVM-IR comparison,
+which is not implemented) aggregates those results:
 `correspondence.status` is `checked_correspondence` only when every item
 checked, `inconsistent_correspondence` when any item is inconsistent, and
 `unchecked_not_translation_validated` otherwise; `object_translation.status`
