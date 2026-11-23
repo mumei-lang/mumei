@@ -158,6 +158,15 @@ fn direct_payload_array_read_builds_and_runs_with_verified_result() {
 }
 
 #[test]
+fn enum_tag_read_with_array_payload_named_tag_returns_discriminant() {
+    let fixture = "test_enum_array_payload_codegen_tag_field.mm";
+    for bitvec_i64 in [false, true] {
+        assert_verifies(fixture, bitvec_i64);
+    }
+    assert_native_result(fixture, 1);
+}
+
+#[test]
 fn unsupported_scalar_array_payload_shapes_fail_codegen_without_panicking() {
     for (fixture, diagnostic) in [
         (

@@ -589,7 +589,10 @@ pub(crate) fn compile_hir_stmt<'a>(
                 return Ok(data_ptr);
             }
             if let HirExpr::FieldAccess(inner, field_name) = value.as_ref() {
-                if let Some(enum_name) = infer_struct_type_name(inner, var_types, module_env) {
+                if let Some(enum_name) = (field_name != "tag")
+                    .then(|| infer_struct_type_name(inner, var_types, module_env))
+                    .flatten()
+                {
                     let enum_name = module_env.resolve_base_type(&enum_name);
                     if let Some(enum_def) = module_env.get_enum(&enum_name) {
                         let mut field_type = None;
