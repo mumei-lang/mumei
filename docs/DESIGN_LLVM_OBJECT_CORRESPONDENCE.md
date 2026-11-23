@@ -57,6 +57,12 @@ producer が何を検証済みか・何が欠けているか・昇格の段階�
 6. **IR encode の残域** — `encode_ir_function_for_comparison` が
    `skipped` に落とす形状（非スカラー call site、集約 f64、複合引数、
    unsupported instruction を含む関数）が detail に理由別で残らない。
+7. **`skipped` が2つの異なる意味を持つ** — `NotLiftable` は
+   「subset 外で比較を試行していない」（`unsupported_signature` 等）と
+   「比較を実行したがソルバーが判定不能」（`solver_unknown`、
+   machine_tv.rs の `SatResult::Unknown` 分岐）を同じ `skipped` に
+   畳む。後者は比較試行済みの未判定で、fail-closed では
+   `checked` に数えてはいけない区別が必要。
 
 ## 4. 昇格条件
 
@@ -65,19 +71,24 @@ producer が何を検証済みか・何が欠けているか・昇格の段階�
 
 1. **関数列挙の完全性**: `object_symbol_correspondence` checked
    （再利用 — IR 関数→object シンボルの全対応）。
-2. **命令列対応**: `llvm_ir_object_equivalence` が
+2. **呼び出し・リンク対応**: `object_call_edge_correspondence` と
+   `object_link_correspondence` が checked（再利用 — 従来の昇格条件を
+   維持。recheck には link 照合が走らない経路があるため、項目の
+   存在そのものも要求する — 未実施は unchecked で fail-closed）。
+3. **命令列対応**: `llvm_ir_object_equivalence` が
    `inconsistent` でないこと — `different` が1関数でもあれば辺は
    `inconsistent_correspondence`（#1415 で導入した語彙を踏襲）。
    in-subset 関数が1つ以上 equivalent で残りが skipped のみの場合の
    扱いは §7(b) の決定に従う。
-3. **relocation 記録**: `relocation_targets`・`relocation_bounds`・
+4. **relocation 記録**: `relocation_targets`・`relocation_bounds`・
    `relocation_resolved_values`/`relocation_applied_values` が
    checked（再利用 — Step 4 着地済み）。
-4. **非決定性の排除**: 正規化 argv 比較 + digest pin が一致
+5. **非決定性の排除**: 正規化 argv 比較 + digest pin が一致
    （`canonical_argv_compared`、再利用）。
-5. **残域の列挙**: skipped 関数（理由別カウント）、非 `.text` セクション、
-   deferred セット相当域が `detail` / `checks_not_performed` に残ること。
-6. **fail-closed**: 上記いずれか判定不能 → `unchecked_not_translation_validated`。
+6. **残域の列挙**: skipped 関数（理由別カウント + solver_unknown の
+   区別、§3-7）、非 `.text` セクション、deferred セット相当域が
+   `detail` / `checks_not_performed` に残ること。
+7. **fail-closed**: 上記いずれか判定不能 → `unchecked_not_translation_validated`。
 
 ## 5. 昇格後の語彙
 
@@ -95,17 +106,24 @@ producer が何を検証済みか・何が欠けているか・昇格の段階�
 
 ## 6. 段階案
 
-- **Step 1（辺の配線・最小）**: descriptor の `llvm_ir→object_code` 辺に
+- **Step 1（残域の正直な列挙・昇格の前提）**: `skipped` を
+  「subset 外（`unsupported_signature`/`unsupported_ir`/
+  `unsupported_instruction`）」と「比較実行済みだが未判定
+  （`solver_unknown`）」に分解し、後者は `unknown` として detail に
+  残す（checked には数えない — §3-7）。合わせて
+  `checks_not_performed` に非 `.text` セクション
+  （`.rodata`/`.data`/`.bss` 未比較）を明示。**この Step が
+  §4-6 の残域列挙を満たすまで Step 2 の昇格配線は行わない** —
+  現状の集約のまま辺を checked にすると solver_unknown が
+  紛れて fail-closed 原則に反する。
+- **Step 2（辺の配線・最小）**: descriptor の `llvm_ir→object_code` 辺に
   `result` を追加し `llvm_ir_object_equivalence` 項目の集約を反映
   （contract 側の `validation` は emit 済みなら profile 条件で更新）。
-  現状で in-subset 全関数 equivalent の bundle が `checked_correspondence`
-  になる最小差分。テスト: 既存 `transformations[0]` アサートに
-  `result` 追加＋divergent ケース（unit-level、source identity ゲートで
-  CLI からは作れない — #1415 と同じ制約）。
-- **Step 2（残域の正直な列挙）**: `skipped` を理由別カウント
-  （unsupported_signature / unsupported_ir / unsupported_instruction）
-  として detail に分解 + `checks_not_performed` に非 `.text` セクション
-  （`.rodata`/`.data`/`.bss` 未比較）を明示。
+  in-subset 全関数 equivalent・solver_unknown なしの bundle が
+  `checked_correspondence` になる最小差分。テスト: 既存
+  `transformations[0]` アサートに `result` 追加＋divergent ケース
+  （unit-level、source identity ゲートで CLI からは作れない —
+  #1415 と同じ制約）。
 - **Step 3（データセクション照合・別スライス推奨）**: `.rodata` 定数 ↔
   IR グローバル初期値の対応項目 `object_data_correspondence`
   （`.text` 辺の昇格ゲートには含めない — 別 item として追加）。
@@ -123,10 +141,12 @@ producer が何を検証済みか・何が欠けているか・昇格の段階�
   liftable な場合のみ `checked` にするか、outside-subset を
   detail 列挙で残して `checked` を許すか — **推奨**: hir 辺と同じ
   「compared ≥1 かつ diverged 0 で checked、skipped は detail に
-  列挙（沈黙させない）」で統一。ただし hir 側と違い skipped には
-  「lift できなかった」意味が混ざるため、Step 2 で理由別分解を
-  先に実装してから昇格するのが安全（現状の一律 skipped のまま
-  `checked` を名乗ると範囲外混入が読み取りにくい）。
+  列挙（沈黙させない）」で統一。ただし2条件付き:
+  (i) skipped は subset 外のみに限定し、`solver_unknown`
+  （比較実行済みの未判定）は `unknown` として別扱い —
+  1件でもあれば辺は `unchecked`（fail-closed、§3-7）;
+  (ii) Step 1 の理由別分解が先 — 現状の一律 skipped のまま
+  `checked` を名乗ると subset 外と未判定の混入が読み取りにくい。
 - **(c) 非 `.text` 対象外の宣言**: `.rodata`/`.data` をこの辺の
   昇格ゲートに含めるか — **推奨**: 含めない。`llvm_ir→object_code`
   は命令選択・レジスタ割当の relation 名
