@@ -2337,12 +2337,33 @@ fn leaf_widths_for_record(
     }
 }
 
+fn ensure_module_loop_exit_domains(
+    source: &str,
+    admission: RefinedAdmission,
+) -> Result<(), BundleError> {
+    let mut config = z3::Config::new();
+    config.set_timeout_msec(BuildSettings::default().solver_timeout_ms);
+    config.set_param_value("rlimit", &RECHECK_RESOURCE_LIMIT.to_string());
+    let context = z3::Context::new(&config);
+    let Ok(atoms) =
+        semantic_contract::encode_pure_i64_module_obligations(source, &context, admission)
+    else {
+        return Ok(());
+    };
+    let solver = z3::Solver::new(&context);
+    if mumei_core::native_bundle::check_module_loop_exit_domains(&atoms, &solver)? {
+        return Err(BundleError("source domain and loop exits inconclusive"));
+    }
+    Ok(())
+}
+
 fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, BundleError> {
     // The producer always runs the widest (composite) admission; the
     // record's `profile` names a wider version only when the source
     // actually declares what needs it, so a plain module keeps pinning v1.
     let admission = RefinedAdmission::CompositeV26;
     let (binding, atoms, types, structs, enums) = prepare_module_source(source, admission)?;
+    ensure_module_loop_exit_domains(source, admission)?;
     let parent = output
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -2519,6 +2540,7 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
     }
     let admission = RefinedAdmission::CompositeV26;
     let prepared = prepare_multifile_source(&root, &members, admission)?;
+    ensure_module_loop_exit_domains(&prepared.merged, admission)?;
     let (binding, graph, atoms, types, structs, enums) = (
         prepared.binding,
         prepared.import_graph_sha256,

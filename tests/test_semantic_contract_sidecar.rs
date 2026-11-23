@@ -49,6 +49,13 @@ ensures: result == x + 1;
 body: x;
 "#;
 
+const NON_EXITING_REQUIRES_LOOP_SOURCE: &str = r#"
+atom main() -> i64
+requires: { let j = 0; while true invariant: j >= 0 decreases: 4 { j = j + 1 }; true };
+ensures: result == 0;
+body: 0;
+"#;
+
 const ARRAY_PARAM_SOURCE: &str = r#"
 atom at(a: [i64], i: i64) -> i64
 requires: i >= 0 && i < len(a);
@@ -682,6 +689,26 @@ fn recheck_refutes_a_freshly_extracted_but_false_module_obligation() {
     assert!(String::from_utf8_lossy(&output.stderr).contains(
         "Semantic-contract sidecar obligation refuted within profile; no recheck diagnostic emitted"
     ));
+}
+
+#[test]
+fn recheck_sidecar_rejects_a_requires_loop_with_no_bounded_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = write_input(dir.path(), "main.mm", NON_EXITING_REQUIRES_LOOP_SOURCE);
+    let output_base = dir.path().join("main");
+    let build = run_build(&input, &output_base, true);
+    if !build.status.success() {
+        assert!(!build.stdout.is_empty() || !build.stderr.is_empty());
+        return;
+    }
+
+    let llvm_path = only_llvm_file(dir.path());
+    let sidecar_path = llvm_path.with_extension("semantic-contract.json");
+    let output = run_sidecar_recheck(&sidecar_path, &input, &llvm_path, true);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("source domain and loop exits empty on all inputs"));
 }
 
 #[test]

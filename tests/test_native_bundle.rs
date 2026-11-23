@@ -67,6 +67,17 @@ requires: true;
 ensures: result == 0;
 body: 0;
 "#;
+const NON_EXITING_REQUIRES_LOOP_MODULE: &str = r#"
+atom helper() -> i64
+requires: { let j = 0; while true invariant: j >= 0 decreases: 4 { j = j + 1 }; true };
+ensures: result == 0;
+body: 0;
+
+atom main() -> i64
+requires: true;
+ensures: result == 0;
+body: 0;
+"#;
 const BRANCH: &str = "atom absd(x: i64, y: i64) -> i64 requires: x >= 0 && x <= 1000 && y >= 0 && y <= 1000; ensures: result >= 0; body: { if x > y { x - y } else { y - x } };\n\
 atom clamp(x: i64) -> i64 requires: true; ensures: result <= 10; body: { if x > 10 { 10 } else { x } };\n\
 atom pick(b: bool, x: i64) -> i64 requires: true; ensures: true; body: { if b { x } else { 0 } };\n\
@@ -3336,6 +3347,26 @@ fn module_bundle_builds_checks_and_rechecks_within_its_own_profile() {
     assert_success(&llvm);
     let stdout = String::from_utf8_lossy(&llvm.stdout);
     assert!(stdout.contains(mumei_emit_llvm::translation_validation::NATIVE_MODULE_PROFILE));
+}
+
+#[test]
+fn module_bundle_build_rejects_a_requires_loop_with_no_bounded_exit() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(&source, NON_EXITING_REQUIRES_LOOP_MODULE).unwrap();
+
+    let output = cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("source domain and loop exits empty on all inputs"));
+    assert!(!bundle.exists());
 }
 
 #[test]
