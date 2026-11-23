@@ -1323,8 +1323,47 @@ pub(crate) fn check_enum_ctor_payload_domains<'a>(
     variant: &crate::parser::ast::EnumVariant,
     leaf_args: &[Dynamic<'a>],
 ) -> MumeiResult<()> {
+    check_enum_payload_domains(vc, solver, enum_def, variant, leaf_args, None)
+}
+
+pub(crate) fn check_enum_field_payload_domains<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+    enum_def: &EnumDef,
+    variant: &crate::parser::ast::EnumVariant,
+    field_idx: usize,
+    leaf_args: &[Dynamic<'a>],
+) -> MumeiResult<()> {
+    check_enum_payload_domains(vc, solver, enum_def, variant, leaf_args, Some(field_idx))
+}
+
+fn check_enum_payload_domains<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+    enum_def: &EnumDef,
+    variant: &crate::parser::ast::EnumVariant,
+    leaf_args: &[Dynamic<'a>],
+    only_field: Option<usize>,
+) -> MumeiResult<()> {
     let mut offset = 0;
     for (field_idx, field_type_ref) in variant.field_types.iter().enumerate() {
+        if only_field.is_some_and(|only| only != field_idx) {
+            let width = if recursive_field_target(enum_def, field_type_ref, vc.module_env).is_some()
+            {
+                1
+            } else {
+                field_leaf_types(&payload_field_type_name(field_type_ref), vc.module_env)
+                    .ok_or_else(|| {
+                        MumeiError::type_error(format!(
+                            "enum constructor payload '{}' has no flattened leaves",
+                            payload_field_type_name(field_type_ref)
+                        ))
+                    })?
+                    .len()
+            };
+            offset += width;
+            continue;
+        }
         let payload_name = variant
             .fields
             .get(field_idx)

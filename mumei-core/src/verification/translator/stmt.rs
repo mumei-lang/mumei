@@ -2028,7 +2028,7 @@ fn enum_field_assign<'a>(
         }
     }
     if let Some(solver) = solver_opt {
-        datatype::check_enum_ctor_payload_domains(vc, solver, edef, variant, &leaf_args)?;
+        datatype::check_enum_field_payload_domains(vc, solver, edef, variant, fidx, &leaf_args)?;
     }
     let Some(rebuilt) = datatype::enum_ctor_apply_leaves(vc, edef, vidx, &leaf_args) else {
         return Ok(None);

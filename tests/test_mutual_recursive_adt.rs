@@ -112,6 +112,15 @@ fn mutual_recursive_enums_verify_in_both_integer_modes() {
             output_text(&output)
         );
         let output = run_verify(
+            "test_mutual_recursive_adt_guarded_write_domain_positive.mm",
+            bitvec_i64,
+        );
+        assert!(
+            output.status.success(),
+            "variant-guarded in-range recursive enum writes should verify (bitvec_i64={bitvec_i64}):\n{}",
+            output_text(&output)
+        );
+        let output = run_verify(
             "test_mutual_recursive_adt_recursive_field_domain_positive.mm",
             bitvec_i64,
         );
