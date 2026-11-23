@@ -122,6 +122,14 @@ fn unsupported_scalar_array_payload_shapes_fail_codegen_without_panicking() {
             "stack-backed array payload cannot escape through an array-bearing enum return",
         ),
         (
+            "test_enum_array_payload_codegen_field_write_literal.mm",
+            "stack-backed array payload cannot be written into enum field",
+        ),
+        (
+            "test_enum_array_payload_codegen_field_write_alias.mm",
+            "stack-backed array payload cannot be written into enum field",
+        ),
+        (
             "test_enum_array_payload_codegen_slot_conflict.mm",
             "array payload conflicts",
         ),

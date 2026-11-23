@@ -4,7 +4,8 @@ use crate::codegen::expr_emit::{
     LAMBDA_MARK,
 };
 use crate::codegen::lowering::{
-    bitpreserve_cast, resolve_param_type, struct_llvm_type, wide_int_cast, ArrayPtrMap,
+    array_elem_llvm_type, bitpreserve_cast, resolve_param_type, struct_llvm_type, wide_int_cast,
+    ArrayPtrMap,
 };
 use crate::codegen::pattern_emit::find_field_index;
 use crate::codegen::task_runtime::declare_task_group_should_cancel_current_extern;
@@ -940,6 +941,34 @@ pub(crate) fn compile_hir_stmt<'a>(
                                         updated.into_struct_value().into(),
                                     );
                                     return Ok(val);
+                                }
+                                let field_type = edef.variants[vidx]
+                                    .field_types
+                                    .get(fidx)
+                                    .map(|field| field.display_name())
+                                    .ok_or_else(|| {
+                                        MumeiError::codegen(format!(
+                                            "enum payload '{payload_field}' has no declared type"
+                                        ))
+                                    })?;
+                                let stack_backed_array =
+                                    if array_elem_llvm_type(context, &field_type, module_env)?
+                                        .is_some()
+                                    {
+                                        match value.as_ref() {
+                                            HirExpr::Variable(name) => {
+                                                array_ptrs.stack_backed.contains(name)
+                                                    || !array_ptrs.contains_key(name)
+                                            }
+                                            _ => true,
+                                        }
+                                    } else {
+                                        false
+                                    };
+                                if stack_backed_array {
+                                    return Err(MumeiError::codegen(format!(
+                                        "stack-backed array payload cannot be written into enum field '{var}'"
+                                    )));
                                 }
                                 let val = compile_hir_expr(
                                     context, builder, module, function, value, variables,
