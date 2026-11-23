@@ -266,22 +266,28 @@ pub enum IrObjectEquivalence {
 
 /// Whether a source model's signature is inside the direct
 /// IR ↔ object comparison's integer subset (design memo §7 Step 3
-/// slices): scalar-i64 parameters, scalar-i64 or register-resident
-/// integer-aggregate results, scalar-i64 call sites, bounded memory —
-/// no array params, wide leaves, doubles, sret results, or loops.
+/// slices): scalar-i64 parameters, scalar-i64 or all-integer aggregate
+/// results (register-resident or `sret` memory-class), scalar-i64 call
+/// sites, bounded memory — no array params, wide leaves, doubles, or
+/// loops.
 /// Callers use this to record `skipped` without paying for an IR
 /// encode; `check_function_against_ir` re-checks it internally.
 pub fn ir_object_signature_liftable(model: &PureI64Body) -> bool {
     let result_leaf_count = model.result_shape.unwrap_or(1);
     model.inputs.len() <= MAX_ARGUMENT_COUNT
         && model.inputs.iter().all(|input| input.get_size() == 64)
-        // Integer-leaf aggregate results enter the subset within the
-        // register-resident budget (rax/rdx/rcx): an `sret`
-        // memory-class result, an f64 or SSE leaf, and a scalar i128
-        // (`[false, false]` on a `None` shape) all stay outside.
-        && model
-            .result_shape
-            .is_none_or(|count| count <= INTEGER_RESULT_REGISTERS.len())
+        // Integer-leaf aggregate results enter the subset: up to the
+        // register-resident budget (rax/rdx/rcx) directly, and beyond
+        // it through `sret` — the callee stores leaf `i` at byte
+        // offset `8 * i` through the hidden result pointer, which the
+        // lifter already records in `sret_stores`. An f64 or SSE leaf
+        // and a scalar i128 (`[false, false]` on a `None` shape) stay
+        // outside — the leaf check below is what keeps a mixed-class
+        // sret shape out too.
+        && model.result_shape.is_none_or(|count| {
+            count <= INTEGER_RESULT_REGISTERS.len()
+                || sret_result_leaf_count(model) == Some(count)
+        })
         // Every declared result leaf an integer leaf: a scalar i128
         // result (`[false, false]` on a `None` shape) or an f64 leaf
         // (`[true]`) is outside. An omitted return annotation leaves
@@ -6509,6 +6515,95 @@ entry:
   %p0 = insertvalue { i64, i64 } undef, i64 %a, 0
   %p1 = insertvalue { i64, i64 } %p0, i64 %t, 1
   ret { i64, i64 } %p1
+}
+"#;
+        let (address, bytes, call_targets) = compiled_function_with_targets(matching_ir, "make");
+        for (ir, expected) in [
+            (matching_ir, FunctionOutcome::Equivalent),
+            (divergent_ir, FunctionOutcome::Different),
+        ] {
+            let (ir_returns, ir_definedness) = unsafe {
+                crate::translation_validation::encode_ir_function_for_comparison(
+                    ir.as_bytes(),
+                    "make",
+                    &model,
+                    false,
+                    &context,
+                )
+            }
+            .unwrap();
+            assert_eq!(
+                check_function_with_frame_memory_against_ir(
+                    &bytes,
+                    address,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &call_targets,
+                    &context,
+                )
+                .0,
+                expected
+            );
+            assert_eq!(
+                check_function_against_ir(
+                    &bytes,
+                    address,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &call_targets,
+                    &context,
+                ),
+                match expected {
+                    FunctionOutcome::Equivalent => IrObjectEquivalence::Equivalent,
+                    _ => IrObjectEquivalence::Different,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn frame_memory_check_compares_sret_aggregate_result_against_ir() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // A four-`i64` aggregate result exceeds the three INTEGER
+        // result registers, so LLVM lowers it memory-class: the callee
+        // stores leaf `i` at byte offset `8 * i` through the hidden
+        // `sret` pointer in rdi and hands the pointer back in rax.
+        // The machine side reads `sret_stores`; the IR side still
+        // encodes `ret {i64, i64, i64, i64}` as its aggregate slots —
+        // the same leaf-0-high fold on both sides.
+        let model = source_model_named_with_admission(
+            "struct Q { a: i64, b: i64, c: i64, d: i64 }\n\
+             atom make(a: i64, b: i64, c: i64, d: i64) -> Q requires: true; ensures: true; body: { Q { a: a + 1, b: b, c: c, d: d } };",
+            "make",
+            &context,
+            RefinedAdmission::CompositeV6,
+        );
+        assert_eq!(model.result_shape, Some(4));
+        let matching_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i64, i64, i64 } @make(i64 %a, i64 %b, i64 %c, i64 %d) {
+entry:
+  %t = add i64 %a, 1
+  %s0 = insertvalue { i64, i64, i64, i64 } undef, i64 %t, 0
+  %s1 = insertvalue { i64, i64, i64, i64 } %s0, i64 %b, 1
+  %s2 = insertvalue { i64, i64, i64, i64 } %s1, i64 %c, 2
+  %s3 = insertvalue { i64, i64, i64, i64 } %s2, i64 %d, 3
+  ret { i64, i64, i64, i64 } %s3
+}
+"#;
+        let divergent_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, i64, i64, i64 } @make(i64 %a, i64 %b, i64 %c, i64 %d) {
+entry:
+  %t = add i64 %a, 2
+  %s0 = insertvalue { i64, i64, i64, i64 } undef, i64 %t, 0
+  %s1 = insertvalue { i64, i64, i64, i64 } %s0, i64 %b, 1
+  %s2 = insertvalue { i64, i64, i64, i64 } %s1, i64 %c, 2
+  %s3 = insertvalue { i64, i64, i64, i64 } %s2, i64 %d, 3
+  ret { i64, i64, i64, i64 } %s3
 }
 "#;
         let (address, bytes, call_targets) = compiled_function_with_targets(matching_ir, "make");

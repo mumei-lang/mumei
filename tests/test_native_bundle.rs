@@ -3876,7 +3876,9 @@ fn module_bundle_with_struct_results_builds_as_v6_and_rechecks() {
     let (source, bundle, id) = build_source(
         root.path(),
         "type Pos = i64 where v > 0;\nstruct P { x: Pos, y: i64 }\n\
+         struct Q { a: i64, b: i64, c: i64, d: i64 }\n\
          atom make(a: Pos) -> P requires: true; ensures: result.x == a; body: { P { x: a, y: 2 } };\n\
+         atom make4(a: i64, b: i64, c: i64, d: i64) -> Q requires: true; ensures: result.a == a + 1; body: { Q { a: a + 1, b: b, c: c, d: d } };\n\
          atom uselet(a: Pos) -> i64 requires: true; ensures: result >= 1; body: { let q = make(a); q.x };\n\
          atom main() -> i64 requires: true; ensures: result == 5; body: { make(5).x };",
     );
@@ -3907,6 +3909,10 @@ fn module_bundle_with_struct_results_builds_as_v6_and_rechecks() {
     assert_eq!(equivalence["result"], "checked");
     let detail = equivalence["detail"].as_str().unwrap();
     assert!(detail.contains("make: equivalent"), "{detail}");
+    // Step 3d second slice: a four-`i64` result goes memory-class
+    // (`sret`) in the object code but still compares `equivalent`
+    // against the aggregate `ret` in the produced IR.
+    assert!(detail.contains("make4: equivalent"), "{detail}");
     assert!(detail.contains("uselet: skipped"), "{detail}");
     assert!(detail.contains("__mumei_user_main: skipped"), "{detail}");
     // A v6 record re-pinned as v5 is refused: v5 keeps struct values out.
