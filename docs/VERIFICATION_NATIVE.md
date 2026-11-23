@@ -2390,6 +2390,22 @@ of those; pointers, structs and wider shapes stay `underivable` in
 out of the `llvm_ir → object_code` edge's promotion gate — the
 relation name covers instruction selection only.
 
+A sibling item, `object_symbol_attribute_correspondence`, covers the
+symbol-attribute gap the name/definition checks do not: every defined,
+named IR entity — function or global — contributes its linkage, mapped
+to the expected ELF binding class (`global`/`local`/`weak`), and is
+compared against the like-named object symbol's binding. Entities
+carrying `unnamed_addr` are excluded entirely (LLVM may merge or drop
+their symbols, so no binding claim survives — their bytes are covered
+by `object_data_correspondence`), and linkages with no byte-exact
+object counterpart (`available_externally`, `appending`, DLL and ghost
+variants) report `underivable`. Calling convention is not
+representable in ELF symbols, so binding comparison is the honest
+subset. The item is `checked` when every derivable entity matched,
+`inconsistent` on a binding mismatch, and `unchecked` when a symbol is
+missing, bound by conflicting duplicates, or underivable. Like the
+data item, it stays out of the `.text` edge's promotion gate.
+
 Step 5 of the record pipeline surfaces the aggregate status on the text
 path too: `recheck-machine-tv` and `accept-object` without `--json`
 print `Object translation correspondence: <status> (N of M items

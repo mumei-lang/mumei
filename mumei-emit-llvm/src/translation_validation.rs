@@ -5,7 +5,7 @@ use inkwell::{
     context::Context as LlvmContext, memory_buffer::MemoryBuffer, module::Linkage,
     values::AsValueRef,
 };
-use llvm_sys::{core::*, prelude::*, LLVMIntPredicate, LLVMOpcode, LLVMTypeKind};
+use llvm_sys::{core::*, prelude::*, LLVMIntPredicate, LLVMOpcode, LLVMTypeKind, LLVMUnnamedAddr};
 use mumei_core::semantic_contract::{
     aggregate_value, call_field_decl, encode_pure_i64_body, encode_pure_i64_module,
     module_source_profile, CallValueShape, PureI64Body, RefinedAdmission, LOOP_BOUND,
@@ -238,6 +238,93 @@ pub fn ir_data_globals(ir: &[u8]) -> std::result::Result<BTreeMap<String, Option
         });
     }
     Ok(globals)
+}
+
+/// ELF binding class an IR linkage maps to, or `None` when the
+/// linkage has no byte-exact object-side counterpart
+/// (`available_externally`/`appending` emit no object symbol; DLL and
+/// ghost variants are platform-scoped). `common` tentatives are
+/// STB_GLOBAL on ELF.
+fn linkage_expected_binding(linkage: Linkage) -> Option<&'static str> {
+    match linkage {
+        Linkage::External | Linkage::Common => Some("global"),
+        Linkage::Internal
+        | Linkage::Private
+        | Linkage::LinkerPrivate
+        | Linkage::LinkerPrivateWeak => Some("local"),
+        Linkage::WeakAny
+        | Linkage::WeakODR
+        | Linkage::ExternalWeak
+        | Linkage::LinkOnceAny
+        | Linkage::LinkOnceODR
+        | Linkage::LinkOnceODRAutoHide => Some("weak"),
+        _ => None,
+    }
+}
+
+/// Defined named IR entities (functions and globals) with the
+/// object-symbol binding class their linkage maps to, for the
+/// object-side symbol-attribute correspondence check
+/// (DESIGN_LLVM_OBJECT_CORRESPONDENCE.md Step 3'). A `None` value
+/// marks a linkage with no derivable binding — the caller must treat
+/// those as unverifiable. Entities carrying `unnamed_addr` are
+/// excluded entirely: LLVM may merge or drop their symbols so no
+/// binding claim survives the object step (their bytes are covered
+/// by the data-section correspondence check).
+#[derive(Clone, Default)]
+pub struct IrSymbolAttributes {
+    pub expected: BTreeMap<String, Option<&'static str>>,
+    pub unnamed_addr_excluded: usize,
+}
+
+#[allow(clippy::result_unit_err)]
+pub fn ir_symbol_attributes(ir: &[u8]) -> std::result::Result<IrSymbolAttributes, ()> {
+    let context = LlvmContext::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            ir,
+            "symbol-attributes.ll",
+        ))
+        .map_err(|_| ())?;
+    let mut attributes = IrSymbolAttributes::default();
+    for function in module.get_functions() {
+        if function.count_basic_blocks() == 0 {
+            continue;
+        }
+        let name = function.get_name().to_str().map_err(|_| ())?.to_owned();
+        if name.starts_with("llvm.") {
+            continue;
+        }
+        if unsafe { LLVMGetUnnamedAddress(function.as_value_ref()) }
+            != LLVMUnnamedAddr::LLVMNoUnnamedAddr
+        {
+            attributes.unnamed_addr_excluded += 1;
+            continue;
+        }
+        attributes
+            .expected
+            .insert(name, linkage_expected_binding(function.get_linkage()));
+    }
+    for global in module.get_globals() {
+        if global.get_initializer().is_none() {
+            continue;
+        }
+        let name = global.get_name().to_str().map_err(|_| ())?.to_owned();
+        if name.starts_with("llvm.") {
+            continue;
+        }
+        if unsafe { LLVMGetUnnamedAddress(global.as_value_ref()) }
+            != LLVMUnnamedAddr::LLVMNoUnnamedAddr
+        {
+            attributes.unnamed_addr_excluded += 1;
+            continue;
+        }
+        let linkage: Linkage = unsafe { LLVMGetLinkage(global.as_value_ref()) }.into();
+        attributes
+            .expected
+            .insert(name, linkage_expected_binding(linkage));
+    }
+    Ok(attributes)
 }
 
 /// Byte content of a constant initializer, or `None` when the shape

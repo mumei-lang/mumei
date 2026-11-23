@@ -5199,6 +5199,49 @@ fn object_data_surface(bytes: &[u8]) -> Result<ObjectDataSurface, ()> {
     Ok(surface)
 }
 
+/// Binding-class surface of a compiled object: every defined, named
+/// symbol — text and data, locals included — mapped to its ELF
+/// binding (`global`/`local`/`weak`). Names bound by two different
+/// symbols land in `conflicts`: the correspondence check cannot say
+/// which one an IR entity produced, so they stay unverifiable.
+/// Section/file symbols, `.L*`-style anonymous labels and undefined
+/// references carry no definition-side binding and are skipped.
+#[derive(Default)]
+struct ObjectSymbolBindingSurface {
+    bindings: BTreeMap<String, &'static str>,
+    conflicts: BTreeSet<String>,
+}
+
+fn object_symbol_binding_surface(bytes: &[u8]) -> Result<ObjectSymbolBindingSurface, ()> {
+    let file = object::File::parse(bytes).map_err(|_| ())?;
+    let mut surface = ObjectSymbolBindingSurface::default();
+    for symbol in file.symbols() {
+        if symbol.is_undefined() {
+            continue;
+        }
+        if matches!(symbol.kind(), SymbolKind::Section | SymbolKind::File) {
+            continue;
+        }
+        let name = symbol.name().map_err(|_| ())?;
+        if name.is_empty() || name.starts_with('.') {
+            continue;
+        }
+        let binding = if symbol.is_weak() {
+            "weak"
+        } else if symbol.is_common() || symbol.is_global() {
+            "global"
+        } else if symbol.is_local() {
+            "local"
+        } else {
+            continue;
+        };
+        if surface.bindings.insert(name.to_owned(), binding).is_some() {
+            surface.conflicts.insert(name.to_owned());
+        }
+    }
+    Ok(surface)
+}
+
 /// Step 2 correspondence inspection of the Step 1 metadata record:
 /// compares the emitted function table against the IR-defined surface
 /// and checks every relocation record for a resolvable target and an
@@ -5208,13 +5251,21 @@ fn object_data_surface(bytes: &[u8]) -> Result<ObjectDataSurface, ()> {
 /// offending names/offsets in `detail`. The record stays honest
 /// metadata: an inconsistency is reported here, never promoted into a
 /// verdict or a performed check.
+/// Optional IR-derived comparison inputs for the correspondence
+/// checks — each `None` keeps its item `unchecked` (fail-closed).
+#[derive(Default)]
+struct IrCorrespondenceInputs<'a> {
+    equivalence: Option<&'a BTreeMap<String, &'static str>>,
+    hir_llvm: Option<&'a BTreeMap<String, &'static str>>,
+    data_globals: Option<&'a BTreeMap<String, Option<Vec<u8>>>>,
+    symbol_attributes: Option<&'a tv::IrSymbolAttributes>,
+}
+
 fn object_translation_correspondence_checks(
     ir_surface: &tv::IrFunctionSurface,
     executable_bytes: &[u8],
     record: &ObjectTranslationRecord,
-    ir_equivalence: Option<&BTreeMap<String, &'static str>>,
-    hir_llvm: Option<&BTreeMap<String, &'static str>>,
-    ir_data_globals: Option<&BTreeMap<String, Option<Vec<u8>>>>,
+    ir: IrCorrespondenceInputs<'_>,
     object_bytes: &[u8],
 ) -> serde_json::Value {
     let check = |item: &str, result: &str, detail: String| serde_json::json!({"item": item, "result": result, "detail": detail});
@@ -5551,7 +5602,7 @@ fn object_translation_correspondence_checks(
     // llvm_ir_object_equivalence: direct LLVM-IR ↔ object comparison
     // over the shared source-model inputs (design memo §7 Step 3
     // slice). Recorded only; verdict/grade promotion stays deferred.
-    match ir_equivalence {
+    match ir.equivalence {
         None => checks.push(check(
             "llvm_ir_object_equivalence",
             "unchecked",
@@ -5620,7 +5671,7 @@ fn object_translation_correspondence_checks(
     // encoder admits proved equivalent (atoms outside the subset stay
     // honestly uncovered in `detail`), `inconsistent` on any
     // divergence, `unchecked` when nothing was compared.
-    match hir_llvm {
+    match ir.hir_llvm {
         Some(outcomes) if !outcomes.is_empty() => {
             let diverged: Vec<&String> = outcomes
                 .iter()
@@ -5677,7 +5728,7 @@ fn object_translation_correspondence_checks(
     // llvm_ir→object_code edge's promotion gates: the relation name
     // covers instruction selection only (memo §7(c)).
     let object_data = object_data_surface(object_bytes).ok();
-    match (ir_data_globals, object_data.as_ref()) {
+    match (ir.data_globals, object_data.as_ref()) {
         (None, _) | (_, None) => checks.push(check(
             "object_data_correspondence",
             "unchecked",
@@ -5771,6 +5822,110 @@ fn object_translation_correspondence_checks(
                     "object_data_correspondence",
                     "checked",
                     format!("{compared} IR data globals verified ({detail})"),
+                ));
+            }
+        }
+    }
+
+    // object_symbol_attribute_correspondence (design memo Step 3'):
+    // each defined named IR entity's linkage ↔ the like-named object
+    // symbol's binding class (global/local/weak). `checked` when every
+    // derivable entity matched — `inconsistent` on a binding
+    // mismatch, `unchecked` when a symbol is missing, multiply
+    // defined, or its linkage is outside the derivable subset.
+    // `unnamed_addr` entities are excluded: LLVM may merge or drop
+    // their symbols so no binding claim survives (their bytes are
+    // covered by object_data_correspondence). Calling convention is
+    // not representable in ELF symbols, so binding is the honest
+    // subset. Kept out of the llvm_ir→object_code edge's promotion
+    // gate: the relation covers instruction selection only.
+    let object_bindings = object_symbol_binding_surface(object_bytes).ok();
+    match (ir.symbol_attributes, object_bindings.as_ref()) {
+        (None, _) | (_, None) => checks.push(check(
+            "object_symbol_attribute_correspondence",
+            "unchecked",
+            "IR symbol attributes or object symbol bindings unavailable".to_owned(),
+        )),
+        (Some(attributes), Some(surface)) if attributes.expected.is_empty() => {
+            checks.push(if surface.bindings.is_empty() {
+                check(
+                    "object_symbol_attribute_correspondence",
+                    "checked",
+                    format!(
+                        "no derivable IR entities or object symbols to compare; {} unnamed_addr entities excluded",
+                        attributes.unnamed_addr_excluded
+                    ),
+                )
+            } else {
+                check(
+                    "object_symbol_attribute_correspondence",
+                    "unchecked",
+                    format!(
+                        "{} object symbols with no derivable IR entities to compare",
+                        surface.bindings.len()
+                    ),
+                )
+            });
+        }
+        (Some(attributes), Some(surface)) => {
+            let mut compared = 0usize;
+            let mut diverged = 0usize;
+            let mut unresolved = 0usize;
+            let mut detail = attributes
+                .expected
+                .iter()
+                .map(|(name, expected)| match expected {
+                    None => {
+                        unresolved += 1;
+                        format!("{name}: underivable")
+                    }
+                    Some(expected_binding) if surface.conflicts.contains(name) => {
+                        unresolved += 1;
+                        format!("{name}: conflicting symbols")
+                    }
+                    Some(expected_binding) => match surface.bindings.get(name) {
+                        Some(&binding) if binding == *expected_binding => {
+                            compared += 1;
+                            format!("{name}: equivalent ({binding})")
+                        }
+                        Some(&binding) => {
+                            diverged += 1;
+                            format!("{name}: different (expected {expected_binding}, object {binding})")
+                        }
+                        None => {
+                            unresolved += 1;
+                            format!("{name}: missing")
+                        }
+                    },
+                })
+                .collect::<Vec<_>>();
+            if attributes.unnamed_addr_excluded > 0 {
+                detail.push(format!(
+                    "{} unnamed_addr entities excluded",
+                    attributes.unnamed_addr_excluded
+                ));
+            }
+            let detail = detail.join(", ");
+            if diverged > 0 {
+                checks.push(check(
+                    "object_symbol_attribute_correspondence",
+                    "inconsistent",
+                    format!("symbol bindings disagree with IR linkage ({detail})"),
+                ));
+            } else if unresolved > 0 {
+                checks.push(check(
+                    "object_symbol_attribute_correspondence",
+                    "unchecked",
+                    format!(
+                        "{compared} of {} IR entities verified ({detail})",
+                        attributes.expected.len()
+                    ),
+                ));
+            } else {
+                checks.push(check(
+                    "object_symbol_attribute_correspondence",
+                    "checked",
+                    format!("{compared} IR entities verified ({detail})"),
                 ));
             }
         }
@@ -6124,13 +6279,17 @@ fn object_translation_correspondence_json(
     let ir_equivalence = llvm_ir_object_equivalence_results(data, record);
     let hir_llvm = hir_llvm_atom_outcomes(data);
     let ir_data_globals = tv::ir_data_globals(&data.llvm_bytes).ok();
+    let ir_symbol_attributes = tv::ir_symbol_attributes(&data.llvm_bytes).ok();
     object_translation_correspondence_checks(
         &data.ir_surface,
         data.executable_bytes.as_slice(),
         record,
-        ir_equivalence.as_ref(),
-        hir_llvm.as_ref(),
-        ir_data_globals.as_ref(),
+        IrCorrespondenceInputs {
+            equivalence: ir_equivalence.as_ref(),
+            hir_llvm: hir_llvm.as_ref(),
+            data_globals: ir_data_globals.as_ref(),
+            symbol_attributes: ir_symbol_attributes.as_ref(),
+        },
         data.object_bytes.as_slice(),
     )
 }
@@ -8684,6 +8843,7 @@ entry:
         let executable_bytes = fs::read(&executable_path).unwrap();
         let ir_surface = tv::ir_function_surface(ir).unwrap();
         let ir_data = tv::ir_data_globals(ir).unwrap();
+        let ir_attrs = tv::ir_symbol_attributes(ir).unwrap();
         assert_eq!(
             ir_data,
             BTreeMap::from([
@@ -8726,9 +8886,12 @@ entry:
             &ir_surface,
             &executable_bytes,
             record,
-            Some(&equivalent),
-            Some(&hir_llvm),
-            Some(&ir_data),
+            IrCorrespondenceInputs {
+                equivalence: Some(&equivalent),
+                hir_llvm: Some(&hir_llvm),
+                data_globals: Some(&ir_data),
+                symbol_attributes: Some(&ir_attrs),
+            },
             &object_bytes,
         );
         assert_eq!(report["status"], "checked_correspondence");
@@ -8736,7 +8899,7 @@ entry:
         assert_eq!(lines.len(), 1);
         assert_eq!(
             lines[0],
-            "Object translation correspondence: checked_correspondence (9 of 9 items checked)."
+            "Object translation correspondence: checked_correspondence (10 of 10 items checked)."
         );
         let results = results_of(&report);
         assert_eq!(
@@ -8763,6 +8926,10 @@ entry:
                     "object_data_correspondence".to_owned(),
                     "checked".to_owned()
                 ),
+                (
+                    "object_symbol_attribute_correspondence".to_owned(),
+                    "checked".to_owned()
+                ),
             ])
         );
 
@@ -8773,9 +8940,10 @@ entry:
             &ir_surface,
             &executable_bytes,
             record,
-            Some(&divergent),
-            None,
-            None,
+            IrCorrespondenceInputs {
+                equivalence: Some(&divergent),
+                ..Default::default()
+            },
             &object_bytes,
         );
         assert_eq!(report["status"], "inconsistent_correspondence");
@@ -8801,9 +8969,11 @@ entry:
             &ir_surface,
             &executable_bytes,
             record,
-            Some(&equivalent),
-            Some(&hir_diverged),
-            None,
+            IrCorrespondenceInputs {
+                equivalence: Some(&equivalent),
+                hir_llvm: Some(&hir_diverged),
+                ..Default::default()
+            },
             &object_bytes,
         );
         assert_eq!(report["status"], "inconsistent_correspondence");
@@ -8818,9 +8988,11 @@ entry:
             &ir_surface,
             &executable_bytes,
             record,
-            Some(&equivalent),
-            Some(&hir_outside),
-            None,
+            IrCorrespondenceInputs {
+                equivalence: Some(&equivalent),
+                hir_llvm: Some(&hir_outside),
+                ..Default::default()
+            },
             &object_bytes,
         );
         assert_eq!(report["status"], "unchecked_not_translation_validated");
@@ -8836,9 +9008,10 @@ entry:
             &ir_surface,
             &executable_bytes,
             record,
-            Some(&unliftable),
-            None,
-            None,
+            IrCorrespondenceInputs {
+                equivalence: Some(&unliftable),
+                ..Default::default()
+            },
             &object_bytes,
         );
         assert_eq!(report["status"], "unchecked_not_translation_validated");
@@ -8858,9 +9031,11 @@ entry:
             &ir_surface,
             &executable_bytes,
             record,
-            Some(&undecidable),
-            Some(&hir_llvm),
-            None,
+            IrCorrespondenceInputs {
+                equivalence: Some(&undecidable),
+                hir_llvm: Some(&hir_llvm),
+                ..Default::default()
+            },
             &object_bytes,
         );
         assert_eq!(report["status"], "unchecked_not_translation_validated");
@@ -8886,9 +9061,7 @@ entry:
             &ir_surface,
             &executable_bytes,
             &short,
-            None,
-            None,
-            None,
+            IrCorrespondenceInputs::default(),
             &object_bytes,
         );
         assert_eq!(report["status"], "inconsistent_correspondence");
@@ -8910,9 +9083,7 @@ entry:
             &ir_surface,
             &executable_bytes,
             &extra,
-            None,
-            None,
-            None,
+            IrCorrespondenceInputs::default(),
             &object_bytes,
         ));
         assert_eq!(results["function_coverage"], "inconsistent");
@@ -8925,9 +9096,7 @@ entry:
             &ir_surface,
             &executable_bytes,
             &bogus_target,
-            None,
-            None,
-            None,
+            IrCorrespondenceInputs::default(),
             &object_bytes,
         ));
         assert_eq!(results["relocation_targets"], "inconsistent");
@@ -8939,9 +9108,7 @@ entry:
             &ir_surface,
             &executable_bytes,
             &out_of_bounds,
-            None,
-            None,
-            None,
+            IrCorrespondenceInputs::default(),
             &object_bytes,
         ));
         assert_eq!(results["relocation_bounds"], "inconsistent");
@@ -8953,9 +9120,7 @@ entry:
             &ir_surface,
             &executable_bytes,
             &unresolved,
-            None,
-            None,
-            None,
+            IrCorrespondenceInputs::default(),
             &object_bytes,
         );
         assert_eq!(report["status"], "unchecked_not_translation_validated");
@@ -8967,9 +9132,7 @@ entry:
             &tv::IrFunctionSurface::default(),
             &executable_bytes,
             record,
-            None,
-            None,
-            None,
+            IrCorrespondenceInputs::default(),
             &object_bytes,
         );
         assert_eq!(report["status"], "unchecked_not_translation_validated");
@@ -9030,9 +9193,10 @@ entry:
             &ir_surface,
             &executable_bytes,
             record,
-            None,
-            None,
-            Some(&ir_data),
+            IrCorrespondenceInputs {
+                data_globals: Some(&ir_data),
+                ..Default::default()
+            },
             &object_bytes,
         );
         let (result, detail) = item(&report);
@@ -9049,9 +9213,10 @@ entry:
             &ir_surface,
             &executable_bytes,
             record,
-            None,
-            None,
-            Some(&with_missing),
+            IrCorrespondenceInputs {
+                data_globals: Some(&with_missing),
+                ..Default::default()
+            },
             &object_bytes,
         );
         let (result, detail) = item(&report);
@@ -9066,9 +9231,10 @@ entry:
             &ir_surface,
             &executable_bytes,
             record,
-            None,
-            None,
-            Some(&with_underivable),
+            IrCorrespondenceInputs {
+                data_globals: Some(&with_underivable),
+                ..Default::default()
+            },
             &object_bytes,
         );
         let (result, detail) = item(&report);
@@ -9097,9 +9263,10 @@ entry:
             &ir_surface,
             &executable_bytes,
             record,
-            None,
-            None,
-            Some(&no_globals),
+            IrCorrespondenceInputs {
+                data_globals: Some(&no_globals),
+                ..Default::default()
+            },
             &object_bytes,
         );
         let (result, detail) = item(&report);
@@ -9127,9 +9294,10 @@ entry:
             &ir_surface,
             &executable_bytes,
             record,
-            None,
-            None,
-            Some(&no_globals),
+            IrCorrespondenceInputs {
+                data_globals: Some(&no_globals),
+                ..Default::default()
+            },
             &anonymous_object,
         );
         let (result, detail) = item(&report);
@@ -9143,15 +9311,168 @@ entry:
             &ir_surface,
             &executable_bytes,
             record,
-            None,
-            None,
-            Some(&with_diverged),
+            IrCorrespondenceInputs {
+                data_globals: Some(&with_diverged),
+                ..Default::default()
+            },
             &object_bytes,
         );
         let (result, detail) = item(&report);
         assert_eq!(result, "inconsistent");
         assert!(detail.contains("counter: different"), "{detail}");
         assert_eq!(report["status"], "inconsistent_correspondence");
+    }
+
+    #[test]
+    fn object_symbol_attribute_correspondence_checks_bindings_against_ir_linkage() {
+        let dir = tempfile::tempdir().unwrap();
+        let ir_path = dir.path().join("attrs.ll");
+        let object_path = dir.path().join("attrs.o");
+        let executable_path = dir.path().join("attrs");
+        // `@greeting` carries `unnamed_addr`: LLVM may merge or drop
+        // its symbol, so it is excluded from the binding domain —
+        // counted in `unnamed_addr_excluded`, never compared.
+        let ir = br#"
+@greeting = private unnamed_addr constant [6 x i8] c"hello\00"
+@counter = global i32 7
+@internal_count = internal global i32 3
+@fallback = weak global i32 9
+
+define i32 @main() {
+entry:
+  ret i32 0
+}
+
+define internal i32 @helper() {
+entry:
+  ret i32 3
+}
+"#;
+        fs::write(&ir_path, ir).unwrap();
+        mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ir_path, &object_path)
+            .unwrap();
+        linker::link_recorded(std::slice::from_ref(&object_path), &executable_path).unwrap();
+        let object_bytes = fs::read(&object_path).unwrap();
+        let executable_bytes = fs::read(&executable_path).unwrap();
+        let ir_surface = tv::ir_function_surface(ir).unwrap();
+        let record = &object_link_corresponds(&object_bytes, &executable_bytes)
+            .unwrap()
+            .unwrap()
+            .2;
+        let ir_attrs = tv::ir_symbol_attributes(ir).unwrap();
+        assert_eq!(ir_attrs.unnamed_addr_excluded, 1);
+        assert_eq!(ir_attrs.expected["counter"], Some("global"));
+        assert_eq!(ir_attrs.expected["internal_count"], Some("local"));
+        assert_eq!(ir_attrs.expected["fallback"], Some("weak"));
+        assert_eq!(ir_attrs.expected["main"], Some("global"));
+        assert_eq!(ir_attrs.expected["helper"], Some("local"));
+
+        let item = |report: &serde_json::Value| -> (String, String) {
+            let item = report["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|check| check["item"] == "object_symbol_attribute_correspondence")
+                .unwrap();
+            (
+                item["result"].as_str().unwrap().to_owned(),
+                item["detail"].as_str().unwrap().to_owned(),
+            )
+        };
+
+        // Every derivable entity verifies against its object binding.
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            IrCorrespondenceInputs {
+                symbol_attributes: Some(&ir_attrs),
+                ..Default::default()
+            },
+            &object_bytes,
+        );
+        let (result, detail) = item(&report);
+        assert_eq!(result, "checked");
+        assert!(detail.contains("counter: equivalent (global)"), "{detail}");
+        assert!(
+            detail.contains("internal_count: equivalent (local)"),
+            "{detail}"
+        );
+        assert!(detail.contains("fallback: equivalent (weak)"), "{detail}");
+        assert!(detail.contains("helper: equivalent (local)"), "{detail}");
+        assert!(
+            detail.contains("1 unnamed_addr entities excluded"),
+            "{detail}"
+        );
+
+        // A symbol the object never emits stays unverifiable — the
+        // item reports `unchecked`, not `inconsistent`.
+        let mut with_missing = ir_attrs.clone();
+        with_missing
+            .expected
+            .insert("ghost".to_owned(), Some("global"));
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            IrCorrespondenceInputs {
+                symbol_attributes: Some(&with_missing),
+                ..Default::default()
+            },
+            &object_bytes,
+        );
+        let (result, detail) = item(&report);
+        assert_eq!(result, "unchecked");
+        assert!(detail.contains("ghost: missing"), "{detail}");
+
+        // A binding that disagrees with the IR linkage is a real
+        // inconsistency.
+        let mut diverged = ir_attrs.clone();
+        diverged
+            .expected
+            .insert("counter".to_owned(), Some("local"));
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            IrCorrespondenceInputs {
+                symbol_attributes: Some(&diverged),
+                ..Default::default()
+            },
+            &object_bytes,
+        );
+        let (result, detail) = item(&report);
+        assert_eq!(result, "inconsistent");
+        assert!(detail.contains("counter: different"), "{detail}");
+        assert_eq!(report["status"], "inconsistent_correspondence");
+
+        // A linkage with no derivable object binding is unverifiable,
+        // never treated as a fixed class.
+        let mut underivable = ir_attrs.clone();
+        underivable.expected.insert("opaque".to_owned(), None);
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            IrCorrespondenceInputs {
+                symbol_attributes: Some(&underivable),
+                ..Default::default()
+            },
+            &object_bytes,
+        );
+        let (result, detail) = item(&report);
+        assert_eq!(result, "unchecked");
+        assert!(detail.contains("opaque: underivable"), "{detail}");
+
+        // `available_externally` definitions emit no object symbol, so
+        // their linkage maps to no derivable binding at all.
+        let opaque = tv::ir_symbol_attributes(
+            br#"@ghost_def = available_externally global i32 0
+@real = global i32 1"#,
+        )
+        .unwrap();
+        assert_eq!(opaque.expected["ghost_def"], None);
+        assert_eq!(opaque.expected["real"], Some("global"));
     }
 
     #[test]
@@ -9229,9 +9550,7 @@ entry:
             &ir_surface,
             &executable_bytes,
             record,
-            None,
-            None,
-            None,
+            IrCorrespondenceInputs::default(),
             &object_bytes,
         );
         let targets = report["checks"]
