@@ -266,9 +266,13 @@ pub fn ir_object_signature_liftable(model: &PureI64Body) -> bool {
     model.inputs.len() <= MAX_ARGUMENT_COUNT
         && model.inputs.iter().all(|input| input.get_size() == 64)
         && model.result_shape.is_none()
-        // Exactly one integer 64-bit result leaf: a scalar i128 result
+        // At most one integer 64-bit result leaf: a scalar i128 result
         // (`[false, false]`) or an f64 result (`[true]`) is outside.
-        && model.result_leaf_doubles.as_slice() == [false]
+        // An omitted return annotation leaves the list empty — an
+        // inferred-i64 body still compares; a genuinely void member
+        // fails closed later in the IR encode.
+        && model.result_leaf_doubles.iter().all(|leaf| !*leaf)
+        && model.result_leaf_doubles.len() <= 1
         // Every parameter a single integer 64-bit scalar leaf: wide
         // leaves (`[false, false]` for i128/u128) and f64 (`[true]`)
         // stay out of the subset.
@@ -5880,8 +5884,9 @@ entry:
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
         config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
         let context = Context::new(&config);
-        // An i128 parameter produces a 128-bit input BV; the 64-bit
-        // comparison must refuse it before substituting.
+        // An i128 parameter flattens into two 64-bit input leaves
+        // (`[false, false]`); the leaf-count check must refuse it
+        // before substituting.
         let model = source_model_with_admission(
             "atom wide(x: i128, y: i64) -> i64 requires: true; ensures: result == y; body: { y };",
             &context,

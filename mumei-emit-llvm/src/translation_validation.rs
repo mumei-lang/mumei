@@ -919,8 +919,9 @@ pub unsafe fn parse_ir_module_for_comparison(llvm_ir: &[u8]) -> Result<ParsedIrM
         ))
         .map_err(|_| ValidationError("LLVM IR parse failed"))?;
     let raw = module.as_mut_ptr();
-    // Keep the C module alive for the struct's lifetime; the held
-    // context keeps every lookup valid.
+    // Skip the Rust wrapper's destructor: the C module intentionally
+    // stays allocated for the struct's lifetime, and the held
+    // `_context` keeps every lookup into it valid.
     std::mem::forget(module);
     Ok(ParsedIrModule {
         _context: context,
