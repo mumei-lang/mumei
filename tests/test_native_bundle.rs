@@ -3596,6 +3596,20 @@ fn native_bundle_rejects_scalar_callback_parameter_sources() {
     .expect("callback source should extract under CompositeV27");
     assert!(!contracts.is_empty());
 
+    assert!(matches!(
+        extract_pure_i64_module_contracts(
+            callback_source,
+            "callback.mm",
+            None,
+            RefinedAdmission::CompositeV26,
+        ),
+        Err(
+            mumei_core::semantic_contract::SemanticContractError::Unsupported(
+                "explicit owned scalar i64 signature required"
+            )
+        )
+    ));
+
     let output = cli(&[
         "native-bundle",
         "build",
@@ -3615,8 +3629,8 @@ fn native_bundle_rejects_scalar_callback_parameter_sources() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        output_text.contains("explicit owned scalar i64 signature required"),
-        "native bundle should name the callback signature rejection; output: {output_text}"
+        output_text.contains("unsupported or invalid module source"),
+        "native bundle should retain its generic profile rejection; output: {output_text}"
     );
 }
 
