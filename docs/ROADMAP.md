@@ -3777,23 +3777,31 @@ the form of the tail expression:
 Most of these files are negative fixtures, so the expected gain in proved files
 is small. Measure it after the inference change.
 
-Design memos for the residual shapes measured after v27. None of them is implemented:
-- **Array returns and array call results (5 files):** held because of
-  codegen, which has two separate gaps.
-  - When the tail is an array literal or a local binding, a `-> [i64]` atom
-    returns `{ i64, ptr }` pointing at an `alloca` in the callee's frame. That
-    pointer dangles after the return. Returning an array parameter unchanged
-    reuses the caller's pointer and is not affected.
-  - Caller code cannot bind a call result as an array: `len()` of the bound
-    local and the fat-pointer lookup both fail. Because of this, neither
-    positive file builds.
+Measured after the inference change (mumei#1411, develop post-merge, under
+`CompositeV29`, same corpus — all git-tracked `.mm` files, now 698):
+`admit_pure_i64_atoms` now admits 179 files; the `explicit owned scalar i64
+signature required` bucket holds 72 files. Across those files 89 atoms omit
+their return type — the fixpoint resolves 46 to `i64` (call chains plus
+`len`), infers 2 to a non-`i64` type and leaves 41 uninferable, mostly on
+`task`/`task_group` tails and lambda/`call(f, ..)` tails — shapes that stay
+outside the profile by design. File-level, 47 of the 72 have every declared
+return in `{None, i64}` and 31 of them fully resolve to `i64` under the
+fixpoint, so an omitted return is no longer their blocker at all; the rest
+fail on co-present features (concurrency bodies, generics, refined-alias
+returns, non-i64 parameters). The residual signature gate is therefore
+feature-bound, not inference-bound; further omitted-return inference would
+admit little without those profiles.
 
-  A profile slice would therefore produce 0 sidecars, and it would attach
-  contracts to memory-unsafe IR. A codegen change comes first: a
-  caller-provided buffer, or a heap allocation with defined ownership, for
-  returned arrays. The profile model after that: `result` is a read-only
-  array in `ensures`, and call results are uninterpreted `len`/`store`
-  applications with a nonnegative-length assumption.
+Design memos for the residual shapes measured after v27:
+- **Array returns and array call results (5 files):** implemented —
+  `mumei.pure-i64-composite/v29` plus module profile `v30` (#1409) admit
+  `-> [i64]` results on top of the fat-pointer codegen (#1403): locally
+  constructed arrays are copied into a `malloc` + `llvm.memcpy` buffer so the
+  returned `{ i64, ptr }` no longer dangles, while an array parameter
+  returned unchanged reuses the caller's pointer; callers bind call/if
+  results as arrays, and contract call sites model `len`/`store`
+  uninterpreted with `len >= 0`. Machine TV keeps `[i64]`-returning members
+  and their callers inconclusive.
 - **`[u32]` and other narrow element kinds (3 files):** 1 positive file.
   It passes an array as a call argument, and one file uses a lambda. A
   narrow-element read can assume the zero-extended element range. Passing
