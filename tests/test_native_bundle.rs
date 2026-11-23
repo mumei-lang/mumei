@@ -661,6 +661,12 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
         source_machine_tv["non_equivalent_functions"],
         serde_json::json!([])
     );
+    // The gate covers source↔machine equivalence only; the link edge's
+    // own status is named separately.
+    assert_eq!(
+        source_machine_tv["object_link_correspondence"],
+        "checked_object_link_correspondence"
+    );
     assert_eq!(
         source_machine_tv["unchecked_domains"],
         descriptor["checks_not_performed"]
@@ -6146,6 +6152,16 @@ fn accept_object_accepts_loop_bundle_with_object_link() {
     assert!(not_performed
         .iter()
         .any(|check| check == "runtime_cancellation_semantics"));
+    // The gate covers source↔machine equivalence only; the link edge's
+    // own status is named separately in the same record.
+    assert_eq!(
+        descriptor["source_machine_tv"]["status"],
+        "checked_source_machine_tv_within_profile"
+    );
+    assert_eq!(
+        descriptor["source_machine_tv"]["object_link_correspondence"],
+        "checked_object_link_correspondence"
+    );
     // The checked-link path emits the full record: functions enumerated,
     // relocations recorded, and the link edge reported as checked.
     let translation = &descriptor["object_translation"];
