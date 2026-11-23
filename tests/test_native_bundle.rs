@@ -6108,6 +6108,25 @@ fn accept_object_accepts_loop_bundle_without_object_link() {
         results.get("relocation_resolved_values").copied(),
         Some("checked") | Some("unchecked")
     ));
+
+    // The text path reports the same aggregate status — and one
+    // diagnostic per inconsistent item — also on the
+    // uncheckable-link path.
+    let text = accept_object(&source, &bundle, &id, false);
+    assert_success(&text);
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains(&format!(
+        "Object translation correspondence: {expected_status}"
+    )));
+    let inconsistent_items = results
+        .values()
+        .filter(|result| **result == "inconsistent")
+        .count();
+    let inconsistent_lines = text
+        .lines()
+        .filter(|line| line.starts_with("  inconsistent: "))
+        .count();
+    assert_eq!(inconsistent_lines, inconsistent_items);
 }
 
 #[test]
