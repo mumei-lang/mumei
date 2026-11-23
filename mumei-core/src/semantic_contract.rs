@@ -233,6 +233,12 @@ pub const PURE_I64_COMPOSITE_PROFILE_V27: &str = "mumei.pure-i64-composite/v27";
 /// Inferred refined-alias returns erased to their scalar base for
 /// semantic-contract sidecars (`pure-i64-composite/v28`).
 pub const PURE_I64_COMPOSITE_PROFILE_V28: &str = "mumei.pure-i64-composite/v28";
+/// Read-only `[i64]` call and atom results (`pure-i64-composite/v29`):
+/// the result is an uninterpreted `(len, store)` pair with a
+/// nonnegative-length assumption — `len(result)` and `result[i]` reads
+/// in `ensures` observe that pair, while the array itself cannot be
+/// written, compared, or forwarded through scalar positions.
+pub const PURE_I64_COMPOSITE_PROFILE_V29: &str = "mumei.pure-i64-composite/v29";
 
 /// Maximum byte length a `Str` literal may declare under
 /// `pure-i64-composite/v13`: one cell per byte under the
@@ -351,6 +357,9 @@ pub enum RefinedAdmission {
     /// `CompositeV28` additionally admits omitted returns inferred as
     /// refined aliases over `i64`, erasing the unproven refinement.
     CompositeV28,
+    /// `CompositeV29` additionally admits read-only `[i64]` atom and
+    /// call results (`pure-i64-composite/v29`).
+    CompositeV29,
 }
 
 impl RefinedAdmission {
@@ -542,6 +551,14 @@ impl RefinedAdmission {
     /// are admitted after erasing the alias refinement.
     pub fn admits_inferred_refined_returns(self) -> bool {
         self >= Self::CompositeV28
+    }
+
+    /// Whether `[i64]` atom and call results are admitted
+    /// (`pure-i64-composite/v29`) — the result reads as an
+    /// uninterpreted `(len, store)` pair under a nonnegative-length
+    /// assumption.
+    pub fn admits_array_results(self) -> bool {
+        self >= Self::CompositeV29
     }
 }
 
