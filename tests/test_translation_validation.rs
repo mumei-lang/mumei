@@ -5,6 +5,7 @@ use mumei_core::semantic_contract::{
 };
 use mumei_core::verification::ModuleEnv;
 use mumei_emit_llvm::translation_validation::{self as tv, Options, Outcome};
+use std::collections::BTreeMap;
 
 const CLAMP: &str = include_str!("fixtures/semantic_contract_clamp.mm");
 
@@ -4173,7 +4174,7 @@ fn hir_outcome(source: &str, ir: &str) -> Outcome {
         panic!("atom")
     };
     let hir = lower_atom_to_hir(&atom);
-    tv::validate_hir_pure_i64_leaf(&hir, ir, Options::default()).unwrap()
+    tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), ir, Options::default()).unwrap()
 }
 
 #[test]
@@ -4222,6 +4223,7 @@ fn hir_leaf_compare_rejects_atoms_outside_the_subset() {
     let hir = lower_atom_to_hir(&atom);
     assert!(tv::validate_hir_pure_i64_leaf(
         &hir,
+        &BTreeMap::new(),
         &pin("define i64 @f(i64 %x) { ret i64 %x }"),
         Options::default()
     )
@@ -4319,7 +4321,7 @@ fn hir_leaf_compare_rejects_mixed_width_signatures() {
     let hir = lower_atom_to_hir(&atom);
     let ir = pin("define i64 @f(i64 %x) { ret i64 %x }");
     assert!(
-        tv::validate_hir_pure_i64_leaf(&hir, &ir, Options::default()).is_err(),
+        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, Options::default()).is_err(),
         "mixed-width signatures stay outside the subset"
     );
 }
@@ -4347,7 +4349,7 @@ fn hir_leaf_compare_rejects_f64_operations_and_wrong_ret() {
     let hir = lower_atom_to_hir(&atom);
     let ir = pin("define double @f(double %x, double %y) { ret double %x }");
     assert!(
-        tv::validate_hir_pure_i64_leaf(&hir, &ir, Options::default()).is_err(),
+        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, Options::default()).is_err(),
         "f64 arithmetic stays outside the pass-through subset"
     );
     // An `i64` return where the source declares `f64` fails the
@@ -4362,7 +4364,7 @@ fn hir_leaf_compare_rejects_f64_operations_and_wrong_ret() {
     // this would compare `Different` instead of erroring.
     let ir = pin("define i64 @f(double %x) { ret i64 0 }");
     assert!(
-        tv::validate_hir_pure_i64_leaf(&hir, &ir, Options::default()).is_err(),
+        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, Options::default()).is_err(),
         "an i64 return where f64 is declared fails the kind gate"
     );
 }
@@ -4399,7 +4401,7 @@ fn hir_leaf_compare_rejects_ordered_ops_over_call_results() {
     let hir = lower_atom_to_hir(&atom);
     let ir = pin("declare i64 @g(i64)\ndefine i64 @f(i64 %x, i64 %y) { %c = call i64 @g(i64 %x)\n %cmp = icmp sgt i64 %c, %y\n %r = zext i1 %cmp to i64\n ret i64 %r }");
     assert!(
-        tv::validate_hir_pure_i64_leaf(&hir, &ir, Options::default()).is_err(),
+        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, Options::default()).is_err(),
         "ordered ops over a call result stay outside the subset"
     );
 }
@@ -4432,6 +4434,10 @@ fn hir_leaf_compare_binds_array_length() {
 fn hir_leaf_compare_rejects_array_writes_and_whole_values() {
     // `[i64]` parameters are read-only in this profile: a store stays
     // outside the leaf subset, and so does passing `a` itself as a value.
+    // A real IR module: if the HIR side wrongly admitted the body, the
+    // comparison would produce a verdict rather than the expected
+    // rejection — an empty module could not tell the two apart.
+    let real_ir = emitted(&source("a: [i64], i: i64", "a[i]"));
     for body in ["a[0] = 1; a[i]", "g(a)"] {
         let src = source("a: [i64], i: i64", body);
         let Item::Atom(atom) = parse_module_checked(&src).unwrap().remove(0) else {
@@ -4439,8 +4445,116 @@ fn hir_leaf_compare_rejects_array_writes_and_whole_values() {
         };
         let hir = lower_atom_to_hir(&atom);
         assert!(
-            tv::validate_hir_pure_i64_leaf(&hir, "", Options::default()).is_err(),
+            tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &real_ir, Options::default())
+                .is_err(),
             "{body} stays outside the read-only leaf subset"
         );
     }
+}
+
+fn hir_atom(source: &str) -> mumei_core::hir::HirAtom {
+    let items = parse_module_checked(source).unwrap();
+    let Some(Item::Atom(atom)) = items.into_iter().find(|i| matches!(i, Item::Atom(_))) else {
+        panic!("atom")
+    };
+    lower_atom_to_hir(&atom)
+}
+
+fn hir_outcome_with_structs(
+    source: &str,
+    structs: &BTreeMap<String, Vec<String>>,
+    ir: &str,
+) -> Outcome {
+    tv::validate_hir_pure_i64_leaf(&hir_atom(source), structs, ir, Options::default()).unwrap()
+}
+
+/// `emitted` for sources whose first item is a struct declaration:
+/// pick the atom out of the item list before lowering, and register
+/// the struct definitions so `p.x`/`Pair{..}` resolve at codegen.
+fn emitted_atom(source: &str) -> String {
+    let items = parse_module_checked(source).unwrap();
+    let mut env = ModuleEnv::new();
+    for item in &items {
+        match item {
+            Item::StructDef(def) => env.register_struct(def),
+            Item::Atom(atom) => env.register_atom(atom),
+            _ => {}
+        }
+    }
+    pin(
+        &mumei_emit_llvm::codegen::compile_to_module(&hir_atom(source).emit_view(), &env, &[])
+            .unwrap(),
+    )
+}
+
+fn pair_env() -> BTreeMap<String, Vec<String>> {
+    BTreeMap::from([("Pair".to_string(), vec!["x".to_string(), "y".to_string()])])
+}
+
+fn pair_source(params: &str, result: &str, body: &str) -> String {
+    format!(
+        "struct Pair {{ x: i64, y: i64 }}\natom f({params}) -> {result} requires: true; ensures: true; body: {{ {body} }};"
+    )
+}
+
+#[test]
+fn hir_leaf_compare_handles_aggregate_params() {
+    // `p: Pair` flattens to `{i64, i64}` — `p.x` binds the first slot.
+    let src = pair_source("p: Pair", "i64", "p.x");
+    assert_eq!(
+        hir_outcome_with_structs(&src, &pair_env(), &emitted_atom(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+    // Reading the second leaf instead is a genuine mismatch.
+    let ir =
+        pin("define i64 @f({i64, i64} %p) { %x = extractvalue {i64, i64} %p, 1\n ret i64 %x }");
+    assert_eq!(
+        hir_outcome_with_structs(&src, &pair_env(), &ir),
+        Outcome::Different
+    );
+}
+
+#[test]
+fn hir_leaf_compare_handles_aggregate_results() {
+    // A `Pair` result returns as `{i64, i64}` — `aggregate_value`'s
+    // leaf-first packing on both sides.
+    let src = pair_source("a: i64, b: i64", "Pair", "Pair{x: a, y: b}");
+    assert_eq!(
+        hir_outcome_with_structs(&src, &pair_env(), &emitted_atom(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+    // Field-init order follows declaration order, not written order —
+    // `Pair{y: b, x: a}` is the same value.
+    let swapped = pair_source("a: i64, b: i64", "Pair", "Pair{y: b, x: a}");
+    assert_eq!(
+        hir_outcome_with_structs(&swapped, &pair_env(), &emitted_atom(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+    let ir = pin("define {i64, i64} @f(i64 %a, i64 %b) { %p0 = insertvalue {i64, i64} undef, i64 %b, 0\n %p1 = insertvalue {i64, i64} %p0, i64 %a, 1\n ret {i64, i64} %p1 }");
+    assert_eq!(
+        hir_outcome_with_structs(&src, &pair_env(), &ir),
+        Outcome::Different
+    );
+}
+
+#[test]
+fn hir_leaf_compare_rejects_aggregate_misuse() {
+    // A whole aggregate cannot stand in a scalar position: not as a
+    // scalar-typed tail, an operand, or a call argument.
+    for body in ["p", "p + 1", "g(p)"] {
+        let src = pair_source("p: Pair", "i64", body);
+        assert!(
+            tv::validate_hir_pure_i64_leaf(&hir_atom(&src), &pair_env(), "", Options::default())
+                .is_err(),
+            "{body} stays outside the scalar subset"
+        );
+    }
+    // A struct the map does not admit (e.g. non-i64 leaves) fails
+    // closed at the signature gate.
+    let unknown = "struct Triple { a: i64, b: i64, c: i64 }\natom f(t: Triple) -> i64 requires: true; ensures: true; body: { t.a };";
+    assert!(
+        tv::validate_hir_pure_i64_leaf(&hir_atom(unknown), &pair_env(), "", Options::default())
+            .is_err(),
+        "unmapped struct params stay outside the subset"
+    );
 }

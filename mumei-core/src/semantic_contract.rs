@@ -8290,6 +8290,7 @@ impl<'ctx> PureI64Body<'ctx> {
 /// order the IR subset used.
 pub fn encode_hir_pure_i64_leaf<'ctx>(
     atom: &crate::hir::HirAtom,
+    structs: &BTreeMap<String, Vec<String>>,
     context: &'ctx Context,
 ) -> Result<PureI64Body<'ctx>, SemanticContractError> {
     use crate::hir::{HirBinOp, HirExpr, HirStmt};
@@ -8314,10 +8315,20 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
         .signature
         .params
         .iter()
-        .filter(|p| p.ty.as_deref() != Some("[i64]"))
+        .filter(|p| {
+            let ty = p.ty.as_deref();
+            ty != Some("[i64]") && !ty.is_some_and(|t| structs.contains_key(t))
+        })
         .map(|p| p.ty.as_deref())
         .collect();
-    tys.push(atom.signature.return_type.as_deref());
+    if !atom
+        .signature
+        .return_type
+        .as_deref()
+        .is_some_and(|t| structs.contains_key(t))
+    {
+        tys.push(atom.signature.return_type.as_deref());
+    }
     // `f64` leaves are their own pass-through subset: every parameter
     // and the result is `f64`, and the body may only carry them through
     // (variables and lets — FP arithmetic stays outside this slice).
@@ -8335,16 +8346,22 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
             "hir array param outside i64",
         ));
     }
+    #[derive(Clone)]
     enum HirLeafValue<'ctx> {
         Scalar(BV<'ctx>, bool),
         Array(BV<'ctx>, Array<'ctx>),
+        /// An aggregate in declaration order: `(field name, leaf,
+        /// call-derived flag)` per i64 leaf slot — the flattened
+        /// layout `param_env`/`aggregate_value` share.
+        Aggregate(Vec<(String, BV<'ctx>, bool)>),
     }
     let mut inputs = Vec::new();
     let mut env: HashMap<String, HirLeafValue<'ctx>> = HashMap::new();
     let mut array_params: Vec<Option<(BV<'ctx>, Array<'ctx>)>> = Vec::new();
+    let mut param_shapes: Vec<Option<usize>> = Vec::new();
     let mut param_leaf_doubles = Vec::new();
-    for (i, param) in atom.signature.params.iter().enumerate() {
-        if array_param[i] {
+    for param in atom.signature.params.iter() {
+        if param.ty.as_deref() == Some("[i64]") {
             // The same read-only `[i64]` convention `param_env` binds:
             // a nonnegative length leaf plus a cell store, read via the
             // bounds-checked `ite` read — no input slot is consumed.
@@ -8357,10 +8374,30 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
             );
             array_params.push(Some((len.clone(), store.clone())));
             env.insert(param.name.clone(), HirLeafValue::Array(len, store));
+            param_shapes.push(None);
             param_leaf_doubles.push(vec![false]);
             continue;
         }
         array_params.push(None);
+        if let Some(fields) = param.ty.as_deref().and_then(|t| structs.get(t)) {
+            // Register-resident aggregate: one 64-bit input slot per
+            // declaration-order leaf, the same flattening the IR
+            // signature carries as `{i64, ...}` formals.
+            let leaves: Vec<(String, BV<'ctx>, bool)> = fields
+                .iter()
+                .enumerate()
+                .map(|(j, name)| {
+                    let leaf = BV::new_const(context, format!("param.{}.{}", param.name, j), 64);
+                    inputs.push(leaf.clone());
+                    (name.clone(), leaf, false)
+                })
+                .collect();
+            param_shapes.push(Some(leaves.len()));
+            param_leaf_doubles.push(vec![false; leaves.len()]);
+            env.insert(param.name.clone(), HirLeafValue::Aggregate(leaves));
+            continue;
+        }
+        param_shapes.push(None);
         match (param.ty.as_deref(), width, signed, float) {
             (None | Some("i64"), 64, _, false) => {}
             (Some("f64"), 64, _, true) => {}
@@ -8388,11 +8425,17 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
             param_leaf_doubles.push(vec![float]);
         }
     }
+    let result_fields: Option<&Vec<String>> = atom
+        .signature
+        .return_type
+        .as_deref()
+        .and_then(|t| structs.get(t));
     match (atom.signature.return_type.as_deref(), width, signed, float) {
         (None | Some("i64"), 64, _, false) => {}
         (Some("f64"), 64, _, true) => {}
         (Some("i128"), 128, true, false) => {}
         (Some("u128"), 128, false, false) => {}
+        (Some(_), _, _, _) if result_fields.is_some() => {}
         _ => return Err(SemanticContractError::Unsupported("hir result type")),
     }
 
@@ -8439,8 +8482,37 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                 Some(HirLeafValue::Array(..)) => {
                     Err(SemanticContractError::Unsupported("hir whole-array value"))
                 }
+                // A whole aggregate is not a scalar operand: its use is
+                // a result/`let` value handled by `encode_value`.
+                Some(HirLeafValue::Aggregate(..)) => Err(SemanticContractError::Unsupported(
+                    "hir whole-aggregate value",
+                )),
                 None => Err(SemanticContractError::Unsupported("hir free variable")),
             },
+            HirExpr::FieldAccess(base, field) => {
+                // The flattened-leaf read a struct param or `let`
+                // carries: pick the named leaf out of the aggregate.
+                let HirExpr::Variable(name) = base.as_ref() else {
+                    return Err(SemanticContractError::Unsupported("hir field access base"));
+                };
+                let Some(HirLeafValue::Aggregate(leaves)) = env.get(name) else {
+                    return Err(SemanticContractError::Unsupported(
+                        "hir access on a non-aggregate binding",
+                    ));
+                };
+                leaves
+                    .iter()
+                    .find(|(n, _, _)| n == field)
+                    .map(|(_, leaf, call)| (leaf.clone(), *call))
+                    .ok_or(SemanticContractError::Unsupported("hir field name"))
+            }
+            HirExpr::StructInit { .. } => {
+                // An aggregate literal is a `let`/result value, never a
+                // scalar operand (call argument, binary operand, ...).
+                Err(SemanticContractError::Unsupported(
+                    "hir aggregate in scalar position",
+                ))
+            }
             HirExpr::ArrayAccess(name, index) => {
                 // The bounds-checked read the emitter produces: the
                 // merged `phi(loaded, 0)` yields 0 out of bounds, so the
@@ -8635,6 +8707,60 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
         }
     }
 
+    /// A `let`/tail value, where an aggregate is admissible: a struct
+    /// literal encodes to its declaration-order leaves, a variable
+    /// bound to an aggregate passes through, and anything else is the
+    /// scalar path. The `structs` map fixes field order — the literal's
+    /// written order is reordered to it, and every declared field must
+    /// be written exactly once.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_value<'ctx>(
+        expr: &HirExpr,
+        env: &HashMap<String, HirLeafValue<'ctx>>,
+        structs: &BTreeMap<String, Vec<String>>,
+        context: &'ctx Context,
+        guard: &Bool<'ctx>,
+        definedness: &mut Vec<Bool<'ctx>>,
+        call_sites: &mut Vec<CallSite<'ctx>>,
+        scalar: (u32, bool, bool),
+    ) -> Result<HirLeafValue<'ctx>, SemanticContractError> {
+        match expr {
+            HirExpr::StructInit { type_name, fields } => {
+                let Some(decl) = structs.get(type_name.as_str()) else {
+                    return Err(SemanticContractError::Unsupported("hir struct init type"));
+                };
+                if fields.len() != decl.len() {
+                    return Err(SemanticContractError::Unsupported("hir struct init arity"));
+                }
+                let mut leaves = Vec::with_capacity(decl.len());
+                for name in decl {
+                    let Some((_, init)) = fields.iter().find(|(n, _)| n == name) else {
+                        return Err(SemanticContractError::Unsupported("hir struct init field"));
+                    };
+                    let (leaf, call) =
+                        encode_expr(init, env, context, guard, definedness, call_sites, scalar)?;
+                    leaves.push((name.clone(), leaf, call));
+                }
+                Ok(HirLeafValue::Aggregate(leaves))
+            }
+            HirExpr::Variable(name) => match env.get(name) {
+                Some(HirLeafValue::Aggregate(leaves)) => {
+                    Ok(HirLeafValue::Aggregate(leaves.clone()))
+                }
+                _ => {
+                    let (leaf, call) =
+                        encode_expr(expr, env, context, guard, definedness, call_sites, scalar)?;
+                    Ok(HirLeafValue::Scalar(leaf, call))
+                }
+            },
+            _ => {
+                let (leaf, call) =
+                    encode_expr(expr, env, context, guard, definedness, call_sites, scalar)?;
+                Ok(HirLeafValue::Scalar(leaf, call))
+            }
+        }
+    }
+
     let (stmts, tail) = match &atom.body {
         HirStmt::Block { stmts, tail_expr } => {
             let tail = tail_expr
@@ -8652,16 +8778,17 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
     for stmt in stmts {
         match stmt {
             HirStmt::Let { var, value, .. } => {
-                let bound = encode_expr(
+                let bound = encode_value(
                     value,
                     &env,
+                    structs,
                     context,
                     &top_guard,
                     &mut definedness,
                     &mut call_sites,
                     scalar,
                 )?;
-                env.insert(var.clone(), HirLeafValue::Scalar(bound.0, bound.1));
+                env.insert(var.clone(), bound);
             }
             HirStmt::Expr(e) => {
                 encode_expr(
@@ -8677,15 +8804,48 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
             _ => return Err(SemanticContractError::Unsupported("hir statement")),
         }
     }
-    let (value, _) = encode_expr(
+    let (value, result_shape, result_leaf_doubles) = match encode_value(
         tail,
         &env,
+        structs,
         context,
         &top_guard,
         &mut definedness,
         &mut call_sites,
         scalar,
-    )?;
+    )? {
+        HirLeafValue::Scalar(leaf, _) => {
+            if result_fields.is_some() {
+                // The signature declares an aggregate result — a bare
+                // scalar tail cannot carry it.
+                return Err(SemanticContractError::Unsupported("hir scalar tail"));
+            }
+            (leaf, None, vec![float])
+        }
+        HirLeafValue::Aggregate(leaves) => {
+            let Some(decl) = result_fields else {
+                return Err(SemanticContractError::Unsupported(
+                    "hir aggregate tail on a scalar result",
+                ));
+            };
+            if leaves.len() != decl.len()
+                || leaves.iter().zip(decl.iter()).any(|((n, _, _), d)| n != d)
+            {
+                return Err(SemanticContractError::Unsupported(
+                    "hir aggregate tail shape",
+                ));
+            }
+            let slots: Vec<BV> = leaves.iter().map(|(_, leaf, _)| leaf.clone()).collect();
+            (
+                aggregate_value(&slots),
+                Some(leaves.len()),
+                vec![false; leaves.len()],
+            )
+        }
+        HirLeafValue::Array(..) => {
+            return Err(SemanticContractError::Unsupported("hir array result"))
+        }
+    };
 
     let mut body = PureI64Body::synthetic_scalar(atom.signature.name.clone(), value);
     body.inputs = inputs;
@@ -8703,9 +8863,10 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
         })
         .collect();
     body.bounded_memory = has_array;
-    body.param_shapes = vec![None; atom.signature.params.len()];
+    body.param_shapes = param_shapes;
     body.param_leaf_doubles = param_leaf_doubles;
-    body.result_leaf_doubles = vec![float];
+    body.result_shape = result_shape;
+    body.result_leaf_doubles = result_leaf_doubles;
     body.has_wide_scalar_features = width == 128;
     body.has_non_i64_scalar_features = width == 128 || float;
     // Mirror the source-side feature flags: a uniform-f64 signature is

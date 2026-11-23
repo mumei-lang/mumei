@@ -409,11 +409,21 @@ pub fn validate_pure_i64_optimized(
 /// uninterpreted call sites (ordered operations over a call result
 /// stay outside until callee signatures are wired in), and read-only
 /// `[i64]` parameters inside the i64 domain (`a[i]` as the
-/// bounds-checked read, `len(a)` as the stored count). Anything wider
-/// fails closed as a validation error. The return is the bare outcome:
+/// bounds-checked read, `len(a)` as the stored count), and
+/// register-resident aggregates whose fields are all `i64` leaves —
+/// `structs` names them with their declaration-order field names, so a
+/// `Pair` parameter binds one input slot per leaf and a `Pair` result
+/// packs via `aggregate_value`. Anything wider fails closed as a
+/// validation error.
+///
+/// The module sweep covers every member, not just the compared
+/// function: an unrelated member carrying `{i64, ptr}` array
+/// parameters fails the whole module — admission is per module, not
+/// per member. The return is the bare outcome:
 /// this is the stage check, not a profile attestation.
 pub fn validate_hir_pure_i64_leaf(
     atom: &mumei_core::hir::HirAtom,
+    structs: &std::collections::BTreeMap<String, Vec<String>>,
     llvm_ir: &str,
     options: Options,
 ) -> Result<Outcome> {
@@ -425,7 +435,7 @@ pub fn validate_hir_pure_i64_leaf(
     config.set_timeout_msec(options.timeout_ms as u64);
     config.set_param_value("rlimit", &options.resource_limit.to_string());
     let context = Context::new(&config);
-    let model = mumei_core::semantic_contract::encode_hir_pure_i64_leaf(atom, &context)
+    let model = mumei_core::semantic_contract::encode_hir_pure_i64_leaf(atom, structs, &context)
         .map_err(|_| ValidationError("hir atom outside the scalar-i64 leaf subset"))?;
     let llvm_context = LlvmContext::create();
     let module = llvm_context
@@ -437,6 +447,17 @@ pub fn validate_hir_pure_i64_leaf(
     module
         .verify()
         .map_err(|_| ValidationError("invalid LLVM module"))?;
+    // A declared target or data layout must match the emitter's — a
+    // foreign layout could truncate GEP indices the array model reads
+    // as 64-bit. A module declaring neither gets LLVM's defaults, like
+    // the pinned fixture modules the tests compare.
+    let triple = module.get_triple();
+    let layout = module.get_data_layout();
+    if (!triple.as_str().is_empty() && triple.as_str().to_bytes() != TARGET.as_bytes())
+        || (!layout.as_str().is_empty() && layout.as_str().to_bytes() != DATA_LAYOUT.as_bytes())
+    {
+        return Err(ValidationError("unsupported target or data layout"));
+    }
     let function = module
         .get_function(&model.function_name)
         .ok_or(ValidationError("missing source function"))?;
@@ -2404,10 +2425,19 @@ unsafe fn check_function(
                             LLVMGetOperand(inst, 0),
                             array_param_mask,
                         );
+                    // The element index is the last operand and must be
+                    // an i64: a wider or narrower index would reach the
+                    // encoder's cell arithmetic at a different width —
+                    // a sort mismatch, not a compare.
+                    let index_i64 = LLVMGetTypeKind(LLVMTypeOf(LLVMGetOperand(inst, operands - 1)))
+                        == LLVMTypeKind::LLVMIntegerTypeKind
+                        && LLVMGetIntTypeWidth(LLVMTypeOf(LLVMGetOperand(inst, operands - 1)))
+                            == 64;
                     if (!gates.bounded_memory && !array_param_pointer)
                         || !(2..=3).contains(&operands)
                         || !outer_zero
                         || !cell_indexed
+                        || !index_i64
                     {
                         return Err(ValidationError("unsupported LLVM getelementptr"));
                     }
@@ -2429,8 +2459,13 @@ unsafe fn check_function(
                             LLVMGetOperand(inst, 0),
                             array_param_mask,
                         );
+                    // An alignment claim above the i64 cell's 8 bytes
+                    // makes the load UB on a lawful input — the model
+                    // assumes the element access, so over-aligned loads
+                    // stay refused.
                     if (!gates.bounded_memory && !array_param_pointer)
                         || width(LLVMTypeOf(inst))? != 64
+                        || LLVMGetAlignment(inst) > 8
                     {
                         return Err(ValidationError("unsupported LLVM load"));
                     }
