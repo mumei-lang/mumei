@@ -4,7 +4,7 @@ use crate::codegen::expr_emit::{
     LAMBDA_MARK,
 };
 use crate::codegen::lowering::{
-    bitpreserve_cast, resolve_param_type, struct_llvm_type, wide_int_cast, ArrayPtr,
+    bitpreserve_cast, resolve_param_type, struct_llvm_type, wide_int_cast, ArrayPtrMap,
 };
 use crate::codegen::pattern_emit::find_field_index;
 use crate::codegen::task_runtime::declare_task_group_should_cancel_current_extern;
@@ -31,7 +31,7 @@ fn emit_deep_aggregate_field_write<'ctx>(
     value: &HirExpr,
     variables: &mut HashMap<String, BasicValueEnum<'ctx>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &mut HashMap<String, ArrayPtr<'ctx>>,
+    array_ptrs: &mut ArrayPtrMap<'ctx>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<Option<BasicValueEnum<'ctx>>> {
     let resolved_root_type = module_env.resolve_base_type(root_type);
@@ -278,7 +278,7 @@ fn bind_lambda_selector<'a>(
     value: &HirExpr,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<Option<BasicValueEnum<'a>>> {
     let Some(branches) = super::expr_emit::collect_lambda_branches(
@@ -431,7 +431,7 @@ pub(crate) fn compile_hir_stmt<'a>(
     stmt: &HirStmt,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     match stmt {
@@ -494,6 +494,7 @@ pub(crate) fn compile_hir_stmt<'a>(
                     module_env,
                 )?;
                 array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
+                array_ptrs.stack_backed.insert(var.clone());
                 variables.insert(var.clone(), len_val);
                 let array_type = ty.clone().or_else(|| {
                     elements
@@ -541,6 +542,7 @@ pub(crate) fn compile_hir_stmt<'a>(
                 let len_val: BasicValueEnum =
                     context.i64_type().const_int(s.len() as u64, false).into();
                 array_ptrs.insert(var.clone(), (len_val, context.i8_type().into(), data_ptr));
+                array_ptrs.stack_backed.remove(var);
                 variables.insert(var.clone(), data_ptr);
                 return Ok(data_ptr);
             }
@@ -548,7 +550,13 @@ pub(crate) fn compile_hir_stmt<'a>(
             // `a[i]`/`len(a)`/`a[i] = x` hit the source's slots.
             if let HirExpr::Variable(src) = value.as_ref() {
                 if let Some(&(len_val, elem_ty, data_ptr)) = array_ptrs.get(src.as_str()) {
+                    let stack_backed = array_ptrs.stack_backed.contains(src);
                     array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
+                    if stack_backed {
+                        array_ptrs.stack_backed.insert(var.clone());
+                    } else {
+                        array_ptrs.stack_backed.remove(var);
+                    }
                     if let Some(array_type) = var_types.get(src.as_str()).cloned() {
                         if array_type.starts_with('[') || array_type.starts_with("[]<") {
                             var_types.insert(var.clone(), array_type);
@@ -619,6 +627,8 @@ pub(crate) fn compile_hir_stmt<'a>(
             } else {
                 val
             };
+            array_ptrs.remove(var.as_str());
+            array_ptrs.stack_backed.remove(var.as_str());
             variables.insert(var.clone(), val);
             let inferred_ty = declared_base
                 .clone()
@@ -1036,6 +1046,7 @@ pub(crate) fn compile_hir_stmt<'a>(
                     module_env,
                 )?;
                 array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
+                array_ptrs.stack_backed.insert(var.clone());
                 variables.insert(var.clone(), len_val);
                 if var_types
                     .get(var.as_str())
@@ -1067,6 +1078,7 @@ pub(crate) fn compile_hir_stmt<'a>(
                             context.i64_type().const_int(lit.len() as u64, false).into();
                         array_ptrs
                             .insert(var.clone(), (len_val, context.i8_type().into(), data_ptr));
+                        array_ptrs.stack_backed.remove(var);
                         variables.insert(var.clone(), data_ptr);
                         return Ok(data_ptr);
                     }
@@ -1074,7 +1086,13 @@ pub(crate) fn compile_hir_stmt<'a>(
             }
             if let HirExpr::Variable(src) = value.as_ref() {
                 if let Some(&(len_val, elem_ty, data_ptr)) = array_ptrs.get(src.as_str()) {
+                    let stack_backed = array_ptrs.stack_backed.contains(src);
                     array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
+                    if stack_backed {
+                        array_ptrs.stack_backed.insert(var.clone());
+                    } else {
+                        array_ptrs.stack_backed.remove(var);
+                    }
                     // `i8` elements mark a `Str` binding: its scalar value
                     // is the `*i8` pointer (concat/extern uses), not the
                     // length integer arrays expose.
@@ -1113,6 +1131,7 @@ pub(crate) fn compile_hir_stmt<'a>(
                 // must follow the RHS: a `s = f(...)` call whose lambda
                 // captures `s` packs the capture from `array_ptrs`.
                 array_ptrs.remove(var.as_str());
+                array_ptrs.stack_backed.remove(var.as_str());
             }
             // `x = …` on a declared 128-bit binding widens the RHS the
             // same way `let` does (`pure-i64-composite/v21`).
@@ -1369,7 +1388,7 @@ pub(crate) fn compile_hir_stmt<'a>(
             )?;
             let body_end_block = builder.get_insert_block().unwrap();
             let body_assigned = collect_assigned_outer_variables_stmt(body);
-            for (name, pre_array) in &pre_loop_arrays {
+            for (name, pre_array) in pre_loop_arrays.iter() {
                 let changed = array_ptrs.get(name).is_none_or(|body_array| {
                     body_array.0.as_value_ref() != pre_array.0.as_value_ref()
                         || body_array.1 != pre_array.1

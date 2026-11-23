@@ -1,5 +1,5 @@
 use crate::codegen::lowering::{
-    box_payload_to_i64, release_boxed_payload, unbox_payload_from_i64, ArrayPtr,
+    box_payload_to_i64, release_boxed_payload, unbox_payload_from_i64, ArrayPtrMap,
 };
 use crate::codegen::stmt_emit::compile_hir_stmt;
 use inkwell::builder::Builder;
@@ -296,7 +296,7 @@ pub(crate) fn emit_task_spawn_only<'a>(
     body: &HirStmt,
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
-    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
     task_group_any: Option<TaskGroupAnyContext<'a>>,
 ) -> MumeiResult<PendingTask<'a>> {
@@ -393,7 +393,7 @@ pub(crate) fn emit_task_spawn_only<'a>(
 
     // Rebuild the array fat pointers the body needs from the args struct, so
     // element reads / stores hit the parent's allocation.
-    let mut inner_array_ptrs: HashMap<String, ArrayPtr<'a>> = HashMap::new();
+    let mut inner_array_ptrs = ArrayPtrMap::default();
     for ((name, len_val, elem_ty, data_val), (_, len_idx, data_idx)) in
         array_captures.iter().zip(array_fields.iter())
     {
@@ -420,6 +420,9 @@ pub(crate) fn emit_task_spawn_only<'a>(
             &format!("task_capture_{}_data", name),
         ));
         inner_array_ptrs.insert(name.clone(), (len_loaded, *elem_ty, data_loaded));
+        if array_ptrs.stack_backed.contains(name) {
+            inner_array_ptrs.stack_backed.insert(name.clone());
+        }
         inner_vars.insert(name.clone(), len_loaded);
     }
 
@@ -717,7 +720,7 @@ pub(crate) fn compile_task_spawn<'a>(
     body: &HirStmt,
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
-    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     let pending = emit_task_spawn_only(

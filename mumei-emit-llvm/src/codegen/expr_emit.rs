@@ -1,7 +1,8 @@
 use crate::codegen::lowering::{
-    array_struct_type, bitpreserve_cast, box_payload_to_i64, declare_chan_send_owned,
-    ensure_type_acyclic, enum_llvm_type, payload_needs_box, release_boxed_payload,
-    resolve_param_type, resolve_return_type, unbox_payload_from_i64, wide_int_cast, ArrayPtr,
+    array_elem_llvm_type, array_struct_type, bitpreserve_cast, box_payload_to_i64,
+    declare_chan_send_owned, ensure_type_acyclic, enum_llvm_type, payload_needs_box,
+    release_boxed_payload, resolve_param_type, resolve_return_type, type_contains_array_enum,
+    unbox_payload_from_i64, wide_int_cast, ArrayPtr, ArrayPtrMap,
 };
 use crate::codegen::pattern_emit::{
     bind_pattern_variables, compile_pattern_test, find_field_index, find_field_index_by_name,
@@ -33,7 +34,7 @@ use std::rc::Rc;
 
 type ArrayMergeState<'a> = (
     HashMap<String, BasicValueEnum<'a>>,
-    HashMap<String, ArrayPtr<'a>>,
+    ArrayPtrMap<'a>,
     BasicBlock<'a>,
     HashSet<String>,
 );
@@ -119,7 +120,7 @@ fn bind_lambda_arg<'a>(
     src_var_ty: Option<&String>,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<()> {
     let is_fat_array = src_array.is_some()
@@ -186,7 +187,7 @@ pub(crate) fn emit_lambda_function<'a>(
     body: &HirStmt,
     outer_variables: &HashMap<String, BasicValueEnum<'a>>,
     outer_var_types: &HashMap<String, String>,
-    outer_array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    outer_array_ptrs: &ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<(String, Vec<String>)> {
     let base = format!(
@@ -290,7 +291,7 @@ pub(crate) fn emit_lambda_function<'a>(
 
         let mut variables: HashMap<String, BasicValueEnum> = HashMap::new();
         let mut var_types: HashMap<String, String> = HashMap::new();
-        let mut array_ptrs: HashMap<String, ArrayPtr> = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
         // Seed the body with the lambda scope live at the let site — a call
         // to an outer lambda inside the body resolves its `@lam:` marker.
         var_types.extend(lam_marks.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -310,6 +311,9 @@ pub(crate) fn emit_lambda_function<'a>(
                 &mut array_ptrs,
                 module_env,
             )?;
+            if outer_array_ptrs.stack_backed.contains(cap) {
+                array_ptrs.stack_backed.insert(cap.clone());
+            }
         }
         for (i, p) in params.iter().enumerate() {
             let val = lam_fn.get_nth_param((all_caps.len() + i) as u32).unwrap();
@@ -340,6 +344,12 @@ pub(crate) fn emit_lambda_function<'a>(
             }
         }
 
+        let inferred_return = return_type
+            .cloned()
+            .or_else(|| infer_stmt_struct_type_name(body, &var_types, module_env));
+        array_ptrs.return_contains_array_enum = inferred_return
+            .as_deref()
+            .is_some_and(|name| type_contains_array_enum(module_env, name));
         let result = compile_hir_stmt(
             context,
             &lam_builder,
@@ -383,7 +393,7 @@ fn push_lambda_captures<'a>(
     builder: &Builder<'a>,
     caps: &[String],
     variables: &HashMap<String, BasicValueEnum<'a>>,
-    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &ArrayPtrMap<'a>,
 ) -> MumeiResult<Vec<BasicMetadataValueEnum<'a>>> {
     let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::with_capacity(caps.len());
     for cap in caps {
@@ -442,7 +452,7 @@ fn block_lambda_scope<'a>(
     stmts: &[HirStmt],
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
-    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<Option<(HashMap<String, BasicValueEnum<'a>>, HashMap<String, String>)>> {
     let mut local_variables = variables.clone();
@@ -505,7 +515,7 @@ fn collect_lambda_branch_body<'e, 'a>(
     conds: Vec<SelCond<'e, 'a>>,
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
-    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
     require_simple_tail: bool,
     scope: Option<SelScope<'a>>,
@@ -565,7 +575,7 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
     conds: Vec<SelCond<'e, 'a>>,
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
-    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
     scope: Option<SelScope<'a>>,
 ) -> MumeiResult<Option<Vec<SelBranch<'e, 'a>>>> {
@@ -716,7 +726,7 @@ pub(crate) fn emit_lambda_selector<'a>(
     branches: &[(String, Option<SelScope<'a>>)],
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
-    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<Option<(String, Vec<String>)>> {
     // Resolve each branch's lifted fn and marker captures.
@@ -859,7 +869,7 @@ pub(crate) fn emit_lambda_selector<'a>(
     lam_builder.position_at_end(entry);
     let mut scope_vars: HashMap<String, BasicValueEnum> = HashMap::new();
     let mut scope_var_types: HashMap<String, String> = HashMap::new();
-    let mut array_ptrs_local: HashMap<String, ArrayPtr> = HashMap::new();
+    let mut array_ptrs_local = ArrayPtrMap::default();
     let mut arg_vals: Vec<BasicValueEnum> = Vec::new();
 
     let sel_val = lam_fn.get_nth_param(0).unwrap().into_int_value();
@@ -879,6 +889,9 @@ pub(crate) fn emit_lambda_selector<'a>(
             &mut array_ptrs_local,
             module_env,
         )?;
+        if array_ptrs.stack_backed.contains(cap) {
+            array_ptrs_local.stack_backed.insert(cap.clone());
+        }
     }
     for i in 0..arity {
         arg_vals.push(
@@ -988,7 +1001,7 @@ fn emit_lambda_call<'a>(
     args: &[HirExpr],
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     let Some((fn_name, caps)) = parse_lambda_marker(mark) else {
@@ -1596,7 +1609,7 @@ pub(crate) fn emit_array_literal<'a>(
     elements: &[HirExpr],
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<(BasicValueEnum<'a>, BasicTypeEnum<'a>, BasicValueEnum<'a>)> {
     let mut elem_vals = Vec::with_capacity(elements.len());
@@ -1731,17 +1744,18 @@ pub(crate) fn emit_array_literal<'a>(
 #[allow(clippy::type_complexity)]
 fn merge_array_ptrs<'a>(
     builder: &Builder<'a>,
-    pre: &HashMap<String, ArrayPtr<'a>>,
-    states: &[(
-        HashMap<String, ArrayPtr<'a>>,
-        BasicBlock<'a>,
-        HashSet<String>,
-    )],
-    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    pre: &ArrayPtrMap<'a>,
+    states: &[(ArrayPtrMap<'a>, BasicBlock<'a>, HashSet<String>)],
+    array_ptrs: &mut ArrayPtrMap<'a>,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
 ) -> MumeiResult<()> {
     *array_ptrs = pre.clone();
-    for (name, pre_array) in pre {
+    for (state, _, _) in states {
+        array_ptrs
+            .stack_backed
+            .extend(state.stack_backed.iter().cloned());
+    }
+    for (name, pre_array) in pre.iter() {
         if !states
             .iter()
             .any(|(_, _, assigned)| assigned.contains(name))
@@ -1828,7 +1842,7 @@ fn emit_enum_variant_init<'a>(
     function: &FunctionValue<'a>,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
     enum_name: &str,
     variant_name: &str,
@@ -1877,10 +1891,66 @@ fn emit_enum_variant_init<'a>(
     .into_struct_value();
     // Set payload fields
     for (i, field_expr) in fields.iter().enumerate() {
-        let field_val = compile_hir_expr(
-            context, builder, module, function, field_expr, variables, var_types, array_ptrs,
-            module_env,
-        )?;
+        let field_type = variant.field_types[i].display_name();
+        let is_array = array_elem_llvm_type(context, &field_type, module_env)?.is_some();
+        if is_array && array_ptrs.return_contains_array_enum {
+            let stack_backed = match field_expr {
+                HirExpr::Variable(name) => {
+                    array_ptrs.stack_backed.contains(name) || !array_ptrs.contains_key(name)
+                }
+                _ => true,
+            };
+            if stack_backed {
+                return Err(MumeiError::codegen(
+                    "stack-backed array payload cannot escape through an array-bearing enum return"
+                        .to_string(),
+                ));
+            }
+        }
+        let field_val = if is_array {
+            if let HirExpr::Variable(name) = field_expr {
+                let (len, elem_ty, data) = array_ptrs.get(name).copied().ok_or_else(|| {
+                    MumeiError::codegen(format!(
+                        "array payload '{name}' is not registered as a fat pointer"
+                    ))
+                })?;
+                let expected_elem_ty = array_elem_llvm_type(context, &field_type, module_env)?
+                    .ok_or_else(|| {
+                        MumeiError::codegen(format!(
+                            "enum '{enum_name}' array payload has no scalar element type"
+                        ))
+                    })?;
+                if elem_ty != expected_elem_ty {
+                    return Err(MumeiError::codegen(format!(
+                        "array payload '{name}' has an incompatible element type"
+                    )));
+                }
+                let array_ty = array_struct_type(context);
+                let mut aggregate: inkwell::values::AggregateValueEnum =
+                    array_ty.get_undef().into();
+                aggregate = llvm!(builder.build_insert_value(aggregate, len, 0, "payload_arr_len"));
+                aggregate =
+                    llvm!(builder.build_insert_value(aggregate, data, 1, "payload_arr_data"));
+                match aggregate {
+                    inkwell::values::AggregateValueEnum::StructValue(value) => value.into(),
+                    _ => {
+                        return Err(MumeiError::codegen(
+                            "array payload is not a fat-pointer aggregate",
+                        ))
+                    }
+                }
+            } else {
+                compile_hir_expr(
+                    context, builder, module, function, field_expr, variables, var_types,
+                    array_ptrs, module_env,
+                )?
+            }
+        } else {
+            compile_hir_expr(
+                context, builder, module, function, field_expr, variables, var_types, array_ptrs,
+                module_env,
+            )?
+        };
         let slot_ty = enum_type
             .get_field_type_at_index((i + 1) as u32)
             .ok_or_else(|| {
@@ -1911,7 +1981,7 @@ pub(crate) fn compile_hir_expr<'a>(
     expr: &HirExpr,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     match expr {
@@ -2117,6 +2187,50 @@ pub(crate) fn compile_hir_expr<'a>(
                 let resolved_callee = module_env
                     .get_atom(name)
                     .or_else(|| module_env.get_atom(&fqn_name));
+                let inferred_callee_return = resolved_callee
+                    .filter(|callee| callee.return_type.is_none())
+                    .and_then(|callee| {
+                        mumei_core::hir::lower_atom_to_hir(callee)
+                            .signature
+                            .inferred_return_type
+                    });
+                let callee_returns_array_enum = resolved_callee
+                    .and_then(|callee| callee.return_type.as_deref())
+                    .or(inferred_callee_return.as_deref())
+                    .is_some_and(|type_name| type_contains_array_enum(module_env, type_name));
+                if array_ptrs.return_contains_array_enum && callee_returns_array_enum {
+                    if let Some(callee) = resolved_callee {
+                        for (i, arg) in args.iter().enumerate() {
+                            let param_is_array = callee
+                                .params
+                                .get(i)
+                                .and_then(|param| param.type_name.as_deref())
+                                .is_some_and(|type_name| {
+                                    matches!(
+                                        mumei_core::lowering::lower(
+                                            &module_env.resolve_base_type(type_name)
+                                        ),
+                                        mumei_core::lowering::LoweredType::Array(_)
+                                    )
+                                });
+                            if !param_is_array {
+                                continue;
+                            }
+                            let stack_backed = match arg {
+                                HirExpr::Variable(array_name) => {
+                                    array_ptrs.stack_backed.contains(array_name)
+                                        || !array_ptrs.contains_key(array_name)
+                                }
+                                _ => true,
+                            };
+                            if stack_backed {
+                                return Err(MumeiError::codegen(format!(
+                                    "stack-backed array argument to '{name}' cannot escape through an array-bearing enum return"
+                                )));
+                            }
+                        }
+                    }
+                }
                 // Lower the callee's signature only when a fresh function
                 // declaration is needed — a callee already declared in this
                 // module (the common case in multi-atom files) is reused
@@ -2399,6 +2513,17 @@ pub(crate) fn compile_hir_expr<'a>(
                 context, builder, module, function, right, variables, var_types, array_ptrs,
                 module_env,
             )?;
+
+            if matches!(op, HirBinOp::Eq | HirBinOp::Neq)
+                && [left.as_ref(), right.as_ref()].iter().any(|operand| {
+                    infer_struct_type_name(operand, var_types, module_env)
+                        .is_some_and(|ty| type_contains_array_enum(module_env, &ty))
+                })
+            {
+                return Err(MumeiError::codegen(
+                    "equality on enums with array payloads is not supported by LLVM codegen",
+                ));
+            }
 
             // Plan 9-8: String operations — if both operands are pointer (Str) type
             if lhs.is_pointer_value() && rhs.is_pointer_value() {
@@ -2983,6 +3108,7 @@ pub(crate) fn compile_hir_expr<'a>(
                         target_val,
                         &mut guard_vars,
                         &mut guard_var_types,
+                        array_ptrs,
                         module_env,
                         enum_hint.as_deref(),
                     )?;
@@ -3024,6 +3150,7 @@ pub(crate) fn compile_hir_expr<'a>(
                     target_val,
                     &mut arm_vars,
                     &mut arm_var_types,
+                    array_ptrs,
                     module_env,
                     enum_hint.as_deref(),
                 )?;
@@ -3133,7 +3260,7 @@ pub(crate) fn compile_hir_expr<'a>(
                 }
             }
             let array_states: Vec<(
-                HashMap<String, ArrayPtr<'a>>,
+                ArrayPtrMap<'a>,
                 inkwell::basic_block::BasicBlock<'a>,
                 std::collections::HashSet<String>,
             )> = arm_states
@@ -3920,7 +4047,7 @@ mod tests {
 
         let mut variables = HashMap::new();
         let mut var_types = HashMap::new();
-        let mut array_ptrs = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
         let result = compile_hir_expr(
             &context,
             &builder,
@@ -4029,7 +4156,7 @@ mod tests {
         variables.insert("B".to_string(), a_struct.into());
         let mut var_types = HashMap::new();
         var_types.insert("B".to_string(), "A".to_string());
-        let mut array_ptrs = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
         let result = compile_hir_expr(
             &context,
             &builder,
@@ -4064,7 +4191,7 @@ mod tests {
         let module_env = ModuleEnv::new();
         let mut variables = HashMap::new();
         let mut var_types = HashMap::new();
-        let mut array_ptrs = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
 
         crate::codegen::stmt_emit::compile_hir_stmt(
             &context,
@@ -4122,7 +4249,7 @@ mod tests {
         let module_env = ModuleEnv::new();
         let mut variables = HashMap::new();
         let mut var_types = HashMap::new();
-        let mut array_ptrs = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
 
         for stmt in [
             HirStmt::Let {
@@ -4171,7 +4298,7 @@ mod tests {
         let module_env = ModuleEnv::new();
         let mut variables = HashMap::new();
         let mut var_types = HashMap::new();
-        let mut array_ptrs = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
 
         compile_hir_stmt(
             &context,
@@ -4243,7 +4370,7 @@ mod tests {
         let mut var_types = HashMap::new();
         var_types.insert("a".to_string(), "u64".to_string());
         var_types.insert("b".to_string(), "u64".to_string());
-        let mut array_ptrs = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
 
         let condition = HirExpr::BinaryOp(
             Box::new(HirExpr::IfThenElse {
@@ -4297,7 +4424,7 @@ mod tests {
         );
         let mut var_types = HashMap::new();
         var_types.insert("a".to_string(), "u64".to_string());
-        let mut array_ptrs = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
         let negative_one = || {
             HirExpr::BinaryOp(
                 Box::new(HirExpr::Number(0)),
@@ -4377,7 +4504,7 @@ mod tests {
         );
         let mut var_types = HashMap::new();
         var_types.insert("a".to_string(), "u64".to_string());
-        let mut array_ptrs = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
         let block = || HirStmt::Block {
             stmts: vec![HirStmt::Let {
                 var: "p".to_string(),
@@ -4433,7 +4560,7 @@ mod tests {
         let module_env = ModuleEnv::new();
         let mut variables = HashMap::new();
         let mut var_types = HashMap::new();
-        let mut array_ptrs = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
         macro_rules! run {
             ($stmt:expr) => {
                 compile_hir_stmt(
@@ -4494,7 +4621,7 @@ mod tests {
         let module_env = ModuleEnv::new();
         let mut variables = HashMap::new();
         let mut var_types = HashMap::new();
-        let mut array_ptrs = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
         macro_rules! run {
             ($stmt:expr) => {
                 compile_hir_stmt(
@@ -4552,7 +4679,7 @@ mod tests {
         let module_env = ModuleEnv::new();
         let mut variables = HashMap::new();
         let mut var_types = HashMap::new();
-        let mut array_ptrs = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
 
         let global = builder.build_global_string_ptr("hi", "str_lit")?;
         let data_ptr: BasicValueEnum = global.as_pointer_value().into();
@@ -4602,7 +4729,7 @@ mod tests {
         let module_env = ModuleEnv::new();
         let mut variables = HashMap::new();
         let mut var_types = HashMap::new();
-        let mut array_ptrs = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
         macro_rules! run {
             ($stmt:expr) => {
                 compile_hir_stmt(
@@ -4692,7 +4819,7 @@ mod tests {
         let module_env = ModuleEnv::new();
         let mut variables = HashMap::new();
         let mut var_types = HashMap::new();
-        let mut array_ptrs = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
         macro_rules! run {
             ($stmt:expr) => {
                 compile_hir_stmt(
