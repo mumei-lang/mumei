@@ -282,12 +282,15 @@ pub fn ir_object_signature_liftable(model: &PureI64Body) -> bool {
         && model
             .result_shape
             .is_none_or(|count| count <= INTEGER_RESULT_REGISTERS.len())
-        // Every declared result leaf an integer 64-bit leaf: a scalar
-        // i128 result (`[false, false]` on a `None` shape) or an f64
-        // leaf (`[true]`) is outside. An omitted return annotation
-        // leaves the list empty — an inferred-i64 body still compares;
-        // a genuinely void atom is already excluded by the source
-        // signature check upstream.
+        // Every declared result leaf an integer leaf: a scalar i128
+        // result (`[false, false]` on a `None` shape) or an f64 leaf
+        // (`[true]`) is outside. An omitted return annotation leaves
+        // the list empty — an inferred-i64 body still compares; a
+        // genuinely void atom is already excluded by the source
+        // signature check upstream. A 128-bit aggregate field stays
+        // indistinguishable here — `{i128}` and `{i64, i64}` both
+        // flatten to two `[false]` slots — so the encode-side
+        // `aggregate_all_i64_leaves` gate fails it closed instead.
         && model.result_leaf_doubles.iter().all(|leaf| !*leaf)
         && model.result_leaf_doubles.len() <= result_leaf_count
         // Every parameter a single integer 64-bit scalar leaf: wide
@@ -6551,6 +6554,55 @@ entry:
                     _ => IrObjectEquivalence::Different,
                 }
             );
+        }
+    }
+
+    #[test]
+    fn ir_object_equivalence_rejects_wide_aggregate_result() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // `{i128}` and `{i64, i64}` flatten to the same signature —
+        // two non-`double` 64-bit slots — so a count+kinds match
+        // cannot keep a 128-bit leaf out of the subset; the
+        // encode-side `aggregate_all_i64_leaves` gate fails it
+        // closed instead.
+        let model = source_model_named_with_admission(
+            "struct P { x: i64, y: i64 }\n\
+             atom make(a: i64, b: i64) -> P requires: true; ensures: true; body: { P { x: a, y: b } };",
+            "make",
+            &context,
+            RefinedAdmission::CompositeV6,
+        );
+        assert_eq!(model.result_shape, Some(2));
+        for wide_ir in [
+            r#"target triple = "x86_64-unknown-linux-gnu"
+define { i128 } @make(i64 %a, i64 %b) {
+entry:
+  %s = zext i64 %a to i128
+  %p0 = insertvalue { i128 } undef, i128 %s, 0
+  ret { i128 } %p0
+}
+"#,
+            r#"target triple = "x86_64-unknown-linux-gnu"
+define { i64, double } @make(i64 %a, i64 %b) {
+entry:
+  %p0 = insertvalue { i64, double } undef, i64 %a, 0
+  ret { i64, double } %p0
+}
+"#,
+        ] {
+            assert!(unsafe {
+                crate::translation_validation::encode_ir_function_for_comparison(
+                    wide_ir.as_bytes(),
+                    "make",
+                    &model,
+                    false,
+                    &context,
+                )
+            }
+            .is_err());
         }
     }
 

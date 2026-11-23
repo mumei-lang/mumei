@@ -1000,8 +1000,21 @@ pub unsafe fn encode_parsed_function_for_comparison<'ctx>(
     // leaves within the three-register integer budget, so an aggregate
     // `ret` encodes as its `aggregate_value` slots and compares leaf by
     // leaf. A scalar return still requires width 64.
+    //
+    // Every aggregate leaf must be an `i64`: a leaf count and the
+    // double/integer kinds alone cannot pin the ABI — `{i128}` and
+    // `{i64, i64}` both flatten to two non-`double` 64-bit slots, so an
+    // `i128`/`u128` field would slip through a count+kinds check and a
+    // machine leaf that is only half of the source's 128-bit value
+    // would compare against the wrong field. `aggregate_all_i64_leaves`
+    // fails closed on 128-bit and `double` leaves; both stay outside
+    // for later slices.
     let ret = LLVMGetReturnType(LLVMGlobalGetValueType(raw));
-    if aggregate_fields(ret).is_none() && width(ret)? != 64 {
+    if aggregate_fields(ret).is_some() {
+        if !aggregate_all_i64_leaves(ret) {
+            return Err(ValidationError("LLVM return outside comparison subset"));
+        }
+    } else if width(ret)? != 64 {
         return Err(ValidationError("LLVM return outside comparison subset"));
     }
     // Scalar-i64 calls are compared: `check_call` already restricts
@@ -1373,6 +1386,27 @@ unsafe fn aggregate_leaf_range(ty: LLVMTypeRef, index: u32) -> Option<(usize, us
         offset += span;
     }
     None
+}
+
+/// Whether every flattened leaf of an admitted aggregate is an `i64`.
+/// `aggregate_fields`/`aggregate_leaf_doubles` cannot make this check:
+/// an `i128` element flattens to two non-`double` slots exactly like
+/// `{i64, i64}` (`pure-i64-composite/v21`), and a `double` leaf is one
+/// slot like an `i64` — both stay outside the direct-comparison subset,
+/// which only admits register-resident all-`i64` aggregates.
+unsafe fn aggregate_all_i64_leaves(ty: LLVMTypeRef) -> bool {
+    if aggregate_fields(ty).is_none() {
+        return false;
+    }
+    (0..LLVMCountStructElementTypes(ty)).all(|i| {
+        let element = LLVMStructGetTypeAtIndex(ty, i);
+        if aggregate_fields(element).is_some() {
+            aggregate_all_i64_leaves(element)
+        } else {
+            LLVMGetTypeKind(element) == LLVMTypeKind::LLVMIntegerTypeKind
+                && LLVMGetIntTypeWidth(element) == 64
+        }
+    })
 }
 
 /// A constant `i128` as a `BV` — the C API's `LLVMConstIntGet*Value`
