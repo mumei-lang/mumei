@@ -277,7 +277,12 @@ pub enum IrObjectEquivalence {
 /// Callers use this to record `skipped` without paying for an IR
 /// encode; `check_function_against_ir` re-checks it internally.
 pub fn ir_object_signature_liftable(model: &PureI64Body) -> bool {
-    let result_leaf_count = model.result_shape.unwrap_or(1);
+    // A scalar result's leaf budget is its value width: `i64` is one
+    // leaf, a scalar `i128`/`u128` (`pure-i64-composite/v21`) carries
+    // two 64-bit leaves and comes back in `rdx:rax`.
+    let result_leaf_count = model
+        .result_shape
+        .unwrap_or((model.value.get_size() / 64) as usize);
     model.inputs.len() <= MAX_ARGUMENT_COUNT
         && model.inputs.iter().all(|input| input.get_size() == 64)
         // Integer-leaf aggregate results enter the subset: up to the
@@ -285,28 +290,38 @@ pub fn ir_object_signature_liftable(model: &PureI64Body) -> bool {
         // it through `sret` — the callee stores leaf `i` at byte
         // offset `8 * i` through the hidden result pointer, which the
         // lifter already records in `sret_stores`. An f64 or SSE leaf
-        // and a scalar i128 (`[false, false]` on a `None` shape) stay
-        // outside — the leaf check below is what keeps a mixed-class
-        // sret shape out too.
+        // stays outside — the leaf check below is what keeps a
+        // mixed-class sret shape out too.
         && model.result_shape.is_none_or(|count| {
             count <= INTEGER_RESULT_REGISTERS.len()
                 || sret_result_leaf_count(model) == Some(count)
         })
-        // Every declared result leaf an integer leaf: a scalar i128
-        // result (`[false, false]` on a `None` shape) or an f64 leaf
-        // (`[true]`) is outside. An omitted return annotation leaves
-        // the list empty — an inferred-i64 body still compares; a
-        // genuinely void atom is already excluded by the source
-        // signature check upstream. A 128-bit aggregate field stays
-        // indistinguishable here — `{i128}` and `{i64, i64}` both
-        // flatten to two `[false]` slots — so the encode-side
-        // `aggregate_all_i64_leaves` gate fails it closed instead.
+        // Every declared result leaf an integer leaf: an f64 leaf
+        // (`[true]`) is outside; a scalar i128 result (`[false,
+        // false]` on a `None` shape, only produced when the module
+        // enables wide scalars) compares as its full 128-bit edge.
+        // An omitted return annotation leaves the list empty — an
+        // inferred-i64 body still compares; a genuinely void atom is
+        // already excluded by the source signature check upstream. A
+        // 128-bit aggregate field stays indistinguishable here —
+        // `{i128}` and `{i64, i64}` both flatten to two `[false]`
+        // slots — so the encode-side `aggregate_all_i64_leaves` gate
+        // fails it closed instead.
         && model.result_leaf_doubles.iter().all(|leaf| !*leaf)
         && model.result_leaf_doubles.len() <= result_leaf_count
-        // Every parameter a single integer 64-bit scalar leaf: wide
-        // leaves (`[false, false]` for i128/u128) and f64 (`[true]`)
-        // stay out of the subset.
-        && model.param_leaf_doubles.iter().all(|leaves| leaves.as_slice() == [false])
+        && (model.result_shape.is_some()
+            || model.result_leaf_doubles.len() <= 1
+            || (model.has_wide_scalar_features
+                && model.result_leaf_doubles.len() == 2
+                && model.value.get_size() == 128))
+        // Every parameter a scalar integer leaf: one 64-bit leaf, or
+        // the two 64-bit leaves an `i128`/`u128` scalar flattens to
+        // (`pure-i64-composite/v21`, `lo` then `hi`) — f64 (`[true]`)
+        // and composite parameters stay out of the subset.
+        && model.param_leaf_doubles.iter().all(|leaves| {
+            leaves.as_slice() == [false]
+                || (model.has_wide_scalar_features && leaves.as_slice() == [false, false])
+        })
         && model.param_shapes.iter().all(Option::is_none)
         && model.array_params.iter().all(Option::is_none)
         && model.call_sites.iter().all(scalar_i64_call_site)
@@ -370,7 +385,12 @@ pub fn check_function_against_ir<'ctx>(
         return IrObjectEquivalence::NotLiftable("unsupported_signature");
     }
     let result_leaf_count = model.result_shape.unwrap_or(1);
-    let result_bits = 64 * result_leaf_count as u32;
+    // A scalar i128 returns as one `rdx:rax` bit-vector edge, not a
+    // 64-bit leaf count — size the IR edge off the declared shape or
+    // the scalar value width.
+    let result_bits = model
+        .result_shape
+        .map_or_else(|| model.value.get_size(), |count| 64 * count as u32);
     if ir_returns.is_empty()
         || ir_returns
             .iter()
@@ -493,7 +513,9 @@ pub fn check_function_with_frame_memory_against_ir<'ctx>(
             FrameMemoryUse::default(),
         );
     }
-    let result_bits = 64 * model.result_shape.unwrap_or(1) as u32;
+    let result_bits = model
+        .result_shape
+        .map_or_else(|| model.value.get_size(), |count| 64 * count as u32);
     if ir_returns.is_empty()
         || ir_returns
             .iter()
@@ -6152,23 +6174,27 @@ entry:
     }
 
     #[test]
-    fn ir_object_equivalence_skips_wider_inputs() {
+    fn ir_object_equivalence_admits_wide_inputs() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
         config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
         let context = Context::new(&config);
         // An i128 parameter flattens into two 64-bit input leaves
-        // (`[false, false]`); the leaf-count check must refuse it
-        // before substituting.
+        // (`[false, false]`); the encoder binds them `hi.concat(lo)`
+        // and the machine reads the adjacent argument registers —
+        // the signature gate admits the pair when the module enables
+        // wide scalars.
         let model = source_model_with_admission(
             "atom wide(x: i128, y: i64) -> i64 requires: true; ensures: result == y; body: { y };",
             &context,
             RefinedAdmission::CompositeV21,
         );
-        assert!(!ir_object_signature_liftable(&model));
+        assert!(ir_object_signature_liftable(&model));
+        // An empty IR edge set reaches the `unsupported_ir` check
+        // rather than bouncing off the signature gate.
         assert_eq!(
             check_function_against_ir(&[], 0, &model, &[], &[], &BTreeMap::new(), &context,),
-            IrObjectEquivalence::NotLiftable("unsupported_signature")
+            IrObjectEquivalence::NotLiftable("unsupported_ir")
         );
     }
 
@@ -6621,6 +6647,86 @@ entry:
                 crate::translation_validation::encode_ir_function_for_comparison(
                     ir.as_bytes(),
                     "make",
+                    &model,
+                    false,
+                    &context,
+                )
+            }
+            .unwrap();
+            assert_eq!(
+                check_function_with_frame_memory_against_ir(
+                    &bytes,
+                    address,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &call_targets,
+                    &context,
+                )
+                .0,
+                expected
+            );
+            assert_eq!(
+                check_function_against_ir(
+                    &bytes,
+                    address,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &call_targets,
+                    &context,
+                ),
+                match expected {
+                    FunctionOutcome::Equivalent => IrObjectEquivalence::Equivalent,
+                    _ => IrObjectEquivalence::Different,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn frame_memory_check_compares_scalar_i128_against_ir() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // A scalar i128 carries two 64-bit leaves (`lo` in the lower
+        // argument register, `hi` in the next) and returns in
+        // `rdx:rax`. Both sides then compare one full 128-bit
+        // bit-vector edge — the IR encoder binds the two input slots
+        // into a native `i128`, the machine side concatenates the
+        // result registers `hi:lo`.
+        let model = source_model_named_with_admission(
+            "atom add(x: i128, y: i128) -> i128 requires: true; ensures: result == x + y; body: { x + y };",
+            "add",
+            &context,
+            RefinedAdmission::CompositeV21,
+        );
+        assert!(model.result_shape.is_none());
+        assert_eq!(model.value.get_size(), 128);
+        let matching_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i128 @add(i128 %x, i128 %y) {
+entry:
+  %r = add i128 %x, %y
+  ret i128 %r
+}
+"#;
+        let divergent_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i128 @add(i128 %x, i128 %y) {
+entry:
+  %r = sub i128 %x, %y
+  ret i128 %r
+}
+"#;
+        let (address, bytes, call_targets) = compiled_function_with_targets(matching_ir, "add");
+        for (ir, expected) in [
+            (matching_ir, FunctionOutcome::Equivalent),
+            (divergent_ir, FunctionOutcome::Different),
+        ] {
+            let (ir_returns, ir_definedness) = unsafe {
+                crate::translation_validation::encode_ir_function_for_comparison(
+                    ir.as_bytes(),
+                    "add",
                     &model,
                     false,
                     &context,

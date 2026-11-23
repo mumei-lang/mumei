@@ -992,14 +992,20 @@ pub unsafe fn encode_parsed_function_for_comparison<'ctx>(
         },
     )?;
     // The shared gate admits a 128-bit scalar return and a checked
-    // direct call; an `i128` return stays outside the comparison
-    // subset. Register-resident integer aggregates are compared: the
-    // shared gate already matched the aggregate's field count and leaf
-    // kinds against `model.result_shape`/`result_leaf_doubles`, and the
-    // model-side `ir_object_signature_liftable` pre-gate keeps the
-    // leaves within the three-register integer budget, so an aggregate
-    // `ret` encodes as its `aggregate_value` slots and compares leaf by
-    // leaf. A scalar return still requires width 64.
+    // direct call; a scalar `i128` return compares as its full 128-bit
+    // edge — the machine side returns `rdx:rax` (`hi:lo`) and the IR
+    // side encodes the `ret` operand at its native width, so both are
+    // plain 128-bit bit-vectors. Register-resident and `sret` integer
+    // aggregates are compared: the shared gate already matched the
+    // aggregate's field count and leaf kinds against
+    // `model.result_shape`/`result_leaf_doubles`, so an aggregate `ret`
+    // encodes as its `aggregate_value` slots and compares leaf by leaf.
+    //
+    // A scalar return must match the model's own width exactly: the
+    // shared gate admits 64|128 for either model, so a foreign IR
+    // returning `i128` against an `i64` source (or `i64` against an
+    // `i128` source) would otherwise encode and compare mismatched
+    // widths — fail it closed here instead.
     //
     // Every aggregate leaf must be an `i64`: a leaf count and the
     // double/integer kinds alone cannot pin the ABI — `{i128}` and
@@ -1014,7 +1020,7 @@ pub unsafe fn encode_parsed_function_for_comparison<'ctx>(
         if !aggregate_all_i64_leaves(ret) {
             return Err(ValidationError("LLVM return outside comparison subset"));
         }
-    } else if width(ret)? != 64 {
+    } else if width(ret)? != model.value.get_size() {
         return Err(ValidationError("LLVM return outside comparison subset"));
     }
     // Scalar-i64 calls are compared: `check_call` already restricts
