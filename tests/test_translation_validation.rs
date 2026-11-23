@@ -4187,6 +4187,23 @@ fn hir_leaf_compare_is_equivalent_on_emitted_ir() {
 }
 
 #[test]
+fn hir_leaf_compare_keeps_plain_ir_main_names() {
+    // `native_main_rename = false` compares call targets as written:
+    // `main()` meets `@main`, and `@__mumei_user_main` — the bundle
+    // emitter's private name — is simply a different function. The
+    // rename stays the recheck path's alone.
+    let src = "atom caller() -> i64 requires: true; ensures: true; body: { main() };\n\
+               atom main() -> i64 requires: true; ensures: true; body: { 7 };";
+    let plain = pin(
+        "define i64 @caller() {\n %r = call i64 @main()\n ret i64 %r }\n\
+         define i64 @main() { ret i64 7 }",
+    );
+    assert_eq!(hir_outcome(src, &plain), Outcome::EquivalentWithinProfile);
+    let renamed = plain.replace("@main", "@__mumei_user_main");
+    assert_eq!(hir_outcome(src, &renamed), Outcome::Different);
+}
+
+#[test]
 fn hir_leaf_compare_catches_a_mistranslated_ir() {
     // The machine side cannot flag a faithfully-lowered wrong IR; the
     // HIR-anchored check compares the HIR model against the IR itself.
