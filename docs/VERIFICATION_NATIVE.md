@@ -2257,7 +2257,8 @@ every text-section relocation with its section, offset, kind, target symbol,
 addend, and the computed pc-relative `resolved_value` when it can be derived.
 The source-to-machine edge names
 `checked_source_machine_tv_within_profile` when the machine-TV
-evaluation accepted every source-atom function, and
+evaluation accepted every source-atom function and the applicable
+`main` entry wrapper, and
 `unchecked_not_translation_validated` when residual unverified
 functions remain — the edge mirrors the check block's verdict rather
 than claiming coverage it does not have. It carries no
