@@ -8569,6 +8569,7 @@ Stage 1 は非破壊なので実装済みのまま維持する。
 capability model は Stage 1 のみが opt-in 拡張として上積みされている位置づけとなる。
 
 - ✅ **追補（2026-11-22, 10）— 追補（9）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: 新規なし。mumei-agent: C06 Sol lexical member access が非識別子オブジェクト上の member を解決（#1121。contract 配列要素 `tokens[0].f()`・call 戻り値 `getToken().f()`・コンストラクタ/キャスト `Token(addr).f()`・`new Token().f`・public getter 経由 `this.token().f()` が宣言 contract 型の member に bind。function 型戻り値・function 型変数・`new Token[]`・mapping 索引・member チェーンは引き続き opaque）。mumei-demo: 新規シナリオなし。いずれも各 PR の境界のまま。
+- ✅ **追補（2026-11-23, 42）— 追補（41）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: `object_translation_correspondence` Step 3 — Step 2 の照合結果を descriptor 側に集約配線（[mumei#1360](https://github.com/mumei-lang/mumei/pull/1360)。`correspondence.status` が `checked_correspondence`（全項目 checked）/`inconsistent_correspondence`（inconsistent あり）/`unchecked_not_translation_validated` の集約値となり、`object_translation.status` も `metadata_only`→`checked_correspondence` に昇格。verdict・grade promotion・checks リストへの追加はなし）。mumei-agent: 新規なし。mumei-demo: 新規なし。いずれも各 PR の境界のまま。
 **関連ファイル**:
 - `docs/CAPABILITY_MODEL_STUDY.md` — 調査成果物（4 項目の分析、opt-in 判定、段階分割案）
 - `docs/CAPABILITY_SECURITY.md` — 現状評価と Section 3 の代替案、Next Steps の設計調査項目
