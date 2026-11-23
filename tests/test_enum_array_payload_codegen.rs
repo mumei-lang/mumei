@@ -140,6 +140,15 @@ fn block_tail_array_payload_builds_and_runs_with_verified_result() {
 }
 
 #[test]
+fn branch_shadowed_array_payload_builds_and_runs_with_verified_result() {
+    let fixture = "test_enum_array_payload_codegen_bshadow.mm";
+    for bitvec_i64 in [false, true] {
+        assert_verifies(fixture, bitvec_i64);
+    }
+    assert_native_result(fixture, 8);
+}
+
+#[test]
 fn direct_payload_array_read_builds_and_runs_with_verified_result() {
     let fixture = "test_enum_array_payload_codegen_direct_read.mm";
     for bitvec_i64 in [false, true] {
@@ -174,6 +183,10 @@ fn unsupported_scalar_array_payload_shapes_fail_codegen_without_panicking() {
         (
             "test_enum_array_payload_codegen_block_tail_escape.mm",
             "stack-backed array payload cannot escape through an array-bearing enum return",
+        ),
+        (
+            "test_enum_array_payload_codegen_conditional_shadow.mm",
+            "cannot use if/match control flow",
         ),
         (
             "test_enum_array_payload_codegen_field_write_literal.mm",

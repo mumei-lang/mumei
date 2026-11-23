@@ -1842,18 +1842,9 @@ pub(crate) fn array_tail_binding(expr: &HirExpr) -> Option<&str> {
     match expr {
         HirExpr::Variable(name) => Some(name),
         HirExpr::IfThenElse {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            let then_name = stmt_tail_binding(then_branch)?;
-            let else_name = stmt_tail_binding(else_branch)?;
-            (then_name == else_name).then_some(then_name)
-        }
-        HirExpr::Match { arms, .. } => {
-            let mut names = arms.iter().map(|arm| stmt_tail_binding(&arm.body));
-            let first = names.next()??;
-            names.all(|name| name == Some(first)).then_some(first)
+            cond, then_branch, ..
+        } if matches!(cond.as_ref(), HirExpr::Variable(name) if name == "true") => {
+            stmt_tail_binding(then_branch)
         }
         _ => None,
     }
@@ -1923,13 +1914,25 @@ fn emit_enum_variant_init<'a>(
         let field_type = variant.field_types[i].display_name();
         let is_array = array_elem_llvm_type(context, &field_type, module_env)?.is_some();
         let array_binding = is_array.then(|| array_tail_binding(field_expr)).flatten();
+        if is_array && array_binding.is_none() {
+            let conditional = match field_expr {
+                HirExpr::IfThenElse { cond, .. } => {
+                    !matches!(cond.as_ref(), HirExpr::Variable(name) if name == "true")
+                }
+                HirExpr::Match { .. } => true,
+                _ => false,
+            };
+            if conditional {
+                return Err(MumeiError::codegen(format!(
+                    "array payload argument for '{enum_name}::{variant_name}' cannot use if/match control flow"
+                )));
+            }
+        }
         let field_val = if is_array {
             if let Some(name) = array_binding {
                 match field_expr {
                     HirExpr::Variable(_) => {}
-                    HirExpr::IfThenElse {
-                        cond, then_branch, ..
-                    } if matches!(cond.as_ref(), HirExpr::Variable(name) if name == "true") => {
+                    HirExpr::IfThenElse { then_branch, .. } => {
                         super::stmt_emit::compile_hir_stmt(
                             context,
                             builder,
@@ -1943,10 +1946,9 @@ fn emit_enum_variant_init<'a>(
                         )?;
                     }
                     _ => {
-                        compile_hir_expr(
-                            context, builder, module, function, field_expr, variables, var_types,
-                            array_ptrs, module_env,
-                        )?;
+                        return Err(MumeiError::codegen(format!(
+                            "array payload argument for '{enum_name}::{variant_name}' has an unsupported tail binding"
+                        )));
                     }
                 }
                 let (len, elem_ty, data) = array_ptrs.get(name).copied().ok_or_else(|| {
