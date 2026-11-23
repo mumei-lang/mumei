@@ -868,6 +868,62 @@ pub fn native_function_name(atom_name: &str) -> &str {
     }
 }
 
+fn ir_definedness<'ctx>(encoder: &IrEncoder<'ctx, '_>) -> Vec<(Bool<'ctx>, Bool<'ctx>)> {
+    encoder
+        .definedness
+        .iter()
+        .map(|(path, defined, ..)| (path.clone(), defined.clone()))
+        .collect()
+}
+
+/// `(path condition, return value)` edges plus `(path condition,
+/// defined)` domain obligations an IR function encodes over shared
+/// `model.inputs` for the direct object comparison.
+pub type IrFunctionEncoding<'ctx> = (Vec<(Bool<'ctx>, BV<'ctx>)>, Vec<(Bool<'ctx>, Bool<'ctx>)>);
+
+/// Encode one LLVM IR function's return edges and definedness
+/// obligations for the direct IR ↔ object comparison (design memo §7
+/// Step 3 slice). Returns `(path condition, return value)` pairs and
+/// `(path condition, defined)` domain obligations bound to
+/// `model.inputs`; `Err` outside the encoder's IR subset — the caller
+/// records the function as not liftable.
+///
+/// # Safety
+/// Calls llvm-sys C APIs on a module it parses from `llvm_ir`; the
+/// caller must pass well-formed LLVM IR bytes and a model whose
+/// `inputs` are bound to `context`.
+pub unsafe fn encode_ir_function_for_comparison<'ctx>(
+    llvm_ir: &[u8],
+    function_name: &str,
+    model: &PureI64Body<'ctx>,
+    optimized: bool,
+    context: &'ctx Context,
+) -> Result<IrFunctionEncoding<'ctx>> {
+    let llvm_context = LlvmContext::create();
+    let module = llvm_context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            llvm_ir,
+            "ir-object-compare.ll",
+        ))
+        .map_err(|_| ValidationError("LLVM IR parse failed"))?;
+    let name = std::ffi::CString::new(function_name)
+        .map_err(|_| ValidationError("LLVM IR function name"))?;
+    let raw = LLVMGetNamedFunction(module.as_mut_ptr(), name.as_ptr());
+    if raw.is_null() {
+        return Err(ValidationError("function missing in LLVM IR"));
+    }
+    let no_renames = BTreeMap::new();
+    let mut encoder = IrEncoder::new(context, &no_renames, false, optimized);
+    let returns = encoder.encode(
+        raw,
+        &model.inputs,
+        &model.param_shapes,
+        &model.param_leaf_doubles,
+        &model.array_params,
+    )?;
+    Ok((returns, ir_definedness(&encoder)))
+}
+
 unsafe fn compare_function<'ctx>(
     context: &'ctx Context,
     raw: LLVMValueRef,
@@ -906,11 +962,7 @@ unsafe fn compare_function<'ctx>(
         &model.param_leaf_doubles,
         &model.array_params,
     )?;
-    let ir_definedness: Vec<(Bool<'ctx>, Bool<'ctx>)> = encoder
-        .definedness
-        .into_iter()
-        .map(|(path, defined, ..)| (path, defined))
-        .collect();
+    let ir_definedness = ir_definedness(&encoder);
     // Division, remainder and shifts bind both sides only where the operands
     // are defined — the same safety domain `--bitvec-i64` verification
     // requires. Inputs outside the source domain are don't-care; inputs the

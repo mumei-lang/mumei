@@ -637,6 +637,13 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     ] {
         assert_eq!(results.get(item).copied(), Some("checked"), "{item}");
     }
+    // Step 4 (design memo §7 direct comparison): the leaf atom's IR
+    // encoding and its object code compare equivalent over the shared
+    // input model — recorded as an inspected item, no verdict change.
+    assert_eq!(
+        results.get("llvm_ir_object_equivalence").copied(),
+        Some("checked")
+    );
 }
 
 #[test]
