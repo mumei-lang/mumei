@@ -5188,6 +5188,26 @@ fn module_bundle_with_i128_leaves_builds_as_v24_and_rechecks() {
         accepted["register_convention_assumed"],
         machine_tv["register_convention_assumed"]
     );
+    // Step 3e: scalar i128/u128 signatures join the direct LLVM-IR
+    // comparison — `add`/`lt`/`callee` record `equivalent`, while
+    // `caller`'s i128 call site stays outside the scalar-i64 call
+    // subset and records `skipped` (inspection only, no verdict).
+    let checks = machine_tv["object_translation"]["correspondence"]["checks"]
+        .as_array()
+        .unwrap();
+    let equivalence = checks
+        .iter()
+        .find(|check| check["item"] == "llvm_ir_object_equivalence")
+        .unwrap();
+    assert_eq!(equivalence["result"], "checked");
+    let detail = equivalence["detail"].as_str().unwrap();
+    for function in ["add", "lt", "callee"] {
+        assert!(
+            detail.contains(&format!("{function}: equivalent")),
+            "{detail}"
+        );
+    }
+    assert!(detail.contains("caller: skipped"), "{detail}");
     // A v24 record re-pinned as v23 is refused — v23 keeps the wide
     // leaf out of the composite shape.
     let mut record = module_record(&bundle);
