@@ -6344,6 +6344,7 @@ entry:
             has_composite_arguments_or_result: true,
             result: z3::ast::BV::from_u64(&context, 0, 64),
             result_is_double: false,
+            result_store: None,
             result_shape: semantic_contract::CallValueShape::Scalar { leaf_count: 1 },
             result_leaf_doubles: vec![false],
             guard: z3::ast::Bool::from_bool(&context, true),
