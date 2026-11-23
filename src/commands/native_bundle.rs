@@ -4267,6 +4267,12 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
             return Err("Machine-code TV inconclusive; source atom names do not map uniquely to object functions.");
         }
     }
+    // Step 3a: scalar-i64 functions compare against the LLVM-IR
+    // encoding instead of the source model's expected value. The IR
+    // module parses once and is shared across functions; when no IR is
+    // available the source-model comparison stays.
+    let mut parsed_ir = None;
+    let mut parsed_ir_failed = false;
     let entry_wrapper_applicable = data.object_surface.defined.contains("main")
         && data.object_surface.defined.contains("__mumei_user_main")
         && source_models.get("__mumei_user_main").is_some_and(|model| {
@@ -4394,14 +4400,56 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
                 branch_shape = machine_tv::branch_shape(&bytes, address, &call_targets);
                 has_conditional_call =
                     machine_tv::has_conditional_branch_and_call(&bytes, address, &call_targets);
-                let (outcome, preservation, frame_memory_use_result) =
-                    machine_tv::check_function_with_frame_memory(
+                // Step 3a: in the scalar-i64 subset the expected value
+                // comes from the LLVM-IR encoding rather than the
+                // source model. Without IR, or when the function
+                // cannot be encoded, the source-model comparison stays
+                // — the `source_machine_tv` claim is machine↔source
+                // either way (IR edges are bound to the source by the
+                // hir→llvm_ir translation validation).
+                let ir_encoding = if machine_tv::ir_object_signature_liftable(model)
+                    && !data.llvm_bytes.is_empty()
+                {
+                    if parsed_ir.is_none() && !parsed_ir_failed {
+                        match unsafe { tv::parse_ir_module_for_comparison(&data.llvm_bytes) } {
+                            Ok(module) => parsed_ir = Some(module),
+                            Err(_) => parsed_ir_failed = true,
+                        }
+                    }
+                    let symbol = tv::native_function_name(&model.function_name).to_owned();
+                    parsed_ir.as_ref().and_then(|module| unsafe {
+                        module
+                            .function(&symbol)
+                            .and_then(|raw| {
+                                tv::encode_parsed_function_for_comparison(
+                                    raw, model, false, &context,
+                                )
+                            })
+                            .ok()
+                    })
+                } else {
+                    None
+                };
+                let (outcome, preservation, frame_memory_use_result) = match ir_encoding {
+                    Some((ir_returns, ir_definedness)) => {
+                        machine_tv::check_function_with_frame_memory_against_ir(
+                            &bytes,
+                            address,
+                            model,
+                            &ir_returns,
+                            &ir_definedness,
+                            &call_targets,
+                            &context,
+                        )
+                    }
+                    None => machine_tv::check_function_with_frame_memory(
                         &bytes,
                         address,
                         model,
                         &call_targets,
                         &context,
-                    );
+                    ),
+                };
                 callee_saved_preservation = preservation;
                 frame_memory_use = frame_memory_use_result;
                 outcome
@@ -5791,6 +5839,79 @@ mod tests {
         assert_eq!(
             machine_tv_acceptance_decision(&only_non_source, false),
             ObjectMachineTvAcceptanceDecision::Inconclusive
+        );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn evaluate_machine_tv_compares_scalar_i64_against_ir_encoding() {
+        // Step 3a: scalar-i64 functions take their expected return
+        // from the LLVM-IR encoding. A parseable but divergent IR
+        // reports `Different` even though the source model and the
+        // object agree — proving the IR path, not the source-model
+        // fallback, runs in the main evaluation.
+        let source = "atom add(x: i64, y: i64) -> i64 requires: true; ensures: result == x + y; body: { x + y };";
+        let matching_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @add(i64 %x, i64 %y) {
+entry:
+  %r = add i64 %x, %y
+  ret i64 %r
+}
+"#;
+        let divergent_ir = matching_ir.replace("add i64", "sub i64");
+
+        let stage = tempfile::tempdir().unwrap();
+        let ir_path = stage.path().join("in.ll");
+        let object_path = stage.path().join("in.o");
+        fs::write(&ir_path, matching_ir).unwrap();
+        mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ir_path, &object_path)
+            .unwrap();
+        let object_bytes = fs::read(&object_path).unwrap();
+        let object_surface = object_symbol_surface(&object_bytes).unwrap();
+        assert!(object_surface.defined.contains("add"));
+
+        let make_data = |llvm_bytes: Vec<u8>| ObjectRecheckData {
+            stage: tempfile::tempdir().unwrap(),
+            family: RecordFamily::Single,
+            canonical_argv_compared: false,
+            admission: RefinedAdmission::Reject,
+            ir_surface: tv::IrFunctionSurface {
+                defined: BTreeSet::new(),
+                declared: BTreeSet::new(),
+                calls: BTreeMap::new(),
+                libc_calls: BTreeMap::new(),
+                call_edges_checkable: false,
+            },
+            object_surface: object_surface.clone(),
+            object_link_correspondence: true,
+            llvm_bytes,
+            object_bytes: object_bytes.clone(),
+            executable_bytes: Vec::new(),
+            object_translation: None,
+            resolved_call_sites: 0,
+            source_text: Some(source.to_owned()),
+        };
+
+        // IR edges agree with the machine code.
+        let evaluation = evaluate_machine_tv(&make_data(matching_ir.as_bytes().to_vec())).unwrap();
+        assert_eq!(
+            evaluation.outcomes.get("add"),
+            Some(&FunctionOutcome::Equivalent)
+        );
+        // A parseable IR that disagrees with the object: only the
+        // IR-edge comparison can produce `Different` here, since the
+        // source model and the machine code agree.
+        let evaluation = evaluate_machine_tv(&make_data(divergent_ir.into_bytes())).unwrap();
+        assert_eq!(
+            evaluation.outcomes.get("add"),
+            Some(&FunctionOutcome::Different)
+        );
+        // Without IR the source-model fallback still proves
+        // equivalence (the claim is machine↔source either way).
+        let evaluation = evaluate_machine_tv(&make_data(Vec::new())).unwrap();
+        assert_eq!(
+            evaluation.outcomes.get("add"),
+            Some(&FunctionOutcome::Equivalent)
         );
     }
 
