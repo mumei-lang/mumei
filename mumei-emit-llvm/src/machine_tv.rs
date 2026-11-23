@@ -365,9 +365,11 @@ fn scalar_i64_call_site(site: &CallSite) -> bool {
 /// `translation_validation::encode_ir_function_for_comparison` on the
 /// same Z3 context.
 ///
-/// Scoped to scalar-i64 signatures plus all-`i64` aggregate results
-/// (register-resident or `sret` memory-class): f64 leaves, wider
-/// inputs, non-scalar call sites, and loops return `NotLiftable`. For
+/// Scoped to 64-bit scalar signatures (plus scalar `i128`/`u128` on
+/// wide-scalar modules, compared as one 128-bit `rdx:rax` edge) and
+/// all-`i64` aggregate results (register-resident or `sret`
+/// memory-class): f64 leaves, composite or wider-than-128 inputs,
+/// non-scalar call sites, and loops return `NotLiftable`. For
 /// every lifted path the machine return must equal the IR return of
 /// some covering edge whose definedness obligations hold and whose
 /// call-argument obligations all hold; an uncovered path, a diverging
@@ -490,9 +492,10 @@ pub fn check_function_with_frame_memory<'ctx>(
 /// obligations over the shared `model.inputs` from
 /// `translation_validation::encode_ir_function_for_comparison` —
 /// instead of the source model's `model.value` (design memo §7 Step
-/// 3a). Scoped to scalar-i64 signatures plus all-`i64` aggregate
-/// results (register-resident or `sret` memory-class): any other
-/// shape reports `OutsideProfile`.
+/// 3a). Scoped to 64-bit scalar signatures (plus scalar `i128`/`u128`
+/// on wide-scalar modules, compared as one 128-bit `rdx:rax` edge)
+/// and all-`i64` aggregate results (register-resident or `sret`
+/// memory-class): any other shape reports `OutsideProfile`.
 pub fn check_function_with_frame_memory_against_ir<'ctx>(
     bytes: &[u8],
     address: u64,
@@ -6718,10 +6721,21 @@ entry:
   ret i128 %r
 }
 "#;
+        // A divergence confined to the high 64 bits proves both APIs
+        // compare the whole 128-bit edge, not just `rax`.
+        let high_bit_divergent_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i128 @add(i128 %x, i128 %y) {
+entry:
+  %r = add i128 %x, %y
+  %h = add i128 %r, 18446744073709551616
+  ret i128 %h
+}
+"#;
         let (address, bytes, call_targets) = compiled_function_with_targets(matching_ir, "add");
         for (ir, expected) in [
             (matching_ir, FunctionOutcome::Equivalent),
             (divergent_ir, FunctionOutcome::Different),
+            (high_bit_divergent_ir, FunctionOutcome::Different),
         ] {
             let (ir_returns, ir_definedness) = unsafe {
                 crate::translation_validation::encode_ir_function_for_comparison(
