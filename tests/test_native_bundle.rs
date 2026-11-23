@@ -563,6 +563,7 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
         descriptor["checks_not_performed"],
         serde_json::json!([
             "optimizer_semantics",
+            "object_data_section_correspondence",
             "raw_link_argument_vector_reproduction",
             "abi_runtime_semantics",
             "os_exit_status_observation",

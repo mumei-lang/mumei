@@ -4877,6 +4877,7 @@ fn write_machine_tv(
         ];
         let mut checks_not_performed = vec![
             "optimizer_semantics",
+            "object_data_section_correspondence",
             "raw_link_argument_vector_reproduction",
             "abi_runtime_semantics",
             "os_exit_status_observation",
@@ -4952,10 +4953,10 @@ fn write_machine_tv(
             evaluation.scope,
         );
         // Mirrors the JSON descriptor's checks_not_performed list: the
-        // seven fixed domains, object_link_correspondence when the link
+        // eight fixed domains, object_link_correspondence when the link
         // check did not run, plus the coverage list.
         let unchecked_domain_count =
-            7 + usize::from(!data.object_link_correspondence) + evaluation.coverage.1.len();
+            8 + usize::from(!data.object_link_correspondence) + evaluation.coverage.1.len();
         println!(
             "{}",
             source_machine_tv_within_profile_line(&evaluation, unchecked_domain_count)
@@ -5588,6 +5589,19 @@ fn object_translation_correspondence_checks(
     })
 }
 
+/// Map an `IrObjectEquivalence` verdict to the recorded outcome:
+/// `unknown` for an attempted-but-undecidable comparison
+/// (`solver_unknown` — fail-closed, never a skip), and the verbatim
+/// `NotLiftable` reason for anything the subset could not compare.
+fn ir_object_equivalence_outcome(equivalence: machine_tv::IrObjectEquivalence) -> &'static str {
+    match equivalence {
+        machine_tv::IrObjectEquivalence::Equivalent => "equivalent",
+        machine_tv::IrObjectEquivalence::Different => "different",
+        machine_tv::IrObjectEquivalence::NotLiftable("solver_unknown") => "unknown",
+        machine_tv::IrObjectEquivalence::NotLiftable(reason) => reason,
+    }
+}
+
 /// Direct LLVM-IR ↔ object-function comparison over the shared
 /// `model.inputs` (design memo §7 Step 3 slice): per function,
 /// `"equivalent"`, `"different"`, `"unknown"` (the comparison ran and
@@ -5651,7 +5665,7 @@ fn llvm_ir_object_equivalence_results(
             match encoded {
                 None => "unsupported_ir",
                 Some((ir_returns, ir_definedness)) => {
-                    match machine_tv::check_function_against_ir(
+                    ir_object_equivalence_outcome(machine_tv::check_function_against_ir(
                         &bytes,
                         address,
                         model,
@@ -5659,12 +5673,7 @@ fn llvm_ir_object_equivalence_results(
                         &ir_definedness,
                         &call_targets,
                         &context,
-                    ) {
-                        machine_tv::IrObjectEquivalence::Equivalent => "equivalent",
-                        machine_tv::IrObjectEquivalence::Different => "different",
-                        machine_tv::IrObjectEquivalence::NotLiftable("solver_unknown") => "unknown",
-                        machine_tv::IrObjectEquivalence::NotLiftable(reason) => reason,
-                    }
+                    ))
                 }
             }
         };
@@ -8665,6 +8674,38 @@ entry:
             .as_str()
             .unwrap()
             .contains("assumed-external: [\"memcpy\"]"));
+    }
+
+    #[test]
+    fn ir_object_equivalence_outcome_separates_unknown_from_skip_reasons() {
+        // `solver_unknown` is an attempted-but-undecidable comparison —
+        // it maps to `unknown` (fail-closed), not a skip reason; every
+        // other `NotLiftable` reason passes through verbatim.
+        use machine_tv::IrObjectEquivalence;
+        assert_eq!(
+            ir_object_equivalence_outcome(IrObjectEquivalence::Equivalent),
+            "equivalent"
+        );
+        assert_eq!(
+            ir_object_equivalence_outcome(IrObjectEquivalence::Different),
+            "different"
+        );
+        assert_eq!(
+            ir_object_equivalence_outcome(IrObjectEquivalence::NotLiftable("solver_unknown")),
+            "unknown"
+        );
+        for reason in [
+            "unsupported_signature",
+            "unsupported_ir",
+            "unsupported_instruction",
+            "lift_failed",
+            "no_liftable_path",
+        ] {
+            assert_eq!(
+                ir_object_equivalence_outcome(IrObjectEquivalence::NotLiftable(reason)),
+                reason
+            );
+        }
     }
 
     #[test]
