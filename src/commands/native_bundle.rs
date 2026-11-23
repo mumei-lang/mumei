@@ -5727,6 +5727,9 @@ fn hir_llvm_atom_outcomes(data: &ObjectRecheckData) -> Option<BTreeMap<String, &
             &hir_atom,
             &structs,
             &subset_ir,
+            // The bundle emitter renames `main` to `__mumei_user_main`
+            // — the rename is this path's alone.
+            true,
             tv::Options::default(),
         ) {
             Ok(tv::Outcome::EquivalentWithinProfile) => "checked",
@@ -6658,7 +6661,7 @@ entry:
             "atom bad(x: i64) -> i64 requires: true; ensures: true; body: { x + 1 };\n",
         );
         let llvm_ir = r#"target triple = "x86_64-pc-linux-gnu"
-@greeting = internal constant [4 x i8] c"hi a "
+@greeting = internal constant [5 x i8] c"hi\0A\00\00"
 
 define i64 @__mumei_user_main() {
 entry:

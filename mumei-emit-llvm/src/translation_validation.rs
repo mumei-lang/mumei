@@ -428,6 +428,11 @@ pub fn validate_hir_pure_i64_leaf(
     atom: &mumei_core::hir::HirAtom,
     structs: &std::collections::BTreeMap<String, Vec<(String, String)>>,
     llvm_ir: &str,
+    // `true` only on the native-bundle recheck path: the bundle
+    // emitter renames the user `main` member to `__mumei_user_main`,
+    // so a source `main()` call must meet that member. Plain IR
+    // comparisons keep source names as they are.
+    native_main_rename: bool,
     options: Options,
 ) -> Result<Outcome> {
     bounded(llvm_ir)?;
@@ -489,10 +494,11 @@ pub fn validate_hir_pure_i64_leaf(
             &context,
             function.as_value_ref(),
             &model,
-            // The bundle emitter renames the user `main` member to
-            // `__mumei_user_main`; a source call `main()` must meet
-            // `call @__mumei_user_main` rather than compare Different.
-            &native_call_renames(true),
+            &if native_main_rename {
+                native_call_renames(true)
+            } else {
+                BTreeMap::new()
+            },
             false,
             false,
             model.array_params.iter().any(|a| a.is_some()),
