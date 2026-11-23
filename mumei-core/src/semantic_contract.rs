@@ -646,6 +646,57 @@ pub struct SemanticContract {
     pub exclusions: Vec<&'static str>,
 }
 
+impl SemanticContract {
+    /// Appends the object-stage transformation relations the
+    /// native-bundle profile declares — `source_atom → machine_code`
+    /// (bounded machine-TV), `llvm_ir → object_code` (llc emission,
+    /// still `unchecked_not_translation_validated` until Step 3's
+    /// direct IR↔object verification exists) and
+    /// `object_code → linked_executable` (the link-correspondence
+    /// check the bundle acceptance pipeline performs).
+    ///
+    /// Profile-conditional: only the native-bundle prepare paths call
+    /// this, so plain `verify` and sidecar extractions keep the
+    /// original six relations. `output_identity` stays `None` — the
+    /// artifact digests are pinned by the descriptor's
+    /// `object_translation.transformations`, which already carries
+    /// `object_sha256`/`executable_sha256`.
+    ///
+    /// The `checked_*` values name the validation method the profile
+    /// applies; they are relation vocabulary, not verdict or check
+    /// promotion.
+    pub fn emit_native_object_transformations(&mut self) {
+        if self
+            .transformations
+            .iter()
+            .any(|relation| relation.to == "machine_code")
+        {
+            return;
+        }
+        self.transformations.push(TransformationRelation {
+            from: "source_atom",
+            to: "machine_code",
+            relation: "machine_code_translation_validation",
+            output_identity: None,
+            validation: "checked_source_machine_tv_within_profile",
+        });
+        self.transformations.push(TransformationRelation {
+            from: "llvm_ir",
+            to: "object_code",
+            relation: "llc_instruction_selection_register_allocation",
+            output_identity: None,
+            validation: "unchecked_not_translation_validated",
+        });
+        self.transformations.push(TransformationRelation {
+            from: "object_code",
+            to: "linked_executable",
+            relation: "static_link_relocation_placement",
+            output_identity: None,
+            validation: "checked_object_link_correspondence",
+        });
+    }
+}
+
 /// Extract the last atom of a module of explicit-i64 atoms without imports,
 /// arithmetic or effects; the widened profile also admits calls as
 /// call-site comparisons. Sibling atoms must satisfy the same atom profile.
@@ -13718,6 +13769,57 @@ mod tests {
 
         assert_transformations(&bounded);
         assert_transformations(&widened);
+    }
+
+    #[test]
+    fn native_object_transformations_emit_only_on_request() {
+        let mut contract = extract(SOURCE).unwrap();
+        // Plain extraction keeps the original six relations.
+        assert_eq!(contract.transformations.len(), 6);
+
+        contract.emit_native_object_transformations();
+        assert_eq!(contract.transformations.len(), 9);
+        let object_stage: Vec<_> = contract.transformations[6..]
+            .iter()
+            .map(|relation| {
+                (
+                    relation.from,
+                    relation.to,
+                    relation.relation,
+                    relation.output_identity.as_deref(),
+                    relation.validation,
+                )
+            })
+            .collect();
+        assert_eq!(
+            object_stage,
+            vec![
+                (
+                    "source_atom",
+                    "machine_code",
+                    "machine_code_translation_validation",
+                    None,
+                    "checked_source_machine_tv_within_profile",
+                ),
+                (
+                    "llvm_ir",
+                    "object_code",
+                    "llc_instruction_selection_register_allocation",
+                    None,
+                    "unchecked_not_translation_validated",
+                ),
+                (
+                    "object_code",
+                    "linked_executable",
+                    "static_link_relocation_placement",
+                    None,
+                    "checked_object_link_correspondence",
+                ),
+            ]
+        );
+        // Re-emitting is a no-op, not a duplicate append.
+        contract.emit_native_object_transformations();
+        assert_eq!(contract.transformations.len(), 9);
     }
 
     #[test]
