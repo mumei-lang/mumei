@@ -638,6 +638,12 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
             relocation["resolved_value"].as_i64().is_some(),
             "eh_frame relocation unresolved: {relocation}"
         );
+        // The applied field's exe-side offset is recorded so the
+        // check re-reads the exact slot, not any matching word.
+        assert!(
+            relocation["applied_offset"].as_u64().is_some(),
+            "eh_frame relocation has no applied offset: {relocation}"
+        );
     }
     // Step 2/3: the strict path confirms every correspondence check item,
     // so the aggregate status records checked_correspondence.
