@@ -313,6 +313,19 @@ body: {
     }
 };
 
+atom match_result_struct_array_leaf_snapshot() -> i64
+requires: true;
+ensures: result == 9;
+body: {
+    let outer = [Pt { x: 1, c: Color::R }];
+    let e = DirectArrayE::D([Pt { x: 9, c: Color::R }]);
+    let selected = match e {
+        DirectArrayE::D(payload) => payload,
+        DirectArrayE::N => outer
+    };
+    selected[0].x
+};
+
 atom direct_struct_array_payload_equality_unchanged(ps: [Pt]) -> bool
 requires: len(ps) > 0;
 ensures: result == true;

@@ -12,6 +12,149 @@ use serde_json::json;
 use z3::ast::Ast as _;
 use z3::{FuncDecl, Sort};
 
+#[derive(Clone)]
+struct MatchArrayResult<'a> {
+    len: z3::ast::Dynamic<'a>,
+    struct_element_type: Option<String>,
+    struct_leaves: std::collections::HashMap<String, z3::ast::Array<'a>>,
+}
+
+#[inline(never)]
+fn merge_match_array_results<'a>(
+    arms: &[(z3::ast::Bool<'a>, Option<MatchArrayResult<'a>>)],
+) -> Result<Option<MatchArrayResult<'a>>, MumeiError> {
+    if arms.iter().any(|(_, arm)| arm.is_some()) && arms.iter().any(|(_, arm)| arm.is_none()) {
+        return Err(MumeiError::type_error(
+            "match branches have incompatible array results",
+        ));
+    }
+    let mut result: Option<MatchArrayResult<'a>> = None;
+    for (cond, arm) in arms.iter().rev() {
+        let Some(arm) = arm else {
+            if result.is_some() {
+                return Err(MumeiError::type_error(
+                    "match branches have incompatible array results",
+                ));
+            }
+            continue;
+        };
+        result = Some(match result {
+            Some(else_result) => {
+                if arm.struct_element_type != else_result.struct_element_type
+                    || arm
+                        .struct_leaves
+                        .keys()
+                        .collect::<std::collections::HashSet<_>>()
+                        != else_result
+                            .struct_leaves
+                            .keys()
+                            .collect::<std::collections::HashSet<_>>()
+                    || arm.len.get_sort() != else_result.len.get_sort()
+                {
+                    return Err(MumeiError::type_error(
+                        "match branches have incompatible array results",
+                    ));
+                }
+                let len = cond.ite(&arm.len, &else_result.len);
+                let mut struct_leaves =
+                    std::collections::HashMap::with_capacity(arm.struct_leaves.len());
+                for (path, array) in &arm.struct_leaves {
+                    let else_array = else_result.struct_leaves.get(path).ok_or_else(|| {
+                        MumeiError::type_error(
+                            "match branches have incompatible struct-array leaves",
+                        )
+                    })?;
+                    let array_value: z3::ast::Dynamic<'a> = array.clone().into();
+                    let else_value: z3::ast::Dynamic<'a> = else_array.clone().into();
+                    let merged = cond.ite(&array_value, &else_value);
+                    let merged = merged.as_array().ok_or_else(|| {
+                        MumeiError::type_error(
+                            "match branches have incompatible struct-array leaves",
+                        )
+                    })?;
+                    struct_leaves.insert(path.clone(), merged);
+                }
+                MatchArrayResult {
+                    len,
+                    struct_element_type: arm.struct_element_type.clone(),
+                    struct_leaves,
+                }
+            }
+            None => arm.clone(),
+        });
+    }
+    Ok(result)
+}
+
+#[inline(never)]
+fn match_arm_array_result<'a>(
+    vc: &VCtx<'a>,
+    body: &Stmt,
+    body_value: &Dynamic<'a>,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> MumeiResult<Option<MatchArrayResult<'a>>> {
+    let Some(array) = body_value.as_array() else {
+        return Ok(None);
+    };
+    let tail = array_value_tail_expr(body);
+    let len = tail
+        .map(|tail| {
+            super::z3_types::array_len_for_expr(vc, env, Some(tail), body_value, solver_opt)
+        })
+        .unwrap_or_else(|| super::z3_types::array_len_for_value(vc, env, &array, solver_opt));
+    let element_type = tail
+        .and_then(|tail| super::z3_types::array_element_type_from_expr(vc, tail))
+        .map(|element_type| vc.module_env.resolve_base_type(&element_type));
+    let struct_element_type = element_type.filter(|element_type| {
+        super::z3_types::array_element_sort_from_type(element_type, vc.module_env, vc.ieee754_f64)
+            == ArrayElementSort::Struct
+    });
+    let struct_leaves = if let Some(element_type) = &struct_element_type {
+        let tail = tail.ok_or_else(|| {
+            MumeiError::type_error("match result struct array has no resolvable tail expression")
+        })?;
+        let snapshot =
+            super::z3_types::snapshot_struct_array_leaves(vc, env, tail, body_value, None)?
+                .ok_or_else(|| {
+                    MumeiError::type_error(format!(
+                        "match result struct array '{element_type}' has no leaf snapshot"
+                    ))
+                })?;
+        let leaf_types = super::z3_types::struct_array_leaf_types(element_type, vc.module_env)
+            .ok_or_else(|| {
+                MumeiError::type_error(format!(
+                    "array element struct '{element_type}' must have only scalar leaves"
+                ))
+            })?;
+        let mut arrays = std::collections::HashMap::with_capacity(leaf_types.len());
+        for (path, _) in leaf_types {
+            let array = snapshot.leaf_array(&path).ok_or_else(|| {
+                MumeiError::type_error(format!(
+                    "match result struct array is missing leaf '{path}'"
+                ))
+            })?;
+            arrays.insert(path, array);
+        }
+        arrays
+    } else {
+        std::collections::HashMap::new()
+    };
+    Ok(Some(MatchArrayResult {
+        len,
+        struct_element_type,
+        struct_leaves,
+    }))
+}
+
+#[inline(never)]
+fn invoke_match_lowering<'a, F>(lowering: F) -> MumeiResult<Dynamic<'a>>
+where
+    F: FnOnce() -> MumeiResult<Dynamic<'a>>,
+{
+    lowering()
+}
+
 struct LocalArrayElementTypeGuard<'a> {
     types: &'a std::cell::RefCell<std::collections::HashMap<String, String>>,
     name: String,
@@ -5112,6 +5255,7 @@ pub(crate) fn expr_to_z3<'a>(
                                     len: result_len.clone(),
                                     _keep: result_z3.clone(),
                                     struct_leaves: result_struct_arrays.clone(),
+                                    struct_element_type: None,
                                 },
                             );
                         }
@@ -6702,7 +6846,7 @@ pub(crate) fn expr_to_z3<'a>(
             }
             Ok(handle)
         }
-        Expr::Match { target, arms } => {
+        Expr::Match { target, arms } => invoke_match_lowering(|| {
             let target_z3 = expr_to_z3(vc, target, env, solver_opt)?;
 
             // Declared enum type of the scrutinee, when it's a bare
@@ -6765,6 +6909,7 @@ pub(crate) fn expr_to_z3<'a>(
                 }
             }
 
+            let array_elem_types_before_match = vc.local_array_elem_types.borrow().clone();
             // ========================================================
             // Z3 網羅性チェック (Exhaustiveness Check)
             // ========================================================
@@ -6774,6 +6919,7 @@ pub(crate) fn expr_to_z3<'a>(
                 let mut arm_conditions: Vec<Bool> = Vec::new();
                 let mut coverage_negations: Vec<Bool> = Vec::new();
                 let enum_types_before_coverage = vc.local_enum_types.borrow().clone();
+                let array_elem_types_before_coverage = array_elem_types_before_match.clone();
                 for arm in arms {
                     *vc.local_enum_types.borrow_mut() = enum_types_before_coverage.clone();
                     // This coverage pass binds payload names only to make
@@ -6783,6 +6929,7 @@ pub(crate) fn expr_to_z3<'a>(
                     // match. Snapshot/restore per arm like the arm pass
                     // below does.
                     let int_types_before_check = vc.local_int_types.borrow().clone();
+                    let array_elem_types_before_check = vc.local_array_elem_types.borrow().clone();
                     let cond = pattern_to_z3_condition(
                         ctx,
                         &arm.pattern,
@@ -6829,6 +6976,8 @@ pub(crate) fn expr_to_z3<'a>(
                         }
                         vc.check_i64_overflow.set(check_i64);
                         *vc.local_enum_types.borrow_mut() = enum_types_before_guard;
+                        *vc.local_array_elem_types.borrow_mut() =
+                            array_elem_types_before_check.clone();
                         let guard_z3 = guard_z3?
                             .as_bool()
                             .ok_or(MumeiError::type_error("Guard must be boolean"))?;
@@ -6838,10 +6987,12 @@ pub(crate) fn expr_to_z3<'a>(
                     };
                     *vc.local_int_types.borrow_mut() = int_types_before_check;
                     *vc.local_enum_types.borrow_mut() = enum_types_before_coverage.clone();
+                    *vc.local_array_elem_types.borrow_mut() = array_elem_types_before_check;
                     coverage_negations.push(full_cond.not());
                     arm_conditions.push(full_cond);
                 }
                 *vc.local_enum_types.borrow_mut() = enum_types_before_coverage;
+                *vc.local_array_elem_types.borrow_mut() = array_elem_types_before_coverage;
 
                 // 網羅性: ¬(P_1 ∨ ... ∨ P_n) が Unsat か？
                 let arm_refs: Vec<&Bool> = arm_conditions.iter().collect();
@@ -6910,6 +7061,8 @@ pub(crate) fn expr_to_z3<'a>(
             // are then folded into an ite chain from the last arm outward.
             let mut accumulated_negations: Vec<Bool> = Vec::new();
             let mut arm_results: Vec<(Bool, Dynamic)> = Vec::with_capacity(arms.len());
+            let mut arm_array_results: Vec<(Bool, Option<MatchArrayResult>)> =
+                Vec::with_capacity(arms.len());
             // Per-arm writes to pre-existing vars fold back under first-match
             // precedence: collected forward, then merged last-to-first so an
             // earlier arm's state overrides a later arm's (the accumulated
@@ -7066,23 +7219,19 @@ pub(crate) fn expr_to_z3<'a>(
                         stack.pop();
                     }
                 }
+                let body_val = body_val?;
+                let array_result =
+                    match_arm_array_result(vc, &arm.body, &body_val, &mut arm_env, solver_opt)?;
                 *vc.local_array_elem_types.borrow_mut() = array_elem_types_before_arm;
                 *vc.local_enum_types.borrow_mut() = enum_types_before_arms.clone();
-                let body_val = body_val?;
                 *vc.local_int_types.borrow_mut() = int_types_before_arm.clone();
-                for key in arm_bound
-                    .iter()
-                    .filter(|key| key.starts_with("__array_len#"))
-                {
-                    if let Some(len) = arm_env.get(key) {
-                        env.insert(key.clone(), len.clone());
-                    }
-                }
                 arm_states.push((full_cond.clone(), arm_env, arm_bound));
+                arm_array_results.push((full_cond.clone(), array_result));
                 arm_results.push((full_cond.clone(), body_val));
                 accumulated_negations.push(full_cond.not());
             }
             *vc.local_enum_types.borrow_mut() = enum_types_before_arms;
+            *vc.local_array_elem_types.borrow_mut() = array_elem_types_before_match;
 
             // Fold the arm values into an ite chain from the last arm
             // outward: `ite(c_1, b_1, ite(c_2, b_2, ... b_n))`, and fold the
@@ -7107,8 +7256,27 @@ pub(crate) fn expr_to_z3<'a>(
             }
             *vc.local_lambdas.borrow_mut() = lambdas_before;
 
-            result.ok_or_else(|| MumeiError::verification("Match expression has no arms"))
-        }
+            let result =
+                result.ok_or_else(|| MumeiError::verification("Match expression has no arms"))?;
+            let array_result = merge_match_array_results(&arm_array_results)?;
+            if let Some(array) = result.as_array() {
+                let array_result = array_result.ok_or_else(|| {
+                    MumeiError::type_error("could not resolve array metadata for match result")
+                })?;
+                super::z3_types::register_array_result(
+                    vc,
+                    &array,
+                    array_result.len,
+                    array_result.struct_element_type,
+                    array_result.struct_leaves,
+                );
+            } else if array_result.is_some() {
+                return Err(MumeiError::type_error(
+                    "match branches have incompatible array results",
+                ));
+            }
+            Ok(result)
+        }),
 
         // =================================================================
         // 非同期処理 + リソース管理の Z3 検証
@@ -7826,6 +7994,7 @@ pub(crate) fn expr_to_z3<'a>(
                                 len: result_len.clone(),
                                 _keep: result_z3.clone(),
                                 struct_leaves: result_struct_arrays.clone(),
+                                struct_element_type: None,
                             },
                         );
                     }

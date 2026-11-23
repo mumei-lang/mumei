@@ -18,6 +18,7 @@ pub(crate) struct CallResultArray<'a> {
     pub(crate) len: Option<Dynamic<'a>>,
     pub(crate) _keep: Dynamic<'a>,
     pub(crate) struct_leaves: std::collections::HashMap<String, z3::ast::Array<'a>>,
+    pub(crate) struct_element_type: Option<String>,
 }
 
 /// Cached `rec_fn#` UF plus the signature it was declared with, so a

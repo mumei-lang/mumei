@@ -252,6 +252,23 @@ body: {
     }
 };
 
+atom match_result_shadowed_struct_array_does_not_reuse_outer(e: DirectArrayE, ps: [Point]) -> i64
+requires:
+    len(ps) > 0
+    && ps[0].x == 1
+    && match e {
+        DirectArrayE::D(payload) => len(payload) > 0 && payload[0].x == 9,
+        DirectArrayE::N => false
+    };
+ensures: result == 1;
+body: {
+    let selected = match e {
+        DirectArrayE::D(ps) => ps,
+        DirectArrayE::N => ps
+    };
+    selected[0].x
+};
+
 atom block_tail_array_payload_shared_write_rejected(ps: [Point]) -> i64
 requires: len(ps) > 0;
 ensures: result == 0;

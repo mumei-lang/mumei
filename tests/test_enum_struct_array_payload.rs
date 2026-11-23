@@ -66,7 +66,7 @@ fn struct_array_payloads_verify_in_both_integer_modes() {
 
 #[test]
 fn unsafe_and_unsupported_struct_array_payloads_fail_closed_in_both_modes() {
-    const EXPECTED_FAILURES: [&str; 21] = [
+    const EXPECTED_FAILURES: [&str; 27] = [
         "overclaimed_struct_array_length",
         "out_of_bounds_struct_array_index",
         "different_struct_fields_keep_lengths_separate",
@@ -78,7 +78,12 @@ fn unsafe_and_unsupported_struct_array_payloads_fail_closed_in_both_modes() {
         "nested_array_in_struct_payload",
         "struct_array_in_struct_payload",
         "direct_struct_array_payload_different_elements",
+        "nested_enum_struct_array_equality_rejects_different_contents",
         "direct_struct_array_payload_stale_reconstruction",
+        "match_result_shadowed_struct_array_does_not_reuse_outer",
+        "block_tail_array_payload_shared_write_rejected",
+        "alias_array_payload_shared_write_rejected",
+        "branch_array_payload_shared_write_rejected",
         "tagged_direct_struct_array_payload_read_remains_closed",
         "direct_struct_array_u32_constructor_domain",
         "direct_struct_array_payload_field_write_rejected",
@@ -88,6 +93,7 @@ fn unsafe_and_unsupported_struct_array_payloads_fail_closed_in_both_modes() {
         "direct_struct_array_nested_array_remains_closed",
         "direct_struct_array_recursive_enum_remains_closed",
         "direct_struct_array_generic_enum_remains_closed",
+        "recursive_struct_enum_array_payload_fails_closed",
     ];
     for bitvec_i64 in [false, true] {
         let output = run_command(
