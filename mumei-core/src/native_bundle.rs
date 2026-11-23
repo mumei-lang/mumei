@@ -921,7 +921,14 @@ pub fn prepare_module_source(
 ) -> Result<ModuleSourceParts, BundleError> {
     let contracts =
         semantic_contract::extract_pure_i64_module_contracts(source, SOURCE_LABEL, None, admission)
-            .map_err(|_| BundleError("unsupported or invalid module source"))?;
+            .map_err(|error| match error {
+                semantic_contract::SemanticContractError::Unsupported(reason)
+                    if reason.contains("signature") =>
+                {
+                    BundleError(reason)
+                }
+                _ => BundleError("unsupported or invalid module source"),
+            })?;
     let mut items =
         parser::parse_module_checked(source).map_err(|_| BundleError("invalid source"))?;
     // Under composite v9 the admission above instantiated every generic
