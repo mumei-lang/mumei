@@ -666,11 +666,11 @@ pub struct SemanticContract {
 impl SemanticContract {
     /// Appends the object-stage transformation relations the
     /// native-bundle profile declares — `source_atom → machine_code`
-    /// (bounded machine-TV), `llvm_ir → object_code` (llc emission,
-    /// still `unchecked_not_translation_validated` until Step 3's
-    /// direct IR↔object verification exists) and
-    /// `object_code → linked_executable` (the link-correspondence
-    /// check the bundle acceptance pipeline performs).
+    /// (bounded machine-TV), `llvm_ir → object_code` (the direct
+    /// IR↔object model comparison `llvm_ir_object_equivalence`
+    /// performs) and `object_code → linked_executable` (the
+    /// link-correspondence check the bundle acceptance pipeline
+    /// performs).
     ///
     /// Profile-conditional: only the native-bundle prepare paths call
     /// this, so plain `verify` and sidecar extractions keep the
@@ -702,7 +702,7 @@ impl SemanticContract {
             to: "object_code",
             relation: "llc_instruction_selection_register_allocation",
             output_identity: None,
-            validation: "unchecked_not_translation_validated",
+            validation: "checked_llvm_ir_object_model_correspondence",
         });
         self.transformations.push(TransformationRelation {
             from: "object_code",
@@ -14731,7 +14731,7 @@ mod tests {
                     "object_code",
                     "llc_instruction_selection_register_allocation",
                     None,
-                    "unchecked_not_translation_validated",
+                    "checked_llvm_ir_object_model_correspondence",
                 ),
                 (
                     "object_code",

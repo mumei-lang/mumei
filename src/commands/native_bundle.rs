@@ -5998,36 +5998,57 @@ fn object_translation_json(
     } else {
         "metadata_only"
     };
-    // The `hir → llvm_ir` edge reports the per-atom model comparison's
-    // aggregate: `checked_correspondence` only when every compared atom
-    // proved equivalent, otherwise the honest fail-closed vocabulary.
-    // The item detail names divergent or uncovered atoms.
-    let hir_llvm_result = correspondence["checks"]
-        .as_array()
-        .and_then(|checks| {
-            checks
-                .iter()
-                .find(|check| check["item"].as_str() == Some("hir_llvm_model_correspondence"))
-        })
-        .and_then(|check| check["result"].as_str())
-        .map(|result| match result {
-            "checked" => "checked_correspondence",
-            // A divergent atom is validation that ran and failed —
-            // not an edge that never ran. Keep the two apart, as the
-            // check item's own detail does.
-            "inconsistent" => "inconsistent_correspondence",
-            _ => "unchecked_not_translation_validated",
-        })
-        .unwrap_or("unchecked_not_translation_validated");
+    // The `hir → llvm_ir` and `llvm_ir → object_code` edges report
+    // their check items' aggregates: `checked_correspondence` only
+    // when the item checked, otherwise the honest fail-closed
+    // vocabulary. The item detail names divergent or uncovered atoms.
+    let check_item_result = |item: &str| {
+        correspondence["checks"]
+            .as_array()
+            .and_then(|checks| {
+                checks
+                    .iter()
+                    .find(|check| check["item"].as_str() == Some(item))
+            })
+            .and_then(|check| check["result"].as_str())
+    };
+    let hir_llvm_result =
+        edge_result_for_item_result(check_item_result("hir_llvm_model_correspondence"));
+    // `llvm_ir → object_code` promotion conditions
+    // (DESIGN_LLVM_OBJECT_CORRESPONDENCE.md §4): the direct comparison
+    // item must check AND every gate it requires must actually have
+    // run — function enumeration, the relocation record items, the
+    // link correspondence and the canonical argv reproduction. The
+    // symbol and call-edge correspondences are upstream hard gates:
+    // a descriptor only exists after they passed.
+    let llvm_ir_object_result = llvm_ir_object_edge_result(
+        check_item_result("llvm_ir_object_equivalence"),
+        &LLVM_IR_OBJECT_GATE_ITEMS
+            .iter()
+            .map(|item| check_item_result(item))
+            .collect::<Vec<_>>(),
+        data.object_link_correspondence,
+        data.canonical_argv_compared,
+    );
     serde_json::json!({
         "status": status,
         "transformations": [
             {
+                // `validation` names the IR↔object model comparison the
+                // recheck runs per liftable function; `result` reports
+                // `checked_correspondence` only when the
+                // `llvm_ir_object_equivalence` item checked and the
+                // memo's promotion conditions (function enumeration,
+                // relocation record, link correspondence, canonical
+                // argv) all ran — a report whose functions are outside
+                // the subset, diverged, or undecidable does not claim
+                // this edge was validated.
                 "from": "llvm_ir",
                 "to": "object_code",
                 "relation": "llc_instruction_selection_register_allocation",
                 "output_identity": object_sha256,
-                "validation": "unchecked_not_translation_validated",
+                "validation": "checked_llvm_ir_object_model_correspondence",
+                "result": llvm_ir_object_result,
             },
             {
                 "from": "object_code",
@@ -6103,6 +6124,56 @@ fn object_translation_json(
             .collect::<Vec<_>>(),
         "correspondence": correspondence,
     })
+}
+
+/// Map a check item's `result` to the vocabulary a transformation
+/// edge reports: `inconsistent` means validation that ran and failed —
+/// not an edge that never ran, so the two stay apart; a missing item
+/// or any other result is fail-closed `unchecked`.
+fn edge_result_for_item_result(item_result: Option<&str>) -> &'static str {
+    match item_result {
+        Some("checked") => "checked_correspondence",
+        Some("inconsistent") => "inconsistent_correspondence",
+        _ => "unchecked_not_translation_validated",
+    }
+}
+
+/// Correspondence items the `llvm_ir → object_code` edge requires
+/// before it may report `checked_correspondence`
+/// (DESIGN_LLVM_OBJECT_CORRESPONDENCE.md §4-1/§4-4): the function
+/// enumeration and the relocation record items.
+const LLVM_IR_OBJECT_GATE_ITEMS: [&str; 6] = [
+    "function_coverage",
+    "function_count",
+    "relocation_targets",
+    "relocation_bounds",
+    "relocation_resolved_values",
+    "relocation_applied_values",
+];
+
+/// `llvm_ir → object_code` edge result per the design memo's promotion
+/// conditions (§4): `checked_correspondence` only when the
+/// `llvm_ir_object_equivalence` item checked, every gate item checked,
+/// and the link correspondence and canonical argv reproduction ran.
+/// Any `inconsistent` item is validation that ran and failed; a
+/// missing, `unchecked` or `unknown` item keeps the edge fail-closed.
+fn llvm_ir_object_edge_result(
+    equivalence_item: Option<&str>,
+    gate_items: &[Option<&str>],
+    object_link_correspondence: bool,
+    canonical_argv_compared: bool,
+) -> &'static str {
+    if equivalence_item == Some("inconsistent") || gate_items.contains(&Some("inconsistent")) {
+        return "inconsistent_correspondence";
+    }
+    if equivalence_item == Some("checked")
+        && gate_items.iter().all(|result| *result == Some("checked"))
+        && object_link_correspondence
+        && canonical_argv_compared
+    {
+        return "checked_correspondence";
+    }
+    "unchecked_not_translation_validated"
 }
 
 fn object_machine_tv_source_atom_count(outcomes: &BTreeMap<String, FunctionOutcome>) -> usize {
@@ -6499,6 +6570,79 @@ fn publish(_: &Path, _: &Path) -> Result<(), BundleError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn llvm_ir_object_edge_result_requires_every_promotion_gate() {
+        let checked_gates: Vec<Option<&str>> = LLVM_IR_OBJECT_GATE_ITEMS
+            .iter()
+            .map(|_| Some("checked"))
+            .collect();
+        // All promotion conditions met.
+        assert_eq!(
+            llvm_ir_object_edge_result(Some("checked"), &checked_gates, true, true),
+            "checked_correspondence"
+        );
+        // The link correspondence not running keeps the edge unchecked.
+        assert_eq!(
+            llvm_ir_object_edge_result(Some("checked"), &checked_gates, false, true),
+            "unchecked_not_translation_validated"
+        );
+        // So does an unpinned canonical argv.
+        assert_eq!(
+            llvm_ir_object_edge_result(Some("checked"), &checked_gates, true, false),
+            "unchecked_not_translation_validated"
+        );
+        // A gate item that stayed unchecked (or is absent) is
+        // fail-closed — never counted as checked.
+        let mut gates = checked_gates.clone();
+        gates[2] = Some("unchecked");
+        assert_eq!(
+            llvm_ir_object_edge_result(Some("checked"), &gates, true, true),
+            "unchecked_not_translation_validated"
+        );
+        let mut gates = checked_gates.clone();
+        gates[4] = None;
+        assert_eq!(
+            llvm_ir_object_edge_result(Some("checked"), &gates, true, true),
+            "unchecked_not_translation_validated"
+        );
+        // A solver-undecidable comparison item is not a skip.
+        assert_eq!(
+            llvm_ir_object_edge_result(Some("unknown"), &checked_gates, true, true),
+            "unchecked_not_translation_validated"
+        );
+        // Validation that ran and failed is inconsistent, on the item
+        // or on any gate.
+        assert_eq!(
+            llvm_ir_object_edge_result(Some("inconsistent"), &checked_gates, true, true),
+            "inconsistent_correspondence"
+        );
+        let mut gates = checked_gates;
+        gates[0] = Some("inconsistent");
+        assert_eq!(
+            llvm_ir_object_edge_result(Some("checked"), &gates, true, true),
+            "inconsistent_correspondence"
+        );
+    }
+
+    #[test]
+    fn edge_result_for_item_result_keeps_inconsistent_apart_from_unchecked() {
+        assert_eq!(
+            edge_result_for_item_result(Some("checked")),
+            "checked_correspondence"
+        );
+        // Validation that ran and failed is not a skipped edge.
+        assert_eq!(
+            edge_result_for_item_result(Some("inconsistent")),
+            "inconsistent_correspondence"
+        );
+        for result in [Some("unchecked"), Some("unknown"), None] {
+            assert_eq!(
+                edge_result_for_item_result(result),
+                "unchecked_not_translation_validated"
+            );
+        }
+    }
 
     #[test]
     fn object_machine_tv_acceptance_decision_is_fail_closed() {
