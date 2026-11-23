@@ -10125,13 +10125,15 @@ fn module_atom_obligations<'ctx>(
         let precondition = callback
             .guard
             .implies(&Bool::and(context, &checks.iter().collect::<Vec<_>>()));
-        let post_definedness = callback.guard.implies(&Bool::and(
-            context,
-            &callback
-                .postcondition_definedness
-                .iter()
-                .collect::<Vec<_>>(),
-        ));
+        let post_definedness = callback.guard.implies(
+            &callback.result_domain.implies(&Bool::and(
+                context,
+                &callback
+                    .postcondition_definedness
+                    .iter()
+                    .collect::<Vec<_>>(),
+            )),
+        );
         if (requires_callback_start..requires_callback_end).contains(&index) {
             let hypotheses = Bool::and(context, &[&source_domain_formula, &requires_loop_exits]);
             callback_definedness_obligations
@@ -18660,6 +18662,22 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
             body: call(f, call(f, x));";
         let outcomes =
             refined_module_outcomes_admission(nested_calls, RefinedAdmission::CompositeV27);
+        assert!(
+            outcomes
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat),
+            "{outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn composite_v27_callback_post_definedness_uses_result_domain() {
+        let source = "type Pos = i64 where v > 0;\n\
+            atom apply(f: atom_ref(i64) -> Pos) -> i64\n\
+                requires: true; ensures: true;\n\
+                contract(f): ensures: 10 / result >= 0;\n\
+                body: call(f, 0);";
+        let outcomes = refined_module_outcomes_admission(source, RefinedAdmission::CompositeV27);
         assert!(
             outcomes
                 .iter()
