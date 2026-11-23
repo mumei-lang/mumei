@@ -516,6 +516,10 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
         "Scope: artifact_reproduction_object_link_correspondence_and_acyclic_branch_and_conditional_call_function_machine_code_tv_only/no_abi_or_runtime_semantics"
     ));
     assert!(text.contains("Entry wrapper is equivalent within the machine-code TV profile."));
+    // Step 5: the text report surfaces the aggregate correspondence
+    // status (and would name each inconsistent item) — previously the
+    // record existed only in `--json` output.
+    assert!(text.contains("Object translation correspondence: checked_correspondence"));
 
     let output = recheck_machine_tv(&source, &bundle, &id, true);
     assert_success(&output);
@@ -5974,7 +5978,10 @@ fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
     assert!(text.contains("Native object accepted within the machine-code TV profile:"));
     assert!(text.contains("2 source-atom functions equivalent"));
     assert!(text.contains("Entry wrapper is equivalent within the machine-code TV profile."));
-    assert_eq!(text.lines().count(), 2);
+    // Step 5: the acceptance text report also surfaces the aggregate
+    // correspondence status.
+    assert!(text.contains("Object translation correspondence: checked_correspondence"));
+    assert_eq!(text.lines().count(), 3);
 
     let wrong_id = "0".repeat(64);
     assert_ne!(wrong_id, id);

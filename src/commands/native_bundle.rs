@@ -4472,6 +4472,9 @@ fn write_machine_tv(
             evaluation.counts.equivalent_bounded_loop_count,
             evaluation.scope,
         );
+        for line in object_translation_correspondence_text(&data) {
+            println!("{line}");
+        }
         Ok(())
     }
 }
@@ -4918,6 +4921,67 @@ fn llvm_ir_object_equivalence_results(
     Some(outcomes)
 }
 
+/// Correspondence check block shared by the JSON descriptors and the
+/// text report: `{"status", "checks": [{item, result, detail}]}` with
+/// `checked` / `unchecked` / `inconsistent` results.
+fn object_translation_correspondence_json(
+    data: &ObjectRecheckData,
+    record: &ObjectTranslationRecord,
+) -> serde_json::Value {
+    let ir_equivalence = llvm_ir_object_equivalence_results(data, record);
+    object_translation_correspondence_checks(
+        &data.ir_surface,
+        data.executable_bytes.as_slice(),
+        record,
+        ir_equivalence.as_ref(),
+    )
+}
+
+/// Human-facing report lines for the correspondence block (design memo
+/// remaining item): the aggregate status plus one diagnostic line per
+/// `inconsistent` item so a divergence is named on the text path —
+/// before this it was only visible in `--json` output.
+fn object_translation_correspondence_report_lines(
+    correspondence: &serde_json::Value,
+) -> Vec<String> {
+    let status = correspondence["status"].as_str().unwrap_or("unknown");
+    let checks = correspondence["checks"].as_array();
+    let checked = checks
+        .map(|checks| {
+            checks
+                .iter()
+                .filter(|check| check["result"].as_str() == Some("checked"))
+                .count()
+        })
+        .unwrap_or(0);
+    let total = checks.map(|checks| checks.len()).unwrap_or(0);
+    let mut lines = vec![format!(
+        "Object translation correspondence: {status} ({checked} of {total} items checked)."
+    )];
+    if let Some(checks) = checks {
+        for check in checks {
+            if check["result"].as_str() == Some("inconsistent") {
+                let item = check["item"].as_str().unwrap_or("unknown");
+                let detail = check["detail"].as_str().unwrap_or("no detail recorded");
+                lines.push(format!("  inconsistent: {item} — {detail}"));
+            }
+        }
+    }
+    lines
+}
+
+/// Correspondence block evaluated for the text report of a command
+/// that already loaded `ObjectRecheckData` (recheck-machine-tv and
+/// accept-object). Runs the same checks as the JSON descriptor.
+fn object_translation_correspondence_text(data: &ObjectRecheckData) -> Vec<String> {
+    let record = data
+        .object_translation
+        .clone()
+        .unwrap_or_else(|| object_translation_parse(&data.object_bytes, &data.executable_bytes));
+    let correspondence = object_translation_correspondence_json(data, &record);
+    object_translation_correspondence_report_lines(&correspondence)
+}
+
 fn object_translation_json(data: &ObjectRecheckData) -> serde_json::Value {
     let record = data
         .object_translation
@@ -4936,13 +5000,7 @@ fn object_translation_json(data: &ObjectRecheckData) -> serde_json::Value {
     } else {
         "unchecked_not_translation_validated"
     };
-    let ir_equivalence = llvm_ir_object_equivalence_results(data, &record);
-    let correspondence = object_translation_correspondence_checks(
-        &data.ir_surface,
-        data.executable_bytes.as_slice(),
-        &record,
-        ir_equivalence.as_ref(),
-    );
+    let correspondence = object_translation_correspondence_json(data, &record);
     let status = if correspondence["status"].as_str() == Some("checked_correspondence") {
         "checked_correspondence"
     } else {
@@ -5156,6 +5214,9 @@ fn write_object_machine_tv_acceptance(
         println!(
             "Acceptance scope excludes producer authenticity, historical execution, {wrapper_exclusion}register-convention validation, optimizer/ABI/runtime/OS observations, grade promotion, and Lean checks; scope: {scope}."
         );
+        for line in object_translation_correspondence_text(data) {
+            println!("{line}");
+        }
         Ok(())
     }
 }
@@ -7036,6 +7097,12 @@ entry:
             Some(&equivalent),
         );
         assert_eq!(report["status"], "checked_correspondence");
+        let lines = object_translation_correspondence_report_lines(&report);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0],
+            "Object translation correspondence: checked_correspondence (6 of 6 items checked)."
+        );
         let results = results_of(&report);
         assert_eq!(
             results,
@@ -7069,6 +7136,16 @@ entry:
             results_of(&report)["llvm_ir_object_equivalence"],
             "inconsistent"
         );
+        // The text report names the inconsistent item and its detail
+        // so the divergence is visible without `--json`.
+        let lines = object_translation_correspondence_report_lines(&report);
+        assert!(
+            lines[0].starts_with("Object translation correspondence: inconsistent_correspondence")
+        );
+        assert!(lines.iter().any(|line| {
+            line.contains("inconsistent: llvm_ir_object_equivalence")
+                && line.contains("helper: different")
+        }));
 
         // Nothing liftable keeps the item honestly `unchecked`, which
         // drops the aggregate back to unchecked_not_translation_validated.
