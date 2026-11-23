@@ -270,6 +270,10 @@ pub enum IrObjectEquivalence {
 /// results (register-resident or `sret` memory-class), scalar-i64 call
 /// sites, bounded memory — no array params, wide leaves, doubles, or
 /// loops.
+/// Admission is semantic, not only inspection: a signature inside this
+/// subset makes `evaluate_machine_tv` compare the lifted machine code
+/// against the IR encoding instead of the source model, and the
+/// equivalence outcome feeds the same object-acceptance record.
 /// Callers use this to record `skipped` without paying for an IR
 /// encode; `check_function_against_ir` re-checks it internally.
 pub fn ir_object_signature_liftable(model: &PureI64Body) -> bool {
@@ -346,7 +350,8 @@ fn scalar_i64_call_site(site: &CallSite) -> bool {
 /// `translation_validation::encode_ir_function_for_comparison` on the
 /// same Z3 context.
 ///
-/// Scoped to scalar-i64 signatures: aggregates, f64 leaves, wider
+/// Scoped to scalar-i64 signatures plus all-`i64` aggregate results
+/// (register-resident or `sret` memory-class): f64 leaves, wider
 /// inputs, non-scalar call sites, and loops return `NotLiftable`. For
 /// every lifted path the machine return must equal the IR return of
 /// some covering edge whose definedness obligations hold and whose
@@ -465,8 +470,9 @@ pub fn check_function_with_frame_memory<'ctx>(
 /// obligations over the shared `model.inputs` from
 /// `translation_validation::encode_ir_function_for_comparison` —
 /// instead of the source model's `model.value` (design memo §7 Step
-/// 3a). Scoped to scalar-i64 signatures: any other shape reports
-/// `OutsideProfile`.
+/// 3a). Scoped to scalar-i64 signatures plus all-`i64` aggregate
+/// results (register-resident or `sret` memory-class): any other
+/// shape reports `OutsideProfile`.
 pub fn check_function_with_frame_memory_against_ir<'ctx>(
     bytes: &[u8],
     address: u64,
