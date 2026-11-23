@@ -11,6 +11,10 @@ struct Point {
     x: i64
 }
 
+struct RecursivePayloadPoint {
+    e: RecursiveStructArrayE
+}
+
 enum C {
     One
 }
@@ -84,6 +88,11 @@ enum NestedArrayPayloadE {
 enum RecursiveArrayPayloadE {
     N,
     D(ps: [Point], next: RecursiveArrayPayloadE)
+}
+
+enum RecursiveStructArrayE {
+    N,
+    D(ps: [RecursivePayloadPoint])
 }
 
 enum GenericArrayPayloadE<T> {
@@ -333,4 +342,12 @@ body: {
         RecursiveArrayPayloadE::D(_, _) => 0,
         RecursiveArrayPayloadE::N => 0
     }
+};
+
+atom recursive_struct_enum_array_payload_fails_closed(ps: [RecursivePayloadPoint]) -> i64
+requires: true;
+ensures: result == 0;
+body: {
+    let e = RecursiveStructArrayE::D(ps);
+    0
 };

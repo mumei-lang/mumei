@@ -332,11 +332,14 @@ fn collect_field_leaves(
     {
         if !field_is_scalar(element_type, module_env) {
             if name.is_empty() {
-                let struct_leaves =
-                    crate::verification::translator::z3_types::struct_array_leaf_types(
-                        element_type,
-                        module_env,
-                    )?;
+                let struct_leaves = struct_array_leaf_types_fueled(
+                    element_type,
+                    module_env,
+                    visiting,
+                    work,
+                    fuel,
+                    memo,
+                )?;
                 let len_name = format!("{name}#len");
                 if leaves.len() + struct_leaves.len() + 1 > MAX_PAYLOAD_LEAVES
                     || !seen.insert(len_name.clone())
@@ -412,6 +415,48 @@ fn collect_field_leaves(
     }
     visiting.remove(&base);
     Some(())
+}
+
+fn struct_array_leaf_types_fueled(
+    element_type: &str,
+    module_env: &ModuleEnv,
+    visiting: &mut std::collections::HashSet<String>,
+    work: &mut usize,
+    fuel: u8,
+    memo: &mut FiniteFuelMemo,
+) -> Option<Vec<(String, String)>> {
+    let resolved = module_env.resolve_base_type(element_type);
+    let base = type_name_base(&resolved);
+    let sdef = module_env
+        .get_struct(&resolved)
+        .or_else(|| module_env.get_struct(base))?;
+    if !visiting.insert(base.to_string()) {
+        return None;
+    }
+    let mut leaves = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for field in &sdef.fields {
+        collect_field_leaves(
+            &field.type_name,
+            module_env,
+            field.name.clone(),
+            &mut leaves,
+            visiting,
+            &mut seen,
+            work,
+            fuel,
+            memo,
+        )?;
+    }
+    visiting.remove(base);
+    if leaves.is_empty()
+        || leaves
+            .iter()
+            .any(|(_, leaf_type)| leaf_type.starts_with("array:") || leaf_type == "array_len")
+    {
+        return None;
+    }
+    Some(leaves)
 }
 
 /// The declared leaf values of a struct-typed payload value, in
