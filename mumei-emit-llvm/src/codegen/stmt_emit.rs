@@ -1,7 +1,7 @@
 use crate::codegen::expr_emit::{
-    chan_payload_key, chan_payload_type_name, compile_hir_expr, emit_array_literal,
-    hir_int_type_name, infer_struct_type_name, is_fixed_int_type_name, resolve_named_type,
-    LAMBDA_MARK,
+    chan_payload_key, chan_payload_type_name, compile_hir_expr, copy_array_to_heap,
+    emit_array_literal, hir_int_type_name, infer_struct_type_name, is_fixed_int_type_name,
+    resolve_named_type, LAMBDA_MARK,
 };
 use crate::codegen::lowering::{
     array_elem_llvm_type, bitpreserve_cast, resolve_param_type, struct_llvm_type,
@@ -743,6 +743,43 @@ pub(crate) fn compile_hir_stmt<'a>(
             if stack_backed_enum {
                 array_ptrs.stack_backed.insert(var.clone());
             }
+            // `let r = <expr>` where the expression yields `[T]` (a call,
+            // an `if`/`match` producing a fat pointer, or an array
+            // binding): the `{i64, ptr}` is unpacked into `array_ptrs` so
+            // `r[i]`/`len(r)` work like any other array binding. Bound
+            // arrays always own a fresh heap copy — writes through the
+            // binding must never reach the source's storage.
+            if let Some(ret_base) = expr_array_type_name(value, var_types, module_env) {
+                // A `Variable` tail resolves through the source binding's
+                // `array_ptrs` slots; other array expressions unpack the
+                // fat `{i64, ptr}` they produced.
+                let source = match value.as_ref() {
+                    HirExpr::Variable(name) => array_ptrs.get(name.as_str()).copied(),
+                    _ => match val {
+                        BasicValueEnum::StructValue(fat_ptr) => {
+                            let len =
+                                llvm!(builder.build_extract_value(fat_ptr, 0, "call_arr_len"));
+                            let data =
+                                llvm!(builder.build_extract_value(fat_ptr, 1, "call_arr_data"));
+                            array_elem_llvm_type(context, &ret_base, module_env)?
+                                .map(|elem_ty| (len, elem_ty, data))
+                        }
+                        _ => None,
+                    },
+                };
+                if let Some((len, elem_ty, data)) = source {
+                    // The verifier treats each binding as an independent
+                    // array value — writes through `var` must never reach
+                    // the callee's buffer or an aliased source — so bound
+                    // arrays always own a fresh heap copy and are never
+                    // stack-backed.
+                    let heap = copy_array_to_heap(context, builder, module, len, elem_ty, data)?;
+                    array_ptrs.insert(var.clone(), (len, elem_ty, heap));
+                    var_types.insert(var.clone(), ret_base);
+                    variables.insert(var.clone(), len);
+                    return Ok(len);
+                }
+            }
             variables.insert(var.clone(), val);
             let inferred_ty = declared_base
                 .clone()
@@ -1253,13 +1290,51 @@ pub(crate) fn compile_hir_stmt<'a>(
                     return Ok(scalar);
                 }
             }
+            // `t = <expr>` on an array binding where the expression
+            // yields `[T]` (call, `if`/`match` producing a fat pointer) —
+            // same fat-pointer unpack as the `let` path. The rebound
+            // copy is always heap-owned, so `stack_backed` is cleared.
+            if let Some(ret_base) = expr_array_type_name(value, var_types, module_env) {
+                // A `Variable` tail resolves through the source binding's
+                // `array_ptrs` slots; other array expressions unpack the
+                // fat `{i64, ptr}` they produced.
+                let source = match value.as_ref() {
+                    HirExpr::Variable(name) => array_ptrs.get(name.as_str()).copied(),
+                    _ => match compile_hir_expr(
+                        context, builder, module, function, value, variables, var_types,
+                        array_ptrs, module_env,
+                    )? {
+                        BasicValueEnum::StructValue(fat_ptr) => {
+                            let len =
+                                llvm!(builder.build_extract_value(fat_ptr, 0, "call_arr_len"));
+                            let data =
+                                llvm!(builder.build_extract_value(fat_ptr, 1, "call_arr_data"));
+                            array_elem_llvm_type(context, &ret_base, module_env)?
+                                .map(|elem_ty| (len, elem_ty, data))
+                        }
+                        _ => None,
+                    },
+                };
+                if let Some((len, elem_ty, data)) = source {
+                    // Rebinding replaces the stored slots outright — and
+                    // the bound copy is always heap-owned (writes through
+                    // `var` must not alias the source), so the
+                    // stack-backed flag is cleared.
+                    array_ptrs.stack_backed.remove(var);
+                    let heap = copy_array_to_heap(context, builder, module, len, elem_ty, data)?;
+                    array_ptrs.insert(var.clone(), (len, elem_ty, heap));
+                    var_types.insert(var.clone(), ret_base);
+                    variables.insert(var.clone(), len);
+                    return Ok(len);
+                }
+            }
             let was_str = matches!(
                 array_ptrs.get(var.as_str()),
                 Some(&(_, elem_ty, _)) if elem_ty == context.i8_type().into()
             );
             if array_ptrs.contains_key(var.as_str()) && !was_str {
                 return Err(MumeiError::codegen(format!(
-                    "array '{var}' can only be reassigned from an array literal or another array binding"
+                    "array '{var}' can only be reassigned from an array literal, another array binding, or an array call result"
                 )));
             }
             let val = compile_hir_expr(
@@ -1659,3 +1734,70 @@ pub(crate) fn compile_hir_stmt<'a>(
         ),
     }
 }
+
+/// The last expression a statement contributes as its value — mirrors
+/// what `compile_hir_stmt` returns for expression/block tails.
+fn stmt_tail_expr(stmt: &HirStmt) -> Option<&HirExpr> {
+    match stmt {
+        HirStmt::Expr(e) => Some(e),
+        HirStmt::Block { tail_expr, .. } => tail_expr.as_deref(),
+        _ => None,
+    }
+}
+
+/// Resolved base type name of an expression that evaluates to an array
+/// (`[T]`): a call whose callee declares or infers an array return, a
+/// binding whose recorded type is an array, or an `if`/`match` whose
+/// branch tails do — else `None`.
+fn expr_array_type_name(
+    expr: &HirExpr,
+    var_types: &HashMap<String, String>,
+    module_env: &ModuleEnv,
+) -> Option<String> {
+    let type_name = match expr {
+        HirExpr::Call { name, .. } => {
+            let fqn_name = name.replace('.', "::");
+            let callee = module_env
+                .get_atom(name)
+                .or_else(|| module_env.get_atom(&fqn_name))?;
+            callee.return_type.clone().or_else(|| {
+                mumei_core::hir::lower_atom_to_hir(callee)
+                    .signature
+                    .inferred_return_type
+            })?
+        }
+        HirExpr::Variable(name) => var_types.get(name.as_str())?.clone(),
+        // A literal tail always produces `[i64]` here — element types in
+        // this lane are profile-int — so `let t = if c {[1,2]} else
+        // {[3,4]}` binds the merged fat pointer.
+        HirExpr::ArrayLit(_) => "[i64]".to_string(),
+        HirExpr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            return [then_branch.as_ref(), else_branch.as_ref()]
+                .into_iter()
+                .filter_map(stmt_tail_expr)
+                .find_map(|tail| expr_array_type_name(tail, var_types, module_env));
+        }
+        HirExpr::Match { arms, .. } => {
+            return arms
+                .iter()
+                .filter_map(|arm| stmt_tail_expr(&arm.body))
+                .find_map(|tail| expr_array_type_name(tail, var_types, module_env));
+        }
+        _ => return None,
+    };
+    let base = module_env.resolve_base_type(&type_name);
+    matches!(
+        mumei_core::lowering::lower(&base),
+        mumei_core::lowering::LoweredType::Array(_)
+    )
+    .then_some(base)
+}
+
+// `expr_array_stack_backed` was removed: bound arrays are always
+// heap-copied at bind time, so no expression can surface stack-backed
+// storage through a binding any more. `driver::tail_slots` still
+// classifies *return* tails (literals and stack-bound aliases) itself.
