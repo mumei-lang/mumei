@@ -1936,7 +1936,10 @@ separate opt-in stage below.
 compares the reproduced `program.o` symbol surface and call edges with the
 pinned `program.ll`. The externally visible IR function definitions must equal
 the object's non-local defined text symbols, and each non-empty undefined
-object symbol must be declared in the IR. For each externally visible function,
+object symbol must be declared in the IR — or be a compiler-rt `__*ti3`
+helper, or a libc call the backend injects for an `llvm.memcpy.*`/
+`llvm.memmove.*`/`llvm.memset.*` intrinsic edge the same caller's IR
+surface records (`memcpy`/`memmove`/`memset`). For each externally visible function,
 the direct callees in the IR must equal the call-relocation targets inside that
 function's object byte range.
 
@@ -1957,8 +1960,9 @@ dynamic-symbol tables — resolves through the PLT stub the linker emits
 for it (the Nth `R_X86_64_JUMP_SLOT` in `.rela.plt` owns the Nth 16-byte
 `.plt.sec` stub, or the Nth `.plt` stub after the 16-byte resolver
 entry), so its call field is verified like any other target; an import
-whose stub cannot be located keeps its field bytes unverified rather
-than making the check inconclusive. A symbol,
+whose stub cannot be located must still have its call field point inside
+the PLT region — a field retargeted elsewhere is a mismatch — but keeps
+its field bytes unverified rather than making the check inconclusive. A symbol,
 call-edge, function-byte, size or resolved-call-target mismatch exits 1. This
 is the third bounded C10 Option B step. Non-call relocations and instruction
 semantics are not checked; this is not general linker-semantics or ABI
@@ -2277,7 +2281,8 @@ is verified against the PLT stub the linker emitted for it — the Nth
 `R_X86_64_JUMP_SLOT` in `.rela.plt` owns the Nth 16-byte `.plt.sec`
 stub, or the Nth `.plt` stub after the 16-byte resolver entry — and an
 import whose stub cannot be located stays honestly `unchecked` with its
-field bytes unverified), and
+field bytes unverified, though the field must still point inside the PLT
+region or the link check reports a mismatch), and
 `llvm_ir_object_equivalence` (the design memo's §7 Step 3 direct
 comparison: each source atom's LLVM-IR encoding and its object function,
 lifted by the machine-TV lifter, are compared over the shared

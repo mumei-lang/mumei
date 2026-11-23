@@ -3257,10 +3257,11 @@ fn object_symbol_surface(bytes: &[u8]) -> Result<ObjectSymbolSurface, ()> {
 
 fn object_symbols_correspond(ir: &tv::IrFunctionSurface, object: &ObjectSymbolSurface) -> bool {
     object.defined == ir.defined
-        && object
-            .undefined
-            .iter()
-            .all(|name| ir.declared.contains(name) || machine_tv::is_ti3_libcall(name))
+        && object.undefined.iter().all(|name| {
+            ir.declared.contains(name)
+                || machine_tv::is_ti3_libcall(name)
+                || ir.libc_calls.values().any(|callees| callees.contains(name))
+        })
 }
 
 fn object_call_edges_correspond(
@@ -3279,7 +3280,20 @@ fn object_call_edges_correspond(
         // when another function calls the helper explicitly.
         let ir_callees = ir.calls.get(caller);
         callees.retain(|name| {
-            !machine_tv::is_ti3_libcall(name) || ir_callees.is_some_and(|set| set.contains(name))
+            if machine_tv::is_ti3_libcall(name) {
+                return ir_callees.is_some_and(|set| set.contains(name));
+            }
+            // A `llvm.memcpy`-style intrinsic lowers to a libc call the
+            // IR never spells — the edge is backend-injected when the
+            // caller's intrinsic surface names it.
+            if ir
+                .libc_calls
+                .get(caller)
+                .is_some_and(|set| set.contains(name))
+            {
+                return false;
+            }
+            true
         });
     }
     (ir.call_edges_checkable && object.call_edges_checkable).then(|| ir.calls == object_calls)
@@ -3326,17 +3340,21 @@ fn object_link_corresponds(
         .filter_map(|symbol| symbol.name().ok().map(str::to_owned))
         .collect();
     let mut plt_stub_addresses = BTreeMap::<String, u64>::new();
+    let mut plt_range: Option<(u64, u64)> = None;
     let plt_stub_layout = executable_file
         .sections()
         .find(|section| section.name() == Ok(".plt.sec"))
-        .map(|section| (section.address(), 0u64))
+        .map(|section| (section.address(), section.size(), 0u64))
         .or_else(|| {
             executable_file
                 .sections()
                 .find(|section| section.name() == Ok(".plt"))
-                .map(|section| (section.address(), 16u64))
+                .map(|section| (section.address(), section.size(), 16u64))
         });
-    if let Some((plt_base, first_stub_offset)) = plt_stub_layout {
+    if let Some((plt_base, plt_size, first_stub_offset)) = plt_stub_layout {
+        plt_range = plt_base
+            .checked_add(plt_size)
+            .map(|plt_end| (plt_base, plt_end));
         let dynsym_names: BTreeMap<u32, String> = executable_file
             .dynamic_symbols()
             .filter_map(|symbol| {
@@ -3587,11 +3605,44 @@ fn object_link_corresponds(
             }
             let field_end = relocation.offset + 4;
             let Some(target_address) = executable_addresses.get(&relocation.target).copied() else {
-                // A loader import whose PLT stub could not be located is
-                // recorded with `resolved_value: None`; its field bytes
-                // are left unverified and the relocation stays
-                // unchecked in `relocation_resolved_values`.
+                // A loader import whose PLT stub could not be mapped:
+                // the call field must still point inside the PLT
+                // region — a field retargeted anywhere else is a real
+                // mismatch. When it does, the field bytes are left
+                // unverified and the relocation stays unchecked in
+                // `relocation_resolved_values`.
                 if executable_imports.contains(&relocation.target) {
+                    let Some(actual_bytes) =
+                        function.executable_bytes.get(relocation.offset..field_end)
+                    else {
+                        return Ok(None);
+                    };
+                    let Ok(actual_bytes) = <[u8; 4]>::try_from(actual_bytes) else {
+                        return Ok(None);
+                    };
+                    let actual_value = i64::from(i32::from_le_bytes(actual_bytes));
+                    let implied_target = i64::try_from(function.executable_address)
+                        .ok()
+                        .and_then(|address| {
+                            address.checked_add(u64::try_from(relocation.offset).ok()? as i64)
+                        })
+                        .and_then(|place| {
+                            place
+                                .checked_add(actual_value)
+                                .and_then(|target| target.checked_sub(relocation.addend))
+                        });
+                    let in_plt = implied_target
+                        .and_then(|target| u64::try_from(target).ok())
+                        .is_some_and(|target| {
+                            plt_range.is_some_and(|(start, end)| start <= target && target < end)
+                        });
+                    if !in_plt {
+                        return Ok(Some((
+                            false,
+                            resolved_call_sites,
+                            object_translation_record(&functions, &relocations),
+                        )));
+                    }
                     compared_through = field_end;
                     continue;
                 }
@@ -6137,6 +6188,7 @@ mod tests {
                 ("helper".to_owned(), BTreeSet::new()),
                 ("main".to_owned(), BTreeSet::new()),
             ]),
+            libc_calls: BTreeMap::new(),
             call_edges_checkable: true,
         };
         let object = |defined: &[&str], undefined: &[&str]| ObjectSymbolSurface {
@@ -6186,6 +6238,7 @@ mod tests {
             defined: BTreeSet::from(["div128".to_owned()]),
             declared: BTreeSet::new(),
             calls: BTreeMap::from([("div128".to_owned(), BTreeSet::new())]),
+            libc_calls: BTreeMap::new(),
             call_edges_checkable: true,
         };
         let object = ObjectSymbolSurface {
@@ -6236,6 +6289,7 @@ mod tests {
                     BTreeSet::from(["__udivti3".to_owned()]),
                 ),
             ]),
+            libc_calls: BTreeMap::new(),
             call_edges_checkable: true,
         };
         let other_object = ObjectSymbolSurface {
@@ -6271,6 +6325,7 @@ mod tests {
             defined: BTreeSet::from(["other".to_owned(), "visible".to_owned()]),
             declared: BTreeSet::from(["external_ref".to_owned()]),
             calls: calls.clone(),
+            libc_calls: BTreeMap::new(),
             call_edges_checkable: true,
         };
         let object = ObjectSymbolSurface {
@@ -7384,6 +7439,15 @@ entry:
         let object_bytes = fs::read(&object_path).unwrap();
         let executable_bytes = fs::read(&executable_path).unwrap();
         let ir_surface = tv::ir_function_surface(ir).unwrap();
+        // The symbol and call-edge surfaces pass the CLI gates too:
+        // `llvm.memcpy`'s `memcpy` is a backend-injected libc call.
+        let object_surface = object_symbol_surface(&object_bytes).unwrap();
+        assert!(object_surface.undefined.contains("memcpy"));
+        assert!(object_symbols_correspond(&ir_surface, &object_surface));
+        assert_eq!(
+            object_call_edges_correspond(&ir_surface, &object_surface),
+            Some(true)
+        );
         let (corresponds, resolved_call_sites, record_) =
             object_link_corresponds(&object_bytes, &executable_bytes)
                 .unwrap()

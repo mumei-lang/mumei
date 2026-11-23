@@ -120,7 +120,27 @@ pub struct IrFunctionSurface {
     pub defined: BTreeSet<String>,
     pub declared: BTreeSet<String>,
     pub calls: BTreeMap<String, BTreeSet<String>>,
+    /// libc calls the backend synthesizes from `llvm.*` intrinsics, by
+    /// caller — `llvm.memcpy.*`/`llvm.memmove.*`/`llvm.memset.*` lower to
+    /// `memcpy`/`memmove`/`memset` edges that never appear in `calls` or
+    /// `declared`.
+    pub libc_calls: BTreeMap<String, BTreeSet<String>>,
     pub call_edges_checkable: bool,
+}
+
+/// The libc symbol a `llvm.*` memory intrinsic lowers to in the object
+/// file, when the backend emits it as a call rather than inline code.
+fn intrinsic_libc_name(callee: &str) -> Option<&'static str> {
+    for (intrinsic, libc) in [
+        ("llvm.memcpy.", "memcpy"),
+        ("llvm.memmove.", "memmove"),
+        ("llvm.memset.", "memset"),
+    ] {
+        if callee.starts_with(intrinsic) {
+            return Some(libc);
+        }
+    }
+    None
 }
 
 #[allow(clippy::result_unit_err)]
@@ -162,6 +182,12 @@ pub fn ir_function_surface(ir: &[u8]) -> std::result::Result<IrFunctionSurface, 
                                     surface.call_edges_checkable = false;
                                 } else if !callee_name.starts_with("llvm.") {
                                     callees.insert(callee_name);
+                                } else if let Some(libc) = intrinsic_libc_name(&callee_name) {
+                                    surface
+                                        .libc_calls
+                                        .entry(name.clone())
+                                        .or_default()
+                                        .insert(libc.to_owned());
                                 }
                             } else {
                                 surface.call_edges_checkable = false;
