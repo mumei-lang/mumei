@@ -5105,6 +5105,37 @@ fn module_bundle_v24_rejects_a_tampered_leaf_widths_pin() {
 }
 
 #[test]
+fn module_bundle_with_i128_variable_shifts_rechecks() {
+    // A variable `i128`/`u128` shift lowers to `shld`/`shrd` +
+    // `test $0x40,%cl`/`cmov` on the generic target — the machine-TV
+    // lifter models the whole sequence. The `requires` bound is the
+    // source verifier's shift domain (0..64); the machine path keeps
+    // the `count >= 64` fallback outside the compared domain.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "atom shl(x: i128, n: i128) -> i128 requires: n >= 0 && n < 64; ensures: true; body: { x << n };\n\
+         atom lshr(x: u128, n: u128) -> u128 requires: n >= 0 && n < 64; ensures: true; body: { x >> n };\n\
+         atom ashr(x: i128, n: i128) -> i128 requires: n >= 0 && n < 64; ensures: true; body: { x >> n };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    );
+    assert_success(&check(&source, &bundle, &id));
+    let machine_tv = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&machine_tv);
+    let machine_tv: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
+    for function in ["shl", "lshr", "ashr"] {
+        assert_eq!(
+            machine_tv["functions"][function]["outcome"], "equivalent_within_profile",
+            "{function}"
+        );
+    }
+    let accepted = accept_object(&source, &bundle, &id, true);
+    assert_success(&accepted);
+    let accepted: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(accepted["accepted"], true);
+}
+
+#[test]
 fn module_bundle_with_wide_enum_payload_builds_as_v25_and_rechecks() {
     // A uniform `i128`/`u128` payload position occupies two 64-bit
     // slots (`pure-i64-composite/v22`); the record pins bundle v25 and

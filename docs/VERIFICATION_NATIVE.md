@@ -2117,7 +2117,13 @@ supported as scalar bitvectors assembled from two unconstrained 64-bit input
 slots, low then high. Their argument pair must fit in consecutive remaining
 GPRs, and scalar results use `rax`/`rdx` (low/high). The bounded machine
 profile models add/subtract, negation, signed/unsigned comparison,
-pass-through and direct scalar calls. Wide multiplication remains
+pass-through, direct scalar calls and variable shifts. A variable
+`shl`/`lshr`/`ashr i128` lowers to the `shld`/`shrd` double-shift
+pair plus the `test $0x40,%cl`/`cmov` fallback for `count >= 64`;
+the lifter models the double shift as a 128-bit concat shift and the
+fallback sequence follows the normal `test`/`cmov` path, so the whole
+emitted sequence compares over the source's defined shift domain.
+Wide multiplication remains
 fail-closed as `unsupported_instruction`: the bounded solver returned
 `Unknown` for LLVM's limb-product sequence. Wide struct leaves remain
 fail-closed. The compiler-rt 128-bit helpers the backend emits for
