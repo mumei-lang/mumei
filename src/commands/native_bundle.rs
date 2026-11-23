@@ -4267,6 +4267,12 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
             return Err("Machine-code TV inconclusive; source atom names do not map uniquely to object functions.");
         }
     }
+    // Step 3a: scalar-i64 functions compare against the LLVM-IR
+    // encoding instead of the source model's expected value. The IR
+    // module parses once and is shared across functions; when no IR is
+    // available the source-model comparison stays.
+    let mut parsed_ir = None;
+    let mut parsed_ir_failed = false;
     let entry_wrapper_applicable = data.object_surface.defined.contains("main")
         && data.object_surface.defined.contains("__mumei_user_main")
         && source_models.get("__mumei_user_main").is_some_and(|model| {
@@ -4394,14 +4400,56 @@ fn evaluate_machine_tv(data: &ObjectRecheckData) -> Result<MachineTvEvaluation, 
                 branch_shape = machine_tv::branch_shape(&bytes, address, &call_targets);
                 has_conditional_call =
                     machine_tv::has_conditional_branch_and_call(&bytes, address, &call_targets);
-                let (outcome, preservation, frame_memory_use_result) =
-                    machine_tv::check_function_with_frame_memory(
+                // Step 3a: in the scalar-i64 subset the expected value
+                // comes from the LLVM-IR encoding rather than the
+                // source model. Without IR, or when the function
+                // cannot be encoded, the source-model comparison stays
+                // — the `source_machine_tv` claim is machine↔source
+                // either way (IR edges are bound to the source by the
+                // hir→llvm_ir translation validation).
+                let ir_encoding = if machine_tv::ir_object_signature_liftable(model)
+                    && !data.llvm_bytes.is_empty()
+                {
+                    if parsed_ir.is_none() && !parsed_ir_failed {
+                        match unsafe { tv::parse_ir_module_for_comparison(&data.llvm_bytes) } {
+                            Ok(module) => parsed_ir = Some(module),
+                            Err(_) => parsed_ir_failed = true,
+                        }
+                    }
+                    let symbol = tv::native_function_name(&model.function_name).to_owned();
+                    parsed_ir.as_ref().and_then(|module| unsafe {
+                        module
+                            .function(&symbol)
+                            .and_then(|raw| {
+                                tv::encode_parsed_function_for_comparison(
+                                    raw, model, false, &context,
+                                )
+                            })
+                            .ok()
+                    })
+                } else {
+                    None
+                };
+                let (outcome, preservation, frame_memory_use_result) = match ir_encoding {
+                    Some((ir_returns, ir_definedness)) => {
+                        machine_tv::check_function_with_frame_memory_against_ir(
+                            &bytes,
+                            address,
+                            model,
+                            &ir_returns,
+                            &ir_definedness,
+                            &call_targets,
+                            &context,
+                        )
+                    }
+                    None => machine_tv::check_function_with_frame_memory(
                         &bytes,
                         address,
                         model,
                         &call_targets,
                         &context,
-                    );
+                    ),
+                };
                 callee_saved_preservation = preservation;
                 frame_memory_use = frame_memory_use_result;
                 outcome

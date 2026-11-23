@@ -247,6 +247,12 @@ pub struct FrameMemoryUse {
     pub allocated: bool,
 }
 
+/// Borrowed LLVM-IR encoding used as the expected value in the
+/// scalar-i64 machine-TV comparison (Step 3a): `(path_condition,
+/// return_value)` edges plus `(path_condition, defined)` definedness
+/// obligations over the shared `model.inputs`.
+type ExpectedIr<'a, 'ctx> = (&'a [(Bool<'ctx>, BV<'ctx>)], &'a [(Bool<'ctx>, Bool<'ctx>)]);
+
 /// Verdict of the direct LLVM-IR ↔ object-function comparison used by
 /// the `llvm_ir_object_equivalence` correspondence item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -382,6 +388,45 @@ pub fn check_function_with_frame_memory<'ctx>(
         call_targets,
         context,
         ResultWidth::I64,
+        None,
+    )
+}
+
+/// Like `check_function_with_frame_memory` but the expected value is
+/// the LLVM-IR encoding — `ir_returns` edges and `ir_definedness`
+/// obligations over the shared `model.inputs` from
+/// `translation_validation::encode_ir_function_for_comparison` —
+/// instead of the source model's `model.value` (design memo §7 Step
+/// 3a). Scoped to scalar-i64 signatures: any other shape reports
+/// `OutsideProfile`.
+pub fn check_function_with_frame_memory_against_ir<'ctx>(
+    bytes: &[u8],
+    address: u64,
+    model: &PureI64Body<'ctx>,
+    ir_returns: &[(Bool<'ctx>, BV<'ctx>)],
+    ir_definedness: &[(Bool<'ctx>, Bool<'ctx>)],
+    call_targets: &BTreeMap<u64, CallTarget>,
+    context: &'ctx Context,
+) -> (
+    FunctionOutcome,
+    Option<CalleeSavedPreservation>,
+    FrameMemoryUse,
+) {
+    if ir_returns.is_empty() || ir_returns.iter().any(|(_, value)| value.get_size() != 64) {
+        return (
+            FunctionOutcome::OutsideProfile("unsupported_ir"),
+            None,
+            FrameMemoryUse::default(),
+        );
+    }
+    check_function_with_result_width(
+        bytes,
+        address,
+        model,
+        call_targets,
+        context,
+        ResultWidth::I64,
+        Some((ir_returns, ir_definedness)),
     )
 }
 
@@ -417,6 +462,7 @@ pub fn check_entry_wrapper_with_preservation(
         call_targets,
         context,
         ResultWidth::I32,
+        None,
     );
     (outcome, preservation)
 }
@@ -428,6 +474,7 @@ fn check_function_with_result_width<'ctx>(
     call_targets: &BTreeMap<u64, CallTarget>,
     context: &'ctx Context,
     result_width: ResultWidth,
+    expected_ir: Option<ExpectedIr<'_, 'ctx>>,
 ) -> (
     FunctionOutcome,
     Option<CalleeSavedPreservation>,
@@ -509,9 +556,21 @@ fn check_function_with_result_width<'ctx>(
         Ok(lifted) => lifted,
         Err(outcome) => return (outcome, None, FrameMemoryUse::default()),
     };
+    // The IR-edge mode covers scalar-i64 signatures only: a scalar
+    // 64-bit model value, no aggregate result shape, and exactly one
+    // return slot per lifted path.
+    let expected_ir =
+        expected_ir.filter(|_| model.result_shape.is_none() && model.value.get_size() == 64);
     let mut unknown_path = false;
     let mut unsupported_call_arguments = false;
     for path in &lifted.paths {
+        if expected_ir.is_some() && path.return_values.len() != 1 {
+            return (
+                FunctionOutcome::OutsideProfile("unsupported_signature"),
+                None,
+                FrameMemoryUse::default(),
+            );
+        }
         let result = check_query_with_simplify_fallback(context, |solver| {
             assert_path_equivalence_query(
                 solver,
@@ -519,6 +578,7 @@ fn check_function_with_result_width<'ctx>(
                 &lifted.arguments,
                 path,
                 result_width,
+                expected_ir,
                 context,
             );
         });
@@ -921,6 +981,7 @@ fn assert_path_equivalence_query<'ctx>(
     arguments: &[BV<'ctx>],
     path: &LiftedPath<'ctx>,
     result_width: ResultWidth,
+    expected_ir: Option<ExpectedIr<'_, 'ctx>>,
     context: &'ctx Context,
 ) {
     let substitutions = input_substitutions(model, arguments);
@@ -935,7 +996,34 @@ fn assert_path_equivalence_query<'ctx>(
         .map(|value| value.substitute(&substitutions))
         .collect();
     let model_value = model.value.substitute(&substitutions);
-    let output_matches = if let Some(leaf_count) = model.result_shape {
+    let output_matches = if let Some((ir_returns, ir_definedness)) = expected_ir {
+        // The expected value is the IR encoding: some edge must cover
+        // this machine path with a matching return and discharged
+        // definedness obligations — the same mismatch disjunction as
+        // `check_function_against_ir`, negated into an equality claim.
+        let machine_return = &substituted_returns[0];
+        let coverage: Vec<Bool> = ir_returns
+            .iter()
+            .map(|(condition, _)| condition.substitute(&substitutions))
+            .collect();
+        let coverage_refs = coverage.iter().collect::<Vec<_>>();
+        let mut mismatches = vec![Bool::or(context, &coverage_refs).not()];
+        for (condition, value) in ir_returns {
+            let condition = condition.substitute(&substitutions);
+            let value = value.substitute(&substitutions);
+            mismatches.push(Bool::and(
+                context,
+                &[&condition, &machine_return._eq(&value).not()],
+            ));
+        }
+        for (condition, defined) in ir_definedness {
+            let condition = condition.substitute(&substitutions);
+            let defined = defined.substitute(&substitutions);
+            mismatches.push(Bool::and(context, &[&condition, &defined.not()]));
+        }
+        let mismatches_refs = mismatches.iter().collect::<Vec<_>>();
+        Bool::or(context, &mismatches_refs).not()
+    } else if let Some(leaf_count) = model.result_shape {
         let matches = (0..leaf_count)
             .map(|leaf| {
                 let source_leaf = aggregate_leaf(&model_value, leaf_count, leaf);
@@ -5991,6 +6079,65 @@ entry:
             check_function_against_ir(&[], 0, &model, &[], &[], &BTreeMap::new(), &context,),
             IrObjectEquivalence::NotLiftable("unsupported_signature")
         );
+    }
+
+    #[test]
+    fn frame_memory_check_uses_ir_edges_as_expected_value() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // Step 3a: with `check_function_with_frame_memory_against_ir`
+        // the expected return comes from the IR edges, not
+        // `model.value` — an IR that disagrees with the machine code
+        // reports `Different` even though source and machine agree.
+        let model = source_model(
+            "atom add(x: i64, y: i64) -> i64 requires: true; ensures: result == x + y; body: { x + y };",
+            &context,
+        );
+        let add_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @helper(i64 %x, i64 %y) {
+entry:
+  %r = add i64 %x, %y
+  ret i64 %r
+}
+"#;
+        let divergent_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @helper(i64 %x, i64 %y) {
+entry:
+  %r = sub i64 %x, %y
+  ret i64 %r
+}
+"#;
+        let (address, bytes) = compiled_function(add_ir);
+        for (ir, expected) in [
+            (add_ir, FunctionOutcome::Equivalent),
+            (divergent_ir, FunctionOutcome::Different),
+        ] {
+            let (ir_returns, ir_definedness) = unsafe {
+                crate::translation_validation::encode_ir_function_for_comparison(
+                    ir.as_bytes(),
+                    "helper",
+                    &model,
+                    false,
+                    &context,
+                )
+            }
+            .unwrap();
+            assert_eq!(
+                check_function_with_frame_memory_against_ir(
+                    &bytes,
+                    address,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &BTreeMap::new(),
+                    &context,
+                )
+                .0,
+                expected
+            );
+        }
     }
 
     #[test]
