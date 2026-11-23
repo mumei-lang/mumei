@@ -1782,9 +1782,14 @@ fn enum_field_assign<'a>(
     let Some((vidx, fidx)) = owner else {
         return Ok(None);
     };
-    if datatype::is_direct_self_field(edef, &edef.variants[vidx].field_types[fidx], vc.module_env) {
+    if let Some(target_enum) = datatype::recursive_field_target(
+        edef,
+        &edef.variants[vidx].field_types[fidx],
+        vc.module_env,
+    ) {
         return Err(MumeiError::type_error(format!(
-            "enum field write '{var}' cannot update or traverse a recursive self payload"
+            "enum field write '{var}' cannot update or traverse a recursive self payload targeting '{}'",
+            target_enum.name
         )));
     }
     if value.binds_name(base) {
@@ -2021,6 +2026,9 @@ fn enum_field_assign<'a>(
                 leaf_args.push(sel);
             }
         }
+    }
+    if let Some(solver) = solver_opt {
+        datatype::check_enum_field_payload_domains(vc, solver, edef, variant, fidx, &leaf_args)?;
     }
     let Some(rebuilt) = datatype::enum_ctor_apply_leaves(vc, edef, vidx, &leaf_args) else {
         return Ok(None);
