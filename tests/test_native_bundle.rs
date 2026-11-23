@@ -587,9 +587,10 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     // verdict-bearing claim).
     assert_eq!(object_translation["status"], "checked_correspondence");
     let transformations = object_translation["transformations"].as_array().unwrap();
-    assert_eq!(transformations.len(), 3);
+    assert_eq!(transformations.len(), 4);
     // The digest-bearing edges keep indices 0 and 1 for consumer
-    // compatibility; the source->machine edge is appended last.
+    // compatibility; the source->machine and hir->llvm_ir edges are
+    // appended after them.
     assert_eq!(transformations[0]["from"], "llvm_ir");
     assert_eq!(transformations[0]["to"], "object_code");
     assert_eq!(
@@ -613,6 +614,17 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     // Machine code is evaluated in memory and never persisted, so its
     // edge carries no artifact digest.
     assert!(transformations[2]["output_identity"].is_null());
+    // The hir->llvm_ir edge names the HIR-anchored model comparison;
+    // `result` mirrors the check item: every in-subset atom proved
+    // equivalent on this bundle.
+    assert_eq!(transformations[3]["from"], "hir");
+    assert_eq!(transformations[3]["to"], "llvm_ir");
+    assert_eq!(transformations[3]["relation"], "existing_llvm_emitter");
+    assert_eq!(
+        transformations[3]["validation"],
+        "checked_hir_llvm_model_correspondence"
+    );
+    assert_eq!(transformations[3]["result"], "checked_correspondence");
     assert_eq!(
         transformations[2]["validation"],
         "checked_source_machine_tv_within_profile"
@@ -717,6 +729,48 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
         source_machine_tv["unchecked_domains"],
         descriptor["checks_not_performed"]
     );
+}
+
+#[test]
+fn hir_llvm_correspondence_covers_main_callers_and_generic_structs() {
+    // `caller` calls `main()`, which the bundle emitter renames to
+    // `__mumei_user_main` — the model comparison must meet the emitted
+    // member, not the source name. `pair_sum` takes `Pair<i64>`: the
+    // generic declaration's `T` specializes from the atom's own
+    // signature so a concrete all-i64 instantiation stays inside the
+    // leaf subset.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "struct Pair<T> { a: T, b: T }\n\
+         atom pair_sum(p: Pair<i64>) -> i64 requires: true; ensures: true; body: { p.a + p.b };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 7 };\n\
+         atom caller() -> i64 requires: true; ensures: true; body: { main() };\n",
+    );
+    let output = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let checks = descriptor["object_translation"]["correspondence"]["checks"]
+        .as_array()
+        .unwrap();
+    let hir_check = checks
+        .iter()
+        .find(|check| check["item"] == "hir_llvm_model_correspondence")
+        .unwrap();
+    assert_eq!(hir_check["result"], "checked");
+    assert_eq!(
+        hir_check["detail"],
+        "3 of 3 atoms equivalent within the leaf subset (0 outside)"
+    );
+    // The edge's result mirrors the check item's aggregate.
+    let transformations = descriptor["object_translation"]["transformations"]
+        .as_array()
+        .unwrap();
+    let hir_edge = transformations
+        .iter()
+        .find(|edge| edge["from"] == "hir" && edge["to"] == "llvm_ir")
+        .unwrap();
+    assert_eq!(hir_edge["result"], "checked_correspondence");
 }
 
 #[test]
@@ -6350,7 +6404,7 @@ fn accept_object_accepts_loop_bundle_with_object_link() {
     };
     assert_eq!(translation["status"], expected_translation_status);
     let transformations = translation["transformations"].as_array().unwrap();
-    assert_eq!(transformations.len(), 3);
+    assert_eq!(transformations.len(), 4);
     let link_edge = transformations
         .iter()
         .find(|edge| edge["relation"] == "static_link_relocation_placement")

@@ -712,6 +712,26 @@ impl SemanticContract {
             validation: "checked_object_link_correspondence",
         });
     }
+
+    /// Promotes the `hir → llvm_ir` relation's validation to
+    /// `checked_hir_llvm_model_correspondence` — the HIR-anchored
+    /// model comparison `validate_hir_pure_i64_leaf` performs
+    /// (`docs/DESIGN_HIR_LLVM_CORRESPONDENCE.md`). Only the
+    /// native-bundle prepare paths call this, so plain `verify`
+    /// keeps `unchecked_not_translation_validated` on the edge.
+    ///
+    /// The `checked_*` value names the validation method the profile
+    /// applies; it is relation vocabulary, not verdict or check
+    /// promotion. The per-atom outcome is reported by the recheck
+    /// descriptor's `result`, which stays honest when an atom falls
+    /// outside the leaf subset.
+    pub fn emit_native_hir_llvm_transformation(&mut self) {
+        for relation in &mut self.transformations {
+            if relation.from == "hir" && relation.to == "llvm_ir" {
+                relation.validation = "checked_hir_llvm_model_correspondence";
+            }
+        }
+    }
 }
 
 /// Extract the last atom of a module of explicit-i64 atoms without imports,
@@ -14725,6 +14745,40 @@ mod tests {
         // Re-emitting is a no-op, not a duplicate append.
         contract.emit_native_object_transformations();
         assert_eq!(contract.transformations.len(), 9);
+    }
+
+    #[test]
+    fn native_hir_llvm_transformation_emit_only_on_request() {
+        let mut contract = extract(SOURCE).unwrap();
+        // Plain extraction keeps `unchecked_not_translation_validated`
+        // on the `hir → llvm_ir` edge.
+        let edge = contract
+            .transformations
+            .iter()
+            .find(|relation| relation.from == "hir" && relation.to == "llvm_ir")
+            .unwrap();
+        assert_eq!(edge.validation, "unchecked_not_translation_validated");
+
+        contract.emit_native_hir_llvm_transformation();
+        let edge = contract
+            .transformations
+            .iter()
+            .find(|relation| relation.from == "hir" && relation.to == "llvm_ir")
+            .unwrap();
+        assert_eq!(edge.validation, "checked_hir_llvm_model_correspondence");
+        // The emit promotes the edge's method in place — no relation
+        // is appended or duplicated.
+        assert_eq!(
+            contract
+                .transformations
+                .iter()
+                .filter(|relation| relation.from == "hir" && relation.to == "llvm_ir")
+                .count(),
+            1
+        );
+        // Re-emitting is a no-op.
+        contract.emit_native_hir_llvm_transformation();
+        assert_eq!(contract.transformations.len(), 6);
     }
 
     #[test]

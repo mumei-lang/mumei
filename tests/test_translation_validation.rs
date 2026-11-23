@@ -4174,7 +4174,7 @@ fn hir_outcome(source: &str, ir: &str) -> Outcome {
         panic!("atom")
     };
     let hir = lower_atom_to_hir(&atom);
-    tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), ir, Options::default()).unwrap()
+    tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), ir, false, Options::default()).unwrap()
 }
 
 #[test]
@@ -4184,6 +4184,23 @@ fn hir_leaf_compare_is_equivalent_on_emitted_ir() {
         hir_outcome(&src, &emitted(&src)),
         Outcome::EquivalentWithinProfile
     );
+}
+
+#[test]
+fn hir_leaf_compare_keeps_plain_ir_main_names() {
+    // `native_main_rename = false` compares call targets as written:
+    // `main()` meets `@main`, and `@__mumei_user_main` — the bundle
+    // emitter's private name — is simply a different function. The
+    // rename stays the recheck path's alone.
+    let src = "atom caller() -> i64 requires: true; ensures: true; body: { main() };\n\
+               atom main() -> i64 requires: true; ensures: true; body: { 7 };";
+    let plain = pin(
+        "define i64 @caller() {\n %r = call i64 @main()\n ret i64 %r }\n\
+         define i64 @main() { ret i64 7 }",
+    );
+    assert_eq!(hir_outcome(src, &plain), Outcome::EquivalentWithinProfile);
+    let renamed = plain.replace("@main", "@__mumei_user_main");
+    assert_eq!(hir_outcome(src, &renamed), Outcome::Different);
 }
 
 #[test]
@@ -4225,6 +4242,7 @@ fn hir_leaf_compare_rejects_atoms_outside_the_subset() {
         &hir,
         &BTreeMap::new(),
         &pin("define i64 @f(i64 %x) { ret i64 %x }"),
+        false,
         Options::default()
     )
     .is_err());
@@ -4321,7 +4339,8 @@ fn hir_leaf_compare_rejects_mixed_width_signatures() {
     let hir = lower_atom_to_hir(&atom);
     let ir = pin("define i64 @f(i64 %x) { ret i64 %x }");
     assert!(
-        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, Options::default()).is_err(),
+        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, false, Options::default())
+            .is_err(),
         "mixed-width signatures stay outside the subset"
     );
 }
@@ -4349,7 +4368,8 @@ fn hir_leaf_compare_rejects_f64_operations_and_wrong_ret() {
     let hir = lower_atom_to_hir(&atom);
     let ir = pin("define double @f(double %x, double %y) { ret double %x }");
     assert!(
-        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, Options::default()).is_err(),
+        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, false, Options::default())
+            .is_err(),
         "f64 arithmetic stays outside the pass-through subset"
     );
     // An `i64` return where the source declares `f64` fails the
@@ -4364,7 +4384,8 @@ fn hir_leaf_compare_rejects_f64_operations_and_wrong_ret() {
     // this would compare `Different` instead of erroring.
     let ir = pin("define i64 @f(double %x) { ret i64 0 }");
     assert!(
-        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, Options::default()).is_err(),
+        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, false, Options::default())
+            .is_err(),
         "an i64 return where f64 is declared fails the kind gate"
     );
 }
@@ -4401,7 +4422,8 @@ fn hir_leaf_compare_rejects_ordered_ops_over_call_results() {
     let hir = lower_atom_to_hir(&atom);
     let ir = pin("declare i64 @g(i64)\ndefine i64 @f(i64 %x, i64 %y) { %c = call i64 @g(i64 %x)\n %cmp = icmp sgt i64 %c, %y\n %r = zext i1 %cmp to i64\n ret i64 %r }");
     assert!(
-        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, Options::default()).is_err(),
+        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, false, Options::default())
+            .is_err(),
         "ordered ops over a call result stay outside the subset"
     );
 }
@@ -4445,8 +4467,14 @@ fn hir_leaf_compare_rejects_array_writes_and_whole_values() {
         };
         let hir = lower_atom_to_hir(&atom);
         assert!(
-            tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &real_ir, Options::default())
-                .is_err(),
+            tv::validate_hir_pure_i64_leaf(
+                &hir,
+                &BTreeMap::new(),
+                &real_ir,
+                false,
+                Options::default()
+            )
+            .is_err(),
             "{body} stays outside the read-only leaf subset"
         );
     }
@@ -4465,7 +4493,8 @@ fn hir_outcome_with_structs(
     structs: &BTreeMap<String, Vec<(String, String)>>,
     ir: &str,
 ) -> Outcome {
-    tv::validate_hir_pure_i64_leaf(&hir_atom(source), structs, ir, Options::default()).unwrap()
+    tv::validate_hir_pure_i64_leaf(&hir_atom(source), structs, ir, false, Options::default())
+        .unwrap()
 }
 
 /// `emitted` for sources whose first item is a struct declaration:
@@ -4558,6 +4587,7 @@ fn hir_leaf_compare_rejects_aggregate_misuse() {
                 &hir_atom(&src),
                 &pair_env(),
                 &real_ir,
+                false,
                 Options::default()
             )
             .is_err(),
@@ -4572,6 +4602,7 @@ fn hir_leaf_compare_rejects_aggregate_misuse() {
             &hir_atom(unknown),
             &pair_env(),
             &emitted_atom(unknown),
+            false,
             Options::default()
         )
         .is_err(),
@@ -4591,6 +4622,7 @@ atom f(w: Wide) -> i64 requires: true; ensures: true; body: { w.a };";
             &hir_atom(wide),
             &wide_env,
             &emitted_atom(wide),
+            false,
             Options::default()
         )
         .is_err(),
@@ -4604,6 +4636,7 @@ atom f() -> Unit requires: true; ensures: true; body: { Unit {} };";
             &hir_atom(empty),
             &empty_env,
             &emitted_atom(empty),
+            false,
             Options::default()
         )
         .is_err(),

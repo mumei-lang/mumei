@@ -5118,6 +5118,7 @@ fn object_translation_correspondence_checks(
     executable_bytes: &[u8],
     record: &ObjectTranslationRecord,
     ir_equivalence: Option<&BTreeMap<String, &'static str>>,
+    hir_llvm: Option<&BTreeMap<String, &'static str>>,
 ) -> serde_json::Value {
     let check = |item: &str, result: &str, detail: String| serde_json::json!({"item": item, "result": result, "detail": detail});
     let mut checks = Vec::new();
@@ -5496,6 +5497,57 @@ fn object_translation_correspondence_checks(
         }
     }
 
+    // hir_llvm_model_correspondence: the HIR-anchored per-atom model
+    // comparison against the emitted IR. `checked` when every atom the
+    // encoder admits proved equivalent (atoms outside the subset stay
+    // honestly uncovered in `detail`), `inconsistent` on any
+    // divergence, `unchecked` when nothing was compared.
+    match hir_llvm {
+        Some(outcomes) if !outcomes.is_empty() => {
+            let diverged: Vec<&String> = outcomes
+                .iter()
+                .filter(|(_, outcome)| **outcome == "inconsistent")
+                .map(|(name, _)| name)
+                .collect();
+            let checked = outcomes
+                .values()
+                .filter(|outcome| **outcome == "checked")
+                .count();
+            let uncovered = outcomes.len() - checked - diverged.len();
+            if !diverged.is_empty() {
+                checks.push(check(
+                    "hir_llvm_model_correspondence",
+                    "inconsistent",
+                    format!(
+                        "{} of {} atoms diverge from their IR model: {diverged:?}",
+                        diverged.len(),
+                        outcomes.len(),
+                    ),
+                ));
+            } else if checked == 0 {
+                checks.push(check(
+                    "hir_llvm_model_correspondence",
+                    "unchecked",
+                    format!("{} atoms outside the hir→llvm_ir leaf subset", uncovered,),
+                ));
+            } else {
+                checks.push(check(
+                    "hir_llvm_model_correspondence",
+                    "checked",
+                    format!(
+                        "{checked} of {} atoms equivalent within the leaf subset ({uncovered} outside)",
+                        outcomes.len(),
+                    ),
+                ));
+            }
+        }
+        _ => checks.push(check(
+            "hir_llvm_model_correspondence",
+            "unchecked",
+            "no source atoms or LLVM IR to compare".to_owned(),
+        )),
+    }
+
     let any_inconsistent = checks
         .iter()
         .any(|check| check["result"].as_str() == Some("inconsistent"));
@@ -5596,6 +5648,232 @@ fn llvm_ir_object_equivalence_results(
     Some(outcomes)
 }
 
+/// Per-atom `hir → llvm_ir` model-correspondence outcomes for the
+/// recheck descriptor (`docs/DESIGN_HIR_LLVM_CORRESPONDENCE.md`):
+/// each parsed atom is lowered against the same module env the emit
+/// used and compared with the emitted LLVM IR by
+/// `validate_hir_pure_i64_leaf`. `checked` marks an atom proved
+/// equivalent within the leaf subset, `inconsistent` a concrete
+/// divergence, and `unchecked` an atom outside the subset — the edge
+/// claims the method, never coverage it does not have. `None` when
+/// no source text or IR bytes are on hand to run it at all.
+fn hir_llvm_atom_outcomes(data: &ObjectRecheckData) -> Option<BTreeMap<String, &'static str>> {
+    let source = data.source_text.as_deref()?;
+    let llvm_ir = std::str::from_utf8(&data.llvm_bytes).ok()?;
+    let mut env = verification::ModuleEnv::default();
+    let mut atoms = Vec::new();
+    let mut struct_defs = Vec::new();
+    for item in parser::parse_module(source) {
+        match &item {
+            parser::Item::TypeDef(typedef) => env.register_type(typedef),
+            parser::Item::StructDef(def) => env.register_struct(def),
+            parser::Item::EnumDef(def) => env.register_enum(def),
+            parser::Item::Atom(atom) => env.register_atom(atom),
+            _ => {}
+        }
+        match item {
+            parser::Item::Atom(atom) => atoms.push(atom),
+            parser::Item::StructDef(def) => struct_defs.push(def),
+            _ => {}
+        }
+    }
+    let (module_header, members) = llvm_module_members(llvm_ir);
+    // Generic struct declarations specialize per instantiation at
+    // build time; the recheck applies the same substitution from each
+    // atom's own signature (`Pair<i64>` → field `T` binds `i64`) so a
+    // concrete all-i64 instantiation is not dropped by the raw `T`.
+    let mut outcomes = BTreeMap::new();
+    for atom in &atoms {
+        let structs = specialized_struct_map(atom, &struct_defs);
+        // The bundle emitter renames the user `main` atom to
+        // `__mumei_user_main` and adds a C `main` wrapper — the model
+        // comparison must target the user member, not the wrapper.
+        let original_name = atom.name.clone();
+        let (member_name, atom) = if atom.name == "main" {
+            let mut renamed = atom.clone();
+            renamed.name = "__mumei_user_main".to_owned();
+            ("__mumei_user_main".to_owned(), renamed)
+        } else {
+            (atom.name.clone(), atom.clone())
+        };
+        // `check_module` gates every member it sees; the per-atom
+        // comparison only owes the atom's own call graph. Slice the
+        // emitted module down to that closure so an unrelated member
+        // outside the subset — the C `main` wrapper, or a sibling
+        // atom the encoder does not admit — does not fail this atom's
+        // check. A callee outside the subset still fails closed.
+        let mut keep = BTreeSet::from([member_name.clone()]);
+        let mut stack = vec![member_name.clone()];
+        while let Some(name) = stack.pop() {
+            if let Some((_, calls)) = members.get(&name) {
+                for call in calls {
+                    if keep.insert(call.clone()) {
+                        stack.push(call.clone());
+                    }
+                }
+            }
+        }
+        let subset_ir = format!(
+            "{}{}",
+            module_header,
+            members
+                .iter()
+                .filter(|(name, _)| keep.contains(*name))
+                .map(|(_, (text, _))| text.clone())
+                .collect::<String>(),
+        );
+        let hir_atom = hir::lower_atom_to_hir_with_env(&atom, Some(&env));
+        let outcome = match tv::validate_hir_pure_i64_leaf(
+            &hir_atom,
+            &structs,
+            &subset_ir,
+            // The bundle emitter renames `main` to `__mumei_user_main`
+            // — the rename is this path's alone.
+            true,
+            tv::Options::default(),
+        ) {
+            Ok(tv::Outcome::EquivalentWithinProfile) => "checked",
+            Ok(tv::Outcome::Different | tv::Outcome::UndefinedBehavior) => "inconsistent",
+            _ => "unchecked",
+        };
+        outcomes.insert(original_name, outcome);
+    }
+    Some(outcomes)
+}
+
+/// The `structs` map for one atom: plain definitions as declared,
+/// generic definitions specialized by the instantiation the atom's
+/// own signature uses (`p: Pair<i64>` binds `T` to `i64`). A def the
+/// atom does not instantiate concretely keeps its raw field types and
+/// fails the encoder's leaf-subset admission honestly.
+fn specialized_struct_map(
+    atom: &parser::Atom,
+    defs: &[parser::StructDef],
+) -> BTreeMap<String, Vec<(String, String)>> {
+    // `Name<arg, ...>` → (Name, [args]); signature type strings are
+    // parser-produced, so a shallow split is a reliable shape.
+    let instantiation = |type_name: &str| -> Option<(String, Vec<String>)> {
+        let (name, rest) = type_name.split_once('<')?;
+        let args = rest
+            .strip_suffix('>')?
+            .split(',')
+            .map(|arg| arg.trim().to_owned())
+            .collect();
+        Some((name.to_owned(), args))
+    };
+    // The encoder admits a parameter by looking its type string up
+    // verbatim, so each entry keys on the whole instantiation
+    // (`Pair<i64>`), not the bare definition name. Nested arguments
+    // (`Box<Pair<i64>>` needs `Pair<i64>` admitted too) register
+    // recursively.
+    let mut instantiations = BTreeMap::<String, Vec<String>>::new();
+    let mut worklist: Vec<String> = atom
+        .params
+        .iter()
+        .filter_map(|param| param.type_name.clone())
+        .chain(atom.return_type.clone())
+        .collect();
+    while let Some(type_name) = worklist.pop() {
+        if let Some((name, args)) = instantiation(&type_name) {
+            worklist.extend(args.iter().cloned());
+            instantiations.entry(type_name).or_insert_with(|| {
+                defs.iter()
+                    .find(|def| def.name == name)
+                    .map(|_| args)
+                    .unwrap_or_default()
+            });
+        }
+    }
+    let mut map = BTreeMap::<String, Vec<(String, String)>>::new();
+    for def in defs {
+        map.insert(
+            def.name.clone(),
+            def.fields
+                .iter()
+                .map(|field| (field.name.clone(), field.type_name.clone()))
+                .collect(),
+        );
+    }
+    for (type_name, args) in &instantiations {
+        let Some(def) = defs.iter().find(|def| {
+            instantiation(type_name)
+                .map(|(name, _)| name == def.name)
+                .unwrap_or(false)
+        }) else {
+            continue;
+        };
+        if args.len() != def.type_params.len() {
+            continue;
+        }
+        map.insert(
+            type_name.clone(),
+            def.fields
+                .iter()
+                .map(|field| {
+                    let type_name = def
+                        .type_params
+                        .iter()
+                        .position(|param| param == &field.type_name)
+                        .map(|index| args[index].clone())
+                        .unwrap_or_else(|| field.type_name.clone());
+                    (field.name.clone(), type_name)
+                })
+                .collect(),
+        );
+    }
+    map
+}
+
+/// Splits an emitted LLVM IR module into its header (everything
+/// outside `define` blocks — target, declarations, attributes) and
+/// each `define` block keyed by function name with its direct `call`
+/// targets. The IR is machine-generated and never hand-edited, so
+/// `define`/`}` line boundaries are reliable delimiters.
+fn llvm_module_members(llvm_ir: &str) -> (String, BTreeMap<String, (String, Vec<String>)>) {
+    let mut header = String::new();
+    let mut members = BTreeMap::<String, (String, Vec<String>)>::new();
+    let mut lines = llvm_ir.lines();
+    while let Some(line) = lines.next() {
+        if !line.starts_with("define ") {
+            // Global definitions (`@name = constant ...`) belong to the
+            // member that referenced them — an unrelated member's string
+            // literal in the header would fail every atom's module check.
+            if !line.starts_with('@') {
+                header.push_str(line);
+                header.push('\n');
+            }
+            continue;
+        }
+        let name = line
+            .split('@')
+            .nth(1)
+            .and_then(|rest| rest.split('(').next())
+            .unwrap_or_default()
+            .to_owned();
+        let mut text = String::from(line);
+        text.push('\n');
+        let mut calls = Vec::new();
+        for body_line in lines.by_ref() {
+            text.push_str(body_line);
+            text.push('\n');
+            if body_line.contains('@') {
+                if let Some(target) = body_line
+                    .split('@')
+                    .nth(1)
+                    .and_then(|rest| rest.split(['(', ' ', ',']).next())
+                {
+                    calls.push(target.to_owned());
+                }
+            }
+            if body_line == "}" {
+                break;
+            }
+        }
+        members.insert(name, (text, calls));
+    }
+    (header, members)
+}
+
 /// Correspondence check block shared by the JSON descriptors and the
 /// text report: `{"status", "checks": [{item, result, detail}]}` with
 /// `checked` / `unchecked` / `inconsistent` results.
@@ -5604,11 +5882,13 @@ fn object_translation_correspondence_json(
     record: &ObjectTranslationRecord,
 ) -> serde_json::Value {
     let ir_equivalence = llvm_ir_object_equivalence_results(data, record);
+    let hir_llvm = hir_llvm_atom_outcomes(data);
     object_translation_correspondence_checks(
         &data.ir_surface,
         data.executable_bytes.as_slice(),
         record,
         ir_equivalence.as_ref(),
+        hir_llvm.as_ref(),
     )
 }
 
@@ -5684,6 +5964,27 @@ fn object_translation_json(
     } else {
         "metadata_only"
     };
+    // The `hir → llvm_ir` edge reports the per-atom model comparison's
+    // aggregate: `checked_correspondence` only when every compared atom
+    // proved equivalent, otherwise the honest fail-closed vocabulary.
+    // The item detail names divergent or uncovered atoms.
+    let hir_llvm_result = correspondence["checks"]
+        .as_array()
+        .and_then(|checks| {
+            checks
+                .iter()
+                .find(|check| check["item"].as_str() == Some("hir_llvm_model_correspondence"))
+        })
+        .and_then(|check| check["result"].as_str())
+        .map(|result| match result {
+            "checked" => "checked_correspondence",
+            // A divergent atom is validation that ran and failed —
+            // not an edge that never ran. Keep the two apart, as the
+            // check item's own detail does.
+            "inconsistent" => "inconsistent_correspondence",
+            _ => "unchecked_not_translation_validated",
+        })
+        .unwrap_or("unchecked_not_translation_validated");
     serde_json::json!({
         "status": status,
         "transformations": [
@@ -5723,6 +6024,21 @@ fn object_translation_json(
                 "relation": "machine_code_translation_validation",
                 "output_identity": null,
                 "validation": machine_tv_validation,
+            },
+            {
+                // `validation` names the HIR-anchored model comparison
+                // the recheck runs per atom; `result` mirrors the
+                // `hir_llvm_model_correspondence` check item so a
+                // report whose atoms are outside the subset — or
+                // whose IR diverged — does not claim this edge was
+                // validated. Appended last; the digest-bearing
+                // indices (0, 1) do not move.
+                "from": "hir",
+                "to": "llvm_ir",
+                "relation": "existing_llvm_emitter",
+                "output_identity": null,
+                "validation": "checked_hir_llvm_model_correspondence",
+                "result": hir_llvm_result,
             },
         ],
         "functions": record
@@ -6323,6 +6639,91 @@ entry:
             evaluation.outcomes.get("add"),
             Some(&FunctionOutcome::Equivalent)
         );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn hir_llvm_atom_outcomes_cover_main_calls_globals_and_generic_structs() {
+        // The recheck compares each atom's HIR against a sliced
+        // member subset of the bundle IR. This fixture pins the three
+        // edges that dropped atoms out of the subset:
+        //  - `caller` calls `main()`, which the emitter renames to
+        //    `__mumei_user_main` — the call rename map must translate;
+        //  - `@greeting` is an unrelated global: kept in the subset
+        //    header it would fail every atom's module check;
+        //  - `pair_sum` takes `Pair<i64>` — the generic declaration's
+        //    `T` must specialize to `i64` from the atom's signature.
+        let source = concat!(
+            "struct Pair<T> { a: T, b: T }\n",
+            "atom pair_sum(p: Pair<i64>) -> i64 requires: true; ensures: true; body: { p.a + p.b };\n",
+            "atom main() -> i64 requires: true; ensures: true; body: { 7 };\n",
+            "atom caller() -> i64 requires: true; ensures: true; body: { main() };\n",
+            "atom bad(x: i64) -> i64 requires: true; ensures: true; body: { x + 1 };\n",
+        );
+        let llvm_ir = r#"target triple = "x86_64-pc-linux-gnu"
+@greeting = internal constant [5 x i8] c"hi\0A\00\00"
+
+define i64 @__mumei_user_main() {
+entry:
+  ret i64 7
+}
+define i64 @caller() {
+entry:
+  %r = call i64 @__mumei_user_main()
+  ret i64 %r
+}
+define i64 @bad(i64 %x) {
+entry:
+  %r = sub i64 %x, 1
+  ret i64 %r
+}
+define i64 @pair_sum({ i64, i64 } %0) {
+entry:
+  %p.a = extractvalue { i64, i64 } %0, 0
+  %p.b = extractvalue { i64, i64 } %0, 1
+  %r = add i64 %p.a, %p.b
+  ret i64 %r
+}
+define i32 @main(i32 %argc, ptr %argv) {
+entry:
+  %r = call i64 @__mumei_user_main()
+  ret i32 0
+}
+"#;
+        let data = ObjectRecheckData {
+            stage: tempfile::tempdir().unwrap(),
+            family: RecordFamily::Single,
+            canonical_argv_compared: false,
+            admission: RefinedAdmission::Reject,
+            ir_surface: tv::IrFunctionSurface {
+                defined: BTreeSet::new(),
+                declared: BTreeSet::new(),
+                calls: BTreeMap::new(),
+                libc_calls: BTreeMap::new(),
+                call_edges_checkable: false,
+            },
+            object_surface: ObjectSymbolSurface {
+                defined: BTreeSet::new(),
+                undefined: BTreeSet::new(),
+                calls: BTreeMap::new(),
+                call_targets: BTreeMap::new(),
+                call_edges_checkable: false,
+            },
+            object_link_correspondence: false,
+            llvm_bytes: llvm_ir.as_bytes().to_vec(),
+            object_bytes: Vec::new(),
+            executable_bytes: Vec::new(),
+            object_translation: None,
+            resolved_call_sites: 0,
+            source_text: Some(source.to_owned()),
+        };
+        let outcomes = hir_llvm_atom_outcomes(&data).unwrap();
+        assert_eq!(outcomes.get("main"), Some(&"checked"));
+        assert_eq!(outcomes.get("caller"), Some(&"checked"));
+        assert_eq!(outcomes.get("pair_sum"), Some(&"checked"));
+        // A member that disagrees with its HIR is validation that ran
+        // and failed — named `inconsistent`, never `unchecked`.
+        assert_eq!(outcomes.get("bad"), Some(&"inconsistent"));
     }
 
     #[test]
@@ -7917,18 +8318,23 @@ entry:
             ("__mumei_user_main".to_owned(), "skipped"),
             ("main".to_owned(), "skipped"),
         ]);
+        let hir_llvm = BTreeMap::from([
+            ("helper".to_owned(), "checked"),
+            ("main".to_owned(), "checked"),
+        ]);
         let report = object_translation_correspondence_checks(
             &ir_surface,
             &executable_bytes,
             record,
             Some(&equivalent),
+            Some(&hir_llvm),
         );
         assert_eq!(report["status"], "checked_correspondence");
         let lines = object_translation_correspondence_report_lines(&report);
         assert_eq!(lines.len(), 1);
         assert_eq!(
             lines[0],
-            "Object translation correspondence: checked_correspondence (7 of 7 items checked)."
+            "Object translation correspondence: checked_correspondence (8 of 8 items checked)."
         );
         let results = results_of(&report);
         assert_eq!(
@@ -7947,6 +8353,10 @@ entry:
                     "llvm_ir_object_equivalence".to_owned(),
                     "checked".to_owned()
                 ),
+                (
+                    "hir_llvm_model_correspondence".to_owned(),
+                    "checked".to_owned()
+                ),
             ])
         );
 
@@ -7958,6 +8368,7 @@ entry:
             &executable_bytes,
             record,
             Some(&divergent),
+            None,
         );
         assert_eq!(report["status"], "inconsistent_correspondence");
         assert_eq!(
@@ -7975,6 +8386,37 @@ entry:
                 && line.contains("helper: different")
         }));
 
+        // A divergent atom makes the hir→llvm_ir item inconsistent —
+        // and the aggregate follows.
+        let hir_diverged = BTreeMap::from([("helper".to_owned(), "inconsistent")]);
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            Some(&equivalent),
+            Some(&hir_diverged),
+        );
+        assert_eq!(report["status"], "inconsistent_correspondence");
+        assert_eq!(
+            results_of(&report)["hir_llvm_model_correspondence"],
+            "inconsistent"
+        );
+
+        // Atoms all outside the leaf subset keep the item unchecked.
+        let hir_outside = BTreeMap::from([("helper".to_owned(), "unchecked")]);
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            Some(&equivalent),
+            Some(&hir_outside),
+        );
+        assert_eq!(report["status"], "unchecked_not_translation_validated");
+        assert_eq!(
+            results_of(&report)["hir_llvm_model_correspondence"],
+            "unchecked"
+        );
+
         // Nothing liftable keeps the item honestly `unchecked`, which
         // drops the aggregate back to unchecked_not_translation_validated.
         let unliftable = BTreeMap::from([("helper".to_owned(), "skipped")]);
@@ -7983,6 +8425,7 @@ entry:
             &executable_bytes,
             record,
             Some(&unliftable),
+            None,
         );
         assert_eq!(report["status"], "unchecked_not_translation_validated");
         assert_eq!(
@@ -7993,8 +8436,13 @@ entry:
         // A record missing a function is unmappable and count-mismatched.
         let mut short = record.clone();
         short.functions.pop();
-        let report =
-            object_translation_correspondence_checks(&ir_surface, &executable_bytes, &short, None);
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            &short,
+            None,
+            None,
+        );
         assert_eq!(report["status"], "inconsistent_correspondence");
         let results = results_of(&report);
         assert_eq!(results["function_coverage"], "inconsistent");
@@ -8015,6 +8463,7 @@ entry:
             &executable_bytes,
             &extra,
             None,
+            None,
         ));
         assert_eq!(results["function_coverage"], "inconsistent");
         assert_eq!(results["function_count"], "inconsistent");
@@ -8027,6 +8476,7 @@ entry:
             &executable_bytes,
             &bogus_target,
             None,
+            None,
         ));
         assert_eq!(results["relocation_targets"], "inconsistent");
 
@@ -8037,6 +8487,7 @@ entry:
             &ir_surface,
             &executable_bytes,
             &out_of_bounds,
+            None,
             None,
         ));
         assert_eq!(results["relocation_bounds"], "inconsistent");
@@ -8049,6 +8500,7 @@ entry:
             &executable_bytes,
             &unresolved,
             None,
+            None,
         );
         assert_eq!(report["status"], "unchecked_not_translation_validated");
         let results = results_of(&report);
@@ -8059,6 +8511,7 @@ entry:
             &tv::IrFunctionSurface::default(),
             &executable_bytes,
             record,
+            None,
             None,
         );
         assert_eq!(report["status"], "unchecked_not_translation_validated");
@@ -8138,8 +8591,13 @@ entry:
         assert!(corresponds);
         assert!(resolved_call_sites >= 1);
 
-        let report =
-            object_translation_correspondence_checks(&ir_surface, &executable_bytes, record, None);
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            None,
+            None,
+        );
         let targets = report["checks"]
             .as_array()
             .unwrap()

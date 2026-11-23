@@ -102,6 +102,12 @@ Ancak HIR'in kendisi referans alınırsa iki yarı (`source→HIR` ve
 2. call → bounded memory → aggregate/sret → i128 → f64 leaf
    （§7 と同じ拡張順、各段で fail-closed 回帰テスト）
 3. profile 条件付き emit + descriptor 反映 + docs
+   （着地済み: `emit_native_hir_llvm_transformation` が native-bundle
+   prepare 経路のみで `validation` を
+   `checked_hir_llvm_model_correspondence` に更新。recheck は
+   `hir_llvm_model_correspondence` 検査項目で各 atom の
+   `validate_hir_pure_i64_leaf` 結果を集約し、transformation 項目の
+   `result` に同値を emit）
 
 工数感: IR エンコーダが Steps 3a–3f で8 PR 掛かった規模。
 HIR 側は HirExpr バリアント網羅＋単体テスト群で同等〜それ以上の

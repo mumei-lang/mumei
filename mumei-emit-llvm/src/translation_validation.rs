@@ -428,6 +428,11 @@ pub fn validate_hir_pure_i64_leaf(
     atom: &mumei_core::hir::HirAtom,
     structs: &std::collections::BTreeMap<String, Vec<(String, String)>>,
     llvm_ir: &str,
+    // `true` only on the native-bundle recheck path: the bundle
+    // emitter renames the user `main` member to `__mumei_user_main`,
+    // so a source `main()` call must meet that member. Plain IR
+    // comparisons keep source names as they are.
+    native_main_rename: bool,
     options: Options,
 ) -> Result<Outcome> {
     bounded(llvm_ir)?;
@@ -453,10 +458,17 @@ pub fn validate_hir_pure_i64_leaf(
     // A declared target or data layout must match the emitter's — a
     // foreign layout could truncate GEP indices the array model reads
     // as 64-bit. A module declaring neither gets LLVM's defaults, like
-    // the pinned fixture modules the tests compare.
+    // the pinned fixture modules the tests compare. The native
+    // triple joins TARGET because the recheck compares bundle
+    // modules emitted under it (`validate_native_module` admits the
+    // same pair).
     let triple = module.get_triple();
     let layout = module.get_data_layout();
-    if (!triple.as_str().is_empty() && triple.as_str().to_bytes() != TARGET.as_bytes())
+    if (!triple.as_str().is_empty()
+        && !matches!(
+            triple.as_str().to_bytes(),
+            bytes if bytes == TARGET.as_bytes() || bytes == NATIVE_TARGET.as_bytes()
+        ))
         || (!layout.as_str().is_empty() && layout.as_str().to_bytes() != DATA_LAYOUT.as_bytes())
     {
         return Err(ValidationError("unsupported target or data layout"));
@@ -482,7 +494,11 @@ pub fn validate_hir_pure_i64_leaf(
             &context,
             function.as_value_ref(),
             &model,
-            &BTreeMap::new(),
+            &if native_main_rename {
+                native_call_renames(true)
+            } else {
+                BTreeMap::new()
+            },
             false,
             false,
             model.array_params.iter().any(|a| a.is_some()),
