@@ -73,15 +73,29 @@ fn scalar_array_payload_contents_remain_extensional() {
             "different in-range contents must not compare equal (bitvec={bitvec_i64}):\n{stdout}\n{stderr}"
         );
         let payload = verify_json(&output);
+        let diagnostic = payload["diagnostics"]
+            .as_array()
+            .and_then(|diagnostics| {
+                diagnostics.iter().find(|entry| {
+                    entry["atom"] == "scalar_array_payload_different_contents_reject_equality"
+                })
+            })
+            .unwrap_or_else(|| {
+                panic!("missing different-content equality diagnostic (bitvec={bitvec_i64}):\n{payload:#}")
+            });
+        assert_eq!(
+            diagnostic["code"], "failed",
+            "different-content equality must fail verification, not typecheck (bitvec={bitvec_i64}):\n{payload:#}"
+        );
+        assert_eq!(
+            diagnostic["failure_type"], "postcondition_violated",
+            "different-content equality must fail its postcondition (bitvec={bitvec_i64}):\n{payload:#}"
+        );
         assert!(
-            payload["diagnostics"]
-                .as_array()
-                .is_some_and(|diagnostics| {
-                    diagnostics.iter().any(|entry| {
-                        entry["atom"] == "scalar_array_payload_different_contents_reject_equality"
-                    })
-                }),
-            "missing different-content equality diagnostic (bitvec={bitvec_i64}):\n{payload:#}"
+            diagnostic["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("Postcondition (ensures) is not satisfied")),
+            "different-content equality must report a postcondition failure, not a type error (bitvec={bitvec_i64}):\n{payload:#}"
         );
     }
 }

@@ -125,6 +125,33 @@ fn unsafe_and_unsupported_struct_array_payloads_fail_closed_in_both_modes() {
                 "missing expected struct-array failure for {atom} (bitvec={bitvec_i64}):\n{payload:#}"
             );
         }
+        for atom in [
+            "direct_struct_array_payload_different_elements",
+            "nested_enum_struct_array_equality_rejects_different_contents",
+        ] {
+            let diagnostic = diagnostics
+                .iter()
+                .find(|entry| entry["atom"] == atom)
+                .unwrap_or_else(|| {
+                    panic!("missing equality diagnostic for {atom} (bitvec={bitvec_i64}):\n{payload:#}")
+                });
+            assert_eq!(
+                diagnostic["code"], "failed",
+                "different-content equality must fail verification, not typecheck, for {atom} (bitvec={bitvec_i64}):\n{payload:#}"
+            );
+            assert_eq!(
+                diagnostic["failure_type"], "postcondition_violated",
+                "different-content equality must fail its postcondition for {atom} (bitvec={bitvec_i64}):\n{payload:#}"
+            );
+            assert!(
+                diagnostic["message"]
+                    .as_str()
+                    .is_some_and(|message| {
+                        message.contains("Postcondition (ensures) is not satisfied")
+                    }),
+                "different-content equality must report a postcondition failure, not a type error, for {atom} (bitvec={bitvec_i64}):\n{payload:#}"
+            );
+        }
         let direct_read = diagnostics
             .iter()
             .find(|entry| entry["atom"] == "tagged_direct_struct_array_payload_read_remains_closed")
