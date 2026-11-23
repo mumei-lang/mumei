@@ -207,6 +207,117 @@ pub fn ir_function_surface(ir: &[u8]) -> std::result::Result<IrFunctionSurface, 
     Ok(surface)
 }
 
+/// Pinned-IR data globals with their derived initializer bytes, for
+/// the object-side data-section correspondence check
+/// (DESIGN_LLVM_OBJECT_CORRESPONDENCE.md Step 3). Every global that
+/// carries an initializer maps to `Some` of its byte content, or
+/// `None` when the initializer's shape is outside the derivable
+/// subset — the caller must treat those as unverifiable, never as
+/// zero-length data. Globals without an initializer (`extern`
+/// declarations) emit no data and are omitted.
+#[allow(clippy::result_unit_err)]
+pub fn ir_data_globals(ir: &[u8]) -> std::result::Result<BTreeMap<String, Option<Vec<u8>>>, ()> {
+    let context = LlvmContext::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            ir,
+            "data-globals.ll",
+        ))
+        .map_err(|_| ())?;
+    let mut globals = BTreeMap::new();
+    for global in module.get_globals() {
+        let name = global.get_name().to_str().map_err(|_| ())?.to_owned();
+        if name.starts_with("llvm.") {
+            continue;
+        }
+        let Some(initializer) = global.get_initializer() else {
+            continue;
+        };
+        globals.insert(name, unsafe {
+            data_initializer_bytes(initializer.as_value_ref())
+        });
+    }
+    Ok(globals)
+}
+
+/// Byte content of a constant initializer, or `None` when the shape
+/// cannot be rendered byte-exactly without a target data layout
+/// (pointers, structs, non-native floats).
+unsafe fn data_initializer_bytes(value: LLVMValueRef) -> Option<Vec<u8>> {
+    if !LLVMIsAConstantDataSequential(value).is_null() {
+        // `LLVMGetAsString` covers i8-element strings (the `str_lit`
+        // globals); wider element kinds return null — fall back to
+        // per-element derivation.
+        let mut len = 0usize;
+        let ptr = LLVMGetAsString(value, &mut len);
+        if !ptr.is_null() {
+            return Some(std::slice::from_raw_parts(ptr.cast::<u8>(), len).to_vec());
+        }
+        let count = LLVMGetArrayLength2(LLVMTypeOf(value));
+        let mut out = Vec::new();
+        for index in 0..count {
+            let element = LLVMGetAggregateElement(value, index as u32);
+            if element.is_null() {
+                return None;
+            }
+            out.extend(data_initializer_bytes(element)?);
+        }
+        return Some(out);
+    }
+    if !LLVMIsAConstantInt(value).is_null() {
+        let width = LLVMGetIntTypeWidth(LLVMTypeOf(value));
+        if width == 0 || width > 64 {
+            return None;
+        }
+        let bits = LLVMConstIntGetZExtValue(value);
+        return Some(bits.to_le_bytes()[..width.div_ceil(8) as usize].to_vec());
+    }
+    if !LLVMIsAConstantFP(value).is_null() {
+        let mut loses_flag = 0;
+        let real = LLVMConstRealGetDouble(value, &mut loses_flag);
+        return Some(match LLVMGetTypeKind(LLVMTypeOf(value)) {
+            LLVMTypeKind::LLVMDoubleTypeKind => real.to_le_bytes().to_vec(),
+            LLVMTypeKind::LLVMFloatTypeKind => (real as f32).to_le_bytes().to_vec(),
+            _ => return None,
+        });
+    }
+    if !LLVMIsAConstantAggregateZero(value).is_null() || LLVMIsNull(value) != 0 {
+        return Some(vec![0; type_store_bytes(LLVMTypeOf(value))?]);
+    }
+    if !LLVMIsAConstantArray(value).is_null() {
+        // Uniform element types leave no padding to model; structs
+        // would need the data layout, so they stay underivable.
+        let count = LLVMGetNumOperands(value);
+        let mut out = Vec::new();
+        for index in 0..count {
+            let element = LLVMGetOperand(value, index as u32);
+            if element.is_null() {
+                return None;
+            }
+            out.extend(data_initializer_bytes(element)?);
+        }
+        return Some(out);
+    }
+    None
+}
+
+/// Bytes a zero-initialized value of `ty` occupies in a data section.
+/// Only shapes whose store size is derivable without a data layout.
+unsafe fn type_store_bytes(ty: LLVMTypeRef) -> Option<usize> {
+    match LLVMGetTypeKind(ty) {
+        LLVMTypeKind::LLVMIntegerTypeKind => {
+            let width = LLVMGetIntTypeWidth(ty);
+            (width != 0 && width <= 64).then_some(width.div_ceil(8) as usize)
+        }
+        LLVMTypeKind::LLVMFloatTypeKind => Some(4),
+        LLVMTypeKind::LLVMDoubleTypeKind => Some(8),
+        LLVMTypeKind::LLVMArrayTypeKind => {
+            Some(type_store_bytes(LLVMGetElementType(ty))? * LLVMGetArrayLength2(ty) as usize)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod ir_function_surface_tests {
     use super::*;
