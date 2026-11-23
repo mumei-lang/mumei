@@ -2495,6 +2495,166 @@ fn array_value_equality<'a>(
     Ok(Bool::and(ctx, &[&len_eq, &contents_eq]))
 }
 
+fn enum_payload_value_equality<'a>(
+    vc: &VCtx<'a>,
+    left: &Dynamic<'a>,
+    right: &Dynamic<'a>,
+) -> MumeiResult<Option<Bool<'a>>> {
+    let Some(enum_def) = vc.module_env.enums.values().find(|enum_def| {
+        datatype::enum_datatype_sort(vc, enum_def).is_some_and(|sort| sort.sort == left.get_sort())
+    }) else {
+        return Ok(None);
+    };
+    let Some(sort) = datatype::enum_datatype_sort(vc, enum_def) else {
+        return Ok(None);
+    };
+    let mut has_array_payload = false;
+    let mut variant_equalities = Vec::with_capacity(enum_def.variants.len());
+    for (variant_idx, variant) in enum_def.variants.iter().enumerate() {
+        let Some((_, left_tag, _, _)) = datatype::variant_tester_condition(vc, left, &variant.name)
+        else {
+            return Ok(None);
+        };
+        let Some((_, right_tag, _, _)) =
+            datatype::variant_tester_condition(vc, right, &variant.name)
+        else {
+            return Ok(None);
+        };
+        let mut payload_equalities = Vec::new();
+        for (field_idx, field) in variant.field_types.iter().enumerate() {
+            let field_type = datatype::payload_field_type_name(field);
+            let Some(leaf_types) = datatype::field_leaf_types(&field_type, vc.module_env) else {
+                return Ok(None);
+            };
+            let Some((offset, _)) =
+                datatype::payload_leaf_range(enum_def, vc.module_env, variant_idx, field_idx)
+            else {
+                return Ok(None);
+            };
+            let mut compared_lengths = std::collections::HashSet::new();
+            for (leaf_idx, (name, base)) in leaf_types.iter().enumerate() {
+                if base == "array_len" {
+                    continue;
+                }
+                let Some(array_type) = base.strip_prefix("array:") else {
+                    let Some(left_value) = datatype::variant_selector_apply(
+                        &sort,
+                        variant_idx,
+                        offset + leaf_idx,
+                        left,
+                    ) else {
+                        return Ok(None);
+                    };
+                    let Some(right_value) = datatype::variant_selector_apply(
+                        &sort,
+                        variant_idx,
+                        offset + leaf_idx,
+                        right,
+                    ) else {
+                        return Ok(None);
+                    };
+                    if left_value.get_sort() != right_value.get_sort() {
+                        return Err(MumeiError::type_error(
+                            "Enum payload values have different field types",
+                        ));
+                    }
+                    payload_equalities.push(left_value._eq(&right_value));
+                    continue;
+                };
+                has_array_payload = true;
+                let Some(length_idx) = datatype::array_payload_length_index(&leaf_types, leaf_idx)
+                else {
+                    return Ok(None);
+                };
+                if compared_lengths.insert(length_idx) {
+                    let Some(left_len) = datatype::variant_selector_apply(
+                        &sort,
+                        variant_idx,
+                        offset + length_idx,
+                        left,
+                    ) else {
+                        return Ok(None);
+                    };
+                    let Some(right_len) = datatype::variant_selector_apply(
+                        &sort,
+                        variant_idx,
+                        offset + length_idx,
+                        right,
+                    ) else {
+                        return Ok(None);
+                    };
+                    let len_eq = if left_len.get_sort() == right_len.get_sort() {
+                        left_len._eq(&right_len)
+                    } else if let (Some(l), Some(r)) =
+                        (as_int_like(&left_len), as_int_like(&right_len))
+                    {
+                        l._eq(&r)
+                    } else {
+                        return Err(MumeiError::type_error(
+                            "Enum payload array lengths are not comparable",
+                        ));
+                    };
+                    payload_equalities.push(len_eq);
+                }
+                let Some(left_array) =
+                    datatype::variant_selector_apply(&sort, variant_idx, offset + leaf_idx, left)
+                        .and_then(|value| value.as_array())
+                else {
+                    return Ok(None);
+                };
+                let Some(right_array) =
+                    datatype::variant_selector_apply(&sort, variant_idx, offset + leaf_idx, right)
+                        .and_then(|value| value.as_array())
+                else {
+                    return Ok(None);
+                };
+                if left_array.get_sort() != right_array.get_sort() {
+                    return Err(MumeiError::type_error(format!(
+                        "Enum payload array leaf '{name}' has mismatched types"
+                    )));
+                }
+                let Some(len) =
+                    datatype::variant_selector_apply(&sort, variant_idx, offset + length_idx, left)
+                else {
+                    return Ok(None);
+                };
+                let Some(len) = as_int_like(&len) else {
+                    return Err(MumeiError::type_error(
+                        "Enum payload array length is not an integer",
+                    ));
+                };
+                let index = Int::fresh_const(vc.ctx, "enum_payload_index");
+                let in_bounds = Bool::and(
+                    vc.ctx,
+                    &[&index.ge(&Int::from_i64(vc.ctx, 0)), &index.lt(&len)],
+                );
+                let left_value = left_array.select(&index);
+                let right_value = right_array.select(&index);
+                let Some(element_eq) = array_eq_element(vc.ctx, &left_value, &right_value) else {
+                    return Err(MumeiError::type_error(format!(
+                        "Enum payload array leaf '{name}' cannot be compared"
+                    )));
+                };
+                payload_equalities.push(z3::ast::forall_const(
+                    vc.ctx,
+                    &[&index],
+                    &[],
+                    &in_bounds.implies(&element_eq),
+                ));
+                let _ = array_type;
+            }
+        }
+        let payload_refs: Vec<&Bool> = payload_equalities.iter().collect();
+        let payload_eq = Bool::and(vc.ctx, &payload_refs);
+        variant_equalities.push(Bool::and(vc.ctx, &[&left_tag, &right_tag, &payload_eq]));
+    }
+    if !has_array_payload {
+        return Ok(None);
+    }
+    let variant_refs: Vec<&Bool> = variant_equalities.iter().collect();
+    Ok(Some(Bool::or(vc.ctx, &variant_refs)))
+}
+
 fn enum_payload_field_read<'a>(
     vc: &VCtx<'a>,
     inner_expr: &Expr,
@@ -2617,9 +2777,17 @@ fn enum_payload_field_read<'a>(
     if field_leaves.len() != payload_width {
         return Ok(None);
     }
-    let direct_array_payload = datatype::array_payload_element_type(&field_leaves).is_some();
+    let direct_struct_array_payload =
+        datatype::struct_array_payload_element_type(&field_type, vc.module_env);
+    let direct_array_payload = datatype::array_payload_element_type(&field_leaves).is_some()
+        || direct_struct_array_payload.is_some();
+    if path.len() == 1 && direct_struct_array_payload.is_some() {
+        return Err(MumeiError::type_error(
+            "direct reads of struct-array enum payloads are not supported; destructure the payload with match",
+        ));
+    }
 
-    let mut terminal_type = field_type;
+    let mut terminal_type = field_type.clone();
     for segment in &path[1..] {
         let resolved = vc.module_env.resolve_base_type(&terminal_type);
         let Some(sdef) = vc.module_env.get_struct(&resolved).or_else(|| {
@@ -5312,6 +5480,25 @@ pub(crate) fn expr_to_z3<'a>(
                                             Some(datatype::PayloadSnapshot {
                                                 leaves: vec![array_ast.into(), len],
                                             })
+                                        } else if datatype::struct_array_payload_element_type(
+                                            &field_type,
+                                            vc.module_env,
+                                        )
+                                        .is_some()
+                                        {
+                                            if let Expr::Variable(name) = arg {
+                                                super::z3_types::mark_array_shared(ctx, env, name);
+                                            }
+                                            datatype::struct_array_payload_leaves(
+                                                vc,
+                                                env,
+                                                &field_type,
+                                                arg,
+                                                &arg_z3,
+                                                solver_opt,
+                                            )
+                                            .ok()?
+                                            .map(|leaves| datatype::PayloadSnapshot { leaves })
                                         } else if vc.module_env.structs.contains_key(
                                             &vc.module_env.resolve_base_type(&field_type),
                                         ) {
@@ -6023,7 +6210,8 @@ pub(crate) fn expr_to_z3<'a>(
                             && r.as_datatype().is_some()
                             && l.get_sort() == r.get_sort() =>
                     {
-                        let eq = l._eq(&r);
+                        let eq =
+                            enum_payload_value_equality(vc, &l, &r)?.unwrap_or_else(|| l._eq(&r));
                         return Ok(if matches!(op, Op::Neq) {
                             eq.not().into()
                         } else {

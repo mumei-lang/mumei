@@ -66,7 +66,7 @@ fn struct_array_payloads_verify_in_both_integer_modes() {
 
 #[test]
 fn unsafe_and_unsupported_struct_array_payloads_fail_closed_in_both_modes() {
-    const EXPECTED_FAILURES: [&str; 10] = [
+    const EXPECTED_FAILURES: [&str; 21] = [
         "overclaimed_struct_array_length",
         "out_of_bounds_struct_array_index",
         "different_struct_fields_keep_lengths_separate",
@@ -77,6 +77,17 @@ fn unsafe_and_unsupported_struct_array_payloads_fail_closed_in_both_modes() {
         "untagged_struct_array_write",
         "nested_array_in_struct_payload",
         "struct_array_in_struct_payload",
+        "direct_struct_array_payload_different_elements",
+        "direct_struct_array_payload_stale_reconstruction",
+        "tagged_direct_struct_array_payload_read_remains_closed",
+        "direct_struct_array_u32_constructor_domain",
+        "direct_struct_array_payload_field_write_rejected",
+        "direct_struct_array_payload_whole_element_write_rejected",
+        "direct_struct_array_payload_alias_write_rejected",
+        "direct_struct_array_payload_callee_write_rejected",
+        "direct_struct_array_nested_array_remains_closed",
+        "direct_struct_array_recursive_enum_remains_closed",
+        "direct_struct_array_generic_enum_remains_closed",
     ];
     for bitvec_i64 in [false, true] {
         let output = run_command(
@@ -106,7 +117,40 @@ fn unsafe_and_unsupported_struct_array_payloads_fail_closed_in_both_modes() {
                 "missing expected struct-array failure for {atom} (bitvec={bitvec_i64}):\n{payload:#}"
             );
         }
+        let direct_read = diagnostics
+            .iter()
+            .find(|entry| entry["atom"] == "tagged_direct_struct_array_payload_read_remains_closed")
+            .unwrap_or_else(|| {
+                panic!("missing direct-read diagnostic (bitvec={bitvec_i64}):\n{payload:#}")
+            });
+        assert!(
+            direct_read["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("destructure the payload with match")),
+            "direct struct-array reads must explain the supported match route (bitvec={bitvec_i64}):\n{payload:#}"
+        );
     }
+}
+
+#[test]
+fn codegen_rejects_struct_array_enum_payload_cleanly() {
+    let output = run_command(
+        "build",
+        "test_enum_struct_array_payload_codegen_unsupported.mm",
+        false,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "struct-array enum payload codegen should remain unsupported:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stderr.contains("struct-element array payloads are not supported by LLVM codegen")
+            && !stderr.contains("panicked")
+            && !stdout.contains("panicked"),
+        "unsupported struct-array enum payload codegen must fail cleanly:\n{stdout}\n{stderr}"
+    );
 }
 
 #[test]

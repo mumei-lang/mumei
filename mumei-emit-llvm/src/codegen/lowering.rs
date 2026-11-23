@@ -263,6 +263,25 @@ pub(crate) fn enum_llvm_type<'a>(
     module_env: &ModuleEnv,
 ) -> MumeiResult<inkwell::types::StructType<'a>> {
     ensure_type_acyclic(module_env, &enum_def.name)?;
+    for variant in &enum_def.variants {
+        for field in &variant.field_types {
+            let field_type = module_env.resolve_base_type(&field.display_name());
+            let Some(element_type) = field_type
+                .strip_prefix('[')
+                .and_then(|type_name| type_name.strip_suffix(']'))
+                .map(str::trim)
+            else {
+                continue;
+            };
+            let element_type = module_env.resolve_base_type(element_type);
+            if module_env.get_struct(&element_type).is_some() {
+                return Err(MumeiError::codegen(format!(
+                    "enum '{}' struct-element array payloads are not supported by LLVM codegen",
+                    enum_def.name
+                )));
+            }
+        }
+    }
     let max_fields = enum_def
         .variants
         .iter()

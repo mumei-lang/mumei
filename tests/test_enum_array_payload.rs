@@ -84,7 +84,7 @@ fn generic_enum_and_struct_payloads_verify_in_both_integer_modes() {
 
 #[test]
 fn unsupported_or_unsafe_enum_array_uses_fail_closed_in_both_modes() {
-    const EXPECTED_FAILURES: [&str; 11] = [
+    const EXPECTED_FAILURES: [&str; 10] = [
         "false_length_claim",
         "out_of_bounds_payload_read",
         "independent_payload_lengths",
@@ -94,7 +94,6 @@ fn unsupported_or_unsafe_enum_array_uses_fail_closed_in_both_modes() {
         "stale_array_tagged_write_uses_updated_elements",
         "match_tail_uses_outer_shadowed_length",
         "nested_array_payload",
-        "struct_array_payload",
         "untagged_array_read",
     ];
     for bitvec_i64 in [false, true] {

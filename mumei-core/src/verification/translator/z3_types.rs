@@ -1787,6 +1787,12 @@ fn struct_array_leaf_for_expr<'a>(
         Expr::Variable(source) => env
             .get(&struct_array_leaf_key(source, leaf_path))
             .and_then(|value| value.as_array()),
+        Expr::FieldAccess(_, _) => {
+            let arr = val_node.as_array()?;
+            let source = array_root_name(&arr)?;
+            env.get(&struct_array_leaf_key(&source, leaf_path))
+                .and_then(|value| value.as_array())
+        }
         Expr::ArrayLit(_) => {
             let arr = val_node.as_array()?;
             let source = array_root_name(&arr)?;

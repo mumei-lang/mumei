@@ -106,17 +106,24 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                                 datatype::payload_leaf_range(edef, vc.module_env, variant_idx, i)
                             })
                             .unwrap_or((i, 1));
-                        let has_array_payload = enum_def
-                            .and_then(|edef| {
-                                datatype::field_leaf_types(
-                                    &datatype::payload_field_type_name(
-                                        edef.variants[variant_idx].field_types.get(i)?,
-                                    ),
+                        let payload_field_type = enum_def.and_then(|edef| {
+                            edef.variants[variant_idx]
+                                .field_types
+                                .get(i)
+                                .map(datatype::payload_field_type_name)
+                        });
+                        let payload_leaves = payload_field_type.as_ref().and_then(|field_type| {
+                            datatype::field_leaf_types(field_type, vc.module_env)
+                        });
+                        let has_array_payload =
+                            payload_leaves.as_ref().is_some_and(|leaves| {
+                                datatype::array_payload_element_type(leaves).is_some()
+                            }) || payload_field_type.as_ref().is_some_and(|field_type| {
+                                datatype::struct_array_payload_element_type(
+                                    field_type,
                                     vc.module_env,
                                 )
-                            })
-                            .is_some_and(|leaves| {
-                                datatype::array_payload_element_type(&leaves).is_some()
+                                .is_some()
                             });
                         if has_array_payload {
                             if !matches!(field_pattern, Pattern::Variable(_) | Pattern::Wildcard) {
@@ -124,10 +131,23 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                                     "match pattern on array payload field '{variant_leaf}.{i}' must be a variable or '_'"
                                 )));
                             }
+                            let length_offset = payload_leaves
+                                .as_ref()
+                                .and_then(|leaves| {
+                                    datatype::array_payload_leaf_pairs(leaves).find_map(
+                                        |(array_index, _)| {
+                                            datatype::array_payload_length_index(
+                                                leaves,
+                                                array_index,
+                                            )
+                                        },
+                                    )
+                                })
+                                .unwrap_or(1);
                             let Some(len) = datatype::variant_selector_apply(
                                 &sort,
                                 variant_idx,
-                                off + 1,
+                                off + length_offset,
                                 target,
                             ) else {
                                 return Err(MumeiError::verification(
@@ -476,17 +496,26 @@ pub(crate) fn pattern_bind_variables<'a>(
                                     )
                                 })
                                 .unwrap_or((i, 1));
-                            let array_element = enum_def
-                                .and_then(|edef| {
-                                    datatype::field_leaf_types(
-                                        &datatype::payload_field_type_name(
-                                            edef.variants[variant_idx].field_types.get(i)?,
-                                        ),
+                            let payload_field_type = enum_def.and_then(|edef| {
+                                edef.variants[variant_idx]
+                                    .field_types
+                                    .get(i)
+                                    .map(datatype::payload_field_type_name)
+                            });
+                            let payload_leaves =
+                                payload_field_type.as_ref().and_then(|field_type| {
+                                    datatype::field_leaf_types(field_type, vc.module_env)
+                                });
+                            let array_element = payload_leaves
+                                .as_ref()
+                                .and_then(|leaves| datatype::array_payload_element_type(leaves))
+                                .map(str::to_owned);
+                            let struct_array_element =
+                                payload_field_type.as_ref().and_then(|field_type| {
+                                    datatype::struct_array_payload_element_type(
+                                        field_type,
                                         vc.module_env,
                                     )
-                                })
-                                .and_then(|leaves| {
-                                    datatype::array_payload_element_type(&leaves).map(str::to_owned)
                                 });
                             if let Some(element_type) = array_element {
                                 let Some(array) = datatype::variant_selector_apply(
@@ -523,6 +552,100 @@ pub(crate) fn pattern_bind_variables<'a>(
                                             .borrow_mut()
                                             .insert(name.clone(), element_type.clone());
                                     }
+                                }
+                                continue;
+                            }
+                            if let Some(element_type) = struct_array_element {
+                                let Some(leaves) = payload_leaves.as_ref() else {
+                                    continue;
+                                };
+                                let Some(length_index) =
+                                    leaves.iter().position(|(_, base)| base == "array_len")
+                                else {
+                                    continue;
+                                };
+                                let Some(len) = datatype::variant_selector_apply(
+                                    &sort,
+                                    variant_idx,
+                                    off + length_index,
+                                    target,
+                                ) else {
+                                    continue;
+                                };
+                                if let (Some(solver), Some(nonnegative)) =
+                                    (solver_opt, nonneg_constraint(vc.ctx, &len))
+                                {
+                                    solver.assert(&is_v.implies(&nonnegative));
+                                }
+                                let struct_leaves = super::z3_types::struct_array_leaf_types(
+                                    &element_type,
+                                    vc.module_env,
+                                )
+                                .unwrap_or_default();
+                                for (path, leaf_type) in &struct_leaves {
+                                    let Some((leaf_index, (_, leaf_sort))) = leaves
+                                        .iter()
+                                        .enumerate()
+                                        .find(|(_, (name, _))| name == &format!("#{path}"))
+                                    else {
+                                        continue;
+                                    };
+                                    let Some(array) = datatype::variant_selector_apply(
+                                        &sort,
+                                        variant_idx,
+                                        off + leaf_index,
+                                        target,
+                                    ) else {
+                                        continue;
+                                    };
+                                    if let Some(solver) = solver_opt {
+                                        let domain = if leaf_sort == &format!("array:{leaf_type}") {
+                                            if leaf_type.starts_with("enum:") {
+                                                datatype::enum_array_leaf_domain(vc, &array, &len)
+                                            } else {
+                                                datatype::array_int_leaf_domain(
+                                                    vc, &array, &len, leaf_type,
+                                                )
+                                            }
+                                        } else {
+                                            None
+                                        };
+                                        if let Some(domain) = domain {
+                                            solver.assert(&is_v.implies(&domain));
+                                        }
+                                    }
+                                    if let Pattern::Variable(name) = field_pattern {
+                                        let key =
+                                            super::z3_types::struct_array_leaf_key(name, path);
+                                        env.insert(key.clone(), array.clone());
+                                        bound.insert(key);
+                                    }
+                                }
+                                if let Pattern::Variable(name) = field_pattern {
+                                    super::z3_types::mark_array_shared(vc.ctx, env, name);
+                                    let carrier_name =
+                                        format!("__enum_struct_array_{name}_{}", env.len());
+                                    let Ok(carrier) = super::z3_types::z3_array_for_sort(
+                                        vc.ctx,
+                                        &carrier_name,
+                                        ArrayElementSort::Struct,
+                                    ) else {
+                                        continue;
+                                    };
+                                    env.insert(name.clone(), carrier.clone().into());
+                                    env.insert(format!("__z3_arr_{name}"), carrier.clone().into());
+                                    let len_key = super::z3_types::array_len_key(name);
+                                    let root_len_key = super::z3_types::array_root_len_key(name);
+                                    env.insert(len_key.clone(), len.clone());
+                                    env.insert(root_len_key.clone(), len.clone());
+                                    super::z3_types::register_array_value_len(env, &carrier, len);
+                                    bound.insert(name.clone());
+                                    bound.insert(format!("__z3_arr_{name}"));
+                                    bound.insert(len_key);
+                                    bound.insert(root_len_key);
+                                    vc.local_array_elem_types
+                                        .borrow_mut()
+                                        .insert(name.clone(), element_type);
                                 }
                                 continue;
                             }
