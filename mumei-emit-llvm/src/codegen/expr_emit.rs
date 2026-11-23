@@ -17,7 +17,7 @@ use crate::codegen::task_runtime::{
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
-use inkwell::module::Module;
+use inkwell::module::{Linkage, Module};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{
     AnyValue, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue,
@@ -1739,6 +1739,110 @@ pub(crate) fn emit_array_literal<'a>(
     Ok((len_val, elem_ty, data_ptr.into()))
 }
 
+/// Copies `len` elements of `elem_ty` from `data_ptr` into freshly `malloc`ed
+/// storage and returns the heap pointer. Used when a `-> [T]` atom's tail is
+/// callee-local (an array literal or a stack-bound alias): the `alloca` it
+/// points into dies with the frame, so the returned fat pointer must own a
+/// heap copy instead. Bindings copy for the same reason in reverse — the
+/// verifier treats each `let`/`=` binding as an independent array value, so
+/// a `t[i] = v` write must never reach the callee's (or an aliased
+/// parameter's) buffer. Ownership convention: the caller owns the copied
+/// buffer (there is no `free` on this path yet — the bounded-memory model
+/// does not track it).
+pub(crate) fn copy_array_to_heap<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    len_val: BasicValueEnum<'a>,
+    elem_ty: BasicTypeEnum<'a>,
+    data_ptr: BasicValueEnum<'a>,
+) -> MumeiResult<BasicValueEnum<'a>> {
+    let malloc_fn = module.get_function("malloc").unwrap_or_else(|| {
+        let ptr_type = context.ptr_type(inkwell::AddressSpace::default());
+        let fn_type = ptr_type.fn_type(&[context.i64_type().into()], false);
+        module.add_function("malloc", fn_type, Some(Linkage::External))
+    });
+    let elem_size = elem_ty
+        .size_of()
+        .ok_or_else(|| MumeiError::codegen("array element type is unsized"))?;
+    let byte_size =
+        llvm!(builder.build_int_mul(len_val.into_int_value(), elem_size, "ret_arr_bytes"));
+    // A `std/libc` import can declare `malloc` with an integer return; the
+    // real symbol still hands back a pointer, so bitcast the call result
+    // instead of assuming the declaration's shape.
+    let call_result = llvm!(builder.build_call(malloc_fn, &[byte_size.into()], "ret_arr_malloc"))
+        .try_as_basic_value()
+        .left()
+        .ok_or_else(|| MumeiError::codegen("malloc returned no value"))?;
+    let heap_ptr = match call_result {
+        BasicValueEnum::PointerValue(p) => p,
+        BasicValueEnum::IntValue(i) => llvm!(builder.build_int_to_ptr(
+            i,
+            context.ptr_type(inkwell::AddressSpace::default()),
+            "ret_arr_malloc_ptr",
+        )),
+        _ => {
+            return Err(MumeiError::codegen(
+                "malloc returned a non-pointer, non-integer value",
+            ))
+        }
+    };
+    llvm!(builder.build_memcpy(heap_ptr, 8, data_ptr.into_pointer_value(), 8, byte_size,));
+    Ok(heap_ptr.into())
+}
+
+/// `(len, data)` slots for a branch whose tail value is an array: a
+/// `Variable` tail resolving through the branch's `array_ptrs` entry, or a
+/// fat `{i64, ptr}` aggregate a call/`if`/`match`/`ArrayLit` tail produced.
+/// String bindings also register in `array_ptrs`, but they store their
+/// `*i8` in `variables` rather than the i64 length arrays carry, so they
+/// return `None` and keep merging through the scalar path as pointers.
+/// Extracts must be emitted inside `end_block` (before its terminator) —
+/// phi incomings have to be defined in (or dominate) the predecessor they
+/// attach to.
+#[allow(clippy::too_many_arguments)]
+fn array_result_slots<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    branch: &HirStmt,
+    val: BasicValueEnum<'a>,
+    arrays: &ArrayPtrMap<'a>,
+    vars: &HashMap<String, BasicValueEnum<'a>>,
+    end_block: BasicBlock<'a>,
+) -> MumeiResult<Option<(BasicValueEnum<'a>, BasicValueEnum<'a>)>> {
+    if let Some(name) = hir_stmt_tail_expr(branch).and_then(|e| {
+        if let HirExpr::Variable(name) = e {
+            Some(name.as_str())
+        } else {
+            None
+        }
+    }) {
+        if let Some(&(len, _, data)) = arrays.get(name) {
+            let string_binding = vars.get(name).is_some_and(|v| v.is_pointer_value());
+            if !string_binding {
+                return Ok(Some((len, data)));
+            }
+        }
+    }
+    if let BasicValueEnum::StructValue(fat) = val {
+        if fat.get_type() == array_struct_type(context) {
+            let saved = builder.get_insert_block();
+            if let Some(term) = end_block.get_terminator() {
+                builder.position_before(&term);
+            } else {
+                builder.position_at_end(end_block);
+            }
+            let len = llvm!(builder.build_extract_value(fat, 0, "arr_branch_len"));
+            let data = llvm!(builder.build_extract_value(fat, 1, "arr_branch_data"));
+            if let Some(saved) = saved {
+                builder.position_at_end(saved);
+            }
+            return Ok(Some((len, data)));
+        }
+    }
+    Ok(None)
+}
+
 /// Phi-merge array bindings that branches reassigned, mirroring the scalar
 /// variable merge while keeping the fat-pointer slots in sync.
 #[allow(clippy::type_complexity)]
@@ -2980,51 +3084,29 @@ pub(crate) fn compile_hir_expr<'a>(
             // Array-producing branches merge their `(len, data)` slots
             // into a single `{i64, ptr}` phi — the scalar merge below
             // would compare a call's fat pointer against a binding's
-            // length. A branch supplies slots either as a `Variable`
-            // tail resolving through its `array_ptrs` entry, or as an
-            // aggregate value a call/`if` tail already produced.
-            // Extracts must be emitted inside the branch's end block —
-            // phi incomings have to be defined in (or dominate) the
-            // predecessor they attach to.
-            let branch_slots = |branch: &HirStmt,
-                                val: BasicValueEnum<'a>,
-                                arrays: &ArrayPtrMap<'a>,
-                                end_block: inkwell::basic_block::BasicBlock<'a>|
-             -> MumeiResult<
-                Option<(BasicValueEnum<'a>, BasicValueEnum<'a>)>,
-            > {
-                if let Some(name) = hir_stmt_tail_expr(branch).and_then(|e| {
-                    if let HirExpr::Variable(name) = e {
-                        Some(name.as_str())
-                    } else {
-                        None
-                    }
-                }) {
-                    if let Some(&(len, _, data)) = arrays.get(name) {
-                        return Ok(Some((len, data)));
-                    }
-                }
-                if let BasicValueEnum::StructValue(fat) = val {
-                    if fat.get_type() == array_struct_type(context) {
-                        let saved = builder.get_insert_block();
-                        if let Some(term) = end_block.get_terminator() {
-                            builder.position_before(&term);
-                        } else {
-                            builder.position_at_end(end_block);
-                        }
-                        let len = llvm!(builder.build_extract_value(fat, 0, "if_arr_branch_len"));
-                        let data = llvm!(builder.build_extract_value(fat, 1, "if_arr_branch_data"));
-                        if let Some(saved) = saved {
-                            builder.position_at_end(saved);
-                        }
-                        return Ok(Some((len, data)));
-                    }
-                }
-                Ok(None)
-            };
-            let then_slots = branch_slots(then_branch, then_val, &then_arrays, then_end_block)?;
-            let else_slots = branch_slots(else_branch, else_val, &else_arrays, else_end_block)?;
-            let scalar_result = match (then_slots, else_slots) {
+            // length. The aggregate is materialised only after every phi
+            // (the slot phis, the merged variable phis and
+            // `merge_array_ptrs`'s) — a non-phi instruction emitted before
+            // a phi makes the block invalid.
+            let then_slots = array_result_slots(
+                context,
+                builder,
+                then_branch,
+                then_val,
+                &then_arrays,
+                &then_vars,
+                then_end_block,
+            )?;
+            let else_slots = array_result_slots(
+                context,
+                builder,
+                else_branch,
+                else_val,
+                &else_arrays,
+                &else_vars,
+                else_end_block,
+            )?;
+            let array_merge = match (then_slots, else_slots) {
                 (Some((then_len, then_data)), Some((else_len, else_data))) => {
                     if then_len.get_type() != else_len.get_type()
                         || then_data.get_type() != else_data.get_type()
@@ -3041,30 +3123,7 @@ pub(crate) fn compile_hir_expr<'a>(
                         (&then_data, then_end_block),
                         (&else_data, else_end_block),
                     ]);
-                    let struct_ty = array_struct_type(context);
-                    let mut agg: inkwell::values::AggregateValueEnum = struct_ty.get_undef().into();
-                    agg = llvm!(builder.build_insert_value(
-                        agg,
-                        len_phi.as_basic_value(),
-                        0,
-                        "if_arr_len_slot"
-                    ));
-                    agg = llvm!(builder.build_insert_value(
-                        agg,
-                        data_phi.as_basic_value(),
-                        1,
-                        "if_arr_data_slot"
-                    ));
-                    Some(match agg {
-                        inkwell::values::AggregateValueEnum::StructValue(s) => {
-                            s.as_basic_value_enum()
-                        }
-                        _ => {
-                            return Err(MumeiError::codegen(
-                                "array if-merge value is not a struct aggregate",
-                            ))
-                        }
-                    })
+                    Some((len_phi.as_basic_value(), data_phi.as_basic_value()))
                 }
                 (Some(_), None) | (None, Some(_)) => {
                     return Err(MumeiError::codegen(
@@ -3073,9 +3132,7 @@ pub(crate) fn compile_hir_expr<'a>(
                 }
                 (None, None) => None,
             };
-            let result_val = if let Some(agg) = scalar_result {
-                agg
-            } else {
+            let scalar_result = if array_merge.is_none() {
                 // A `Num` literal branch adapts to the other branch's
                 // declared width in the verifier's merge — widen the
                 // narrower LLVM value the same way before the phi
@@ -3093,7 +3150,9 @@ pub(crate) fn compile_hir_expr<'a>(
                 for (val, block) in &widened {
                     phi.add_incoming(&[(val, *block)]);
                 }
-                phi.as_basic_value()
+                Some(phi.as_basic_value())
+            } else {
+                None
             };
             *variables = pre_vars.clone();
             for (name, pre_val) in &pre_vars {
@@ -3137,6 +3196,26 @@ pub(crate) fn compile_hir_expr<'a>(
                 array_ptrs,
                 variables,
             )?;
+            // Materialise the merged fat pointer last: `insert_value` is
+            // not a phi and must follow every phi in this block.
+            let result_val = if let Some((len_val, data_val)) = array_merge {
+                let struct_ty = array_struct_type(context);
+                let mut agg: inkwell::values::AggregateValueEnum = struct_ty.get_undef().into();
+                agg = llvm!(builder.build_insert_value(agg, len_val, 0, "if_arr_len_slot"));
+                agg = llvm!(builder.build_insert_value(agg, data_val, 1, "if_arr_data_slot"));
+                match agg {
+                    inkwell::values::AggregateValueEnum::StructValue(s) => s.as_basic_value_enum(),
+                    _ => {
+                        return Err(MumeiError::codegen(
+                            "array if-merge value is not a struct aggregate",
+                        ))
+                    }
+                }
+            } else {
+                scalar_result.ok_or_else(|| {
+                    MumeiError::codegen("if merge produced neither array nor scalar result")
+                })?
+            };
             Ok(result_val)
         }
 
@@ -3337,6 +3416,38 @@ pub(crate) fn compile_hir_expr<'a>(
                 arm_states.push((arm_vars, arm_arrays, body_end, assigned));
             }
 
+            // Array-producing arms merge their `(len, data)` slots the same
+            // way the `if` merge does — a `Variable` tail resolves through
+            // its `array_ptrs` entry, an aggregate tail unpacks in the arm's
+            // end block. Arms must agree on the representation: mixing a
+            // fat pointer with a scalar would feed mismatched types into
+            // the merge phi.
+            let mut arm_slots: Vec<Option<(BasicValueEnum<'a>, BasicValueEnum<'a>)>> =
+                Vec::with_capacity(incoming.len());
+            for (i, (body_val, body_end)) in incoming.iter().enumerate() {
+                let (arm_vars, arm_arrays, _, _) = &arm_states[i];
+                arm_slots.push(array_result_slots(
+                    context,
+                    builder,
+                    &arms[i].body,
+                    *body_val,
+                    arm_arrays,
+                    arm_vars,
+                    *body_end,
+                )?);
+            }
+            if arm_slots.iter().any(Option::is_some) && !arm_slots.iter().all(Option::is_some) {
+                return Err(MumeiError::codegen(
+                    "match arms disagree on whether the result is an array",
+                ));
+            }
+            let array_merge: Option<Vec<(BasicValueEnum<'a>, BasicValueEnum<'a>)>> =
+                if arm_slots.iter().all(Option::is_some) && !arm_slots.is_empty() {
+                    Some(arm_slots.into_iter().map(Option::unwrap).collect())
+                } else {
+                    None
+                };
+
             // The phi type is the widest int type any arm produced — a
             // `Num` literal arm adapts to a declared-width arm in the
             // verifier's merge, so narrower incomings extend the same
@@ -3344,42 +3455,100 @@ pub(crate) fn compile_hir_expr<'a>(
             // non-int results it stays the first arm's body type
             // (Plan 18) and must be computed before creating the
             // unreachable block value.
-            let (phi_type, mut incoming) =
-                widen_merge_incomings(context, builder, &incoming, &arm_names)?;
-
-            builder.position_at_end(unreachable_block);
-            // Create a zero/null value matching the inferred phi type
-            let unreachable_val: BasicValueEnum = if phi_type.is_float_type() {
-                context.f64_type().const_float(0.0).into()
-            } else if phi_type.is_pointer_type() {
-                context
-                    .ptr_type(AddressSpace::default())
-                    .const_null()
-                    .into()
-            } else if phi_type.is_struct_type() {
-                // The fallback arm is unreachable; a zero aggregate
-                // keeps it poison-free so translation validation can
-                // model every slot (an `undef` leaf has no slot value).
-                phi_type.into_struct_type().const_zero().into()
-            } else if phi_type.is_int_type() {
-                phi_type.into_int_type().const_int(0, false).into()
+            // The unreachable block terminates into merge_block in both
+            // modes; only the scalar path needs a fallback value of
+            // `phi_type`. In array mode the slot phis take a (0, null)
+            // incoming from it instead.
+            let mut slot_incoming: Vec<(
+                BasicValueEnum<'a>,
+                BasicValueEnum<'a>,
+                inkwell::basic_block::BasicBlock<'a>,
+            )> = Vec::new();
+            let scalar_result = if let Some(slots) = &array_merge {
+                for ((body_val, body_end), (len, data)) in incoming.iter().zip(slots.iter()) {
+                    let _ = body_val;
+                    slot_incoming.push((*len, *data, *body_end));
+                }
+                builder.position_at_end(unreachable_block);
+                llvm!(builder.build_unconditional_branch(merge_block));
+                slot_incoming.push((
+                    context.i64_type().const_int(0, false).into(),
+                    context
+                        .ptr_type(AddressSpace::default())
+                        .const_null()
+                        .into(),
+                    unreachable_block,
+                ));
+                arm_states.push((
+                    pre_vars.clone(),
+                    pre_arrays.clone(),
+                    unreachable_block,
+                    std::collections::HashSet::new(),
+                ));
+                builder.position_at_end(merge_block);
+                None
             } else {
-                context.i64_type().const_int(0, false).into()
-            };
-            llvm!(builder.build_unconditional_branch(merge_block));
-            incoming.push((unreachable_val, unreachable_block));
-            arm_states.push((
-                pre_vars.clone(),
-                pre_arrays.clone(),
-                unreachable_block,
-                std::collections::HashSet::new(),
-            ));
+                // The phi type is the widest int type any arm produced — a
+                // `Num` literal arm adapts to a declared-width arm in the
+                // verifier's merge, so narrower incomings extend the same
+                // way before the phi (`pure-i64-composite/v22`). For
+                // non-int results it stays the first arm's body type
+                // (Plan 18) and must be computed before creating the
+                // unreachable block value.
+                let (phi_type, mut incoming) =
+                    widen_merge_incomings(context, builder, &incoming, &arm_names)?;
 
-            builder.position_at_end(merge_block);
-            let phi = llvm!(builder.build_phi(phi_type, "match_result"));
-            for (val, block) in &incoming {
-                phi.add_incoming(&[(val, *block)]);
-            }
+                builder.position_at_end(unreachable_block);
+                // Create a zero/null value matching the inferred phi type
+                let unreachable_val: BasicValueEnum = if phi_type.is_float_type() {
+                    context.f64_type().const_float(0.0).into()
+                } else if phi_type.is_pointer_type() {
+                    context
+                        .ptr_type(AddressSpace::default())
+                        .const_null()
+                        .into()
+                } else if phi_type.is_struct_type() {
+                    // The fallback arm is unreachable; a zero aggregate
+                    // keeps it poison-free so translation validation can
+                    // model every slot (an `undef` leaf has no slot value).
+                    phi_type.into_struct_type().const_zero().into()
+                } else if phi_type.is_int_type() {
+                    phi_type.into_int_type().const_int(0, false).into()
+                } else {
+                    context.i64_type().const_int(0, false).into()
+                };
+                llvm!(builder.build_unconditional_branch(merge_block));
+                incoming.push((unreachable_val, unreachable_block));
+                arm_states.push((
+                    pre_vars.clone(),
+                    pre_arrays.clone(),
+                    unreachable_block,
+                    std::collections::HashSet::new(),
+                ));
+
+                builder.position_at_end(merge_block);
+                let phi = llvm!(builder.build_phi(phi_type, "match_result"));
+                for (val, block) in &incoming {
+                    phi.add_incoming(&[(val, *block)]);
+                }
+                Some(phi.as_basic_value())
+            };
+
+            // Slot phis first — every phi in merge_block must precede the
+            // variable-merge phis and any non-phi instruction.
+            let slot_phis = if slot_incoming.is_empty() {
+                None
+            } else {
+                let len_ty = slot_incoming[0].0.get_type();
+                let data_ty = slot_incoming[0].1.get_type();
+                let len_phi = llvm!(builder.build_phi(len_ty, "match_arr_len"));
+                let data_phi = llvm!(builder.build_phi(data_ty, "match_arr_data"));
+                for (len, data, block) in &slot_incoming {
+                    len_phi.add_incoming(&[(len, *block)]);
+                    data_phi.add_incoming(&[(data, *block)]);
+                }
+                Some((len_phi.as_basic_value(), data_phi.as_basic_value()))
+            };
             *variables = pre_vars.clone();
             for (name, pre_val) in &pre_vars {
                 let mut merged_incoming = Vec::with_capacity(arm_states.len());
@@ -3431,7 +3600,23 @@ pub(crate) fn compile_hir_expr<'a>(
                 .collect();
             merge_array_ptrs(builder, &pre_arrays, &array_states, array_ptrs, variables)?;
 
-            Ok(phi.as_basic_value())
+            // Materialise the merged fat pointer last, after every phi.
+            if let Some((len_val, data_val)) = slot_phis {
+                let struct_ty = array_struct_type(context);
+                let mut agg: inkwell::values::AggregateValueEnum = struct_ty.get_undef().into();
+                agg = llvm!(builder.build_insert_value(agg, len_val, 0, "match_arr_len_slot"));
+                agg = llvm!(builder.build_insert_value(agg, data_val, 1, "match_arr_data_slot"));
+                match agg {
+                    inkwell::values::AggregateValueEnum::StructValue(s) => {
+                        Ok(s.as_basic_value_enum())
+                    }
+                    _ => Err(MumeiError::codegen(
+                        "array match-merge value is not a struct aggregate",
+                    )),
+                }
+            } else {
+                Ok(scalar_result.expect("scalar merge always produces a phi"))
+            }
         }
 
         // =================================================================

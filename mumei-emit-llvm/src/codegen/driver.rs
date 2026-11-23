@@ -1,13 +1,11 @@
-use crate::codegen::expr_emit::{chan_payload_key, emit_array_literal};
+use crate::codegen::expr_emit::{chan_payload_key, copy_array_to_heap, emit_array_literal};
 use crate::codegen::lowering::{
     array_elem_llvm_type, declare_extern_functions, resolve_param_type, resolve_return_type,
     type_contains_array_enum, ArrayPtrMap,
 };
 use crate::codegen::stmt_emit::compile_hir_stmt;
-use inkwell::builder::Builder;
 use inkwell::context::Context;
-use inkwell::module::Linkage;
-use inkwell::module::Module;
+use inkwell::module::{Linkage, Module};
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
 };
@@ -333,40 +331,6 @@ pub fn compile_atom_into_module<'ctx>(
     llvm!(builder.build_return(Some(&result_val)));
 
     Ok(())
-}
-
-/// Copies `len` elements of `elem_ty` from `data_ptr` into freshly `malloc`ed
-/// storage and returns the heap pointer. Used when a `-> [T]` atom's tail is
-/// callee-local (an array literal or a stack-bound alias): the `alloca` it
-/// points into dies with the frame, so the returned fat pointer must own a
-/// heap copy instead. Ownership convention: the caller owns the returned
-/// buffer (there is no `free` on this path yet — the bounded-memory model
-/// does not track it).
-fn copy_array_to_heap<'a>(
-    context: &'a Context,
-    builder: &Builder<'a>,
-    module: &Module<'a>,
-    len_val: BasicValueEnum<'a>,
-    elem_ty: BasicTypeEnum<'a>,
-    data_ptr: BasicValueEnum<'a>,
-) -> MumeiResult<BasicValueEnum<'a>> {
-    let malloc_fn = module.get_function("malloc").unwrap_or_else(|| {
-        let ptr_type = context.ptr_type(inkwell::AddressSpace::default());
-        let fn_type = ptr_type.fn_type(&[context.i64_type().into()], false);
-        module.add_function("malloc", fn_type, Some(Linkage::External))
-    });
-    let elem_size = elem_ty
-        .size_of()
-        .ok_or_else(|| MumeiError::codegen("array element type is unsized"))?;
-    let byte_size =
-        llvm!(builder.build_int_mul(len_val.into_int_value(), elem_size, "ret_arr_bytes"));
-    let heap_ptr = llvm!(builder.build_call(malloc_fn, &[byte_size.into()], "ret_arr_malloc"))
-        .try_as_basic_value()
-        .left()
-        .ok_or_else(|| MumeiError::codegen("malloc returned no value"))?
-        .into_pointer_value();
-    llvm!(builder.build_memcpy(heap_ptr, 8, data_ptr.into_pointer_value(), 8, byte_size,));
-    Ok(heap_ptr.into())
 }
 
 /// P7-A: Compile an HirAtom into a standalone in-memory LLVM Module.
