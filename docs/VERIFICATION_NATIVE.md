@@ -2317,6 +2317,20 @@ inconsistent item, so a divergence is named without reading the JSON
 descriptor. The lines are a report only — they change neither the
 record nor any verdict, grade, or performed-check claim.
 
+The same descriptors carry `source_machine_tv`: the design memo's §7
+Step 2 gate emitted as metadata. `source_machine_tv.status` is
+`checked_source_machine_tv_within_profile` when the machine-TV decision
+is accepted — every source-atom function and, when applicable, the entry
+wrapper came back `equivalent_within_profile` — and
+`unchecked_not_translation_validated` otherwise.
+`non_equivalent_functions` enumerates each function that did not compare
+equivalent with its `outcome` (and `reason` for `outside_profile`), and
+`unchecked_domains` lists the descriptor's `checks_not_performed` names,
+so the residual unverified domain is enumerable from the record. Both
+text paths print `Source machine-TV within profile: <status> ...` after
+the summary. This is a report only — no check, grade or verdict is
+promoted.
+
 Scalar f64 leaves are admitted only under a record profile that admits f64
 arithmetic. The bounded SSE2 profile handles register-only `movsd`, `movapd`,
 `movaps`, `movq`, `addsd`, `subsd`, `mulsd`, `divsd`, and `cmpeqsd`; f64

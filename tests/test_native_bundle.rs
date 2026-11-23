@@ -648,6 +648,23 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
         results.get("llvm_ir_object_equivalence").copied(),
         Some("checked")
     );
+    // Design memo §7 Step 2: the within-profile gate is emitted as
+    // metadata — every source atom (and the entry wrapper) compared
+    // equivalent, so the gate records checked; the residual unchecked
+    // domains mirror the descriptor's checks_not_performed.
+    let source_machine_tv = &descriptor["source_machine_tv"];
+    assert_eq!(
+        source_machine_tv["status"],
+        "checked_source_machine_tv_within_profile"
+    );
+    assert_eq!(
+        source_machine_tv["non_equivalent_functions"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        source_machine_tv["unchecked_domains"],
+        descriptor["checks_not_performed"]
+    );
 }
 
 #[test]
@@ -6069,7 +6086,11 @@ fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
     // Step 5: the acceptance text report also surfaces the aggregate
     // correspondence status.
     assert!(text.contains("Object translation correspondence: checked_correspondence"));
-    assert_eq!(text.lines().count(), 3);
+    // Design memo §7 Step 2: the within-profile gate is named too.
+    assert!(
+        text.contains("Source machine-TV within profile: checked_source_machine_tv_within_profile")
+    );
+    assert_eq!(text.lines().count(), 4);
 
     let wrong_id = "0".repeat(64);
     assert_ne!(wrong_id, id);
@@ -7111,6 +7132,23 @@ fn array_parameter_module_builds_as_v29_and_machine_tv_is_inconclusive() {
         "outside_profile"
     );
     assert!(machine_tv.to_string().contains("unsupported_signature"));
+    // Design memo §7 Step 2 gate: an out-of-profile atom keeps the
+    // status honest and enumerates the function it could not evaluate.
+    let source_machine_tv = &machine_tv["source_machine_tv"];
+    assert_eq!(
+        source_machine_tv["status"],
+        "unchecked_not_translation_validated"
+    );
+    let non_equivalent = source_machine_tv["non_equivalent_functions"]
+        .as_array()
+        .unwrap();
+    assert!(non_equivalent
+        .iter()
+        .any(|entry| { entry["name"] == "read_at" && entry["outcome"] == "outside_profile" }));
+    assert_eq!(
+        source_machine_tv["unchecked_domains"],
+        machine_tv["checks_not_performed"]
+    );
     let accepted = accept_object(&source, &bundle, &id, true);
     assert_eq!(accepted.status.code(), Some(3));
     assert!(accepted.stdout.is_empty());
