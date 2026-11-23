@@ -1,11 +1,11 @@
 //! Plan 10 / P10-C: native Z3 `Datatype` sorts for finite enums and bounded
-//! direct-self-recursive enums (`Z3_DATATYPE_SORT`).
+//! recursive enum groups (`Z3_DATATYPE_SORT`).
 //!
-//! Finite non-generic enums with supported payload leaves, and non-generic
-//! direct-self-recursive enums with a base variant and finite non-self
-//! payloads, are lowered to native Z3 datatypes. Other enums, mutual cycles,
-//! and recursion through structs or arrays keep the Int-tag path. Native
-//! variants become constructors with `is-<Variant>` testers and selectors of
+//! Finite non-generic enums with supported payload leaves and bounded,
+//! inhabited non-generic recursive enum groups are lowered to native Z3
+//! datatypes. Other enums and recursion through structs or arrays keep the
+//! Int-tag path. Native variants become constructors with `is-<Variant>`
+//! testers and selectors of
 //! the *correct* sort (a `Str` payload projects as a Z3 `String`, not an Int
 //! tag). In default Int mode, width-narrowed integer leaves
 //! (`u64`/`u32`/`i32`) land on `Int` — [`enum_value_leaf_domain`] bounds them
@@ -14,7 +14,7 @@
 //! Unsupported recursive enums keep the Int-tag encoding and the
 //! `inductive_data_type` fragment tag (Lean 4 delegation boundary).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use z3::ast::{Ast, Bool, Datatype, Dynamic, Int, BV};
@@ -27,10 +27,8 @@ use crate::verification::module_env::ModuleEnv;
 use crate::verification::translator::{VCtx, F64_EBITS, F64_SBITS};
 use crate::verification::types::{Env, MumeiError, MumeiResult};
 
-/// Deepest enum-in-payload nesting a finite ADT accepts — a bound so a
-/// mutual `A(B)`, `B(A)` declaration cycle cannot recurse the
-/// flattening walk forever (self-reference already fails
-/// `is_recursive`, this covers cycles the flag does not name).
+/// Deepest enum-in-payload nesting a finite ADT accepts, bounding flattening
+/// of unsupported declaration cycles.
 const MAX_ENUM_PAYLOAD_NEST: u8 = 8;
 
 /// `true` when `enum_def` is finite + non-recursive and every payload
@@ -52,52 +50,175 @@ pub(crate) fn is_finite_adt(enum_def: &EnumDef, module_env: &ModuleEnv) -> bool 
     )
 }
 
-pub(crate) fn is_direct_self_field(
+const MAX_RECURSIVE_ENUM_GROUP_SIZE: usize = 4;
+
+fn direct_enum_field_target<'a>(
     enum_def: &EnumDef,
     field_type: &TypeRef,
-    module_env: &ModuleEnv,
-) -> bool {
-    field_type.type_args.is_empty()
-        && (field_type.name == "Self"
-            || module_env.resolve_base_type(&field_type.display_name()) == enum_def.name)
+    module_env: &'a ModuleEnv,
+) -> Option<&'a EnumDef> {
+    if !field_type.type_args.is_empty() || field_type.name.starts_with('[') {
+        return None;
+    }
+    let field_name = if field_type.name == "Self" {
+        enum_def.name.as_str()
+    } else {
+        field_type.name.as_str()
+    };
+    if field_name.contains('<') {
+        return None;
+    }
+    let resolved = module_env.resolve_base_type(field_name);
+    let target = module_env.get_enum(&resolved)?;
+    if !target.type_params.is_empty() || target.name.contains('<') {
+        return None;
+    }
+    Some(target)
+}
+
+fn enum_graph_reaches(start: &str, target: &str, edges: &HashMap<String, Vec<String>>) -> bool {
+    let mut pending = vec![start.to_string()];
+    let mut visited = HashSet::new();
+    while let Some(current) = pending.pop() {
+        if current == target {
+            return true;
+        }
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+        pending.extend(edges.get(&current).into_iter().flatten().cloned());
+    }
+    false
+}
+
+/// The strongly connected component containing `enum_def`, ordered by name.
+/// Only bare, non-generic enum-valued fields participate in the graph.
+pub(crate) fn recursive_enum_group<'a>(
+    enum_def: &EnumDef,
+    module_env: &'a ModuleEnv,
+) -> Option<Vec<&'a EnumDef>> {
+    let mut enums: Vec<&EnumDef> = module_env
+        .enums
+        .values()
+        .filter(|definition| definition.type_params.is_empty() && !definition.name.contains('<'))
+        .collect();
+    enums.sort_by(|left, right| left.name.cmp(&right.name));
+    if !enums
+        .iter()
+        .any(|candidate| candidate.name == enum_def.name)
+    {
+        return None;
+    }
+
+    let mut edges = HashMap::new();
+    for definition in &enums {
+        let mut targets = Vec::new();
+        for variant in &definition.variants {
+            for field in &variant.field_types {
+                if let Some(target) = direct_enum_field_target(definition, field, module_env) {
+                    targets.push(target.name.clone());
+                }
+            }
+        }
+        targets.sort();
+        targets.dedup();
+        edges.insert(definition.name.clone(), targets);
+    }
+
+    let mut group: Vec<&EnumDef> = enums
+        .into_iter()
+        .filter(|candidate| {
+            enum_graph_reaches(&enum_def.name, &candidate.name, &edges)
+                && enum_graph_reaches(&candidate.name, &enum_def.name, &edges)
+        })
+        .collect();
+    let is_self_recursive = group.len() == 1
+        && edges
+            .get(&enum_def.name)
+            .is_some_and(|targets| targets.iter().any(|target| target == &enum_def.name));
+    if group.len() == 1 && !is_self_recursive {
+        return None;
+    }
+    group.sort_by(|left, right| left.name.cmp(&right.name));
+    Some(group)
+}
+
+pub(crate) fn recursive_field_target<'a>(
+    enum_def: &EnumDef,
+    field_type: &TypeRef,
+    module_env: &'a ModuleEnv,
+) -> Option<&'a EnumDef> {
+    let target = direct_enum_field_target(enum_def, field_type, module_env)?;
+    let group = recursive_enum_group(enum_def, module_env)?;
+    group
+        .iter()
+        .any(|member| member.name == target.name)
+        .then_some(target)
 }
 
 pub(crate) fn is_self_recursive_adt(enum_def: &EnumDef, module_env: &ModuleEnv) -> bool {
-    if !enum_def.type_params.is_empty()
-        || enum_def.name.contains('<')
-        || enum_def.variants.is_empty()
-        || enum_def.variants.iter().any(|variant| {
-            variant.field_types.iter().any(|field| {
-                !is_direct_self_field(enum_def, field, module_env)
-                    && struct_array_payload_element_type(
-                        &payload_field_type_name(field),
-                        module_env,
-                    )
-                    .is_some()
-            })
-        })
-        || !enum_def.variants.iter().any(|variant| {
-            !variant
-                .field_types
-                .iter()
-                .any(|field| is_direct_self_field(enum_def, field, module_env))
+    let Some(group) = recursive_enum_group(enum_def, module_env) else {
+        return false;
+    };
+    if group.len() > MAX_RECURSIVE_ENUM_GROUP_SIZE
+        || group.iter().any(|member| {
+            !member.type_params.is_empty()
+                || member.name.contains('<')
+                || member.variants.is_empty()
         })
     {
         return false;
     }
 
+    let group_names: HashSet<&str> = group.iter().map(|member| member.name.as_str()).collect();
     let mut memo = FiniteFuelMemo::default();
-    enum_def.variants.iter().all(|variant| {
-        variant.field_types.iter().all(|field| {
-            is_direct_self_field(enum_def, field, module_env)
-                || field_is_finite_payload(
-                    &payload_field_type_name(field),
-                    module_env,
-                    MAX_ENUM_PAYLOAD_NEST,
-                    &mut memo,
-                )
-        })
-    })
+    for member in &group {
+        for variant in &member.variants {
+            for field in &variant.field_types {
+                if direct_enum_field_target(member, field, module_env)
+                    .is_some_and(|target| group_names.contains(target.name.as_str()))
+                {
+                    continue;
+                }
+                let field_type = payload_field_type_name(field);
+                if struct_array_payload_element_type(&field_type, module_env).is_some()
+                    || !field_is_finite_payload(
+                        &field_type,
+                        module_env,
+                        MAX_ENUM_PAYLOAD_NEST,
+                        &mut memo,
+                    )
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
+    let mut inhabited = HashSet::new();
+    loop {
+        let mut changed = false;
+        for member in &group {
+            if inhabited.contains(member.name.as_str()) {
+                continue;
+            }
+            let has_inhabited_variant = member.variants.iter().any(|variant| {
+                variant.field_types.iter().all(|field| {
+                    direct_enum_field_target(member, field, module_env)
+                        .filter(|target| group_names.contains(target.name.as_str()))
+                        .is_none_or(|target| inhabited.contains(target.name.as_str()))
+                })
+            });
+            if has_inhabited_variant {
+                inhabited.insert(member.name.as_str());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    inhabited.len() == group.len()
 }
 
 pub(crate) fn uses_datatype_sort(enum_def: &EnumDef, module_env: &ModuleEnv) -> bool {
@@ -125,7 +246,8 @@ fn is_finite_adt_fueled(
     // asserts at least one variant) and never have a constructible value, so
     // they keep the Int-tag encoding — the vacuous `all()` below would
     // otherwise claim them.
-    let finite = !enum_def.is_recursive
+    let finite = recursive_enum_group(enum_def, module_env).is_none()
+        && !enum_def.is_recursive
         && enum_def.type_params.is_empty()
         && !enum_def.variants.is_empty()
         && enum_def.variants.iter().all(|variant| {
@@ -642,13 +764,13 @@ pub(crate) fn payload_leaf_range(
     let mut offset = 0;
     for (i, field_type) in variant.field_types.iter().enumerate() {
         if i == field_idx {
-            if is_direct_self_field(enum_def, field_type, module_env) {
+            if recursive_field_target(enum_def, field_type, module_env).is_some() {
                 return Some((offset, 1));
             }
             let leaves = field_leaf_types(&payload_field_type_name(field_type), module_env)?;
             return Some((offset, leaves.len()));
         }
-        if is_direct_self_field(enum_def, field_type, module_env) {
+        if recursive_field_target(enum_def, field_type, module_env).is_some() {
             offset += 1;
         } else {
             offset += field_leaf_types(&payload_field_type_name(field_type), module_env)?.len();
@@ -801,7 +923,7 @@ fn enum_leaf_domain_for<'a>(
         let mut accessor_idx = 0usize;
         let mut bounds: Vec<Bool> = Vec::new();
         for field in &variant.field_types {
-            if is_direct_self_field(enum_def, field, vc.module_env) {
+            if recursive_field_target(enum_def, field, vc.module_env).is_some() {
                 accessor_idx += 1;
                 continue;
             }
@@ -963,14 +1085,32 @@ pub(crate) fn enum_datatype_sort<'a>(
     if let Some(sort) = vc.enum_sorts.borrow().get(&enum_def.name) {
         return Some(sort.clone());
     }
+
+    let group = recursive_enum_group(enum_def, vc.module_env).unwrap_or_else(|| vec![enum_def]);
+    let builders = group
+        .iter()
+        .map(|member| enum_datatype_builder(vc, member))
+        .collect::<Option<Vec<_>>>()?;
+    let sorts = z3::datatype_builder::create_datatypes(builders);
+    if sorts.len() != group.len() {
+        return None;
+    }
+    let mut cache = vc.enum_sorts.borrow_mut();
+    for (member, sort) in group.into_iter().zip(sorts) {
+        cache.insert(member.name.clone(), Rc::new(sort));
+    }
+    cache.get(&enum_def.name).cloned()
+}
+
+fn enum_datatype_builder<'a>(vc: &VCtx<'a>, enum_def: &EnumDef) -> Option<z3::DatatypeBuilder<'a>> {
     let mut builder = z3::DatatypeBuilder::new(vc.ctx, enum_def.name.as_str());
     for variant in &enum_def.variants {
         let mut names = Vec::new();
         let mut accessors = Vec::new();
         for (i, field_type) in variant.field_types.iter().enumerate() {
-            if is_direct_self_field(enum_def, field_type, vc.module_env) {
+            if let Some(target_enum) = recursive_field_target(enum_def, field_type, vc.module_env) {
                 names.push(format!("{}_{}", variant.name, i));
-                accessors.push(DatatypeAccessor::Datatype(enum_def.name.clone().into()));
+                accessors.push(DatatypeAccessor::Datatype(target_enum.name.clone().into()));
             } else {
                 for (name, sort) in
                     field_leaf_sorts(vc, &variant.name, i, &payload_field_type_name(field_type))?
@@ -987,11 +1127,7 @@ pub(crate) fn enum_datatype_sort<'a>(
             .collect();
         builder = builder.variant(variant.name.as_str(), fields);
     }
-    let sort = Rc::new(builder.finish());
-    vc.enum_sorts
-        .borrow_mut()
-        .insert(enum_def.name.clone(), sort.clone());
-    Some(sort)
+    Some(builder)
 }
 
 /// Resolves `type_name` to `(DatatypeSort, &EnumDef)` when it names an enum
@@ -1091,7 +1227,7 @@ fn expand_ctor_args<'a>(
         if variant
             .field_types
             .get(i)
-            .is_some_and(|field| is_direct_self_field(enum_def, field, vc.module_env))
+            .is_some_and(|field| recursive_field_target(enum_def, field, vc.module_env).is_some())
         {
             leaves.push(arg.clone());
             continue;
@@ -1192,7 +1328,7 @@ fn check_enum_ctor_payload_domains<'a>(
                     .to_owned()
             })
             .unwrap_or_else(|| field_idx.to_string());
-        if is_direct_self_field(enum_def, field_type_ref, vc.module_env) {
+        if let Some(target_enum) = recursive_field_target(enum_def, field_type_ref, vc.module_env) {
             let value = leaf_args.get(offset).ok_or_else(|| {
                 MumeiError::type_error("enum constructor is missing a recursive payload leaf")
             })?;
@@ -1203,7 +1339,7 @@ fn check_enum_ctor_payload_domains<'a>(
                     enum_def,
                     variant,
                     &payload_name,
-                    &enum_def.name,
+                    &target_enum.name,
                     &domain,
                 )?;
             }
@@ -1296,11 +1432,10 @@ fn check_enum_ctor_payload_domains<'a>(
 /// expects `BV(64)`, and applying it raw panics inside Z3.
 fn ctor_leaf_sorts<'a>(vc: &VCtx<'a>, enum_def: &EnumDef, idx: usize) -> Option<Vec<Sort<'a>>> {
     let variant = enum_def.variants.get(idx)?;
-    let self_sort = enum_datatype_sort(vc, enum_def)?.sort.clone();
     let mut sorts = Vec::new();
     for (i, ft) in variant.field_types.iter().enumerate() {
-        if is_direct_self_field(enum_def, ft, vc.module_env) {
-            sorts.push(self_sort.clone());
+        if let Some(target_enum) = recursive_field_target(enum_def, ft, vc.module_env) {
+            sorts.push(enum_datatype_sort(vc, target_enum)?.sort.clone());
         } else {
             sorts.extend(
                 field_leaf_sorts(vc, &variant.name, i, &payload_field_type_name(ft))?

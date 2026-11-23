@@ -1,14 +1,12 @@
 enum A {
-    Stop,
     More(value: B),
 }
 
 enum B {
-    Stop,
     More(value: A),
 }
 
-atom unsupported_mutual() -> A
+atom unsupported_mutual(value: A) -> A
     requires: true;
     ensures: true;
-    body: A::More(B::More(A::Stop))
+    body: A::More(B::More(value))

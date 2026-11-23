@@ -1782,9 +1782,14 @@ fn enum_field_assign<'a>(
     let Some((vidx, fidx)) = owner else {
         return Ok(None);
     };
-    if datatype::is_direct_self_field(edef, &edef.variants[vidx].field_types[fidx], vc.module_env) {
+    if let Some(target_enum) = datatype::recursive_field_target(
+        edef,
+        &edef.variants[vidx].field_types[fidx],
+        vc.module_env,
+    ) {
         return Err(MumeiError::type_error(format!(
-            "enum field write '{var}' cannot update or traverse a recursive self payload"
+            "enum field write '{var}' cannot update or traverse a recursive self payload targeting '{}'",
+            target_enum.name
         )));
     }
     if value.binds_name(base) {

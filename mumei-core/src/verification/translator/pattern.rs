@@ -232,11 +232,12 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                                             .field_types
                                             .get(i)
                                             .is_some_and(|field_type| {
-                                                !datatype::is_direct_self_field(
+                                                datatype::recursive_field_target(
                                                     edef,
                                                     field_type,
                                                     vc.module_env,
                                                 )
+                                                .is_none()
                                             })
                                 });
                                 if recursive_payload {
@@ -304,7 +305,8 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                             enum_def.and_then(|edef| edef.variants[variant_idx].field_types.get(i)),
                         ) {
                             if datatype::is_self_recursive_adt(edef, vc.module_env)
-                                && !datatype::is_direct_self_field(edef, field_type, vc.module_env)
+                                && datatype::recursive_field_target(edef, field_type, vc.module_env)
+                                    .is_none()
                             {
                                 let type_name = datatype::payload_field_type_name(field_type);
                                 if let Some(leaf_types) =
@@ -809,12 +811,12 @@ pub(crate) fn pattern_bind_variables<'a>(
                                 Pattern::Variable(fname) => {
                                     env.insert(fname.clone(), field_sym.clone());
                                     if let Some(edef) = enum_def {
-                                        if edef
+                                        if let Some(target_enum) = edef
                                             .variants
                                             .get(variant_idx)
                                             .and_then(|variant| variant.field_types.get(i))
-                                            .is_some_and(|field_type| {
-                                                datatype::is_direct_self_field(
+                                            .and_then(|field_type| {
+                                                datatype::recursive_field_target(
                                                     edef,
                                                     field_type,
                                                     vc.module_env,
@@ -829,7 +831,7 @@ pub(crate) fn pattern_bind_variables<'a>(
                                             }
                                             vc.local_enum_types
                                                 .borrow_mut()
-                                                .insert(fname.clone(), edef.name.clone());
+                                                .insert(fname.clone(), target_enum.name.clone());
                                         }
                                     }
                                     // A payload leaf keeps its declared

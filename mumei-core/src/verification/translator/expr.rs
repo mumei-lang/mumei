@@ -2754,6 +2754,9 @@ fn enum_type_needs_leafwise_equality(
         work.spend()?;
         for field in &variant.field_types {
             work.spend()?;
+            if datatype::recursive_field_target(enum_def, field, vc.module_env).is_some() {
+                continue;
+            }
             let field_type = datatype::payload_field_type_name(field);
             let Some(leaves) = datatype::field_leaf_types(&field_type, vc.module_env) else {
                 continue;
@@ -2833,6 +2836,35 @@ fn enum_payload_value_equality_inner<'a>(
         let mut payload_equalities = Vec::new();
         for (field_idx, field) in variant.field_types.iter().enumerate() {
             work.spend()?;
+            if datatype::recursive_field_target(enum_def, field, vc.module_env).is_some() {
+                let Some((offset, width)) =
+                    datatype::payload_leaf_range(enum_def, vc.module_env, variant_idx, field_idx)
+                else {
+                    return Ok(None);
+                };
+                if width != 1 {
+                    return Err(MumeiError::type_error(
+                        "Recursive enum payload has an invalid datatype accessor width",
+                    ));
+                }
+                let Some(left_value) =
+                    datatype::variant_selector_apply(&sort, variant_idx, offset, left)
+                else {
+                    return Ok(None);
+                };
+                let Some(right_value) =
+                    datatype::variant_selector_apply(&sort, variant_idx, offset, right)
+                else {
+                    return Ok(None);
+                };
+                if left_value.get_sort() != right_value.get_sort() {
+                    return Err(MumeiError::type_error(
+                        "Recursive enum payload values have different field types",
+                    ));
+                }
+                payload_equalities.push(left_value._eq(&right_value));
+                continue;
+            }
             let field_type = datatype::payload_field_type_name(field);
             let Some(leaf_types) = datatype::field_leaf_types(&field_type, vc.module_env) else {
                 return Ok(None);
@@ -3074,7 +3106,12 @@ fn enum_payload_field_read<'a>(
     let Some(field_type_ref) = enum_def.variants[variant_idx].field_types.get(field_idx) else {
         return Ok(None);
     };
-    if datatype::is_direct_self_field(enum_def, field_type_ref, vc.module_env) {
+    if let Some(target_enum) =
+        datatype::recursive_field_target(enum_def, field_type_ref, vc.module_env)
+    {
+        let Some(target_sort) = datatype::enum_datatype_sort(vc, target_enum) else {
+            return Ok(None);
+        };
         let Some((payload_offset, _)) =
             datatype::payload_leaf_range(enum_def, vc.module_env, variant_idx, field_idx)
         else {
@@ -3094,6 +3131,9 @@ fn enum_payload_field_read<'a>(
         else {
             return Ok(None);
         };
+        if selector.get_sort() != target_sort.sort {
+            return Ok(None);
+        }
         let Some(fresh) = super::z3_types::dynamic_fresh_const(
             vc.ctx,
             "__recursive_enum_payload_read",
@@ -3255,8 +3295,11 @@ fn enum_payload_field_read<'a>(
             else {
                 return Ok(None);
             };
-            let outer_self_field =
-                datatype::is_direct_self_field(outer_enum_def, outer_field_type_ref, vc.module_env);
+            let outer_recursive_target = datatype::recursive_field_target(
+                outer_enum_def,
+                outer_field_type_ref,
+                vc.module_env,
+            );
             let outer_field_type = datatype::payload_field_type_name(outer_field_type_ref);
             let Some((_, width)) = datatype::payload_leaf_range(
                 outer_enum_def,
@@ -3269,7 +3312,11 @@ fn enum_payload_field_read<'a>(
             if width == 0 {
                 return Ok(None);
             }
-            if !outer_self_field {
+            if let Some(target_enum) = outer_recursive_target {
+                if datatype::enum_datatype_sort(vc, target_enum).is_none() {
+                    return Ok(None);
+                }
+            } else {
                 let Some(leaves) = datatype::field_leaf_types(&outer_field_type, vc.module_env)
                 else {
                     return Ok(None);
@@ -3395,8 +3442,8 @@ fn enum_payload_field_read<'a>(
         else {
             return Ok(None);
         };
-        let outer_self_field =
-            datatype::is_direct_self_field(outer_enum_def, outer_field_type_ref, vc.module_env);
+        let outer_recursive_target =
+            datatype::recursive_field_target(outer_enum_def, outer_field_type_ref, vc.module_env);
         let outer_field_type = datatype::payload_field_type_name(outer_field_type_ref);
         let Some((_, width)) = datatype::payload_leaf_range(
             outer_enum_def,
@@ -3409,7 +3456,11 @@ fn enum_payload_field_read<'a>(
         if width == 0 {
             return Ok(None);
         }
-        if !outer_self_field {
+        if let Some(target_enum) = outer_recursive_target {
+            if datatype::enum_datatype_sort(vc, target_enum).is_none() {
+                return Ok(None);
+            }
+        } else {
             let Some(leaves) = datatype::field_leaf_types(&outer_field_type, vc.module_env) else {
                 return Ok(None);
             };

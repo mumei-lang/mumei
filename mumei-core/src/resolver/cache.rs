@@ -87,7 +87,8 @@ use std::path::Path;
 /// so cached verdicts must be re-derived.
 /// Version 42 represents struct-array enum payloads with leaf arrays and rejects
 /// direct reads, so cached verdicts must be re-derived.
-pub const VERIFIER_POLICY_VERSION: u32 = 42;
+/// Version 43 admits bounded, inhabited mutual-recursive enum groups as Z3 datatypes.
+pub const VERIFIER_POLICY_VERSION: u32 = 43;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -3370,7 +3371,7 @@ body: { p.a };\n";
         let baseline = proof_hash_for(source, "g");
         assert_eq!(
             baseline,
-            "e7919cb92f8919300cbe050c1ce83ab83520554db3878305fd70f5bc211111e1"
+            "79839c31c38aea79bacf0bb044fd6a17ec03c302ce23f90293d3bedf26dcbc25"
         );
         let changed = proof_hash_for(
             &source.replace(
@@ -3383,7 +3384,7 @@ body: { p.a };\n";
     }
 
     #[test]
-    fn effect_free_proof_hash_matches_policy_version_42() {
+    fn effect_free_proof_hash_matches_policy_version_43() {
         let source = "atom main(x: i64) -> i64\n\
                       requires: true;\n\
                       ensures: result == x;\n\
@@ -3392,7 +3393,7 @@ body: { p.a };\n";
 
         assert_eq!(
             hash,
-            "fddcfb44b0968dd0e5adb9c1a30f6e170eb50c24bf9f98999bda02fb578d0251"
+            "10e8ee509c711d841152ae579b107f335a90afbdeff9b63a10f634f424ab3d96"
         );
         assert!(!dependency_hashes_for(source, "main")
             .keys()
