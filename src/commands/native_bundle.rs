@@ -3044,12 +3044,20 @@ struct ObjectLinkFunction {
 }
 
 struct ObjectLinkRelocation {
-    function_index: usize,
+    // `None` for relocations outside any enumerated function (e.g.
+    // `.eh_frame` unwind records), which the byte-level link check
+    // skips but the whole-relocation record still lists.
+    function_index: Option<usize>,
     section_name: String,
     offset_in_section: u64,
     offset: usize,
     kind: &'static str,
     target: String,
+    // Section the target symbol belongs to, when the relocation
+    // references a section symbol (e.g. `.text + 0x20`); the exe-side
+    // base of that input section plus `target_value` gives S.
+    target_section: Option<object::SectionIndex>,
+    target_value: u64,
     addend: i64,
     resolved_value: Option<i64>,
 }
@@ -3481,13 +3489,67 @@ fn object_link_corresponds(
         });
     }
 
+    // Step 4 of docs/DESIGN_OBJECT_TRANSLATION_CORRESPONDENCE.md: every
+    // relocation entry is recorded, not only call sites in code. Text
+    // relocations keep the strict gates below (the byte-level link
+    // check must understand each in-function entry); relocations in
+    // non-Text sections (`.eh_frame` unwind metadata, data tables, …)
+    // are always recorded and are resolved afterwards against the
+    // linked executable when their kind admits recomputation.
     let mut relocations = Vec::new();
     for section in object_file.sections() {
-        if section.kind() != SectionKind::Text {
-            continue;
-        }
         let section_index = section.index();
+        let section_name = section.name().unwrap_or_default().to_owned();
+        let is_text = section.kind() == SectionKind::Text;
         for (offset, relocation) in section.relocations() {
+            let kind = match relocation.flags() {
+                RelocationFlags::Elf { r_type } if r_type == object::elf::R_X86_64_PLT32 => {
+                    "R_X86_64_PLT32"
+                }
+                RelocationFlags::Elf { r_type } if r_type == object::elf::R_X86_64_PC32 => {
+                    "R_X86_64_PC32"
+                }
+                _ => "other",
+            };
+            if !is_text {
+                let (target_name, target_section, target_value) = match relocation.target() {
+                    RelocationTarget::Symbol(symbol_index) => {
+                        match object_file.symbol_by_index(symbol_index) {
+                            Ok(symbol) => {
+                                let name = symbol.name().unwrap_or_default();
+                                if name.is_empty() {
+                                    // Section symbols carry no name;
+                                    // record the section's name like
+                                    // `readelf` displays (`.text + N`).
+                                    let section_name = symbol
+                                        .section_index()
+                                        .and_then(|index| object_file.section_by_index(index).ok())
+                                        .and_then(|section| section.name().ok().map(str::to_owned))
+                                        .unwrap_or_default();
+                                    (section_name, symbol.section_index(), symbol.address())
+                                } else {
+                                    (name.to_owned(), None, symbol.address())
+                                }
+                            }
+                            Err(_) => (String::new(), None, 0),
+                        }
+                    }
+                    _ => (String::new(), None, 0),
+                };
+                relocations.push(ObjectLinkRelocation {
+                    function_index: None,
+                    section_name: section_name.clone(),
+                    offset_in_section: offset,
+                    offset: usize::MAX,
+                    kind,
+                    target: target_name,
+                    target_section,
+                    target_value,
+                    addend: relocation.addend(),
+                    resolved_value: None,
+                });
+                continue;
+            }
             let mut containing = functions.iter().enumerate().filter(|(_, function)| {
                 function.section == section_index
                     && function.object_address <= offset
@@ -3499,14 +3561,7 @@ fn object_link_corresponds(
             if containing.next().is_some() {
                 return Ok(None);
             }
-            if relocation.size() != 32
-                || !matches!(
-                    relocation.flags(),
-                    RelocationFlags::Elf { r_type }
-                        if r_type == object::elf::R_X86_64_PLT32
-                            || r_type == object::elf::R_X86_64_PC32
-                )
-            {
+            if kind == "other" || relocation.size() != 32 {
                 return Ok(None);
             }
             let RelocationTarget::Symbol(symbol_index) = relocation.target() else {
@@ -3565,26 +3620,125 @@ fn object_link_corresponds(
             if field_end > function_size {
                 return Ok(None);
             }
-            let section_name = section.name().unwrap_or_default().to_owned();
-            let kind = match relocation.flags() {
-                RelocationFlags::Elf { r_type } if r_type == object::elf::R_X86_64_PLT32 => {
-                    "R_X86_64_PLT32"
-                }
-                RelocationFlags::Elf { r_type } if r_type == object::elf::R_X86_64_PC32 => {
-                    "R_X86_64_PC32"
-                }
-                _ => "other",
-            };
             relocations.push(ObjectLinkRelocation {
-                function_index,
-                section_name,
+                function_index: Some(function_index),
+                section_name: section_name.clone(),
                 offset_in_section: offset,
                 offset: relative_offset,
                 kind,
                 target: target_name.to_owned(),
+                target_section: target.section_index(),
+                target_value: target.address(),
                 addend: relocation.addend(),
                 resolved_value: None,
             });
+        }
+    }
+
+    // Step 4: resolve the non-Text entries too, so every enumerated
+    // record can be matched against the field actually applied in the
+    // linked executable. A PC32/PLT32 entry resolves when the
+    // same-named executable section holds a 32-bit field equal to
+    // `target + addend − place` at a slot no other entry claims;
+    // other kinds or unfindable sites keep `resolved_value: None`
+    // and are reported unchecked downstream — never guessed.
+    let mut section_deltas = BTreeMap::new();
+    for function in &functions {
+        // Every function of an input section shares one exe-side base:
+        // the linker never splits an input section's contents.
+        section_deltas.entry(function.section.0).or_insert(
+            i64::try_from(function.executable_address).unwrap_or(0)
+                - i64::try_from(function.object_address).unwrap_or(0),
+        );
+    }
+    let exe_section_bytes = |name: &str| -> Option<(u64, Vec<u8>)> {
+        executable_file
+            .sections()
+            .find(|section| section.name() == Ok(name))
+            .and_then(|section| {
+                section
+                    .uncompressed_data()
+                    .ok()
+                    .map(|data| (section.address(), data.into_owned()))
+            })
+    };
+    let target_base = |relocation: &ObjectLinkRelocation| -> Option<i64> {
+        if let Some(&address) = executable_addresses.get(&relocation.target) {
+            return i64::try_from(address).ok();
+        }
+        if let Some(candidates) = executable_symbols.get(&relocation.target) {
+            if candidates.len() == 1 {
+                return i64::try_from(candidates[0].0).ok();
+            }
+        }
+        let section_index = relocation.target_section?;
+        if let Some(&delta) = section_deltas.get(&section_index.0) {
+            return delta.checked_add(i64::try_from(relocation.target_value).ok()?);
+        }
+        // A section-symbol target without mapped functions falls back
+        // to the same-named output section's base; a wrong guess just
+        // leaves the entry unresolved rather than resolving falsely.
+        let section_name = object_file
+            .section_by_index(section_index)
+            .ok()
+            .and_then(|section| section.name().ok().map(str::to_owned))?;
+        let (base, _) = exe_section_bytes(&section_name)?;
+        i64::try_from(base)
+            .ok()?
+            .checked_add(i64::try_from(relocation.target_value).ok()?)
+    };
+    let mut pending: Vec<(usize, String, i64, i64, Vec<u64>)> = Vec::new();
+    for (index, relocation) in relocations.iter().enumerate() {
+        if relocation.function_index.is_some()
+            || !matches!(relocation.kind, "R_X86_64_PC32" | "R_X86_64_PLT32")
+        {
+            continue;
+        }
+        let Some((section_base, section_data)) = exe_section_bytes(&relocation.section_name) else {
+            continue;
+        };
+        let Ok(section_base) = i64::try_from(section_base) else {
+            continue;
+        };
+        let Some(target) =
+            target_base(relocation).and_then(|base| base.checked_add(relocation.addend))
+        else {
+            continue;
+        };
+        let mut candidates = Vec::new();
+        for place in 0..section_data.len().saturating_sub(3) {
+            let Ok(field_bytes) = <[u8; 4]>::try_from(&section_data[place..place + 4]) else {
+                continue;
+            };
+            let Ok(place_offset) = i64::try_from(place) else {
+                continue;
+            };
+            if i64::from(i32::from_le_bytes(field_bytes)) == target - (section_base + place_offset)
+            {
+                candidates.push(place as u64);
+            }
+        }
+        if !candidates.is_empty() {
+            pending.push((
+                index,
+                relocation.section_name.clone(),
+                target,
+                section_base,
+                candidates,
+            ));
+        }
+    }
+    // Distinct-slot assignment: the fewest-candidates entries claim
+    // first so one applied field cannot verify two records.
+    pending.sort_by_key(|(_, _, _, _, candidates)| candidates.len());
+    let mut taken = BTreeSet::<(String, u64)>::new();
+    for (index, section_name, target, section_base, candidates) in pending {
+        if let Some(&place) = candidates
+            .iter()
+            .find(|place| taken.insert((section_name.clone(), **place)))
+        {
+            relocations[index].resolved_value =
+                Some(target - (section_base + i64::try_from(place).unwrap_or(0)));
         }
     }
 
@@ -3593,7 +3747,7 @@ fn object_link_corresponds(
         let mut function_relocations: Vec<usize> = relocations
             .iter()
             .enumerate()
-            .filter(|(_, relocation)| relocation.function_index == function_index)
+            .filter(|(_, relocation)| relocation.function_index == Some(function_index))
             .map(|(index, _)| index)
             .collect();
         function_relocations.sort_by_key(|index| relocations[*index].offset);
@@ -4987,6 +5141,11 @@ fn object_translation_correspondence_checks(
             || executable_imports.contains(target)
             || ir_surface.declared.contains(target)
             || machine_tv::is_ti3_libcall(target)
+            // Section-symbol relocation targets (`.text + N` in
+            // `.eh_frame` and friends) name their own section.
+            || executable_file
+                .as_ref()
+                .is_some_and(|file| file.sections().any(|s| s.name() == Ok(target)))
     };
     let unresolvable: Vec<String> = record
         .relocations
@@ -5029,9 +5188,18 @@ fn object_translation_correspondence_checks(
             format!("unresolvable relocation targets: {unresolvable:?}"),
         ));
     }
+    // Bounds apply to relocations inside code sections — entries in
+    // other sections (`.eh_frame` and friends) cannot sit inside a
+    // function record by construction, so they are exempt and noted.
+    let code_sections: BTreeSet<&str> = record
+        .functions
+        .iter()
+        .map(|function| function.object_section.as_str())
+        .collect();
     let out_of_bounds: Vec<(String, u64)> = record
         .relocations
         .iter()
+        .filter(|relocation| code_sections.contains(relocation.object_section.as_str()))
         .filter(|relocation| {
             !record.functions.iter().any(|function| {
                 function.object_section == relocation.object_section
@@ -5041,14 +5209,26 @@ fn object_translation_correspondence_checks(
         })
         .map(|relocation| (relocation.object_section.clone(), relocation.object_offset))
         .collect();
+    let exempt = record
+        .relocations
+        .iter()
+        .filter(|relocation| !code_sections.contains(relocation.object_section.as_str()))
+        .count();
     if out_of_bounds.is_empty() {
         checks.push(check(
             "relocation_bounds",
             "checked",
-            format!(
-                "{} relocations inside an enumerated function",
-                record.relocations.len()
-            ),
+            if exempt == 0 {
+                format!(
+                    "{} relocations inside an enumerated function",
+                    record.relocations.len()
+                )
+            } else {
+                format!(
+                    "{} relocations inside an enumerated function ({exempt} outside code sections)",
+                    record.relocations.len() - exempt
+                )
+            },
         ));
     } else {
         checks.push(check(
@@ -5076,6 +5256,105 @@ fn object_translation_correspondence_checks(
                 "{resolved}/{} relocation values recomputed",
                 record.relocations.len()
             ),
+        ));
+    }
+
+    // relocation_applied_values (Step 4 全件照合): every record's
+    // recomputed value must be the value the linker actually applied —
+    // at the owning function's exe site for code relocations, and as a
+    // field present in the same-named section for the rest (`.eh_frame`
+    // entries get merged, so their slot is located by value). A record
+    // without a recomputed value stays unresolved, never assumed.
+    let exe_sections: Vec<_> = executable_file
+        .as_ref()
+        .map(|file| file.sections().collect())
+        .unwrap_or_default();
+    let mut verified = 0usize;
+    let mut unresolved = 0usize;
+    let mut mismatched = Vec::new();
+    for relocation in &record.relocations {
+        let Some(resolved) = relocation.resolved_value else {
+            unresolved += 1;
+            continue;
+        };
+        let function = record.functions.iter().find(|function| {
+            function.object_section == relocation.object_section
+                && function.object_offset <= relocation.object_offset
+                && relocation.object_offset < function.object_offset + function.object_size
+        });
+        match function {
+            Some(function) => {
+                let applied = function
+                    .executable_address
+                    .and_then(|base| {
+                        base.checked_add(relocation.object_offset - function.object_offset)
+                    })
+                    .and_then(|place| {
+                        exe_sections
+                            .iter()
+                            .find(|section| {
+                                section.address() <= place
+                                    && place + 4 <= section.address() + section.size()
+                            })
+                            .and_then(|section| section.data_range(place, 4).ok().flatten())
+                    })
+                    .map(|bytes| i64::from(i32::from_le_bytes(bytes.try_into().unwrap())));
+                match applied {
+                    Some(actual) if actual == resolved => verified += 1,
+                    Some(_) => mismatched
+                        .push((relocation.object_section.clone(), relocation.object_offset)),
+                    None => unresolved += 1,
+                }
+            }
+            None => {
+                let section = exe_sections
+                    .iter()
+                    .find(|section| section.name() == Ok(relocation.object_section.as_str()));
+                match section {
+                    None => unresolved += 1,
+                    Some(section) => {
+                        let Ok(data) = section.uncompressed_data() else {
+                            unresolved += 1;
+                            continue;
+                        };
+                        let found = (0..data.len().saturating_sub(3)).any(|place| {
+                            i64::from(i32::from_le_bytes(
+                                data[place..place + 4].try_into().unwrap(),
+                            )) == resolved
+                        });
+                        if found {
+                            verified += 1;
+                        } else {
+                            mismatched.push((
+                                relocation.object_section.clone(),
+                                relocation.object_offset,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !mismatched.is_empty() {
+        checks.push(check(
+            "relocation_applied_values",
+            "inconsistent",
+            format!("applied fields disagree with the record: {mismatched:?}"),
+        ));
+    } else if unresolved > 0 {
+        checks.push(check(
+            "relocation_applied_values",
+            "unchecked",
+            format!(
+                "{verified}/{} applied values verified ({unresolved} unresolved)",
+                record.relocations.len()
+            ),
+        ));
+    } else {
+        checks.push(check(
+            "relocation_applied_values",
+            "checked",
+            format!("{verified} applied values verified"),
         ));
     }
 
@@ -6944,9 +7223,16 @@ entry:
             assert!(function.object_size > 0);
             assert!(function.executable_address.unwrap_or(0) > 0);
         }
-        assert_eq!(record.relocations.len(), 2);
-        let reloc_targets: Vec<&str> = record
+        // Step 4 全件照合: the record lists every relocation entry —
+        // the two `.text` call sites plus the `.eh_frame` unwind
+        // records the object always carries.
+        let text_relocs: Vec<_> = record
             .relocations
+            .iter()
+            .filter(|relocation| relocation.object_section == ".text")
+            .collect();
+        assert_eq!(text_relocs.len(), 2);
+        let reloc_targets: Vec<&str> = text_relocs
             .iter()
             .map(|relocation| relocation.target_symbol.as_str())
             .collect();
@@ -6956,10 +7242,19 @@ entry:
                 "missing relocation to {target}"
             );
         }
-        for relocation in &record.relocations {
-            assert_eq!(relocation.object_section, ".text");
+        for relocation in &text_relocs {
             assert_eq!(relocation.kind, "R_X86_64_PLT32");
             assert_eq!(relocation.addend, -4);
+            assert!(relocation.resolved_value.is_some());
+        }
+        assert!(
+            record
+                .relocations
+                .iter()
+                .any(|relocation| relocation.object_section == ".eh_frame"),
+            "non-Text relocations must be recorded too"
+        );
+        for relocation in &record.relocations {
             assert!(relocation.resolved_value.is_some());
         }
 
@@ -7501,7 +7796,7 @@ entry:
         assert_eq!(lines.len(), 1);
         assert_eq!(
             lines[0],
-            "Object translation correspondence: checked_correspondence (6 of 6 items checked)."
+            "Object translation correspondence: checked_correspondence (7 of 7 items checked)."
         );
         let results = results_of(&report);
         assert_eq!(
@@ -7515,6 +7810,7 @@ entry:
                     "relocation_resolved_values".to_owned(),
                     "checked".to_owned()
                 ),
+                ("relocation_applied_values".to_owned(), "checked".to_owned()),
                 (
                     "llvm_ir_object_equivalence".to_owned(),
                     "checked".to_owned()
