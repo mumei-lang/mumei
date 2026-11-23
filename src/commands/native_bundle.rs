@@ -4174,6 +4174,7 @@ fn machine_tv_acceptance_decision(
 fn source_machine_tv_within_profile_json(
     evaluation: &MachineTvEvaluation,
     unchecked_domains: &[&str],
+    object_link_correspondence: bool,
 ) -> serde_json::Value {
     let accepted =
         machine_tv_acceptance_decision(&evaluation.outcomes, evaluation.entry_wrapper_applicable)
@@ -4202,6 +4203,14 @@ fn source_machine_tv_within_profile_json(
         "status": status,
         "non_equivalent_functions": non_equivalent,
         "unchecked_domains": unchecked_domains,
+        // The gate covers source↔machine equivalence only; the link
+        // edge's own status is named explicitly so consumers do not read
+        // `checked` as covering it.
+        "object_link_correspondence": if object_link_correspondence {
+            "checked_object_link_correspondence"
+        } else {
+            "unchecked_not_translation_validated"
+        },
     })
 }
 
@@ -4651,6 +4660,7 @@ fn write_machine_tv(
             "source_machine_tv": source_machine_tv_within_profile_json(
                 &evaluation,
                 &checks_not_performed,
+                data.object_link_correspondence,
             ),
             "checks_performed": checks_performed,
             "checks_not_performed": checks_not_performed,
@@ -5435,6 +5445,7 @@ fn write_object_machine_tv_acceptance(
             "source_machine_tv": source_machine_tv_within_profile_json(
                 evaluation,
                 &checks_not_performed,
+                data.object_link_correspondence,
             ),
         });
         let mut bytes = serde_json::to_vec_pretty(&descriptor)
@@ -5464,9 +5475,19 @@ fn write_object_machine_tv_acceptance(
         println!(
             "Acceptance scope excludes producer authenticity, historical execution, {wrapper_exclusion}register-convention validation, optimizer/ABI/runtime/OS observations, grade promotion, and Lean checks; scope: {scope}."
         );
+        // Same residual-domain count as the JSON descriptor's
+        // checks_not_performed — producer authenticity, register
+        // convention and the other fixed domains included.
+        let (_, unchecked_domains) = object_machine_tv_acceptance_checks(
+            data.family,
+            data.canonical_argv_compared,
+            data.object_link_correspondence,
+            wrapper_equivalent,
+            &evaluation.coverage,
+        );
         println!(
             "{}",
-            source_machine_tv_within_profile_line(evaluation, evaluation.coverage.1.len())
+            source_machine_tv_within_profile_line(evaluation, unchecked_domains.len())
         );
         for line in object_translation_correspondence_text(data) {
             println!("{line}");

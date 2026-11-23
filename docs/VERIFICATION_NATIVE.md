@@ -2326,7 +2326,12 @@ wrapper came back `equivalent_within_profile` — and
 `non_equivalent_functions` enumerates each function that did not compare
 equivalent with its `outcome` (and `reason` for `outside_profile`), and
 `unchecked_domains` lists the descriptor's `checks_not_performed` names,
-so the residual unverified domain is enumerable from the record. Both
+so the residual unverified domain is enumerable from the record. The
+gate covers source↔machine equivalence only:
+`source_machine_tv.object_link_correspondence` names the link edge's own
+status (`checked_object_link_correspondence` or
+`unchecked_not_translation_validated`) so `checked` is not misread as
+covering it. Both
 text paths print `Source machine-TV within profile: <status> ...` after
 the summary. This is a report only — no check, grade or verdict is
 promoted.
