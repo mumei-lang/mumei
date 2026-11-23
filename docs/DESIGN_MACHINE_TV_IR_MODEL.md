@@ -59,13 +59,23 @@ Step 4（#1363）で `llvm_ir_object_equivalence` 検査項目として直接比
 
 1. 署名から `model.inputs`（64-bit シンボリック入力列）を導出 — 現行と
    同じ ABI 解釈を両側に適用するため署名の導出元はソースモデルのまま
-   維持し、IR 側 arity との整合は既存の arity ゲート（`param_shapes` /
-   `array_params` マスク経由）を再利用する
+   維持する。IR 側 arity との整合は既存のヘッダー・arity 検査
+   （`param_shapes` / `array_params` マスク経由）を再利用するが、
+   直接比較経路のエンコーダはこの検査を呼んでいないため、接続を
+   設計の必須項目とする（未接続のままでは arity 不一致を検出しない）
 2. IR エンコーダが `(path_condition, return_value)` edges と
    `(path_condition, defined)` 定義域義務を出す
 3. lifter の各 machine パスを「全 IR edge の disjunction 内で戻り値一致 +
    定義域義務成立」で検証 — `compare_object_function_against_ir` の
    現行意味論をそのまま昇格させる
+
+**比較入力域の明示**: 直接等価を主張する入力域は「ソース側の定義域が
+有界に絞った部分」に限定する。現行のパス比較はソースモデルの定義域
+義務で入力を絞るため、IR 上は定義されるがソースでは未定義の入力
+（シフト量 ≥ 幅、`udiv` の除数 0 等）は比較ドメインから除外される —
+その領域で機械語と IR が乖離していても検出しない。`checked_object_`
+`translation_tv` はこの限定域上の等価を名乗るものとし、全域等価を
+含意しないことを記述子の `input_domain` 文字列に残す。
 
 比較結果は関数ごとに `Equivalent` / `Different` / `Unknown` /
 `OutsideProfile(reason)` の4値で、既存の `MachineTvEvaluation` 流路に
@@ -78,12 +88,14 @@ Step 4（#1363）で `llvm_ir_object_equivalence` 検査項目として直接比
 
 | 順序 | 領域 | 機械語側の既存リフト | IR 側に必要なエンコード |
 |---|---|---|---|
-| 1 | forward/acyclic branch | 分岐パス列挙済み | `br`/`switch`/`phi` のパス条件列挙（既に scalar-i64 で実施） |
-| 2 | call（同一モジュール内直接呼出） | `call_sites` で結果値代入済み | callee を IR エンコードし戻り値 edge を連結（入口 ABI で inputs 写像） |
-| 3 | bounded memory（配列引数） | `array_params` + load/store リフト済み | `getelementptr`/`load`/`store` を配列入力上の選択関数でモデル化 |
-| 4 | aggregate 引数・戻り値（sret 含む） | leaf 展開・sret バッファ経路済み | struct 引数を leaf 単位で展開、sret は暗黙 `rdi` バッファとして model.inputs に追加 |
-| 5 | i128 引数・戻り値 | wide leaf pair・ti3 ヘルパー・shld/shrd 済み | 2 リーフ入力として (lo, hi) ペア化、`mul` limbs は deferred のまま除外 |
-| 6 | f64 leaf | f64 leaf リフト済み | SSE `movsd`/`addsd` 等と `fadd`/`fcmp` の対応 — NaN payload・MXCSR は deferred で definedness から除外 |
+| 1 | forward/acyclic branch | 分岐パス列挙済み | `br`/`phi` のパス条件列挙は scalar-i64 で実施済み。`switch` は現行エンコーダが未対応 — `icmp`+`br` 鎖への分解か直接列挙かを実装時に決める |
+| 2 | call（同一モジュール内直接呼出） | `call_sites` で結果値代入済み | callee を IR エンコードし戻り値 edge を連結。callee inputs は caller が評価した実引数で束縛する**引数照合義務**を新設 — 現行の機械語リフトは実引数照合を別義務に分け、IR 比較器はその義務を検査しないため設計に明記が必要 |
+| 3 | bounded memory（ローカルメモリ） | frame load/store リフト済み | `getelementptr`/`load`/`store` をフレーム配列上の選択関数でモデル化（現行 IR エンコーダの `store` はローカルメモリのみ） |
+| 4 | 配列引数（引数バッファへの書込み） | **未対応** — 機械語側署名ゲートは現状配列引数を拒否。機械語リフトの拡張と同時進行 | 引数バッファへの `store`（書き戻し）をモデル化。ローカルメモリ(3)とは別領域として、配列引数への書込みを対象に含めるかを実装時に明文化する |
+| 5 | aggregate 引数・戻り値 | leaf 展開済み | struct 引数を leaf 単位で展開 |
+| 6 | sret（5+ leaf 集約戻り値） | callee/caller 両側の sret バッファ経路済み | 暗黙 `rdi` ポインタは IR の宣言仮引数ではなく共有 `model.inputs` でもない — IR 側は `sret` 属性付き仮引数が指すバッファへの書込み値として戻り値をモデル化し、機械語がバッファに書いた値と照合する。model.inputs は増やさない |
+| 7 | i128 引数・戻り値 | wide leaf pair・ti3 ヘルパー・shld/shrd 済み | 2 リーフ入力として (lo, hi) ペア化、`mul` limbs は deferred のまま除外 |
+| 8 | f64 leaf | f64 leaf リフト済み | SSE `movsd`/`addsd` 等と `fadd`/`fcmp` の対応 — NaN payload・MXCSR は deferred で definedness から除外 |
 
 各段で未対応の関数は引き続き `OutsideProfile`/`unchecked` で fail-closed。
 **順序は合否ではなく記録粒度** — 昇格ゲートは「プロファイル対象関数の
@@ -98,6 +110,12 @@ Step 4（#1363）で `llvm_ir_object_equivalence` 検査項目として直接比
 `functions.<name>` 内訳行（`outcome`/`reason`/`detail`）で列挙する。
 `unchecked` のまま残る関数は残域として `unchecked_domains` に
 `llvm_ir_object_equivalence:<function>` で名前付き列挙 — 沈黙させない。
+
+**昇格前の完全性検査**: 現行の集計は未比較の関数が混在しても
+`checked` を返し、比較結果の収集は対応する機械語バイトがない関数を
+記録しない。昇格時は「比較対象一覧（object/IR 両側に存在する全関数）」
+と「関数別の比較結果」を突き合わせ、結果が欠落した関数が1つでも
+あれば昇格を止める — 列挙義務として本設計に含める。
 
 ### 3.4 昇格語彙の接続
 
@@ -122,9 +140,12 @@ Step 4（#1363）で `llvm_ir_object_equivalence` 検査項目として直接比
 - `atom max(a,b)`（`icmp`+`select` / `cmov`）: select 畳み込み edge の
   パス条件が `cmov` パスと整合することを検証（現行でも通る回帰ケース）
 - `atom twice(x) { inner(x)+inner(x) }`（call 導入後）: callee の IR edge
-  が caller の inputs 写像で連結されることを検証
-- 負例: IR の `udiv`（定義域義務 `b != 0`）を含む関数で `b=0` が機械語の
-  definedness に覆われない場合 `Different` → fail-closed を確認
+  が caller の実引数評価で束縛され、引数照合義務が検査されることを検証
+- 負例（`Different`）: 除数 0 でも値を返す機械語（例: ゼロ除算時に
+  cmov で分岐する系列）と無条件に `udiv` する IR を組み合わせ、
+  定義域義務不成立を `Different` として検出することを確認。なお機械語が
+  ゼロ除算でトラップする系列はリフト失敗で `NotLiftable` となり
+  `Different` にはならない — fail-closed として正しいが別経路
 - 境界: `mul i128`・cyclic 関数を含むバンドルで当該関数のみ
   `unchecked` 列挙され、他関数の checked と両立することを確認
 
