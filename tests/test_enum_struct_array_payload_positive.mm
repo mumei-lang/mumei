@@ -25,6 +25,10 @@ struct Pt {
     c: Color
 }
 
+struct CachePoint {
+    x: i64
+}
+
 struct WidePt {
     x: i64,
     n: u32
@@ -37,6 +41,11 @@ enum Color {
 
 enum DirectArrayE {
     D(ps: [Pt]),
+    N
+}
+
+enum CacheArrayE {
+    D(ps: [CachePoint]),
     N
 }
 
@@ -324,6 +333,41 @@ body: {
         DirectArrayE::N => outer
     };
     selected[0].x
+};
+
+atom cache_array_call_source() -> [CachePoint]
+requires: true;
+ensures: len(result) == 1 && result[0].x == 1;
+body: [CachePoint { x: 1 }];
+
+atom call_result_array_leaf_cache_tracks_store() -> i64
+requires: true;
+ensures: result == 9;
+body: {
+    let qs = cache_array_call_source();
+    qs[0].x = 9;
+    let e = CacheArrayE::D(qs);
+    match e {
+        CacheArrayE::D(payload) => payload[0].x,
+        CacheArrayE::N => 0
+    }
+};
+
+atom match_result_array_leaf_cache_tracks_store() -> i64
+requires: true;
+ensures: result == 9;
+body: {
+    let source = [CachePoint { x: 1 }];
+    let qs = match Color::R {
+        Color::R => source,
+        Color::G(_) => source
+    };
+    qs[0].x = 9;
+    let e = CacheArrayE::D(qs);
+    match e {
+        CacheArrayE::D(payload) => payload[0].x,
+        CacheArrayE::N => 0
+    }
 };
 
 atom direct_struct_array_payload_equality_unchanged(ps: [Pt]) -> bool
