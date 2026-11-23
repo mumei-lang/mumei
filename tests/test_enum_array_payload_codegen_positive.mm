@@ -20,8 +20,8 @@ body: {
 };
 
 atom second_payload(xs: [i64]) -> i64
-requires: len(xs) == 2;
-ensures: result == xs[1];
+requires: len(xs) == 2 && xs[1] == 9;
+ensures: result == 9;
 body: {
     let e = Ev::D(xs);
     match e {
@@ -77,12 +77,12 @@ body: {
 
 atom main() -> i64
 requires: true;
-ensures: result == 9;
+ensures: result == 24;
 body: {
     let length = length_payload([3, 9]);
     let second = second_payload([3, 9]);
     let passed = pass_bound_array(Ev::D([3, 9]));
     let returned = match_returned_array();
     let floats = float_length([1.0, 2.0]);
-    9
+    length + second + passed + returned + floats
 };

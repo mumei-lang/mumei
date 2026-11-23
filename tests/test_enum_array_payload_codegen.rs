@@ -125,7 +125,7 @@ fn scalar_array_enum_payloads_build_and_run_with_verified_results() {
     let run_stderr = String::from_utf8_lossy(&run.stderr);
     assert_eq!(
         run.status.code(),
-        Some(9),
+        Some(24),
         "native result should equal the verified postcondition result:\n{run_stdout}\n{run_stderr}"
     );
 }
