@@ -1018,7 +1018,12 @@ pub unsafe fn encode_parsed_function_for_comparison<'ctx>(
                     LLVMGetTypeKind(arg_type) == LLVMTypeKind::LLVMIntegerTypeKind
                         && LLVMGetIntTypeWidth(arg_type) == 64
                 });
-                if !scalar_result || !scalar_args {
+                // An unused call result carries its actual arguments
+                // nowhere in the encoded return term, so the IR and
+                // machine sides could pass different actuals and still
+                // compare `Equivalent`. Reject it instead of asserting
+                // arg obligations the subset cannot map to call sites.
+                if !scalar_result || !scalar_args || LLVMGetFirstUse(inst).is_null() {
                     return Err(ValidationError("LLVM call outside comparison subset"));
                 }
             }
@@ -1026,8 +1031,13 @@ pub unsafe fn encode_parsed_function_for_comparison<'ctx>(
         }
         block = LLVMGetNextBasicBlock(block);
     }
-    let no_renames = BTreeMap::new();
-    let mut encoder = IrEncoder::new(context, &no_renames, false, optimized);
+    // The native emitter renames the user `main` atom to
+    // `__mumei_user_main`; the source model's call sites name their
+    // callee `main`, so the encoder needs the same rename map the
+    // shared validation path uses or every call to `main` compares
+    // `Different`.
+    let call_renames = native_call_renames(true);
+    let mut encoder = IrEncoder::new(context, &call_renames, false, optimized);
     let returns = encoder.encode(
         raw,
         &model.inputs,

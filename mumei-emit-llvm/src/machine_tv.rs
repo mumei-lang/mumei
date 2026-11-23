@@ -6080,6 +6080,23 @@ entry:
             check_function_against_ir(&[], 0, &caller, &[], &[], &BTreeMap::new(), &context,),
             IrObjectEquivalence::NotLiftable("unsupported_signature")
         );
+
+        // A composite-argument call site inside an otherwise scalar
+        // caller is rejected by the call-site gate itself — the
+        // caller's own parameters stay inside the scalar-i64 subset.
+        let struct_caller = source_model_named_with_admission(
+            "struct P { x: i64, y: i64 }\n\
+             atom helper(p: P) -> i64 requires: true; ensures: true; body: { p.x };\n\
+             atom caller(x: i64) -> i64 requires: true; ensures: true; body: { helper(P { x: x, y: 0 }) };",
+            "caller",
+            &context,
+            RefinedAdmission::CompositeV21,
+        );
+        assert!(!ir_object_signature_liftable(&struct_caller));
+        assert_eq!(
+            check_function_against_ir(&[], 0, &struct_caller, &[], &[], &BTreeMap::new(), &context,),
+            IrObjectEquivalence::NotLiftable("unsupported_signature")
+        );
     }
 
     #[test]
@@ -6243,6 +6260,48 @@ entry:
                 }
             );
         }
+    }
+
+    #[test]
+    fn encode_ir_for_comparison_renames_native_main_callee() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // The binary emitter renames the user `main` to
+        // `__mumei_user_main`, while the source model's call site
+        // binds `call_decl("main", ...)`. Without the native rename
+        // map the encoded term is a different uninterpreted function
+        // and every call to `main` compares `Different`.
+        let source = "atom main(x: i64) -> i64 requires: true; ensures: true; body: { main(x) };";
+        let model = source_model_named(source, "main", &context);
+        let ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @__mumei_user_main(i64 %x) {
+entry:
+  %r = call i64 @__mumei_user_main(i64 %x)
+  ret i64 %r
+}
+"#;
+        let (returns, _defined) = unsafe {
+            crate::translation_validation::encode_ir_function_for_comparison(
+                ir.as_bytes(),
+                "__mumei_user_main",
+                &model,
+                false,
+                &context,
+            )
+        }
+        .unwrap();
+        let expected = mumei_core::semantic_contract::call_decl(&context, "main", 1)
+            .apply(&[&model.inputs[0]])
+            .as_bv()
+            .unwrap();
+        assert!(
+            returns.iter().any(|(_condition, value)| {
+                value._eq(&expected).simplify().as_bool() == Some(true)
+            }),
+            "call term does not use the source callee name `main`"
+        );
     }
 
     #[test]
