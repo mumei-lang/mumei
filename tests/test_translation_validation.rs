@@ -5,6 +5,7 @@ use mumei_core::semantic_contract::{
 };
 use mumei_core::verification::ModuleEnv;
 use mumei_emit_llvm::translation_validation::{self as tv, Options, Outcome};
+use std::collections::BTreeMap;
 
 const CLAMP: &str = include_str!("fixtures/semantic_contract_clamp.mm");
 
@@ -4163,5 +4164,449 @@ fn composite_v23_does_not_admit_struct_valued_enum_payload_reads() {
         )
         .is_err(),
         "struct-valued direct enum payload reads must not expand CompositeV23 admission"
+    );
+}
+
+// ─── hir → llvm_ir correspondence (scalar-i64 leaf subset) ────────────
+
+fn hir_outcome(source: &str, ir: &str) -> Outcome {
+    let Item::Atom(atom) = parse_module_checked(source).unwrap().remove(0) else {
+        panic!("atom")
+    };
+    let hir = lower_atom_to_hir(&atom);
+    tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), ir, Options::default()).unwrap()
+}
+
+#[test]
+fn hir_leaf_compare_is_equivalent_on_emitted_ir() {
+    let src = source("x: i64, y: i64", "x * y + 1");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn hir_leaf_compare_catches_a_mistranslated_ir() {
+    // The machine side cannot flag a faithfully-lowered wrong IR; the
+    // HIR-anchored check compares the HIR model against the IR itself.
+    let ir = pin("define i64 @f(i64 %x, i64 %y) { %s = sub i64 %x, %y\n ret i64 %s }");
+    assert_eq!(
+        hir_outcome(&source("x: i64, y: i64", "x + y"), &ir),
+        Outcome::Different
+    );
+}
+
+#[test]
+fn hir_leaf_compare_binds_definedness_both_ways() {
+    // A missing UB guard on the IR side is UndefinedBehavior, not a
+    // value mismatch — the same direction the source check enforces.
+    let src = source("x: i64, y: i64", "x / y");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+    let ir = pin("define i64 @f(i64 %x, i64 %y) { %q = sdiv i64 %x, 0\n ret i64 %q }");
+    assert_eq!(hir_outcome(&src, &ir), Outcome::UndefinedBehavior);
+}
+
+#[test]
+fn hir_leaf_compare_rejects_atoms_outside_the_subset() {
+    // A non-i64 parameter is outside the leaf subset — fail closed, no
+    // verdict.
+    let Item::Atom(atom) = parse_module_checked(&source("x: f64", "1"))
+        .unwrap()
+        .remove(0)
+    else {
+        panic!("atom")
+    };
+    let hir = lower_atom_to_hir(&atom);
+    assert!(tv::validate_hir_pure_i64_leaf(
+        &hir,
+        &BTreeMap::new(),
+        &pin("define i64 @f(i64 %x) { ret i64 %x }"),
+        Options::default()
+    )
+    .is_err());
+}
+
+#[test]
+fn hir_leaf_compare_binds_scalar_i64_call_sites() {
+    // f calls g: both sides produce `mumei_call_g_1` on the same arg —
+    // the call compares as an uninterpreted site, so a wrong IR call
+    // (to h, or with swapped args) is caught.
+    let src = source("x: i64", "g(x + 1)");
+    let ir = pin(
+        "define i64 @g(i64 %a) { %r = add i64 %a, 0\n ret i64 %r }\n\
+         define i64 @f(i64 %x) { %v = add i64 %x, 1\n %r = call i64 @g(i64 %v)\n ret i64 %r }",
+    );
+    assert_eq!(hir_outcome(&src, &ir), Outcome::EquivalentWithinProfile);
+
+    // Same shape, different callee — the site names differ.
+    let wrong = pin(
+        "define i64 @h(i64 %a) { %r = add i64 %a, 0\n ret i64 %r }\n\
+         define i64 @g(i64 %a) { %r = add i64 %a, 0\n ret i64 %r }\n\
+         define i64 @f(i64 %x) { %v = add i64 %x, 1\n %r = call i64 @h(i64 %v)\n ret i64 %r }",
+    );
+    assert_eq!(hir_outcome(&src, &wrong), Outcome::Different);
+
+    // Same callee, different argument.
+    let wrong_arg = pin(
+        "define i64 @g(i64 %a) { %r = add i64 %a, 0\n ret i64 %r }\n\
+         define i64 @f(i64 %x) { %v = add i64 %x, 2\n %r = call i64 @g(i64 %v)\n ret i64 %r }",
+    );
+    assert_eq!(hir_outcome(&src, &wrong_arg), Outcome::Different);
+}
+
+#[test]
+fn hir_leaf_compare_guards_branch_definedness() {
+    // `x / y` only in the else arm: y = 0 is in-domain whenever
+    // x > 0 (then-branch taken), so the check stays equivalent.
+    let src = source("x: i64, y: i64", "if x > 0 { 1 } else { x / y }");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn hir_leaf_compare_short_circuits_rhs_definedness() {
+    // `c` may be 0 whenever `a == 0`: `&&` never runs the rhs there, so
+    // the comparison cannot bind `c != 0` on those inputs.
+    let src = source("a: i64, b: i64, c: i64", "a != 0 && (b / c) > 0");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+fn source_ret(params: &str, ret: &str, body: &str) -> String {
+    format!("atom f({params}) -> {ret} requires: true; ensures: true; body: {{ {body} }};")
+}
+
+#[test]
+fn hir_leaf_compare_uniform_i128_signatures() {
+    let src = source_ret("x: i128, y: i128", "i128", "x + y * 2");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+    // Upper-64 divergence only: truncation hides it from an i64 view but
+    // not from the 128-bit model.
+    let ir = pin(
+        "define i128 @f(i128 %x, i128 %y) { %m = mul i128 %y, 3\n %r = add i128 %x, %m\n ret i128 %r }",
+    );
+    assert_eq!(hir_outcome(&src, &ir), Outcome::Different);
+}
+
+#[test]
+fn hir_leaf_compare_uniform_u128_uses_unsigned_ops() {
+    let src = source_ret("x: u128, y: u128", "u128", "x > y");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+    // A signed comparison on the same bits is a mistranslation.
+    let ir = pin("define i128 @f(i128 %x, i128 %y) { %c = icmp sgt i128 %x, %y\n %r = select i1 %c, i128 1, i128 0\n ret i128 %r }");
+    assert_eq!(hir_outcome(&src, &ir), Outcome::Different);
+}
+
+#[test]
+fn hir_leaf_compare_rejects_mixed_width_signatures() {
+    // i64 param + i128 result mixes widths — outside this slice.
+    let src = source_ret("x: i64", "i128", "x");
+    let Item::Atom(atom) = parse_module_checked(&src).unwrap().remove(0) else {
+        panic!("atom")
+    };
+    let hir = lower_atom_to_hir(&atom);
+    let ir = pin("define i64 @f(i64 %x) { ret i64 %x }");
+    assert!(
+        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, Options::default()).is_err(),
+        "mixed-width signatures stay outside the subset"
+    );
+}
+
+#[test]
+fn hir_leaf_compare_uniform_f64_pass_through() {
+    let src = source_ret("x: f64, y: f64", "f64", "let z = x; z");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+    // Returning the other parameter is a mistranslation — the model
+    // binds the IEEE-754 bit pattern, so it shows up as Different.
+    let ir = pin("define double @f(double %x, double %y) { ret double %y }");
+    assert_eq!(hir_outcome(&src, &ir), Outcome::Different);
+}
+
+#[test]
+fn hir_leaf_compare_rejects_f64_operations_and_wrong_ret() {
+    // FP arithmetic stays outside the pass-through subset.
+    let src = source_ret("x: f64, y: f64", "f64", "x + y");
+    let Item::Atom(atom) = parse_module_checked(&src).unwrap().remove(0) else {
+        panic!("atom")
+    };
+    let hir = lower_atom_to_hir(&atom);
+    let ir = pin("define double @f(double %x, double %y) { ret double %x }");
+    assert!(
+        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, Options::default()).is_err(),
+        "f64 arithmetic stays outside the pass-through subset"
+    );
+    // An `i64` return where the source declares `f64` fails the
+    // declared-kind gate rather than comparing the bit pattern.
+    let src = source_ret("x: f64", "f64", "x");
+    let Item::Atom(atom) = parse_module_checked(&src).unwrap().remove(0) else {
+        panic!("atom")
+    };
+    let hir = lower_atom_to_hir(&atom);
+    // `ret i64 0` is fully inside the instruction subset — only the
+    // declared-kind check on the return rejects it; without that gate
+    // this would compare `Different` instead of erroring.
+    let ir = pin("define i64 @f(double %x) { ret i64 0 }");
+    assert!(
+        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, Options::default()).is_err(),
+        "an i64 return where f64 is declared fails the kind gate"
+    );
+}
+
+#[test]
+fn hir_leaf_compare_i128_upper_half_divergence() {
+    let src = source_ret("x: i128", "i128", "x");
+    // Only the upper half differs: bit 64 set — invisible below 2^64.
+    let ir = pin("define i128 @f(i128 %x) { %r = or i128 %x, 18446744073709551616\n ret i128 %r }");
+    assert_eq!(hir_outcome(&src, &ir), Outcome::Different);
+}
+
+#[test]
+fn hir_leaf_compare_u128_negative_literal_zero_extends() {
+    // `x + -1` in u128: the emitter zero-extends the 64-bit literal, so
+    // this is x + (2^64-1), not x - 1 — a sext model would misjudge both.
+    let src = source_ret("x: u128", "u128", "x + -1");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+    let ir = pin("define i128 @f(i128 %x) { %r = add i128 %x, -1\n ret i128 %r }");
+    assert_eq!(hir_outcome(&src, &ir), Outcome::Different);
+}
+
+#[test]
+fn hir_leaf_compare_rejects_ordered_ops_over_call_results() {
+    // `g` may be a u64-returning callee — ordered ops over its result
+    // need the callee signature env, so they fail closed for now.
+    let src = source("x: i64, y: i64", "g(x) > y");
+    let Item::Atom(atom) = parse_module_checked(&src).unwrap().remove(0) else {
+        panic!("atom")
+    };
+    let hir = lower_atom_to_hir(&atom);
+    let ir = pin("declare i64 @g(i64)\ndefine i64 @f(i64 %x, i64 %y) { %c = call i64 @g(i64 %x)\n %cmp = icmp sgt i64 %c, %y\n %r = zext i1 %cmp to i64\n ret i64 %r }");
+    assert!(
+        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, Options::default()).is_err(),
+        "ordered ops over a call result stay outside the subset"
+    );
+}
+
+#[test]
+fn hir_leaf_compare_handles_bounded_array_reads() {
+    // `a[i]` is the emitter's bounds-check + load + merged `phi(loaded, 0)`
+    // — an out-of-bounds read yields 0 on both sides.
+    let src = source("a: [i64], i: i64", "a[i]");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+    // The same read on the wrong element is a genuine mismatch.
+    let wrong = emitted(&source("a: [i64], i: i64", "a[i] + 1"));
+    assert_eq!(hir_outcome(&src, &wrong), Outcome::Different);
+}
+
+#[test]
+fn hir_leaf_compare_binds_array_length() {
+    // `len(a)` reads the stored element count — the `arrlen` slot.
+    let src = source("a: [i64]", "len(a)");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn hir_leaf_compare_rejects_array_writes_and_whole_values() {
+    // `[i64]` parameters are read-only in this profile: a store stays
+    // outside the leaf subset, and so does passing `a` itself as a value.
+    // A real IR module: if the HIR side wrongly admitted the body, the
+    // comparison would produce a verdict rather than the expected
+    // rejection — an empty module could not tell the two apart.
+    let real_ir = emitted(&source("a: [i64], i: i64", "a[i]"));
+    for body in ["a[0] = 1; a[i]", "g(a)"] {
+        let src = source("a: [i64], i: i64", body);
+        let Item::Atom(atom) = parse_module_checked(&src).unwrap().remove(0) else {
+            panic!("atom")
+        };
+        let hir = lower_atom_to_hir(&atom);
+        assert!(
+            tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &real_ir, Options::default())
+                .is_err(),
+            "{body} stays outside the read-only leaf subset"
+        );
+    }
+}
+
+fn hir_atom(source: &str) -> mumei_core::hir::HirAtom {
+    let items = parse_module_checked(source).unwrap();
+    let Some(Item::Atom(atom)) = items.into_iter().find(|i| matches!(i, Item::Atom(_))) else {
+        panic!("atom")
+    };
+    lower_atom_to_hir(&atom)
+}
+
+fn hir_outcome_with_structs(
+    source: &str,
+    structs: &BTreeMap<String, Vec<(String, String)>>,
+    ir: &str,
+) -> Outcome {
+    tv::validate_hir_pure_i64_leaf(&hir_atom(source), structs, ir, Options::default()).unwrap()
+}
+
+/// `emitted` for sources whose first item is a struct declaration:
+/// pick the atom out of the item list before lowering, and register
+/// the struct definitions so `p.x`/`Pair{..}` resolve at codegen.
+fn emitted_atom(source: &str) -> String {
+    let items = parse_module_checked(source).unwrap();
+    let mut env = ModuleEnv::new();
+    for item in &items {
+        match item {
+            Item::StructDef(def) => env.register_struct(def),
+            Item::Atom(atom) => env.register_atom(atom),
+            _ => {}
+        }
+    }
+    pin(
+        &mumei_emit_llvm::codegen::compile_to_module(&hir_atom(source).emit_view(), &env, &[])
+            .unwrap(),
+    )
+}
+
+fn pair_env() -> BTreeMap<String, Vec<(String, String)>> {
+    BTreeMap::from([(
+        "Pair".to_string(),
+        vec![
+            ("x".to_string(), "i64".to_string()),
+            ("y".to_string(), "i64".to_string()),
+        ],
+    )])
+}
+
+fn pair_source(params: &str, result: &str, body: &str) -> String {
+    format!(
+        "struct Pair {{ x: i64, y: i64 }}\natom f({params}) -> {result} requires: true; ensures: true; body: {{ {body} }};"
+    )
+}
+
+#[test]
+fn hir_leaf_compare_handles_aggregate_params() {
+    // `p: Pair` flattens to `{i64, i64}` — `p.x` binds the first slot.
+    let src = pair_source("p: Pair", "i64", "p.x");
+    assert_eq!(
+        hir_outcome_with_structs(&src, &pair_env(), &emitted_atom(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+    // Reading the second leaf instead is a genuine mismatch.
+    let ir =
+        pin("define i64 @f({i64, i64} %p) { %x = extractvalue {i64, i64} %p, 1\n ret i64 %x }");
+    assert_eq!(
+        hir_outcome_with_structs(&src, &pair_env(), &ir),
+        Outcome::Different
+    );
+}
+
+#[test]
+fn hir_leaf_compare_handles_aggregate_results() {
+    // A `Pair` result returns as `{i64, i64}` — `aggregate_value`'s
+    // leaf-first packing on both sides.
+    let src = pair_source("a: i64, b: i64", "Pair", "Pair{x: a, y: b}");
+    assert_eq!(
+        hir_outcome_with_structs(&src, &pair_env(), &emitted_atom(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+    // Field-init order follows declaration order, not written order —
+    // `Pair{y: b, x: a}` is the same value.
+    let swapped = pair_source("a: i64, b: i64", "Pair", "Pair{y: b, x: a}");
+    assert_eq!(
+        hir_outcome_with_structs(&swapped, &pair_env(), &emitted_atom(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+    let ir = pin("define {i64, i64} @f(i64 %a, i64 %b) { %p0 = insertvalue {i64, i64} undef, i64 %b, 0\n %p1 = insertvalue {i64, i64} %p0, i64 %a, 1\n ret {i64, i64} %p1 }");
+    assert_eq!(
+        hir_outcome_with_structs(&src, &pair_env(), &ir),
+        Outcome::Different
+    );
+}
+
+#[test]
+fn hir_leaf_compare_rejects_aggregate_misuse() {
+    // A whole aggregate cannot stand in a scalar position: not as a
+    // scalar-typed tail, an operand, or a call argument.
+    // A real module, not the empty string — an empty module could not
+    // tell a wrong HIR-side admission apart from a missing comparison
+    // target. (The misuse bodies themselves do not codegen.)
+    let real_ir = emitted_atom(&pair_source("p: Pair", "i64", "p.x"));
+    for body in ["p", "p + 1", "g(p)"] {
+        let src = pair_source("p: Pair", "i64", body);
+        assert!(
+            tv::validate_hir_pure_i64_leaf(
+                &hir_atom(&src),
+                &pair_env(),
+                &real_ir,
+                Options::default()
+            )
+            .is_err(),
+            "{body} stays outside the scalar subset"
+        );
+    }
+    // A struct the map does not admit (e.g. non-i64 leaves) fails
+    // closed at the signature gate.
+    let unknown = "struct Triple { a: i64, b: i64, c: i64 }\natom f(t: Triple) -> i64 requires: true; ensures: true; body: { t.a };";
+    assert!(
+        tv::validate_hir_pure_i64_leaf(
+            &hir_atom(unknown),
+            &pair_env(),
+            &emitted_atom(unknown),
+            Options::default()
+        )
+        .is_err(),
+        "unmapped struct params stay outside the subset"
+    );
+    // Map entries that are not non-empty all-i64 records are dropped
+    // from the admission, so a signature naming them fails closed the
+    // same way.
+    let wide = "struct Wide { a: i128 }
+atom f(w: Wide) -> i64 requires: true; ensures: true; body: { w.a };";
+    let wide_env = BTreeMap::from([(
+        "Wide".to_string(),
+        vec![("a".to_string(), "i128".to_string())],
+    )]);
+    assert!(
+        tv::validate_hir_pure_i64_leaf(
+            &hir_atom(wide),
+            &wide_env,
+            &emitted_atom(wide),
+            Options::default()
+        )
+        .is_err(),
+        "non-i64 leaf records are not admitted"
+    );
+    let empty = "struct Unit {}
+atom f() -> Unit requires: true; ensures: true; body: { Unit {} };";
+    let empty_env = BTreeMap::from([("Unit".to_string(), Vec::new())]);
+    assert!(
+        tv::validate_hir_pure_i64_leaf(
+            &hir_atom(empty),
+            &empty_env,
+            &emitted_atom(empty),
+            Options::default()
+        )
+        .is_err(),
+        "empty records are not admitted"
     );
 }

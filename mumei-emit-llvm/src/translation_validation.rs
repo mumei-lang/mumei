@@ -400,6 +400,97 @@ pub fn validate_pure_i64_optimized(
     validate(source, llvm_ir, options, false, true)
 }
 
+/// Compare a `HirAtom`'s scalar leaf body with the same-named
+/// function in `llvm_ir` — the `hir → llvm_ir` correspondence check.
+/// Admission is the leaf subset only (`encode_hir_pure_i64_leaf`):
+/// uniform-width scalar signatures (`i64`, `i128`/`u128` at their
+/// two-slot carriers, or `f64` pass-through leaves), `let` bindings,
+/// short-circuit `&&`/`||`/`=>`, tail `if` branches, i64-carrying
+/// uninterpreted call sites (ordered operations over a call result
+/// stay outside until callee signatures are wired in), and read-only
+/// `[i64]` parameters inside the i64 domain (`a[i]` as the
+/// bounds-checked read, `len(a)` as the stored count), and
+/// register-resident aggregates whose fields are all `i64` leaves —
+/// `structs` names them with their declaration-order
+/// `(field name, field type)` pairs, so a `Pair` parameter binds one
+/// input slot per leaf and a `Pair` result packs via
+/// `aggregate_value`. An entry that is not a non-empty all-`i64`
+/// record is dropped from the admission, so a signature or literal
+/// naming it fails closed at the encoder's type gates. Anything wider fails closed as a
+/// validation error.
+///
+/// The module sweep covers every member, not just the compared
+/// function: an unrelated member carrying `{i64, ptr}` array
+/// parameters fails the whole module — admission is per module, not
+/// per member. The return is the bare outcome:
+/// this is the stage check, not a profile attestation.
+pub fn validate_hir_pure_i64_leaf(
+    atom: &mumei_core::hir::HirAtom,
+    structs: &std::collections::BTreeMap<String, Vec<(String, String)>>,
+    llvm_ir: &str,
+    options: Options,
+) -> Result<Outcome> {
+    bounded(llvm_ir)?;
+    if options.timeout_ms == 0 || options.timeout_ms > 30_000 || options.resource_limit == 0 {
+        return Err(ValidationError("invalid solver budget"));
+    }
+    let mut config = Config::new();
+    config.set_timeout_msec(options.timeout_ms as u64);
+    config.set_param_value("rlimit", &options.resource_limit.to_string());
+    let context = Context::new(&config);
+    let model = mumei_core::semantic_contract::encode_hir_pure_i64_leaf(atom, structs, &context)
+        .map_err(|_| ValidationError("hir atom outside the scalar-i64 leaf subset"))?;
+    let llvm_context = LlvmContext::create();
+    let module = llvm_context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            llvm_ir.as_bytes(),
+            "hir-comparison.ll",
+        ))
+        .map_err(|_| ValidationError("invalid LLVM IR"))?;
+    module
+        .verify()
+        .map_err(|_| ValidationError("invalid LLVM module"))?;
+    // A declared target or data layout must match the emitter's — a
+    // foreign layout could truncate GEP indices the array model reads
+    // as 64-bit. A module declaring neither gets LLVM's defaults, like
+    // the pinned fixture modules the tests compare.
+    let triple = module.get_triple();
+    let layout = module.get_data_layout();
+    if (!triple.as_str().is_empty() && triple.as_str().to_bytes() != TARGET.as_bytes())
+        || (!layout.as_str().is_empty() && layout.as_str().to_bytes() != DATA_LAYOUT.as_bytes())
+    {
+        return Err(ValidationError("unsupported target or data layout"));
+    }
+    let function = module
+        .get_function(&model.function_name)
+        .ok_or(ValidationError("missing source function"))?;
+    // The module is parsed/verified and remains alive for every raw LLVM query.
+    let (outcome, _) = unsafe {
+        check_module(
+            module.as_mut_ptr(),
+            model.bounded_memory,
+            false,
+            false,
+            false,
+            &BTreeMap::from([(
+                model.function_name.clone(),
+                model.array_params.iter().map(Option::is_some).collect(),
+            )]),
+            model.array_params.iter().any(|a| a.is_some()),
+        )?;
+        compare_function(
+            &context,
+            function.as_value_ref(),
+            &model,
+            &BTreeMap::new(),
+            false,
+            false,
+            model.array_params.iter().any(|a| a.is_some()),
+        )?
+    };
+    Ok(outcome)
+}
+
 fn validate(
     source: &str,
     llvm_ir: &str,
@@ -461,6 +552,8 @@ fn validate(
                 model.bounded_memory,
                 false,
                 optimized,
+                false,
+                &BTreeMap::new(),
                 false,
             )?;
         }
@@ -575,7 +668,29 @@ fn validate_module(
     // the bounded-memory whitelist — sibling members are potential call
     // targets and re-gate on their own model at comparison time.
     let any_memory = models.iter().any(|model| model.bounded_memory);
-    unsafe { check_module(module.as_mut_ptr(), any_memory, false, optimized, false)? };
+    let array_param_members: BTreeMap<String, Vec<bool>> = models
+        .iter()
+        .map(|model| {
+            (
+                model.function_name.clone(),
+                model.array_params.iter().map(Option::is_some).collect(),
+            )
+        })
+        .collect();
+    let any_array_params = models
+        .iter()
+        .any(|model| model.array_params.iter().any(Option::is_some));
+    unsafe {
+        check_module(
+            module.as_mut_ptr(),
+            any_memory,
+            false,
+            optimized,
+            false,
+            &array_param_members,
+            any_array_params,
+        )?
+    };
     let mut functions = Vec::new();
     let mut any_definedness = false;
     let mut any_param_domain = false;
@@ -1049,6 +1164,18 @@ pub unsafe fn encode_parsed_function_for_comparison<'ctx>(
     // would compare against the wrong field. `aggregate_all_i64_leaves`
     // fails closed on 128-bit and `double` leaves; both stay outside
     // for later slices.
+    // Aggregate parameters get the same all-`i64`-leaf gate the
+    // result has: `param_shapes`/`param_leaf_doubles` pin the leaf
+    // count and the double/integer kinds only, so a `{i128, i64}`
+    // formal would slip a wider field into a slot the model binds at
+    // 64 bits — count-and-kinds cannot pin widths, so a non-i64 leaf
+    // fails closed instead of reaching the compare as a sort error.
+    for index in 0..LLVMCountParams(raw) {
+        let param_type = LLVMTypeOf(LLVMGetParam(raw, index));
+        if aggregate_fields(param_type).is_some() && !aggregate_all_i64_leaves(param_type) {
+            return Err(ValidationError("LLVM param outside comparison subset"));
+        }
+    }
     let ret = LLVMGetReturnType(LLVMGlobalGetValueType(raw));
     if aggregate_fields(ret).is_some() {
         if !aggregate_all_i64_leaves(ret) {
@@ -1619,6 +1746,8 @@ unsafe fn check_module(
     f64_arithmetic: bool,
     optimized: bool,
     str_leaves: bool,
+    array_param_members: &BTreeMap<String, Vec<bool>>,
+    array_params_admitted: bool,
 ) -> Result<()> {
     check_module_environment(module, str_leaves)?;
     let mut member = LLVMGetFirstFunction(module);
@@ -1646,6 +1775,11 @@ unsafe fn check_module(
             member = LLVMGetNextFunction(member);
             continue;
         }
+        let member_name = callee_name(member);
+        let array_param_mask = member_name
+            .as_ref()
+            .and_then(|name| array_param_members.get(name))
+            .map(Vec::as_slice);
         check_function(
             member,
             LLVMCountParams(member) as usize,
@@ -1656,7 +1790,8 @@ unsafe fn check_module(
                 bounded_memory,
                 f64_arithmetic,
                 optimized,
-                ..CheckGates::default()
+                array_param_mask,
+                array_params_admitted,
             },
         )?;
         member = LLVMGetNextFunction(member);
@@ -2305,10 +2440,19 @@ unsafe fn check_function(
                             LLVMGetOperand(inst, 0),
                             array_param_mask,
                         );
+                    // The element index is the last operand and must be
+                    // an i64: a wider or narrower index would reach the
+                    // encoder's cell arithmetic at a different width —
+                    // a sort mismatch, not a compare.
+                    let index_i64 = LLVMGetTypeKind(LLVMTypeOf(LLVMGetOperand(inst, operands - 1)))
+                        == LLVMTypeKind::LLVMIntegerTypeKind
+                        && LLVMGetIntTypeWidth(LLVMTypeOf(LLVMGetOperand(inst, operands - 1)))
+                            == 64;
                     if (!gates.bounded_memory && !array_param_pointer)
                         || !(2..=3).contains(&operands)
                         || !outer_zero
                         || !cell_indexed
+                        || !index_i64
                     {
                         return Err(ValidationError("unsupported LLVM getelementptr"));
                     }
@@ -2330,8 +2474,13 @@ unsafe fn check_function(
                             LLVMGetOperand(inst, 0),
                             array_param_mask,
                         );
+                    // An alignment claim above the i64 cell's 8 bytes
+                    // makes the load UB on a lawful input — the model
+                    // assumes the element access, so over-aligned loads
+                    // stay refused.
                     if (!gates.bounded_memory && !array_param_pointer)
                         || width(LLVMTypeOf(inst))? != 64
+                        || LLVMGetAlignment(inst) > 8
                     {
                         return Err(ValidationError("unsupported LLVM load"));
                     }
