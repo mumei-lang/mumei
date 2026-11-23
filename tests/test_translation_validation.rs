@@ -3058,6 +3058,107 @@ fn composite_v8_nested_struct_aggregates_validate_and_refute() {
     );
 }
 
+#[test]
+fn v26_array_parameter_abi_is_validated_and_unsupported_ir_fails_closed() {
+    let source =
+        "atom read_at(a: [i64], i: i64) -> i64 requires: true; ensures: true; body: { a[i] };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };";
+    let items = parse_module_checked(source).unwrap();
+    let ir = emitted_module(&items);
+    let validate = |llvm_ir: &str| {
+        tv::validate_native_module(
+            source,
+            llvm_ir,
+            Options::default(),
+            RefinedAdmission::CompositeV26,
+        )
+    };
+    let report = validate(&ir).unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    assert!(report
+        .input_domain
+        .ends_with("_with_read_only_i64_array_params_nonnegative_len"));
+    assert!(!report.input_domain.contains("bool_params"));
+    assert!(ir.contains("define i64 @read_at({ i64, ptr }"));
+    assert!(tv::validate_native_module(
+        source,
+        &ir,
+        Options::default(),
+        RefinedAdmission::CompositeV25,
+    )
+    .is_err());
+
+    let mixed_source = "atom read_at(a: [i64], i: i64) -> i64 requires: true; ensures: true; body: { a[i] };\n\
+         atom select(flag: bool) -> i64 requires: true; ensures: true; body: { if flag { 1 } else { 0 } };\n\
+         atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };";
+    let mixed_items = parse_module_checked(mixed_source).unwrap();
+    let mixed_ir = emitted_module(&mixed_items);
+    let mixed_report = tv::validate_native_module(
+        mixed_source,
+        &mixed_ir,
+        Options::default(),
+        RefinedAdmission::CompositeV26,
+    )
+    .unwrap();
+    assert!(mixed_report
+        .input_domain
+        .contains("bool_params_restricted_to_0_or_1"));
+    assert!(mixed_report
+        .input_domain
+        .ends_with("_with_read_only_i64_array_params_nonnegative_len"));
+
+    let replace_read_at = |llvm_ir: &str, replacement: &str| {
+        let start = llvm_ir.find("define i64 @read_at(").unwrap();
+        let end = start + llvm_ir[start..].find("\n}").unwrap() + 2;
+        format!("{}{}{}", &llvm_ir[..start], replacement, &llvm_ir[end..])
+    };
+    let wrong_bound = ir.replacen("icmp slt i64", "icmp sle i64", 1);
+    assert_ne!(
+        wrong_bound, ir,
+        "array bounds comparison probe did not apply"
+    );
+    assert_ne!(
+        validate(&wrong_bound).unwrap().outcome,
+        Outcome::EquivalentWithinProfile
+    );
+
+    let direct_load = replace_read_at(
+        &ir,
+        "define i64 @read_at({ i64, ptr } %a, i64 %i) {\n\
+           %data = extractvalue { i64, ptr } %a, 1\n\
+           %cell = getelementptr i64, ptr %data, i64 %i\n\
+           %value = load i64, ptr %cell\n\
+           ret i64 %value\n}",
+    );
+    assert_eq!(
+        validate(&direct_load).unwrap().outcome,
+        Outcome::UndefinedBehavior
+    );
+
+    let store = replace_read_at(
+        &ir,
+        "define i64 @read_at({ i64, ptr } %a, i64 %i) {\n\
+           %data = extractvalue { i64, ptr } %a, 1\n\
+           %cell = getelementptr i64, ptr %data, i64 %i\n\
+           store i64 0, ptr %cell\n\
+           ret i64 0\n}",
+    );
+    assert!(validate(&store)
+        .unwrap_err()
+        .to_string()
+        .contains("unsupported use of array parameter memory"));
+
+    let wrong_formal = replace_read_at(
+        &ir,
+        "define i64 @read_at(i64 %a, i64 %i) {\n\
+           ret i64 0\n}",
+    );
+    assert!(validate(&wrong_formal)
+        .unwrap_err()
+        .to_string()
+        .contains("LLVM array parameter type mismatch"));
+}
+
 const BOUNDED_ARRAY_SOURCE: &str = "atom sum() -> i64 requires: true; ensures: true; body: { let a = [1, 2, 3]; a[1] = 9; a[0] + a[1] + a[2] };\n\
      atom pick(a0: i64, i: i64) -> i64 requires: 0 <= i && i < 3; ensures: true; body: { let a = [a0, 20, 30]; a[i] = 7; a[i] };\n\
      atom main() -> i64 requires: true; ensures: true; body: { sum() + pick(1, 0) };";

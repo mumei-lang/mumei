@@ -484,6 +484,9 @@ pub fn function_has_reachable_cycle(
 }
 
 pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
+    if model.array_params.iter().any(Option::is_some) {
+        return false;
+    }
     let parameter_leaf_count = model
         .param_shapes
         .iter()
@@ -5492,6 +5495,19 @@ mod tests {
             .into_iter()
             .find(|model| model.function_name == name)
             .unwrap()
+    }
+
+    #[test]
+    fn array_parameter_signatures_are_outside_machine_tv() {
+        let config = Config::new();
+        let context = Context::new(&config);
+        let model = source_model_with_admission(
+            "atom read(a: [i64]) -> i64 requires: true; ensures: result >= 0; body: len(a);",
+            &context,
+            RefinedAdmission::CompositeV26,
+        );
+        assert!(model.array_params[0].is_some());
+        assert!(!supports_signature(&model));
     }
 
     fn helper_call_targets(offsets: &[u64]) -> BTreeMap<u64, CallTarget> {

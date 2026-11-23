@@ -405,14 +405,14 @@ fn recheck_semantic_contract_sidecar_bytes(
     let atoms = semantic_contract::encode_pure_i64_module_obligations(
         &source,
         &context,
-        RefinedAdmission::CompositeV25,
+        RefinedAdmission::CompositeV26,
     )
     .map_err(|_| "source outside semantic-contract sidecar profile")?;
     let contracts = semantic_contract::extract_pure_i64_module_contracts(
         &source,
         label,
         None,
-        RefinedAdmission::CompositeV25,
+        RefinedAdmission::CompositeV26,
     )
     .map_err(|_| "source outside semantic-contract sidecar profile")?;
     let fresh_contracts =

@@ -56,6 +56,17 @@ atom main() -> i64
         0
     }
 "#;
+const ARRAY_PARAM_MODULE: &str = r#"
+atom read_at(a: [i64], i: i64) -> i64
+requires: i >= 0 && i < len(a);
+ensures: result == a[i];
+body: a[i];
+
+atom main() -> i64
+requires: true;
+ensures: result == 0;
+body: 0;
+"#;
 const BRANCH: &str = "atom absd(x: i64, y: i64) -> i64 requires: x >= 0 && x <= 1000 && y >= 0 && y <= 1000; ensures: result >= 0; body: { if x > y { x - y } else { y - x } };\n\
 atom clamp(x: i64) -> i64 requires: true; ensures: result <= 10; body: { if x > 10 { 10 } else { x } };\n\
 atom pick(b: bool, x: i64) -> i64 requires: true; ensures: true; body: { if b { x } else { 0 } };\n\
@@ -3520,6 +3531,18 @@ fn module_bundle_without_structs_keeps_its_narrow_profile_under_the_composite_pr
 }
 
 #[test]
+fn effect_free_single_atom_main_keeps_the_single_bundle_profile() {
+    let root = tempfile::tempdir().unwrap();
+    let (_source, bundle, _id) = build_source(
+        root.path(),
+        "atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::SCHEMA);
+    assert_eq!(record["profile"], native_bundle::PROFILE);
+}
+
+#[test]
 fn module_bundle_with_struct_and_single_main_takes_the_module_path() {
     // A lone `main` beside a struct declaration is still a composite
     // module — the single-atom path rejects every non-atom item.
@@ -6664,6 +6687,82 @@ fn single_atom_effect_module_routes_to_v28_and_rechecks() {
 }
 
 #[test]
+fn array_parameter_module_builds_as_v29_and_machine_tv_is_inconclusive() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), ARRAY_PARAM_MODULE);
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MODULE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V29);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V26
+    );
+    assert_eq!(record["leaf_widths"]["read_at"], serde_json::json!([64]));
+    assert_eq!(record["leaf_widths"]["main"], serde_json::json!([]));
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+
+    let llvm_ir = fs::read_to_string(bundle.join(BundleFile::LlvmIr.file_name())).unwrap();
+    let report = mumei_emit_llvm::translation_validation::validate_native_module(
+        ARRAY_PARAM_MODULE,
+        &llvm_ir,
+        Default::default(),
+        mumei_core::semantic_contract::RefinedAdmission::CompositeV26,
+    )
+    .unwrap();
+    assert_eq!(
+        report
+            .functions
+            .iter()
+            .map(|function| (function.function_name.as_str(), function.outcome))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "read_at",
+                mumei_emit_llvm::translation_validation::Outcome::EquivalentWithinProfile
+            ),
+            (
+                "main",
+                mumei_emit_llvm::translation_validation::Outcome::EquivalentWithinProfile
+            ),
+        ]
+    );
+    assert!(report
+        .input_domain
+        .ends_with("_with_read_only_i64_array_params_nonnegative_len"));
+    assert!(!report.input_domain.contains("bool_params"));
+    assert_eq!(
+        Command::new(bundle.join("program"))
+            .status()
+            .unwrap()
+            .code(),
+        Some(0)
+    );
+
+    let machine_tv = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&machine_tv);
+    let machine_tv: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
+    assert_eq!(
+        machine_tv["functions"]["read_at"]["outcome"],
+        "outside_profile"
+    );
+    assert!(machine_tv.to_string().contains("unsupported_signature"));
+    let accepted = accept_object(&source, &bundle, &id, true);
+    assert_eq!(accepted.status.code(), Some(3));
+    assert!(accepted.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&accepted.stderr).contains("object not accepted"));
+
+    let mut downgraded = module_record(&bundle);
+    downgraded["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V28.into());
+    let bytes = serde_json::to_vec_pretty(&downgraded).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!recheck(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
 fn module_bundle_rejects_inferred_non_i64_return() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source.mm");
@@ -6793,4 +6892,61 @@ atom main() -> i64
     );
     assert_success(&check(&source, &bundle, &id));
     assert_success(&recheck(&source, &bundle, &id));
+}
+
+#[test]
+fn multifile_bundle_rechecks_an_imported_array_parameter_member_as_v29() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    let imported = r#"
+atom size(a: [i64]) -> i64
+    requires: true;
+    ensures: true;
+    body: len(a);
+"#;
+    let root_source = r#"
+import "arrays" as arrays;
+atom main() -> i64 requires: true; ensures: result == 0; body: 0;
+"#;
+    fs::write(root.path().join("arrays.mm"), imported).unwrap();
+    fs::write(&source, root_source).unwrap();
+    let prepared = native_bundle::prepare_multifile_source(
+        "app.mm",
+        &BTreeMap::from([
+            ("app.mm".to_owned(), root_source.to_owned()),
+            ("arrays.mm".to_owned(), imported.to_owned()),
+        ]),
+        mumei_core::semantic_contract::RefinedAdmission::CompositeV26,
+    )
+    .unwrap();
+    let imported_atom = prepared
+        .atoms
+        .iter()
+        .find(|atom| atom.name != "main")
+        .expect("imported array atom must survive merge");
+    let imported_name = imported_atom.name.clone();
+    assert!(prepared.merged.contains("len("));
+
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MULTIFILE_PROFILE_V29);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V26
+    );
+    assert_eq!(
+        record["leaf_widths"][imported_name.as_str()],
+        serde_json::json!([])
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
 }
