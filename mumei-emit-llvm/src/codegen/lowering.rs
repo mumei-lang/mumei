@@ -8,6 +8,8 @@ use mumei_core::hir::HirTypeRef;
 use mumei_core::lowering::{lower, LoweredType};
 use mumei_core::parser::parse_type_ref;
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
+use std::collections::{HashMap, HashSet};
+use std::ops::{Deref, DerefMut};
 
 pub(crate) fn array_struct_type(context: &Context) -> inkwell::types::StructType<'_> {
     let i64_type = context.i64_type();
@@ -18,6 +20,95 @@ pub(crate) fn array_struct_type(context: &Context) -> inkwell::types::StructType
 /// An array fat pointer unpacked for codegen: `(len, element_type, data)`.
 /// `element_type` is the LLVM type used for GEP/load/store on `data`.
 pub(crate) type ArrayPtr<'a> = (BasicValueEnum<'a>, BasicTypeEnum<'a>, BasicValueEnum<'a>);
+
+#[derive(Clone, Default)]
+pub(crate) struct ArrayPtrMap<'a> {
+    pointers: HashMap<String, ArrayPtr<'a>>,
+    pub(crate) stack_backed: HashSet<String>,
+    pub(crate) return_contains_array_enum: bool,
+}
+
+impl<'a> Deref for ArrayPtrMap<'a> {
+    type Target = HashMap<String, ArrayPtr<'a>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.pointers
+    }
+}
+
+impl<'a> DerefMut for ArrayPtrMap<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.pointers
+    }
+}
+
+fn array_element_name(type_name: &str, module_env: &ModuleEnv) -> Option<String> {
+    let base = module_env.resolve_base_type(type_name);
+    base.strip_prefix("[]<")
+        .and_then(|inner| inner.strip_suffix('>'))
+        .or_else(|| {
+            base.strip_prefix('[')
+                .and_then(|inner| inner.strip_suffix(']'))
+        })
+        .map(str::trim)
+        .filter(|inner| !inner.is_empty())
+        .map(str::to_owned)
+}
+
+fn scalar_array_element(type_name: &str, module_env: &ModuleEnv) -> bool {
+    let base = module_env.resolve_base_type(type_name);
+    matches!(
+        lower(&base),
+        LoweredType::I64
+            | LoweredType::I32
+            | LoweredType::U64
+            | LoweredType::U32
+            | LoweredType::Bool
+            | LoweredType::F64
+            | LoweredType::Str
+    )
+}
+
+pub(crate) fn type_contains_array_enum(module_env: &ModuleEnv, type_name: &str) -> bool {
+    fn visit(
+        module_env: &ModuleEnv,
+        type_name: &str,
+        inside_enum_payload: bool,
+        visiting: &mut HashSet<String>,
+    ) -> bool {
+        if let Some(element) = array_element_name(type_name, module_env) {
+            return inside_enum_payload || visit(module_env, &element, false, visiting);
+        }
+        let base = module_env.resolve_base_type(type_name);
+        if let Some(enum_def) = module_env.get_enum(&base) {
+            if !visiting.insert(enum_def.name.clone()) {
+                return true;
+            }
+            let contains = enum_def.variants.iter().any(|variant| {
+                variant
+                    .field_types
+                    .iter()
+                    .any(|field| visit(module_env, &field.display_name(), true, visiting))
+            });
+            visiting.remove(&enum_def.name);
+            return contains;
+        }
+        if let Some(struct_def) = module_env.get_struct(&base) {
+            if !visiting.insert(struct_def.name.clone()) {
+                return true;
+            }
+            let contains = struct_def
+                .fields
+                .iter()
+                .any(|field| visit(module_env, &field.type_name, inside_enum_payload, visiting));
+            visiting.remove(&struct_def.name);
+            return contains;
+        }
+        false
+    }
+
+    visit(module_env, type_name, false, &mut HashSet::new())
+}
 
 pub(crate) fn type_cycle_path(module_env: &ModuleEnv, type_name: &str) -> Option<Vec<String>> {
     fn array_type(element: HirTypeRef) -> HirTypeRef {
@@ -263,21 +354,23 @@ pub(crate) fn enum_llvm_type<'a>(
     module_env: &ModuleEnv,
 ) -> MumeiResult<inkwell::types::StructType<'a>> {
     ensure_type_acyclic(module_env, &enum_def.name)?;
+    if !enum_def.type_params.is_empty() {
+        return Err(MumeiError::codegen(format!(
+            "generic enum '{}' is not supported by LLVM codegen",
+            enum_def.name
+        )));
+    }
     for variant in &enum_def.variants {
         for field in &variant.field_types {
-            let field_type = module_env.resolve_base_type(&field.display_name());
-            let Some(element_type) = field_type
-                .strip_prefix('[')
-                .and_then(|type_name| type_name.strip_suffix(']'))
-                .map(str::trim)
-            else {
+            let field_name = field.display_name();
+            let field_type = module_env.resolve_base_type(&field_name);
+            let Some(element_type) = array_element_name(&field_type, module_env) else {
                 continue;
             };
-            let element_type = module_env.resolve_base_type(element_type);
-            if module_env.get_struct(&element_type).is_some() {
+            if !scalar_array_element(&element_type, module_env) {
                 return Err(MumeiError::codegen(format!(
-                    "enum '{}' struct-element array payloads are not supported by LLVM codegen",
-                    enum_def.name
+                    "enum '{}' struct-element array payloads are not supported by LLVM codegen (payload arrays require a supported scalar element type)",
+                    enum_def.name,
                 )));
             }
         }
@@ -293,16 +386,63 @@ pub(crate) fn enum_llvm_type<'a>(
         // Plan 9: Resolve actual field types from EnumDef.variants[*].field_types
         // Collect the type names across all variants at this slot position
         let mut resolved_type: Option<inkwell::types::BasicTypeEnum> = None;
+        let mut array_type: Option<inkwell::types::BasicTypeEnum> = None;
+        let mut array_source_type: Option<String> = None;
+        let mut source_types = HashSet::new();
         for variant in &enum_def.variants {
             if slot < variant.field_types.len() {
-                let type_name = &variant.field_types[slot].name;
+                let type_name = variant.field_types[slot].display_name();
+                let resolved_name = module_env.resolve_base_type(&type_name);
                 let slot_type = match lower(type_name.as_str()) {
                     LoweredType::F64 => context.f64_type().into(),
                     LoweredType::Str => context.ptr_type(inkwell::AddressSpace::default()).into(),
                     _ => resolve_param_type(context, Some(type_name.as_str()), module_env)?,
                 };
+                if array_element_name(&type_name, module_env).is_some() {
+                    if source_types
+                        .iter()
+                        .any(|existing| existing != &resolved_name)
+                    {
+                        return Err(MumeiError::codegen(format!(
+                            "enum '{}' array payload conflicts with another variant at slot {}",
+                            enum_def.name, slot
+                        )));
+                    }
+                    if let Some(array_type) = array_type {
+                        if array_type != slot_type {
+                            return Err(MumeiError::codegen(format!(
+                                "enum '{}' has incompatible array payload types at slot {}",
+                                enum_def.name, slot
+                            )));
+                        }
+                    } else if let Some(existing) = resolved_type {
+                        if existing != slot_type {
+                            return Err(MumeiError::codegen(format!(
+                                "enum '{}' array payload conflicts with another variant at slot {}",
+                                enum_def.name, slot
+                            )));
+                        }
+                    }
+                    array_type = Some(slot_type);
+                    array_source_type = Some(resolved_name.clone());
+                } else if let Some(array_type) = array_type {
+                    if array_type != slot_type || array_source_type.as_ref() != Some(&resolved_name)
+                    {
+                        return Err(MumeiError::codegen(format!(
+                            "enum '{}' array payload conflicts with another variant at slot {}",
+                            enum_def.name, slot
+                        )));
+                    }
+                }
+                source_types.insert(resolved_name);
                 match resolved_type {
                     None => resolved_type = Some(slot_type),
+                    Some(existing) if array_type.is_some() && existing != slot_type => {
+                        return Err(MumeiError::codegen(format!(
+                            "enum '{}' array payload conflicts with another variant at slot {}",
+                            enum_def.name, slot
+                        )));
+                    }
                     Some(existing) => resolved_type = Some(union_slot_type(existing, slot_type)),
                 }
             }

@@ -1,4 +1,6 @@
-use crate::codegen::lowering::{bitpreserve_cast, resolve_param_type};
+use crate::codegen::lowering::{
+    array_elem_llvm_type, bitpreserve_cast, resolve_param_type, ArrayPtrMap,
+};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::types::BasicTypeEnum;
@@ -214,11 +216,14 @@ pub(crate) fn bind_pattern_variables<'a>(
     target: BasicValueEnum<'a>,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
+    array_ptrs: &mut ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
     enum_hint: Option<&str>,
 ) -> MumeiResult<()> {
     match pattern {
         HirPattern::Variable(name) => {
+            array_ptrs.remove(name);
+            array_ptrs.stack_backed.remove(name);
             variables.insert(name.clone(), target);
             Ok(())
         }
@@ -242,7 +247,6 @@ pub(crate) fn bind_pattern_variables<'a>(
                             module_env,
                             enum_hint,
                         )?;
-                        variables.insert(fname.clone(), field_val);
                         // Record the declared payload type so a bound
                         // composite (`E::V(p)`) resolves `p.f` to its
                         // declared struct — including leaf signedness,
@@ -252,8 +256,36 @@ pub(crate) fn bind_pattern_variables<'a>(
                             .and_then(|e| e.variants.iter().find(|v| v.name == variant_name))
                             .and_then(|v| v.field_types.get(field_idx))
                         {
-                            var_types.insert(fname.clone(), field_ty.name.clone());
+                            let field_type = field_ty.display_name();
+                            var_types.insert(fname.clone(), field_type.clone());
+                            if let Some(elem_ty) =
+                                array_elem_llvm_type(context, &field_type, module_env)?
+                            {
+                                if !field_val.is_struct_value() {
+                                    return Err(MumeiError::codegen(format!(
+                                        "array payload '{fname}' is not a fat-pointer aggregate"
+                                    )));
+                                }
+                                let fat_ptr = field_val.into_struct_value();
+                                let len = llvm!(builder.build_extract_value(
+                                    fat_ptr,
+                                    0,
+                                    &format!("{fname}_len")
+                                ));
+                                let data = llvm!(builder.build_extract_value(
+                                    fat_ptr,
+                                    1,
+                                    &format!("{fname}_data")
+                                ));
+                                array_ptrs.insert(fname.clone(), (len, elem_ty, data));
+                                array_ptrs.stack_backed.remove(fname);
+                                variables.insert(fname.clone(), len);
+                                continue;
+                            }
                         }
+                        array_ptrs.stack_backed.remove(fname);
+                        array_ptrs.remove(fname);
+                        variables.insert(fname.clone(), field_val);
                     }
                     HirPattern::Variant { .. } => {
                         let nested_val = extract_variant_field_value(
@@ -272,6 +304,7 @@ pub(crate) fn bind_pattern_variables<'a>(
                             nested_val,
                             variables,
                             var_types,
+                            array_ptrs,
                             module_env,
                             nested_hint.as_deref(),
                         )?;

@@ -1,5 +1,8 @@
 use crate::codegen::expr_emit::{chan_payload_key, emit_array_literal};
-use crate::codegen::lowering::{declare_extern_functions, resolve_param_type, resolve_return_type};
+use crate::codegen::lowering::{
+    declare_extern_functions, resolve_param_type, resolve_return_type, type_contains_array_enum,
+    ArrayPtrMap,
+};
 use crate::codegen::stmt_emit::compile_hir_stmt;
 use inkwell::context::Context;
 use inkwell::module::Linkage;
@@ -71,7 +74,12 @@ pub fn compile_atom_into_module<'ctx>(
 
     let mut variables = HashMap::new();
     let mut var_types: HashMap<String, String> = HashMap::new();
-    let mut array_ptrs: HashMap<String, crate::codegen::lowering::ArrayPtr> = HashMap::new();
+    let mut array_ptrs = ArrayPtrMap::default();
+    array_ptrs.return_contains_array_enum = signature
+        .return_type
+        .as_deref()
+        .or(signature.inferred_return_type.as_deref())
+        .is_some_and(|type_name| type_contains_array_enum(module_env, type_name));
 
     for (i, param) in signature.params.iter().enumerate() {
         let val = function.get_nth_param(i as u32).unwrap();
