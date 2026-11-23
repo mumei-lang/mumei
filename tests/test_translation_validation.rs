@@ -4277,3 +4277,49 @@ fn hir_leaf_compare_short_circuits_rhs_definedness() {
         Outcome::EquivalentWithinProfile
     );
 }
+
+fn source_ret(params: &str, ret: &str, body: &str) -> String {
+    format!("atom f({params}) -> {ret} requires: true; ensures: true; body: {{ {body} }};")
+}
+
+#[test]
+fn hir_leaf_compare_uniform_i128_signatures() {
+    let src = source_ret("x: i128, y: i128", "i128", "x + y * 2");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+    // Upper-64 divergence only: truncation hides it from an i64 view but
+    // not from the 128-bit model.
+    let ir = pin(
+        "define i128 @f(i128 %x, i128 %y) { %m = mul i128 %y, 3\n %r = add i128 %x, %m\n ret i128 %r }",
+    );
+    assert_eq!(hir_outcome(&src, &ir), Outcome::Different);
+}
+
+#[test]
+fn hir_leaf_compare_uniform_u128_uses_unsigned_ops() {
+    let src = source_ret("x: u128, y: u128", "u128", "x > y");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+    // A signed comparison on the same bits is a mistranslation.
+    let ir = pin("define i128 @f(i128 %x, i128 %y) { %c = icmp sgt i128 %x, %y\n %r = select i1 %c, i128 1, i128 0\n ret i128 %r }");
+    assert_eq!(hir_outcome(&src, &ir), Outcome::Different);
+}
+
+#[test]
+fn hir_leaf_compare_rejects_mixed_width_signatures() {
+    // i64 param + i128 result mixes widths — outside this slice.
+    let src = source_ret("x: i64", "i128", "x");
+    let Item::Atom(atom) = parse_module_checked(&src).unwrap().remove(0) else {
+        panic!("atom")
+    };
+    let hir = lower_atom_to_hir(&atom);
+    let ir = pin("define i64 @f(i64 %x) { ret i64 %x }");
+    assert!(
+        tv::validate_hir_pure_i64_leaf(&hir, &ir, Options::default()).is_err(),
+        "mixed-width signatures stay outside the subset"
+    );
+}
