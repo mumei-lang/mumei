@@ -283,6 +283,7 @@ pub fn check_entry_wrapper_with_preservation(
     model.call_sites.push(CallSite {
         callee: "main".to_owned(),
         args: Vec::new(),
+        callback_arguments: Vec::new(),
         arg_leaf_doubles: Vec::new(),
         argument_shapes: Vec::new(),
         has_composite_arguments_or_result: false,
@@ -9352,6 +9353,7 @@ entry:
         float_result_caller.call_sites.push(CallSite {
             callee: "helper".to_owned(),
             args: Vec::new(),
+            callback_arguments: Vec::new(),
             arg_leaf_doubles: Vec::new(),
             argument_shapes: Vec::new(),
             has_composite_arguments_or_result: false,
@@ -9549,6 +9551,7 @@ entry:
             args: (0..9)
                 .map(|index| BV::fresh_const(&context, &format!("f64_arg_{index}"), 64))
                 .collect(),
+            callback_arguments: Vec::new(),
             arg_leaf_doubles: vec![true; 9],
             argument_shapes: vec![CallValueShape::Scalar { leaf_count: 1 }; 9],
             has_composite_arguments_or_result: false,

@@ -1,6 +1,7 @@
 use mumei_core::semantic_contract::{
     extract_pure_i64_module_contracts, RefinedAdmission, PURE_I64_COMPOSITE_PROFILE_V24,
-    PURE_I64_COMPOSITE_PROFILE_V25, PURE_I64_COMPOSITE_PROFILE_V26, SEMANTIC_CONTRACT_VERSION,
+    PURE_I64_COMPOSITE_PROFILE_V25, PURE_I64_COMPOSITE_PROFILE_V26, PURE_I64_COMPOSITE_PROFILE_V27,
+    SEMANTIC_CONTRACT_VERSION,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -192,17 +193,28 @@ fn write_sidecar_fixture(
     source: &str,
     artifact_name: &str,
 ) -> (PathBuf, PathBuf, PathBuf) {
+    write_sidecar_fixture_with_admission(
+        dir,
+        source_name,
+        source,
+        artifact_name,
+        RefinedAdmission::CompositeV26,
+    )
+}
+
+fn write_sidecar_fixture_with_admission(
+    dir: &Path,
+    source_name: &str,
+    source: &str,
+    artifact_name: &str,
+    admission: RefinedAdmission,
+) -> (PathBuf, PathBuf, PathBuf) {
     let source_path = write_input(dir, source_name, source);
     let artifact_path = dir.join(artifact_name);
     let artifact_bytes = b"not interpreted as LLVM IR\n";
     fs::write(&artifact_path, artifact_bytes).unwrap();
-    let contracts = extract_pure_i64_module_contracts(
-        source,
-        source_name,
-        None,
-        RefinedAdmission::CompositeV26,
-    )
-    .unwrap();
+    let contracts =
+        extract_pure_i64_module_contracts(source, source_name, None, admission).unwrap();
     let sidecar_value = serde_json::json!({
         "schema_version": "mumei.semantic-contract-sidecar/v1",
         "semantic_contract_version": SEMANTIC_CONTRACT_VERSION,
@@ -480,6 +492,82 @@ fn effect_sidecar_uses_composite_v25_and_rechecks_and_accepts() {
         .as_array()
         .unwrap()
         .contains(&Value::String("producer_signature_binding".to_owned())));
+}
+
+#[test]
+fn callback_parameter_sidecar_build_rechecks_and_accepts_v27() {
+    let dir = tempfile::tempdir().unwrap();
+    let source_text = include_str!("positive/test_callback_contract_ok.mm");
+    let input = write_input(dir.path(), "test_callback_contract_ok.mm", source_text);
+    let output_base = dir.path().join("callback");
+    succeeds(run_build(&input, &output_base, true));
+
+    let artifact = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().and_then(|extension| extension.to_str()) == Some("ll"))
+        .expect("callback build must emit LLVM IR");
+    let sidecar = artifact.with_extension("semantic-contract.json");
+    let sidecar_value: Value = serde_json::from_slice(&fs::read(&sidecar).unwrap()).unwrap();
+    assert!(sidecar_value["contracts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|contract| {
+            contract["profile"] == PURE_I64_COMPOSITE_PROFILE_V27
+                && contract["specification"]["callback_parameters"]
+                    .as_array()
+                    .is_some_and(|callbacks| !callbacks.is_empty())
+        }));
+    assert!(sidecar_value["contracts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|contract| {
+            let has_callback = contract["specification"]["callback_parameters"]
+                .as_array()
+                .is_some_and(|callbacks| !callbacks.is_empty());
+            if has_callback {
+                contract["profile"] == PURE_I64_COMPOSITE_PROFILE_V27
+            } else {
+                contract["profile"] != PURE_I64_COMPOSITE_PROFILE_V27
+            }
+        }));
+    let apply_contract = sidecar_value["contracts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|contract| contract["atom"] == "apply_nonneg")
+        .unwrap();
+    let callback = &apply_contract["specification"]["callback_parameters"][0];
+    assert!(callback["type"].as_str().unwrap().contains("atom_ref"));
+    assert_eq!(callback["requires"], Value::Null);
+    assert_eq!(callback["ensures"], "result >= 0");
+    assert!(apply_contract["assumptions"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(
+            "callback_contract_assumed_not_runtime_checked".to_owned()
+        )));
+
+    let recheck = succeeds(run_sidecar_recheck(&sidecar, &input, &artifact, true));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&recheck.stdout).unwrap()["recheck"],
+        "consistent"
+    );
+    let accepted = sidecar_accept_command(&sidecar, &input, &artifact, true)
+        .output()
+        .unwrap();
+    assert!(
+        accepted.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&accepted.stdout),
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&accepted.stdout).unwrap()["accepted"],
+        true
+    );
 }
 
 #[test]

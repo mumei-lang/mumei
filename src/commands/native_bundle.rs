@@ -5228,6 +5228,7 @@ mod tests {
                 z3::ast::BV::from_u64(&context, 1, 64),
                 z3::ast::BV::from_u64(&context, 2, 64),
             ],
+            callback_arguments: Vec::new(),
             arg_leaf_doubles: vec![false, false],
             argument_shapes: vec![semantic_contract::CallValueShape::Struct {
                 leaf_count: 2,

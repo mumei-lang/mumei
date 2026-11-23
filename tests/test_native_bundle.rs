@@ -3574,6 +3574,34 @@ fn effect_free_single_atom_main_keeps_the_single_bundle_profile() {
 }
 
 #[test]
+fn native_bundle_rejects_scalar_callback_parameter_sources() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source.mm");
+    let bundle = root.path().join("bundle");
+    let callback_source =
+        "atom zero(x: i64) -> i64 requires: true; ensures: result == 0; body: 0;\n\
+        atom apply(f: atom_ref(i64) -> i64) -> i64 requires: true; \
+        ensures: true; contract(f): ensures: result >= 0; body: call(f, 0);\n\
+        atom main() -> i64 requires: true; ensures: result >= 0; \
+        body: apply(atom_ref(zero));";
+    fs::write(&source, callback_source).unwrap();
+
+    let output = cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]);
+    assert!(
+        !output.status.success(),
+        "native bundles must stay on CompositeV26 for callback parameters; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn module_bundle_with_struct_and_single_main_takes_the_module_path() {
     // A lone `main` beside a struct declaration is still a composite
     // module — the single-atom path rejects every non-atom item.
