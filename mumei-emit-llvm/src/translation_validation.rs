@@ -269,8 +269,9 @@ fn linkage_expected_binding(linkage: Linkage) -> Option<&'static str> {
 /// marks a linkage with no derivable binding — the caller must treat
 /// those as unverifiable. Entities carrying `unnamed_addr` are
 /// excluded entirely: LLVM may merge or drop their symbols so no
-/// binding claim survives the object step (their bytes are covered
-/// by the data-section correspondence check).
+/// binding claim survives the object step. For globals the bytes are
+/// covered by the data-section correspondence check; `unnamed_addr`
+/// functions simply carry no attribute claim.
 #[derive(Clone, Default)]
 pub struct IrSymbolAttributes {
     pub expected: BTreeMap<String, Option<&'static str>>,

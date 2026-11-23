@@ -5834,8 +5834,9 @@ fn object_translation_correspondence_checks(
     // mismatch, `unchecked` when a symbol is missing, multiply
     // defined, or its linkage is outside the derivable subset.
     // `unnamed_addr` entities are excluded: LLVM may merge or drop
-    // their symbols so no binding claim survives (their bytes are
-    // covered by object_data_correspondence). Calling convention is
+    // their symbols so no binding claim survives — for globals the
+    // bytes are covered by object_data_correspondence; unnamed_addr
+    // functions simply carry no attribute claim. Calling convention is
     // not representable in ELF symbols, so binding is the honest
     // subset. Kept out of the llvm_ir→object_code edge's promotion
     // gate: the relation covers instruction selection only.

@@ -2396,8 +2396,9 @@ named IR entity — function or global — contributes its linkage, mapped
 to the expected ELF binding class (`global`/`local`/`weak`), and is
 compared against the like-named object symbol's binding. Entities
 carrying `unnamed_addr` are excluded entirely (LLVM may merge or drop
-their symbols, so no binding claim survives — their bytes are covered
-by `object_data_correspondence`), and linkages with no byte-exact
+their symbols, so no binding claim survives — for globals the bytes
+are covered by `object_data_correspondence`; `unnamed_addr` functions
+simply carry no attribute claim), and linkages with no byte-exact
 object counterpart (`available_externally`, `appending`, DLL and ghost
 variants) report `underivable`. Calling convention is not
 representable in ELF symbols, so binding comparison is the honest
