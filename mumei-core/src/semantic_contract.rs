@@ -10148,7 +10148,7 @@ fn module_atom_obligations<'ctx>(
             callback_assumptions
                 .iter()
                 .enumerate()
-                .filter(|(other, _)| *other != index)
+                .filter(|(other, _)| *other < index)
                 .map(|(_, assumption)| assumption.clone()),
         );
         hypotheses.extend(requires_exits.iter().chain(ensures_exits.iter()).cloned());
@@ -18633,6 +18633,33 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
             &matching_subsumption,
             RefinedAdmission::CompositeV27,
         );
+        assert!(
+            outcomes
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat),
+            "{outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn composite_v27_callback_preconditions_use_only_prior_call_assumptions() {
+        let repeated_calls = "atom apply(x: i64, f: atom_ref(i64) -> i64) -> i64\n\
+            requires: true; ensures: true;\n\
+            contract(f): requires: x >= 0, ensures: x >= 0;\n\
+            body: call(f, x) + call(f, x);";
+        let outcomes =
+            refined_module_outcomes_admission(repeated_calls, RefinedAdmission::CompositeV27);
+        assert!(
+            outcomes.iter().any(|result| *result == z3::SatResult::Sat),
+            "{outcomes:?}"
+        );
+
+        let nested_calls = "atom apply(x: i64, f: atom_ref(i64) -> i64) -> i64\n\
+            requires: x >= 0; ensures: true;\n\
+            contract(f): requires: x >= 0, ensures: result >= 0;\n\
+            body: call(f, call(f, x));";
+        let outcomes =
+            refined_module_outcomes_admission(nested_calls, RefinedAdmission::CompositeV27);
         assert!(
             outcomes
                 .iter()
