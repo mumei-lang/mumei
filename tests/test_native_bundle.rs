@@ -4,7 +4,7 @@ use mumei_core::native_bundle::{self, BundleFile, RECORD_FILE};
 use mumei_core::semantic_contract::{extract_pure_i64_module_contracts, RefinedAdmission};
 use object::{Object, ObjectSection, ObjectSymbol, SymbolKind};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::Path,
     process::{Command, Output},
@@ -611,11 +611,39 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     assert!(main_record["executable_address"].as_u64().is_some());
     let relocations = object_translation["relocations"].as_array().unwrap();
     assert!(!relocations.is_empty());
+    // Step 4 (design memo §7): every relocation entry is recorded —
+    // call-site fields in `.text` plus the `.eh_frame` unwind records
+    // the object always carries, each resolvable against the exe.
     for relocation in relocations {
-        assert_eq!(relocation["object_section"], ".text");
+        assert!(relocation["object_section"].as_str().is_some());
         assert!(relocation["object_offset"].as_u64().is_some());
+        assert!(relocation["kind"].as_str().is_some());
         assert!(relocation["target_symbol"].as_str().is_some());
         assert!(relocation["addend"].as_i64().is_some());
+    }
+    let sections: BTreeSet<&str> = relocations
+        .iter()
+        .map(|relocation| relocation["object_section"].as_str().unwrap())
+        .collect();
+    assert!(sections.contains(".text"));
+    assert!(sections.contains(".eh_frame"));
+    let eh_frame = relocations
+        .iter()
+        .filter(|relocation| relocation["object_section"] == ".eh_frame")
+        .collect::<Vec<_>>();
+    assert!(!eh_frame.is_empty());
+    for relocation in &eh_frame {
+        assert_eq!(relocation["kind"], "R_X86_64_PC32");
+        assert!(
+            relocation["resolved_value"].as_i64().is_some(),
+            "eh_frame relocation unresolved: {relocation}"
+        );
+        // The applied field's exe-side offset is recorded so the
+        // check re-reads the exact slot, not any matching word.
+        assert!(
+            relocation["applied_offset"].as_u64().is_some(),
+            "eh_frame relocation has no applied offset: {relocation}"
+        );
     }
     // Step 2/3: the strict path confirms every correspondence check item,
     // so the aggregate status records checked_correspondence.
@@ -638,6 +666,7 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
         "relocation_targets",
         "relocation_bounds",
         "relocation_resolved_values",
+        "relocation_applied_values",
     ] {
         assert_eq!(results.get(item).copied(), Some("checked"), "{item}");
     }

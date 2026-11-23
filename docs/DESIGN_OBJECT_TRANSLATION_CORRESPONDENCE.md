@@ -213,8 +213,19 @@ mumei native-bundle recheck-machine-tv bundle loop.mm --expected-build-id "$buil
   `checked_source_machine_tv_within_profile` を emit（IR↔object は未検証のまま）
 - **Step 3（直接対応）**: 昇格条件 4(a) — machine-TV の比較対象を
   LLVM IR 再導出モデルに切り替える設計（大きい。別メモ化を推奨）
-- **Step 4（relocation 全件照合）**: §3.3 の reloc レコードを emit +
-  exe 内解決値との全件照合
+- **Step 4（relocation 全件照合）— 実装済み**: §3.3 の reloc レコードを
+  全セクション・全種別で emit（`.eh_frame` 等の非コード reloc を含む）。
+  PC32/PLT32 は exe 側セクション内で `target + addend − place` を満たす
+  スロットを探索して解決（関数外のため入力セクション→exe ベースは
+  関数マッピングから推定）。解決は一意の未占有スロットのみに限り、
+  位置は `applied_offset` として記録する（複数候補は偶然一致を
+  見誤る余地があるため未解決のまま unchecked）。その他種別は
+  `elf:<r_type>` の種別番号つきで `resolved_value` なし記録。
+  検査項目 `relocation_applied_values` がコード reloc は正確な
+  サイト、非コードは記録された `applied_offset` のフィールドで
+  exe 適用値と照合（不一致→inconsistent、未解決→unchecked）。
+  照合不能時の fallback parse（`object_translation_parse`）も
+  全セクションを列挙する
 
 ## 8. 未解決の設計問い
 
