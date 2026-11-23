@@ -586,6 +586,17 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     // path, so the aggregate status records checked_correspondence (still no
     // verdict-bearing claim).
     assert_eq!(object_translation["status"], "checked_correspondence");
+    // Step 3': on a real CLI-produced bundle every defined named IR
+    // entity is external, so the symbol-attribute item verifies
+    // `checked` end to end — the precheck admits external linkage
+    // only, so internal/private functions never reach it.
+    let symbol_attribute_item = object_translation["correspondence"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["item"] == "object_symbol_attribute_correspondence")
+        .expect("symbol-attribute item present in the CLI descriptor");
+    assert_eq!(symbol_attribute_item["result"], "checked");
     let transformations = object_translation["transformations"].as_array().unwrap();
     assert_eq!(transformations.len(), 4);
     // The digest-bearing edges keep indices 0 and 1 for consumer

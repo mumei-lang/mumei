@@ -2,7 +2,8 @@
 
 ステータス: Step 1（skipped 分解 + `checks_not_performed` 非 `.text` 明示、#1421）、
 Step 2（辺 `result`/`validation` 配線、#1423）、Step 3（`object_data_correspondence`
-項目、本差分）実装済み。Step 4（subset 拡張）は未着手。`docs/DESIGN_OBJECT_TRANSLATION_CORRESPONDENCE.md`
+項目、#1429）、Step 3'（`object_symbol_attribute_correspondence` 項目、本差分）
+実装済み。Step 4（subset 拡張）は未着手。`docs/DESIGN_OBJECT_TRANSLATION_CORRESPONDENCE.md`
 の §4 条件 4(a) — 「machine-TV の比較対象を LLVM IR 再導出モデルに切り替える」
 本筋路線 — が Step 3a–3f スライス（#1382–#1398）として既に着地済みのため、
 本メモは残りの昇格条件と語彙・欠落領域を棚卸しする。
@@ -53,6 +54,14 @@ producer が何を検証済みか・何が欠けているか・昇格の段階�
    命令列のみが対象。
 4. **シンボル属性の忠実性** — `object_symbol_correspondence` は名前と
    定義の存在を見るだけで visibility/linkage/calling convention は未照合。
+   → **Step 3' として実施済み**: `object_symbol_attribute_correspondence`
+   項目が IR linkage ↔ object シンボル binding（global/local/weak）を
+   照合する。calling convention は ELF シンボルに表現されないため
+   binding 比較が正直な部分集合。`unnamed_addr` 実体は除外（シンボルが
+   統合・省略され得て binding 主張が残らない — バイトは
+   `object_data_correspondence` が担保）。導出不能 linkage
+   （`available_externally`/`appending`/DLL 系等）は `underivable` で
+   fail-closed。`.text` 辺昇格ゲートには含めない（Step 3 と同じ位置づけ）。
 5. **IR 由来の非ソース関数** — C `main` ラッパー等、ソース atom に
    対応しない IR メンバーは `llvm_ir_object_equivalence` の対象外
    （`machine_code_entry_wrapper_tv` が別 anchor で担当 — 辺の集約には
@@ -142,6 +151,15 @@ producer が何を検証済みか・何が欠けているか・昇格の段階�
   `missing`（`unchecked` — `different` ではない）。`.bss` は
   size の zero image と照合。全 derivable global が検証されれば
   `checked`、byte 乖離で `inconsistent`。
+- **Step 3'（シンボル属性照合・本差分）**: 欠落4 の実施 —
+  `object_symbol_attribute_correspondence` 項目を `correspondence.checks`
+  に追加。IR 側は `ir_symbol_attributes` が defined な named entity
+  （関数 + グローバル）の linkage を期待 binding（global/local/weak）に
+  写像し、object 側は defined な named シンボル全件（text・data、
+  local 含む）の binding を抽出して名前一致で比較。`unnamed_addr`
+  実体は対象外、導出不能 linkage・同名多重定義・シンボル不在は
+  `underivable`/`conflicting`/`missing` として `unchecked` に倒す。
+  `.text` 辺の昇格ゲートは変更しない（Step 3 と同じく別 item）。
 - **Step 4（subset 拡張・deferred 依存）**: cyclic CFG / loop beyond bound 等
   deferred セットの扱いが決まり次第、liftable 範囲を追従拡大。
 
