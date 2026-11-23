@@ -2266,13 +2266,16 @@ than claiming coverage it does not have. It carries no
 `output_identity` — machine code is evaluated in memory and never
 persisted as an artifact — and is appended last so the two
 digest-bearing edges keep their positions in the list. `llvm_ir -> object_code`
-names the `checked_llvm_ir_object_model_correspondence` method and mirrors
-the `llvm_ir_object_equivalence` check item's aggregate in a separate
-`result` key — `checked_correspondence` when at least one function
-compared equivalent and none diverged or stayed undecidable,
-`inconsistent_correspondence` on any divergence, and
-`unchecked_not_translation_validated` otherwise — so a report whose
-functions are outside the liftable subset or solver-undecidable does
+names the `checked_llvm_ir_object_model_correspondence` method and reports
+the promotion result in a separate `result` key —
+`checked_correspondence` only when the `llvm_ir_object_equivalence`
+item checked and the design memo's promotion conditions all ran:
+the function-enumeration and relocation-record correspondence items
+checked, the link correspondence ran, and the canonical argv
+reproduction compared; `inconsistent_correspondence` when the item or
+any of those gates found a divergence; `unchecked_not_translation_validated`
+otherwise — so a report whose functions are outside the liftable
+subset, solver-undecidable, or missing a promotion gate does
 not claim the edge was validated. The link
 edge names the `checked_object_link_correspondence` method only when that
 check ran and reports the check's outcome in a separate `result` key so
