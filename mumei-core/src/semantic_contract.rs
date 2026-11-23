@@ -8928,10 +8928,13 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
 /// whose signature bounds, guarded-operator definedness or
 /// bounded-while exits leave no input is outside the profile, matching
 /// the LLVM side's empty-domain rejection rather than reading vacuous
-/// obligations as proven.
+/// obligations as proven. `loop_exits` collects the bounded-loop exit
+/// hypotheses used by those obligations so their combined domain can
+/// also be checked for non-emptiness.
 pub struct ModuleAtomObligations<'ctx> {
     pub atom: String,
     pub domain: Bool<'ctx>,
+    pub loop_exits: Bool<'ctx>,
     pub obligations: Vec<Bool<'ctx>>,
 }
 
@@ -8973,8 +8976,10 @@ fn module_atom_obligations<'ctx>(
         .chain(body.definedness.iter())
         .cloned()
         .collect();
+    let mut loop_exit_terms = Vec::new();
     if let Some(exits) = &body.loop_bound_exits {
         source_domain.push(exits.clone());
+        loop_exit_terms.push(exits.clone());
     }
     let mut env: HashMap<String, SourceValue> = param_env(
         &atom.params,
@@ -9014,6 +9019,7 @@ fn module_atom_obligations<'ctx>(
     .boolean()?;
     let requires_definedness = std::mem::take(&mut *call_returns.perform_definedness.borrow_mut());
     let requires_loop_exits = Bool::and(context, &requires_exits.iter().collect::<Vec<_>>());
+    loop_exit_terms.extend(requires_exits.iter().cloned());
     env.insert(
         "result".to_string(),
         result_value(&atom.name, &body.value, context, call_returns),
@@ -9042,6 +9048,7 @@ fn module_atom_obligations<'ctx>(
         &EnumEnv::new(),
     )?
     .boolean()?;
+    loop_exit_terms.extend(ensures_exits.iter().cloned());
     let ensures_definedness = std::mem::take(&mut *call_returns.perform_definedness.borrow_mut());
     // A refined result type adds its declaration conjuncts to the
     // postcondition the atom must satisfy — `-> Port` guarantees
@@ -9102,6 +9109,10 @@ fn module_atom_obligations<'ctx>(
             enums,
         )?
         .boolean()?;
+        if !site_exits.is_empty() {
+            let site_exit_domain = Bool::and(context, &site_exits.iter().collect::<Vec<_>>());
+            loop_exit_terms.push(site.guard.implies(&site_exit_domain));
+        }
         // A domain counterexample counts only where the callee's own
         // bounded-while encodings actually exited — same domain
         // convention the single-atom obligation applies to `requires`.
@@ -9214,6 +9225,9 @@ fn module_atom_obligations<'ctx>(
         // off-guard arguments — outside the domain obligation's reach —
         // falsify the whole formula and mask a real violation.
         let exits_domain = Bool::and(context, &ensures_site_exits.iter().collect::<Vec<_>>());
+        if !ensures_site_exits.is_empty() {
+            loop_exit_terms.push(site.guard.implies(&exits_domain));
+        }
         let site_domain = Bool::and(context, &[&site.guard, &exits_domain]);
         assumptions.push(site_domain.implies(&callee_post));
     }
@@ -9239,9 +9253,15 @@ fn module_atom_obligations<'ctx>(
         ));
     }
     obligations.extend(domain_obligations);
+    let loop_exits = if loop_exit_terms.is_empty() {
+        Bool::from_bool(context, true)
+    } else {
+        Bool::and(context, &loop_exit_terms.iter().collect::<Vec<_>>())
+    };
     Ok(ModuleAtomObligations {
         atom: atom.name.clone(),
         domain: source_domain_formula,
+        loop_exits,
         obligations,
     })
 }

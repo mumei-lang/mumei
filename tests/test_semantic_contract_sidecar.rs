@@ -49,6 +49,25 @@ ensures: result == x + 1;
 body: x;
 "#;
 
+const NON_EXITING_REQUIRES_LOOP_SOURCE: &str = r#"
+atom main() -> i64
+requires: { let j = 0; while true invariant: j >= 0 decreases: 4 { j = j + 1 }; true };
+ensures: result == 0;
+body: 0;
+"#;
+
+const BOUNDED_LOOP_SOURCE: &str = r#"
+atom count(n: i64) -> i64
+requires: n >= 0 && n <= 2;
+ensures: result == n;
+body: { let i = 0; while i < n invariant: i >= 0 && i <= n decreases: n - i { i = i + 1 }; i };
+
+atom main() -> i64
+requires: true;
+ensures: result == 2;
+body: { count(2) };
+"#;
+
 const ARRAY_PARAM_SOURCE: &str = r#"
 atom at(a: [i64], i: i64) -> i64
 requires: i >= 0 && i < len(a);
@@ -165,6 +184,40 @@ fn write_input(dir: &Path, name: &str, source: &str) -> PathBuf {
     let input = dir.join(name);
     fs::write(&input, source).unwrap();
     input
+}
+
+fn write_sidecar_fixture(
+    dir: &Path,
+    source_name: &str,
+    source: &str,
+    artifact_name: &str,
+) -> (PathBuf, PathBuf, PathBuf) {
+    let source_path = write_input(dir, source_name, source);
+    let artifact_path = dir.join(artifact_name);
+    let artifact_bytes = b"not interpreted as LLVM IR\n";
+    fs::write(&artifact_path, artifact_bytes).unwrap();
+    let contracts = extract_pure_i64_module_contracts(
+        source,
+        source_name,
+        None,
+        RefinedAdmission::CompositeV26,
+    )
+    .unwrap();
+    let sidecar_value = serde_json::json!({
+        "schema_version": "mumei.semantic-contract-sidecar/v1",
+        "semantic_contract_version": SEMANTIC_CONTRACT_VERSION,
+        "artifact": {
+            "kind": "llvm-ir",
+            "file_name": artifact_name,
+            "sha256": format!("{:x}", Sha256::digest(artifact_bytes)),
+        },
+        "artifact_binding": "sha256_of_emitted_file_not_correspondence",
+        "correspondence": "unchecked",
+        "contracts": serde_json::to_value(contracts).unwrap(),
+    });
+    let sidecar_path = dir.join("sidecar.semantic-contract.json");
+    fs::write(&sidecar_path, serde_json::to_vec(&sidecar_value).unwrap()).unwrap();
+    (source_path, artifact_path, sidecar_path)
 }
 
 fn only_llvm_file(dir: &Path) -> PathBuf {
@@ -682,6 +735,45 @@ fn recheck_refutes_a_freshly_extracted_but_false_module_obligation() {
     assert!(String::from_utf8_lossy(&output.stderr).contains(
         "Semantic-contract sidecar obligation refuted within profile; no recheck diagnostic emitted"
     ));
+}
+
+#[test]
+fn sidecar_recheck_rejects_an_empty_loop_exit_domain_and_accepts_a_bounded_loop_control() {
+    let empty_dir = tempfile::tempdir().unwrap();
+    let (source, artifact, sidecar) = write_sidecar_fixture(
+        empty_dir.path(),
+        "main.mm",
+        NON_EXITING_REQUIRES_LOOP_SOURCE,
+        "empty.ll",
+    );
+
+    let output = run_sidecar_recheck(&sidecar, &source, &artifact, true);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("source domain and loop exits empty on all inputs"));
+
+    let accepted = sidecar_accept_command(&sidecar, &source, &artifact, true)
+        .output()
+        .unwrap();
+    assert_eq!(accepted.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&accepted.stderr)
+        .contains("source domain and loop exits empty on all inputs"));
+
+    let bounded_dir = tempfile::tempdir().unwrap();
+    let (source, artifact, sidecar) = write_sidecar_fixture(
+        bounded_dir.path(),
+        "main.mm",
+        BOUNDED_LOOP_SOURCE,
+        "bounded.ll",
+    );
+    let output = run_sidecar_recheck(&sidecar, &source, &artifact, true);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["recheck"], "consistent");
 }
 
 #[test]

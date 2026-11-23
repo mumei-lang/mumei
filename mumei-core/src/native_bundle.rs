@@ -1777,6 +1777,39 @@ pub fn recheck_multifile_source(
 
 /// The per-atom obligation sweep shared by the module and multifile
 /// source rechecks.
+fn check_atom_loop_exit_domain(
+    atom: &semantic_contract::ModuleAtomObligations<'_>,
+    solver: &z3::Solver,
+) -> Result<bool, BundleError> {
+    if atom.loop_exits.as_bool() == Some(true) {
+        return Ok(false);
+    }
+    solver.reset();
+    solver.assert(&atom.domain);
+    solver.assert(&atom.loop_exits);
+    match solver.check() {
+        z3::SatResult::Sat => Ok(false),
+        z3::SatResult::Unsat => Err(BundleError(
+            "source domain and loop exits empty on all inputs",
+        )),
+        z3::SatResult::Unknown => Ok(true),
+    }
+}
+
+/// Check whether each atom's input domain intersects the bounded-loop
+/// exit hypotheses used by its obligations. Returns true if any query is
+/// inconclusive.
+pub fn check_module_loop_exit_domains(
+    atoms: &[semantic_contract::ModuleAtomObligations<'_>],
+    solver: &z3::Solver,
+) -> Result<bool, BundleError> {
+    let mut inconclusive = false;
+    for atom in atoms {
+        inconclusive |= check_atom_loop_exit_domain(atom, solver)?;
+    }
+    Ok(inconclusive)
+}
+
 pub fn solve_module_obligations(
     atoms: &[semantic_contract::ModuleAtomObligations<'_>],
     solver: &z3::Solver,
@@ -1794,6 +1827,7 @@ pub fn solve_module_obligations(
             z3::SatResult::Unsat => return Err(BundleError("empty source domain")),
             z3::SatResult::Unknown => inconclusive = true,
         }
+        inconclusive |= check_atom_loop_exit_domain(atom, solver)?;
         for obligation in &atom.obligations {
             solver.reset();
             solver.assert(obligation);
@@ -2108,6 +2142,20 @@ mod source_recheck_tests {
     use super::*;
     use z3::{Config, Context, SatResult, Solver};
 
+    fn check_module_source(source: &str) -> Result<SourceRecheck, BundleError> {
+        let mut config = Config::new();
+        config.set_timeout_msec(BuildSettings::default().solver_timeout_ms);
+        let context = Context::new(&config);
+        let atoms = semantic_contract::encode_pure_i64_module_obligations(
+            source,
+            &context,
+            RefinedAdmission::CompositeV26,
+        )
+        .unwrap();
+        let solver = Solver::new(&context);
+        solve_module_obligations(&atoms, &solver)
+    }
+
     #[test]
     fn only_unsat_can_establish_the_source_postcondition() {
         assert_eq!(
@@ -2172,6 +2220,34 @@ mod source_recheck_tests {
         assert_eq!(
             source_recheck_result(solver.check()),
             SourceRecheck::Inconclusive
+        );
+    }
+
+    #[test]
+    fn module_recheck_rejects_non_exiting_requires_loop_domain() {
+        let source = "atom helper() -> i64\n\
+            requires: { let j = 0; while true invariant: j >= 0 decreases: 4 { j = j + 1 }; true };\n\
+            ensures: result == 0;\n\
+            body: 0;\n\
+            atom main() -> i64 requires: true; ensures: result == 0; body: 0;";
+        let error = check_module_source(source).unwrap_err();
+        assert_eq!(error.0, "source domain and loop exits empty on all inputs");
+    }
+
+    #[test]
+    fn module_recheck_rejects_non_exiting_body_loop_and_accepts_partial_exit_domain() {
+        let non_exiting = "atom f() -> i64 requires: true; ensures: true; body: { let j = 0; while true invariant: j >= 0 decreases: 4 { j = j + 1 }; 0 };";
+        let error = check_module_source(non_exiting).unwrap_err();
+        assert_eq!(error.0, "empty source domain");
+
+        let exits_on_some_inputs = "atom count(n: i64) -> i64\n\
+            requires: n >= 0 && n <= 2;\n\
+            ensures: result == n;\n\
+            body: { let i = 0; while i < n invariant: i >= 0 && i <= n decreases: n - i { i = i + 1 }; i };\n\
+            atom main() -> i64 requires: true; ensures: result == 2; body: { count(2) };";
+        assert_eq!(
+            check_module_source(exits_on_some_inputs).unwrap(),
+            SourceRecheck::RecheckedWithinProfile
         );
     }
 
