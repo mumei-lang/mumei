@@ -4877,7 +4877,6 @@ fn write_machine_tv(
         ];
         let mut checks_not_performed = vec![
             "optimizer_semantics",
-            "object_data_section_correspondence",
             "raw_link_argument_vector_reproduction",
             "abi_runtime_semantics",
             "os_exit_status_observation",
@@ -4953,10 +4952,10 @@ fn write_machine_tv(
             evaluation.scope,
         );
         // Mirrors the JSON descriptor's checks_not_performed list: the
-        // eight fixed domains, object_link_correspondence when the link
+        // seven fixed domains, object_link_correspondence when the link
         // check did not run, plus the coverage list.
         let unchecked_domain_count =
-            8 + usize::from(!data.object_link_correspondence) + evaluation.coverage.1.len();
+            7 + usize::from(!data.object_link_correspondence) + evaluation.coverage.1.len();
         println!(
             "{}",
             source_machine_tv_within_profile_line(&evaluation, unchecked_domain_count)
@@ -5105,6 +5104,101 @@ fn executable_text_symbols<'a, R: object::ReadRef<'a>>(
     symbols
 }
 
+/// A defined, named symbol living outside text sections, with its
+/// byte content when the section carries file bytes.
+struct ObjectDataSymbol {
+    section_name: String,
+    size: u64,
+    /// `None` for `.bss`-style uninitialized sections — size is the
+    /// whole claim there, and the runtime value is zero.
+    data: Option<Vec<u8>>,
+}
+
+impl ObjectDataSymbol {
+    /// The symbol's contents — the section bytes, or an all-zero
+    /// image of `size` bytes for uninitialized sections.
+    fn contents(&self) -> Vec<u8> {
+        self.data
+            .clone()
+            .unwrap_or_else(|| vec![0; self.size as usize])
+    }
+}
+
+/// Data-section surface of a compiled object: every defined, named,
+/// non-text symbol — including locals — mapped to its section and
+/// bytes, plus the raw contents of each initialized data section.
+/// Anonymous `unnamed_addr` constants land in a section's bytes
+/// without a symbol (LLVM merges identical constants), so the
+/// section contents are needed for the content-match fallback.
+/// Assembler-local `.L*` labels and section/file symbols are
+/// skipped: they never name an IR global.
+#[derive(Default)]
+struct ObjectDataSurface {
+    symbols: BTreeMap<String, ObjectDataSymbol>,
+    section_contents: BTreeMap<String, Vec<u8>>,
+}
+
+fn object_data_surface(bytes: &[u8]) -> Result<ObjectDataSurface, ()> {
+    let file = object::File::parse(bytes).map_err(|_| ())?;
+    let mut surface = ObjectDataSurface::default();
+    for section in file.sections() {
+        if matches!(
+            section.kind(),
+            SectionKind::Data | SectionKind::ReadOnlyData | SectionKind::ReadOnlyString
+        ) {
+            surface.section_contents.insert(
+                section.name().map_err(|_| ())?.to_owned(),
+                section.uncompressed_data().map_err(|_| ())?.to_vec(),
+            );
+        }
+    }
+    for symbol in file.symbols() {
+        if !symbol.is_definition() {
+            continue;
+        }
+        if matches!(
+            symbol.kind(),
+            SymbolKind::Text | SymbolKind::Section | SymbolKind::File
+        ) {
+            continue;
+        }
+        let Some(section_index) = symbol.section_index() else {
+            continue;
+        };
+        let section = file.section_by_index(section_index).map_err(|_| ())?;
+        if section.kind() == SectionKind::Text {
+            continue;
+        }
+        let name = symbol.name().map_err(|_| ())?;
+        if name.is_empty() || name.starts_with('.') {
+            continue;
+        }
+        let size = symbol.size();
+        let data = if section.kind() == SectionKind::UninitializedData {
+            None
+        } else {
+            let base = symbol.address().checked_sub(section.address()).ok_or(())?;
+            let end = base.checked_add(size).ok_or(())?;
+            let bytes = section.uncompressed_data().map_err(|_| ())?;
+            let end_usize = usize::try_from(end).map_err(|_| ())?;
+            let base_usize = usize::try_from(base).map_err(|_| ())?;
+            if end_usize > bytes.len() {
+                return Err(());
+            }
+            Some(bytes[base_usize..end_usize].to_vec())
+        };
+        surface.symbols.insert(
+            name.to_owned(),
+            ObjectDataSymbol {
+                section_name: section.name().map_err(|_| ())?.to_owned(),
+                size,
+                data,
+            },
+        );
+    }
+    Ok(surface)
+}
+
 /// Step 2 correspondence inspection of the Step 1 metadata record:
 /// compares the emitted function table against the IR-defined surface
 /// and checks every relocation record for a resolvable target and an
@@ -5120,6 +5214,8 @@ fn object_translation_correspondence_checks(
     record: &ObjectTranslationRecord,
     ir_equivalence: Option<&BTreeMap<String, &'static str>>,
     hir_llvm: Option<&BTreeMap<String, &'static str>>,
+    ir_data_globals: Option<&BTreeMap<String, Option<Vec<u8>>>>,
+    object_bytes: &[u8],
 ) -> serde_json::Value {
     let check = |item: &str, result: &str, detail: String| serde_json::json!({"item": item, "result": result, "detail": detail});
     let mut checks = Vec::new();
@@ -5570,6 +5666,116 @@ fn object_translation_correspondence_checks(
         )),
     }
 
+    // object_data_correspondence (design memo Step 3): every IR data
+    // global's initializer bytes ↔ the like-named non-text symbol's
+    // contents. `checked` when each derivable global matched — a
+    // name-absent global still counts when an object data symbol
+    // holds identical bytes, because LLVM merges identical
+    // `unnamed_addr` constants — `inconsistent` on byte divergence,
+    // `unchecked` when a global is missing from the object or its
+    // initializer is outside the derivable shapes. Kept out of the
+    // llvm_ir→object_code edge's promotion gates: the relation name
+    // covers instruction selection only (memo §7(c)).
+    let object_data = object_data_surface(object_bytes).ok();
+    match (ir_data_globals, object_data.as_ref()) {
+        (None, _) | (_, None) => checks.push(check(
+            "object_data_correspondence",
+            "unchecked",
+            "IR data globals or object data symbols unavailable".to_owned(),
+        )),
+        (Some(globals), Some(surface)) if globals.is_empty() => {
+            // Anonymous data sections carry bytes that no object
+            // symbol names; with no IR globals they cannot be matched,
+            // so only a fully empty data surface verifies.
+            let anonymous_bytes: usize = surface.section_contents.values().map(Vec::len).sum();
+            checks.push(if surface.symbols.is_empty() && anonymous_bytes == 0 {
+                check(
+                    "object_data_correspondence",
+                    "checked",
+                    "no IR data globals or object data symbols to compare".to_owned(),
+                )
+            } else {
+                check(
+                    "object_data_correspondence",
+                    "unchecked",
+                    format!(
+                        "{} object data symbols and {anonymous_bytes} anonymous data bytes with no IR globals to compare",
+                        surface.symbols.len()
+                    ),
+                )
+            });
+        }
+        (Some(globals), Some(surface)) => {
+            let symbols = &surface.symbols;
+            // A name-absent global still verifies when its exact
+            // initializer bytes sit in a data section: LLVM merges
+            // identical `unnamed_addr` constants under whichever name
+            // survives, and emits anonymous constants with no symbol
+            // at all (`.rodata.str1.1` is symbol-free).
+            let bytes_recorded = |expected: &[u8]| {
+                !expected.is_empty()
+                    && (symbols.values().any(|symbol| symbol.contents() == expected)
+                        || surface.section_contents.values().any(|data| {
+                            data.windows(expected.len())
+                                .any(|window| window == expected)
+                        }))
+            };
+            let mut compared = 0usize;
+            let mut diverged = 0usize;
+            let mut unresolved = 0usize;
+            let detail = globals
+                .iter()
+                .map(|(name, initializer)| match initializer {
+                    None => {
+                        unresolved += 1;
+                        format!("{name}: underivable")
+                    }
+                    Some(expected) => match symbols.get(name) {
+                        Some(symbol) if symbol.contents() == *expected => {
+                            compared += 1;
+                            format!("{name}: equivalent ({})", symbol.section_name)
+                        }
+                        Some(symbol) => {
+                            diverged += 1;
+                            format!("{name}: different ({})", symbol.section_name)
+                        }
+                        None if bytes_recorded(expected) => {
+                            compared += 1;
+                            format!("{name}: merged")
+                        }
+                        None => {
+                            unresolved += 1;
+                            format!("{name}: missing")
+                        }
+                    },
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            if diverged > 0 {
+                checks.push(check(
+                    "object_data_correspondence",
+                    "inconsistent",
+                    format!("data initializers disagree with object contents ({detail})"),
+                ));
+            } else if unresolved > 0 {
+                checks.push(check(
+                    "object_data_correspondence",
+                    "unchecked",
+                    format!(
+                        "{compared} of {} IR data globals verified ({detail})",
+                        globals.len()
+                    ),
+                ));
+            } else {
+                checks.push(check(
+                    "object_data_correspondence",
+                    "checked",
+                    format!("{compared} IR data globals verified ({detail})"),
+                ));
+            }
+        }
+    }
+
     let any_inconsistent = checks
         .iter()
         .any(|check| check["result"].as_str() == Some("inconsistent"));
@@ -5917,12 +6123,15 @@ fn object_translation_correspondence_json(
 ) -> serde_json::Value {
     let ir_equivalence = llvm_ir_object_equivalence_results(data, record);
     let hir_llvm = hir_llvm_atom_outcomes(data);
+    let ir_data_globals = tv::ir_data_globals(&data.llvm_bytes).ok();
     object_translation_correspondence_checks(
         &data.ir_surface,
         data.executable_bytes.as_slice(),
         record,
         ir_equivalence.as_ref(),
         hir_llvm.as_ref(),
+        ir_data_globals.as_ref(),
+        data.object_bytes.as_slice(),
     )
 }
 
@@ -6240,7 +6449,6 @@ fn object_machine_tv_acceptance_checks(
     checks_not_performed.extend([
         "register_convention_validation",
         "optimizer_semantics",
-        "object_data_section_correspondence",
         "abi_runtime_semantics",
         "os_exit_status_observation",
         "os_stdout_observation",
@@ -8445,6 +8653,10 @@ entry:
         let object_path = dir.path().join("module.o");
         let executable_path = dir.path().join("module");
         let ir = br#"
+@greeting = private unnamed_addr constant [6 x i8] c"hello\00"
+@counter = global i32 7
+@scratch = global [8 x i8] zeroinitializer
+
 define i64 @helper(i64 %argument) {
 entry:
   %value = add i64 %argument, 1
@@ -8471,6 +8683,15 @@ entry:
         let object_bytes = fs::read(&object_path).unwrap();
         let executable_bytes = fs::read(&executable_path).unwrap();
         let ir_surface = tv::ir_function_surface(ir).unwrap();
+        let ir_data = tv::ir_data_globals(ir).unwrap();
+        assert_eq!(
+            ir_data,
+            BTreeMap::from([
+                ("counter".to_owned(), Some(vec![7, 0, 0, 0])),
+                ("greeting".to_owned(), Some(b"hello\0".as_slice().to_vec())),
+                ("scratch".to_owned(), Some(vec![0; 8])),
+            ])
+        );
         let record = &object_link_corresponds(&object_bytes, &executable_bytes)
             .unwrap()
             .unwrap()
@@ -8507,13 +8728,15 @@ entry:
             record,
             Some(&equivalent),
             Some(&hir_llvm),
+            Some(&ir_data),
+            &object_bytes,
         );
         assert_eq!(report["status"], "checked_correspondence");
         let lines = object_translation_correspondence_report_lines(&report);
         assert_eq!(lines.len(), 1);
         assert_eq!(
             lines[0],
-            "Object translation correspondence: checked_correspondence (8 of 8 items checked)."
+            "Object translation correspondence: checked_correspondence (9 of 9 items checked)."
         );
         let results = results_of(&report);
         assert_eq!(
@@ -8536,6 +8759,10 @@ entry:
                     "hir_llvm_model_correspondence".to_owned(),
                     "checked".to_owned()
                 ),
+                (
+                    "object_data_correspondence".to_owned(),
+                    "checked".to_owned()
+                ),
             ])
         );
 
@@ -8548,6 +8775,8 @@ entry:
             record,
             Some(&divergent),
             None,
+            None,
+            &object_bytes,
         );
         assert_eq!(report["status"], "inconsistent_correspondence");
         assert_eq!(
@@ -8574,6 +8803,8 @@ entry:
             record,
             Some(&equivalent),
             Some(&hir_diverged),
+            None,
+            &object_bytes,
         );
         assert_eq!(report["status"], "inconsistent_correspondence");
         assert_eq!(
@@ -8589,6 +8820,8 @@ entry:
             record,
             Some(&equivalent),
             Some(&hir_outside),
+            None,
+            &object_bytes,
         );
         assert_eq!(report["status"], "unchecked_not_translation_validated");
         assert_eq!(
@@ -8605,6 +8838,8 @@ entry:
             record,
             Some(&unliftable),
             None,
+            None,
+            &object_bytes,
         );
         assert_eq!(report["status"], "unchecked_not_translation_validated");
         assert_eq!(
@@ -8625,6 +8860,8 @@ entry:
             record,
             Some(&undecidable),
             Some(&hir_llvm),
+            None,
+            &object_bytes,
         );
         assert_eq!(report["status"], "unchecked_not_translation_validated");
         assert_eq!(
@@ -8651,6 +8888,8 @@ entry:
             &short,
             None,
             None,
+            None,
+            &object_bytes,
         );
         assert_eq!(report["status"], "inconsistent_correspondence");
         let results = results_of(&report);
@@ -8673,6 +8912,8 @@ entry:
             &extra,
             None,
             None,
+            None,
+            &object_bytes,
         ));
         assert_eq!(results["function_coverage"], "inconsistent");
         assert_eq!(results["function_count"], "inconsistent");
@@ -8686,6 +8927,8 @@ entry:
             &bogus_target,
             None,
             None,
+            None,
+            &object_bytes,
         ));
         assert_eq!(results["relocation_targets"], "inconsistent");
 
@@ -8698,6 +8941,8 @@ entry:
             &out_of_bounds,
             None,
             None,
+            None,
+            &object_bytes,
         ));
         assert_eq!(results["relocation_bounds"], "inconsistent");
 
@@ -8710,6 +8955,8 @@ entry:
             &unresolved,
             None,
             None,
+            None,
+            &object_bytes,
         );
         assert_eq!(report["status"], "unchecked_not_translation_validated");
         let results = results_of(&report);
@@ -8722,11 +8969,189 @@ entry:
             record,
             None,
             None,
+            None,
+            &object_bytes,
         );
         assert_eq!(report["status"], "unchecked_not_translation_validated");
         let results = results_of(&report);
         assert_eq!(results["function_coverage"], "unchecked");
         assert_eq!(results["function_count"], "unchecked");
+    }
+
+    #[test]
+    fn object_data_correspondence_reports_equivalent_merged_missing_and_different() {
+        let dir = tempfile::tempdir().unwrap();
+        let ir_path = dir.path().join("data.ll");
+        let object_path = dir.path().join("data.o");
+        let executable_path = dir.path().join("data");
+        // `@greeting` gets no object symbol: mergeable `unnamed_addr`
+        // string constants land in `.rodata.str1.1` anonymously, so
+        // only the byte-content fallback verifies it.
+        let ir = br#"
+@greeting = private unnamed_addr constant [6 x i8] c"hello\00"
+@counter = global i32 7
+@scratch = global [8 x i8] zeroinitializer
+
+define i32 @main() {
+entry:
+  ret i32 0
+}
+"#;
+        fs::write(&ir_path, ir).unwrap();
+        mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ir_path, &object_path)
+            .unwrap();
+        linker::link_recorded(std::slice::from_ref(&object_path), &executable_path).unwrap();
+        let object_bytes = fs::read(&object_path).unwrap();
+        let executable_bytes = fs::read(&executable_path).unwrap();
+        let ir_surface = tv::ir_function_surface(ir).unwrap();
+        let ir_data = tv::ir_data_globals(ir).unwrap();
+        let record = &object_link_corresponds(&object_bytes, &executable_bytes)
+            .unwrap()
+            .unwrap()
+            .2;
+
+        let item = |report: &serde_json::Value| -> (String, String) {
+            let item = report["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|check| check["item"] == "object_data_correspondence")
+                .unwrap();
+            (
+                item["result"].as_str().unwrap().to_owned(),
+                item["detail"].as_str().unwrap().to_owned(),
+            )
+        };
+
+        // Every derivable global verifies: named data/bss symbols by
+        // content, the anonymous string constant via the section-byte
+        // fallback (`merged`).
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            None,
+            None,
+            Some(&ir_data),
+            &object_bytes,
+        );
+        let (result, detail) = item(&report);
+        assert_eq!(result, "checked");
+        assert!(detail.contains("counter: equivalent"), "{detail}");
+        assert!(detail.contains("scratch: equivalent"), "{detail}");
+        assert!(detail.contains("greeting: merged"), "{detail}");
+
+        // A global the object never emits stays unverifiable — the
+        // item reports `unchecked`, not `inconsistent`.
+        let mut with_missing = ir_data.clone();
+        with_missing.insert("hidden".to_owned(), Some(vec![1, 2, 3]));
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            None,
+            None,
+            Some(&with_missing),
+            &object_bytes,
+        );
+        let (result, detail) = item(&report);
+        assert_eq!(result, "unchecked");
+        assert!(detail.contains("hidden: missing"), "{detail}");
+
+        // An initializer outside the derivable shapes is unverifiable,
+        // never treated as empty data.
+        let mut with_underivable = ir_data.clone();
+        with_underivable.insert("opaque".to_owned(), None);
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            None,
+            None,
+            Some(&with_underivable),
+            &object_bytes,
+        );
+        let (result, detail) = item(&report);
+        assert_eq!(result, "unchecked");
+        assert!(detail.contains("opaque: underivable"), "{detail}");
+
+        // Integer widths whose byte-store size is not a power of two
+        // (`i24` allocates 4 bytes but stores 3) are underivable too —
+        // comparing them against the object's padded image would
+        // report a false `inconsistent`.
+        let padded = tv::ir_data_globals(
+            br#"@pair = global [2 x i24] [i24 1, i24 2]
+@word = global i24 7
+@aligned = global i64 7"#,
+        )
+        .unwrap();
+        assert_eq!(padded["pair"], None);
+        assert_eq!(padded["word"], None);
+        assert_eq!(padded["aligned"], Some(7u64.to_le_bytes().to_vec()));
+
+        // Object data with no IR globals stays unverifiable when the
+        // sections hold anonymous bytes — only a fully empty surface
+        // is trivially checked.
+        let no_globals: BTreeMap<String, Option<Vec<u8>>> = BTreeMap::new();
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            None,
+            None,
+            Some(&no_globals),
+            &object_bytes,
+        );
+        let (result, detail) = item(&report);
+        assert_eq!(result, "unchecked");
+        assert!(detail.contains("anonymous data bytes"), "{detail}");
+
+        // The same outcome must hold when the object carries *only*
+        // anonymous data — no named data symbols at all. A module of a
+        // single `unnamed_addr` string constant compiles to exactly
+        // that: `.rodata.str1.1` bytes with an empty symbol map.
+        let anonymous_ir_path = dir.path().join("anonymous.ll");
+        let anonymous_object_path = dir.path().join("anonymous.o");
+        let anonymous_ir = br#"@lone = private unnamed_addr constant [4 x i8] c"hey\00""#;
+        fs::write(&anonymous_ir_path, anonymous_ir).unwrap();
+        mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(
+            &anonymous_ir_path,
+            &anonymous_object_path,
+        )
+        .unwrap();
+        let anonymous_object = fs::read(&anonymous_object_path).unwrap();
+        let anonymous_surface = object_data_surface(&anonymous_object).unwrap();
+        assert!(anonymous_surface.symbols.is_empty());
+        assert!(!anonymous_surface.section_contents.is_empty());
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            None,
+            None,
+            Some(&no_globals),
+            &anonymous_object,
+        );
+        let (result, detail) = item(&report);
+        assert_eq!(result, "unchecked");
+        assert!(detail.contains("anonymous data bytes"), "{detail}");
+
+        // A named symbol whose bytes disagree is a real inconsistency.
+        let mut with_diverged = ir_data.clone();
+        with_diverged.insert("counter".to_owned(), Some(vec![1, 2, 3, 4]));
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            None,
+            None,
+            Some(&with_diverged),
+            &object_bytes,
+        );
+        let (result, detail) = item(&report);
+        assert_eq!(result, "inconsistent");
+        assert!(detail.contains("counter: different"), "{detail}");
+        assert_eq!(report["status"], "inconsistent_correspondence");
     }
 
     #[test]
@@ -8806,6 +9231,8 @@ entry:
             record,
             None,
             None,
+            None,
+            &object_bytes,
         );
         let targets = report["checks"]
             .as_array()

@@ -2368,6 +2368,28 @@ equivalent, `inconsistent_correspondence` on any divergence, and
 so `validation: "checked_hir_llvm_model_correspondence"` names the
 method while `result` stays honest about coverage.
 
+A further item, `object_data_correspondence`, covers the non-`.text`
+sections the instruction-selection checks do not: every IR data
+global's initializer bytes are compared against the like-named object
+data symbol's contents — `.bss` symbols carry no file bytes, so their
+claim is an all-zero image of the symbol size. An IR global whose
+name is absent still verifies when its exact initializer bytes sit in
+an initialized data section, because LLVM merges identical
+`unnamed_addr` constants and emits anonymous ones with no symbol at
+all (`.rodata.str1.1` is symbol-free); the `detail` entry records
+that outcome as `merged`. The item is `checked` when every derivable
+global verified (and trivially `checked` when neither side defines
+any data), `inconsistent` on byte divergence, and `unchecked` when a
+global is missing from the object or its initializer is outside the
+derivable shapes — power-of-two-byte integers up to 64 bits (i8–i64;
+`i24`-style widths whose store size is not a power of two allocate
+padded bytes LLVM does not describe without a data layout, so they
+stay `underivable`), f32/f64, i8 strings, and uniform-element arrays
+of those; pointers, structs and wider shapes stay `underivable` in
+`detail`, never zero-filled. This item stays
+out of the `llvm_ir → object_code` edge's promotion gate — the
+relation name covers instruction selection only.
+
 Step 5 of the record pipeline surfaces the aggregate status on the text
 path too: `recheck-machine-tv` and `accept-object` without `--json`
 print `Object translation correspondence: <status> (N of M items
