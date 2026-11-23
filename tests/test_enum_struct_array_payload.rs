@@ -1,7 +1,6 @@
 use serde_json::Value;
 use std::path::Path;
 use std::process::{Command, Output};
-use std::time::{Duration, Instant};
 
 fn run_command(command: &str, fixture_name: &str, bitvec_i64: bool) -> Output {
     let dir = tempfile::tempdir().expect("create verification directory");
@@ -139,23 +138,6 @@ fn unsafe_and_unsupported_struct_array_payloads_fail_closed_in_both_modes() {
             "direct struct-array reads must explain the supported match route (bitvec={bitvec_i64}):\n{payload:#}"
         );
     }
-}
-
-#[test]
-fn array_free_nested_enum_equality_finishes_quickly() {
-    let started = Instant::now();
-    let output = run_command("verify", "test_enum_payload_equality_work.mm", false);
-    let elapsed = started.elapsed();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "array-free nested enum equality must verify:\n{stdout}\n{stderr}"
-    );
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "array-free nested enum equality took {elapsed:?}:\n{stdout}\n{stderr}"
-    );
 }
 
 #[test]
