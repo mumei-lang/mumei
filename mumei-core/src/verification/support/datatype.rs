@@ -97,6 +97,14 @@ pub(crate) fn recursive_enum_group<'a>(
     enum_def: &EnumDef,
     module_env: &'a ModuleEnv,
 ) -> Option<Vec<&'a EnumDef>> {
+    if !enum_def
+        .variants
+        .iter()
+        .flat_map(|variant| &variant.field_types)
+        .any(|field| direct_enum_field_target(enum_def, field, module_env).is_some())
+    {
+        return None;
+    }
     let mut enums: Vec<&EnumDef> = module_env
         .enums
         .values()
@@ -1079,11 +1087,11 @@ pub(crate) fn enum_datatype_sort<'a>(
     vc: &VCtx<'a>,
     enum_def: &EnumDef,
 ) -> Option<Rc<DatatypeSort<'a>>> {
-    if !uses_datatype_sort(enum_def, vc.module_env) {
-        return None;
-    }
     if let Some(sort) = vc.enum_sorts.borrow().get(&enum_def.name) {
         return Some(sort.clone());
+    }
+    if !uses_datatype_sort(enum_def, vc.module_env) {
+        return None;
     }
 
     let group = recursive_enum_group(enum_def, vc.module_env).unwrap_or_else(|| vec![enum_def]);
