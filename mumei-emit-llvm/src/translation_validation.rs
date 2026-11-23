@@ -400,6 +400,55 @@ pub fn validate_pure_i64_optimized(
     validate(source, llvm_ir, options, false, true)
 }
 
+/// Compare a `HirAtom`'s scalar-i64 leaf body with the same-named
+/// function in `llvm_ir` — the `hir → llvm_ir` correspondence check.
+/// Admission is the leaf subset only (`encode_hir_pure_i64_leaf`);
+/// anything wider fails closed as a validation error. The return is the
+/// bare outcome: this is the stage check, not a profile attestation.
+pub fn validate_hir_pure_i64_leaf(
+    atom: &mumei_core::hir::HirAtom,
+    llvm_ir: &str,
+    options: Options,
+) -> Result<Outcome> {
+    bounded(llvm_ir)?;
+    if options.timeout_ms == 0 || options.timeout_ms > 30_000 || options.resource_limit == 0 {
+        return Err(ValidationError("invalid solver budget"));
+    }
+    let mut config = Config::new();
+    config.set_timeout_msec(options.timeout_ms as u64);
+    config.set_param_value("rlimit", &options.resource_limit.to_string());
+    let context = Context::new(&config);
+    let model = mumei_core::semantic_contract::encode_hir_pure_i64_leaf(atom, &context)
+        .map_err(|_| ValidationError("hir atom outside the scalar-i64 leaf subset"))?;
+    let llvm_context = LlvmContext::create();
+    let module = llvm_context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            llvm_ir.as_bytes(),
+            "hir-comparison.ll",
+        ))
+        .map_err(|_| ValidationError("invalid LLVM IR"))?;
+    module
+        .verify()
+        .map_err(|_| ValidationError("invalid LLVM module"))?;
+    let function = module
+        .get_function(&model.function_name)
+        .ok_or(ValidationError("missing source function"))?;
+    // The module is parsed/verified and remains alive for every raw LLVM query.
+    let (outcome, _) = unsafe {
+        check_module(module.as_mut_ptr(), false, false, false, false)?;
+        compare_function(
+            &context,
+            function.as_value_ref(),
+            &model,
+            &BTreeMap::new(),
+            false,
+            false,
+            false,
+        )?
+    };
+    Ok(outcome)
+}
+
 fn validate(
     source: &str,
     llvm_ir: &str,

@@ -4165,3 +4165,64 @@ fn composite_v23_does_not_admit_struct_valued_enum_payload_reads() {
         "struct-valued direct enum payload reads must not expand CompositeV23 admission"
     );
 }
+
+// ─── hir → llvm_ir correspondence (scalar-i64 leaf subset) ────────────
+
+fn hir_outcome(source: &str, ir: &str) -> Outcome {
+    let Item::Atom(atom) = parse_module_checked(source).unwrap().remove(0) else {
+        panic!("atom")
+    };
+    let hir = lower_atom_to_hir(&atom);
+    tv::validate_hir_pure_i64_leaf(&hir, ir, Options::default()).unwrap()
+}
+
+#[test]
+fn hir_leaf_compare_is_equivalent_on_emitted_ir() {
+    let src = source("x: i64, y: i64", "x * y + 1");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn hir_leaf_compare_catches_a_mistranslated_ir() {
+    // The machine side cannot flag a faithfully-lowered wrong IR; the
+    // HIR-anchored check compares the HIR model against the IR itself.
+    let ir = pin("define i64 @f(i64 %x, i64 %y) { %s = sub i64 %x, %y\n ret i64 %s }");
+    assert_eq!(
+        hir_outcome(&source("x: i64, y: i64", "x + y"), &ir),
+        Outcome::Different
+    );
+}
+
+#[test]
+fn hir_leaf_compare_binds_definedness_both_ways() {
+    // A missing UB guard on the IR side is UndefinedBehavior, not a
+    // value mismatch — the same direction the source check enforces.
+    let src = source("x: i64, y: i64", "x / y");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+    let ir = pin("define i64 @f(i64 %x, i64 %y) { %q = sdiv i64 %x, 0\n ret i64 %q }");
+    assert_eq!(hir_outcome(&src, &ir), Outcome::UndefinedBehavior);
+}
+
+#[test]
+fn hir_leaf_compare_rejects_atoms_outside_the_subset() {
+    // A call site is outside the leaf subset — fail closed, no verdict.
+    let Item::Atom(atom) = parse_module_checked(&source("x: i64", "g(x)"))
+        .unwrap()
+        .remove(0)
+    else {
+        panic!("atom")
+    };
+    let hir = lower_atom_to_hir(&atom);
+    assert!(tv::validate_hir_pure_i64_leaf(
+        &hir,
+        &pin("define i64 @f(i64 %x) { ret i64 %x }"),
+        Options::default()
+    )
+    .is_err());
+}

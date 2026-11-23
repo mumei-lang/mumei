@@ -8267,6 +8267,146 @@ impl<'ctx> PureI64Body<'ctx> {
     }
 }
 
+/// Encode a `HirAtom` into the same `PureI64Body` model the source-side
+/// encoder produces, so the `hir → llvm_ir` correspondence reuses the
+/// existing IR comparison (the comparison encodes the LLVM function
+/// against this model's shared inputs).
+///
+/// Admission is the scalar-i64 leaf subset: parameters and the result
+/// are `i64`; the body is a flat block of `let` bindings plus a tail
+/// expression; expressions are `Number` / `Variable` / `BinaryOp` /
+/// single-expression `IfThenElse`. Anything outside fails closed as
+/// `Unsupported` — wider admission follows the same staged order the IR
+/// subset used.
+pub fn encode_hir_pure_i64_leaf<'ctx>(
+    atom: &crate::hir::HirAtom,
+    context: &'ctx Context,
+) -> Result<PureI64Body<'ctx>, SemanticContractError> {
+    use crate::hir::{HirBinOp, HirExpr, HirStmt};
+
+    if !atom.signature.effects.is_empty() {
+        return Err(SemanticContractError::Unsupported("hir effects"));
+    }
+    let mut inputs = Vec::new();
+    let mut env: HashMap<String, BV<'ctx>> = HashMap::new();
+    for param in &atom.signature.params {
+        match param.ty.as_deref() {
+            None | Some("i64") => {}
+            _ => return Err(SemanticContractError::Unsupported("hir non-i64 param")),
+        }
+        let input = BV::new_const(context, format!("param.{}", param.name), 64);
+        env.insert(param.name.clone(), input.clone());
+        inputs.push(input);
+    }
+    match atom.signature.return_type.as_deref() {
+        None | Some("i64") => {}
+        _ => return Err(SemanticContractError::Unsupported("hir non-i64 result")),
+    }
+
+    fn encode_expr<'ctx>(
+        expr: &HirExpr,
+        env: &HashMap<String, BV<'ctx>>,
+        context: &'ctx Context,
+        definedness: &mut Vec<Bool<'ctx>>,
+    ) -> Result<BV<'ctx>, SemanticContractError> {
+        let zero = BV::from_i64(context, 0, 64);
+        let one = BV::from_i64(context, 1, 64);
+        let as_i64 = |b: Bool<'ctx>| b.ite(&one, &zero);
+        match expr {
+            HirExpr::Number(n) => Ok(BV::from_i64(context, *n, 64)),
+            HirExpr::Variable(name) => env
+                .get(name)
+                .cloned()
+                .ok_or(SemanticContractError::Unsupported("hir free variable")),
+            HirExpr::BinaryOp(lhs, op, rhs) => {
+                let l = encode_expr(lhs, env, context, definedness)?;
+                let r = encode_expr(rhs, env, context, definedness)?;
+                let l_nz = l._eq(&zero).not();
+                let r_nz = r._eq(&zero).not();
+                Ok(match op {
+                    HirBinOp::Add => l.bvadd(&r),
+                    HirBinOp::Sub => l.bvsub(&r),
+                    HirBinOp::Mul => l.bvmul(&r),
+                    HirBinOp::Div | HirBinOp::Rem => {
+                        // The same obligations the source side binds: a
+                        // nonzero divisor and no i64::MIN / -1 overflow.
+                        definedness.push(r_nz.clone());
+                        let min = BV::from_i64(context, i64::MIN, 64);
+                        let neg_one = BV::from_i64(context, -1, 64);
+                        definedness
+                            .push(Bool::and(context, &[&l._eq(&min), &r._eq(&neg_one)]).not());
+                        if matches!(op, HirBinOp::Div) {
+                            l.bvsdiv(&r)
+                        } else {
+                            l.bvsrem(&r)
+                        }
+                    }
+                    HirBinOp::Eq => as_i64(l._eq(&r)),
+                    HirBinOp::Neq => as_i64(l._eq(&r).not()),
+                    HirBinOp::Gt => as_i64(l.bvsgt(&r)),
+                    HirBinOp::Lt => as_i64(l.bvslt(&r)),
+                    HirBinOp::Ge => as_i64(l.bvsge(&r)),
+                    HirBinOp::Le => as_i64(l.bvsle(&r)),
+                    HirBinOp::And => as_i64(Bool::and(context, &[&l_nz, &r_nz])),
+                    HirBinOp::Or => as_i64(Bool::or(context, &[&l_nz, &r_nz])),
+                    HirBinOp::Implies => as_i64(l_nz.implies(&r_nz)),
+                    _ => return Err(SemanticContractError::Unsupported("hir op")),
+                })
+            }
+            HirExpr::IfThenElse {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                let (HirStmt::Expr(then_e), HirStmt::Expr(else_e)) =
+                    (then_branch.as_ref(), else_branch.as_ref())
+                else {
+                    return Err(SemanticContractError::Unsupported("hir if branch"));
+                };
+                let c = encode_expr(cond, env, context, definedness)?;
+                let t = encode_expr(then_e, env, context, definedness)?;
+                let e = encode_expr(else_e, env, context, definedness)?;
+                Ok(c._eq(&zero).not().ite(&t, &e))
+            }
+            _ => Err(SemanticContractError::Unsupported("hir expression")),
+        }
+    }
+
+    let (stmts, tail) = match &atom.body {
+        HirStmt::Block { stmts, tail_expr } => {
+            let tail = tail_expr
+                .as_deref()
+                .ok_or(SemanticContractError::Unsupported("hir body without tail"))?;
+            (stmts.as_slice(), tail)
+        }
+        HirStmt::Expr(e) => (&[][..], e),
+        _ => return Err(SemanticContractError::Unsupported("hir body shape")),
+    };
+    let mut definedness = Vec::new();
+    for stmt in stmts {
+        match stmt {
+            HirStmt::Let { var, value, .. } => {
+                let bound = encode_expr(value, &env, context, &mut definedness)?;
+                env.insert(var.clone(), bound);
+            }
+            HirStmt::Expr(e) => {
+                encode_expr(e, &env, context, &mut definedness)?;
+            }
+            _ => return Err(SemanticContractError::Unsupported("hir statement")),
+        }
+    }
+    let value = encode_expr(tail, &env, context, &mut definedness)?;
+
+    let mut body = PureI64Body::synthetic_scalar(atom.signature.name.clone(), value);
+    body.inputs = inputs;
+    body.definedness = definedness;
+    body.array_params = vec![None; atom.signature.params.len()];
+    body.param_shapes = vec![None; atom.signature.params.len()];
+    body.param_leaf_doubles = vec![vec![false]; atom.signature.params.len()];
+    body.result_leaf_doubles = vec![false];
+    Ok(body)
+}
+
 type BodyResult<T> = std::result::Result<T, SemanticContractError>;
 type AdmittedPureI64Module = (
     String,
