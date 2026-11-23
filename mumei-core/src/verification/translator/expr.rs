@@ -3144,6 +3144,11 @@ fn enum_payload_field_read<'a>(
         let Some(value) = super::z3_types::dynamic_ite(&is_variant, &selector, &fresh) else {
             return Ok(None);
         };
+        if let (Some(solver), Some(domain)) =
+            (solver_opt, datatype::enum_value_leaf_domain(vc, &value))
+        {
+            solver.assert(&is_variant.implies(&domain));
+        }
         return Ok(Some(value));
     }
     let field_type = datatype::payload_field_type_name(field_type_ref);
