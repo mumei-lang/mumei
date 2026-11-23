@@ -4612,6 +4612,7 @@ fn object_translation_correspondence_checks(
     ir_surface: &tv::IrFunctionSurface,
     executable_bytes: &[u8],
     record: &ObjectTranslationRecord,
+    ir_equivalence: Option<&BTreeMap<String, &'static str>>,
 ) -> serde_json::Value {
     let check = |item: &str, result: &str, detail: String| serde_json::json!({"item": item, "result": result, "detail": detail});
     let mut checks = Vec::new();
@@ -4771,6 +4772,52 @@ fn object_translation_correspondence_checks(
         ));
     }
 
+    // llvm_ir_object_equivalence: direct LLVM-IR ↔ object comparison
+    // over the shared source-model inputs (design memo §7 Step 3
+    // slice). Recorded only; verdict/grade promotion stays deferred.
+    match ir_equivalence {
+        None => checks.push(check(
+            "llvm_ir_object_equivalence",
+            "unchecked",
+            "no source model or LLVM IR available for direct comparison".to_owned(),
+        )),
+        Some(outcomes) => {
+            let compared = outcomes
+                .iter()
+                .filter(|(_, outcome)| **outcome != "skipped")
+                .count();
+            let different: Vec<&String> = outcomes
+                .iter()
+                .filter(|(_, outcome)| **outcome == "different")
+                .map(|(name, _)| name)
+                .collect();
+            let detail = outcomes
+                .iter()
+                .map(|(name, outcome)| format!("{name}: {outcome}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !different.is_empty() {
+                checks.push(check(
+                    "llvm_ir_object_equivalence",
+                    "inconsistent",
+                    format!("divergent functions ({})", detail),
+                ));
+            } else if compared == 0 {
+                checks.push(check(
+                    "llvm_ir_object_equivalence",
+                    "unchecked",
+                    format!("no source-atom function liftable in the scalar-i64 subset ({detail})"),
+                ));
+            } else {
+                checks.push(check(
+                    "llvm_ir_object_equivalence",
+                    "checked",
+                    format!("{compared} liftable function(s) equivalent ({detail})"),
+                ));
+            }
+        }
+    }
+
     let any_inconsistent = checks
         .iter()
         .any(|check| check["result"].as_str() == Some("inconsistent"));
@@ -4788,6 +4835,87 @@ fn object_translation_correspondence_checks(
         "status": status,
         "checks": checks,
     })
+}
+
+/// Direct LLVM-IR ↔ object-function comparison over the shared
+/// `model.inputs` (design memo §7 Step 3 slice): per function,
+/// `"equivalent"`, `"different"`, or `"skipped"` when the function is
+/// outside the admitted scalar-i64 subset or its IR could not be
+/// encoded. `None` when the checked source snapshot or LLVM IR is
+/// unavailable — the item then records `unchecked`.
+fn llvm_ir_object_equivalence_results(
+    data: &ObjectRecheckData,
+    record: &ObjectTranslationRecord,
+) -> Option<BTreeMap<String, &'static str>> {
+    let source_text = data.source_text.as_deref()?;
+    if data.llvm_bytes.is_empty() {
+        return None;
+    }
+    let mut config = z3::Config::new();
+    config.set_timeout_msec(u64::from(machine_tv::TIMEOUT_MS));
+    config.set_param_value("rlimit", &machine_tv::RESOURCE_LIMIT.to_string());
+    let context = z3::Context::new(&config);
+    let models =
+        semantic_contract::encode_pure_i64_module(source_text, &context, true, data.admission)
+            .ok()?;
+    // Parse the LLVM module once and share it across functions; models
+    // outside the scalar-i64 signature subset skip before the encode.
+    let mut parsed = None;
+    let mut outcomes = BTreeMap::new();
+    for model in &models {
+        let symbol = tv::native_function_name(&model.function_name).to_owned();
+        if !record
+            .functions
+            .iter()
+            .any(|function| function.ir_function == symbol)
+        {
+            continue;
+        }
+        let Some((address, bytes)) = object_function_bytes(&data.object_bytes, &symbol) else {
+            continue;
+        };
+        let outcome = if !machine_tv::ir_object_signature_liftable(model) {
+            "skipped"
+        } else {
+            if parsed.is_none() {
+                parsed = unsafe { tv::parse_ir_module_for_comparison(&data.llvm_bytes) }.ok();
+            }
+            let encoded = parsed.as_ref().and_then(|module| unsafe {
+                module
+                    .function(&symbol)
+                    .and_then(|raw| {
+                        tv::encode_parsed_function_for_comparison(raw, model, false, &context)
+                    })
+                    .ok()
+            });
+            let call_targets = data
+                .object_surface
+                .call_targets
+                .get(&symbol)
+                .cloned()
+                .unwrap_or_default();
+            match encoded {
+                None => "skipped",
+                Some((ir_returns, ir_definedness)) => {
+                    match machine_tv::check_function_against_ir(
+                        &bytes,
+                        address,
+                        model,
+                        &ir_returns,
+                        &ir_definedness,
+                        &call_targets,
+                        &context,
+                    ) {
+                        machine_tv::IrObjectEquivalence::Equivalent => "equivalent",
+                        machine_tv::IrObjectEquivalence::Different => "different",
+                        machine_tv::IrObjectEquivalence::NotLiftable(_) => "skipped",
+                    }
+                }
+            }
+        };
+        outcomes.insert(symbol, outcome);
+    }
+    Some(outcomes)
 }
 
 fn object_translation_json(data: &ObjectRecheckData) -> serde_json::Value {
@@ -4808,10 +4936,12 @@ fn object_translation_json(data: &ObjectRecheckData) -> serde_json::Value {
     } else {
         "unchecked_not_translation_validated"
     };
+    let ir_equivalence = llvm_ir_object_equivalence_results(data, &record);
     let correspondence = object_translation_correspondence_checks(
         &data.ir_surface,
         data.executable_bytes.as_slice(),
         &record,
+        ir_equivalence.as_ref(),
     );
     let status = if correspondence["status"].as_str() == Some("checked_correspondence") {
         "checked_correspondence"
@@ -6891,8 +7021,20 @@ entry:
                 })
                 .collect()
         };
-        let report =
-            object_translation_correspondence_checks(&ir_surface, &executable_bytes, record);
+        // A liftable function comparing equivalent makes the direct
+        // IR ↔ object item `checked`; every metadata item checked and
+        // the aggregate stays `checked_correspondence`.
+        let equivalent = BTreeMap::from([
+            ("helper".to_owned(), "equivalent"),
+            ("__mumei_user_main".to_owned(), "skipped"),
+            ("main".to_owned(), "skipped"),
+        ]);
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            Some(&equivalent),
+        );
         assert_eq!(report["status"], "checked_correspondence");
         let results = results_of(&report);
         assert_eq!(
@@ -6906,14 +7048,48 @@ entry:
                     "relocation_resolved_values".to_owned(),
                     "checked".to_owned()
                 ),
+                (
+                    "llvm_ir_object_equivalence".to_owned(),
+                    "checked".to_owned()
+                ),
             ])
+        );
+
+        // A divergent function makes the item — and the aggregate —
+        // inconsistent even when every metadata item checked.
+        let divergent = BTreeMap::from([("helper".to_owned(), "different")]);
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            Some(&divergent),
+        );
+        assert_eq!(report["status"], "inconsistent_correspondence");
+        assert_eq!(
+            results_of(&report)["llvm_ir_object_equivalence"],
+            "inconsistent"
+        );
+
+        // Nothing liftable keeps the item honestly `unchecked`, which
+        // drops the aggregate back to unchecked_not_translation_validated.
+        let unliftable = BTreeMap::from([("helper".to_owned(), "skipped")]);
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+            Some(&unliftable),
+        );
+        assert_eq!(report["status"], "unchecked_not_translation_validated");
+        assert_eq!(
+            results_of(&report)["llvm_ir_object_equivalence"],
+            "unchecked"
         );
 
         // A record missing a function is unmappable and count-mismatched.
         let mut short = record.clone();
         short.functions.pop();
         let report =
-            object_translation_correspondence_checks(&ir_surface, &executable_bytes, &short);
+            object_translation_correspondence_checks(&ir_surface, &executable_bytes, &short, None);
         assert_eq!(report["status"], "inconsistent_correspondence");
         let results = results_of(&report);
         assert_eq!(results["function_coverage"], "inconsistent");
@@ -6933,6 +7109,7 @@ entry:
             &ir_surface,
             &executable_bytes,
             &extra,
+            None,
         ));
         assert_eq!(results["function_coverage"], "inconsistent");
         assert_eq!(results["function_count"], "inconsistent");
@@ -6944,6 +7121,7 @@ entry:
             &ir_surface,
             &executable_bytes,
             &bogus_target,
+            None,
         ));
         assert_eq!(results["relocation_targets"], "inconsistent");
 
@@ -6954,14 +7132,19 @@ entry:
             &ir_surface,
             &executable_bytes,
             &out_of_bounds,
+            None,
         ));
         assert_eq!(results["relocation_bounds"], "inconsistent");
 
         // A relocation without a recomputed value stays honestly unchecked.
         let mut unresolved = record.clone();
         unresolved.relocations[0].resolved_value = None;
-        let report =
-            object_translation_correspondence_checks(&ir_surface, &executable_bytes, &unresolved);
+        let report = object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            &unresolved,
+            None,
+        );
         assert_eq!(report["status"], "unchecked_not_translation_validated");
         let results = results_of(&report);
         assert_eq!(results["relocation_resolved_values"], "unchecked");
@@ -6971,6 +7154,7 @@ entry:
             &tv::IrFunctionSurface::default(),
             &executable_bytes,
             record,
+            None,
         );
         assert_eq!(report["status"], "unchecked_not_translation_validated");
         let results = results_of(&report);

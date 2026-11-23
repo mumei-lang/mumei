@@ -2222,8 +2222,7 @@ metadata. Each entry of `correspondence.checks`
 reports one item's `result` — `checked` when the comparison ran and passed,
 `unchecked` when it could not run, or `inconsistent` with the offending names
 or offsets in `detail`. Step 3 of the record pipeline (aggregate status
-wiring; unrelated to the design memo's §7 Step 3, direct LLVM-IR comparison,
-which is not implemented) aggregates those results:
+wiring) aggregates those results:
 `correspondence.status` is `checked_correspondence` only when every item
 checked, `inconsistent_correspondence` when any item is inconsistent, and
 `unchecked_not_translation_validated` otherwise; `object_translation.status`
@@ -2234,8 +2233,29 @@ function maps to exactly one record function and vice versa),
 `function_count`, `relocation_targets` (every relocation target resolves to a
 record function, a linked executable symbol, an IR-declared callee, or a
 compiler-rt helper), `relocation_bounds` (every relocation offset falls inside
-an enumerated function's section range), and `relocation_resolved_values`
-(every relocation's pc-relative value recomputed). An `inconsistent` item is
+an enumerated function's section range), `relocation_resolved_values`
+(every relocation's pc-relative value recomputed), and
+`llvm_ir_object_equivalence` (the design memo's §7 Step 3 direct
+comparison: each source atom's LLVM-IR encoding and its object function,
+lifted by the machine-TV lifter, are compared over the shared
+`model.inputs`; on every lifted path the machine return must equal the
+IR return of a covering edge whose definedness obligations hold —
+definedness domains are checked for divergence in the IR→object
+direction only, so an object that produces a value where the IR is
+undefined reports `inconsistent`, while an IR edge that diverges where
+the source domain is unbounded may surface as `inconsistent` or
+`unchecked` pending review of the domain boundary). Divergence is
+reported only for inputs the source defines: the path assumptions
+assert the source parameter domain and definedness obligations, so
+inputs where the source itself is undefined — e.g. a 64-bit shift by
+64 or more, which x86 answers by masking — are excluded rather than
+reported as IR↔object differences. The comparison is
+scoped to scalar-i64 signatures — functions with aggregates, f64
+leaves, calls, loops, or bounded memory, or whose IR fails to encode,
+are `skipped` in `detail`; the item is `checked` when at least one
+function compared equivalent and none diverged, `inconsistent` when any
+function diverged, and `unchecked` when none could be lifted. An
+`inconsistent` item is
 reported in place; it is not promoted into a verdict or a performed check.
 
 Scalar f64 leaves are admitted only under a record profile that admits f64

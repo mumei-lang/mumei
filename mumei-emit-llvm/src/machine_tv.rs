@@ -247,6 +247,123 @@ pub struct FrameMemoryUse {
     pub allocated: bool,
 }
 
+/// Verdict of the direct LLVM-IR ↔ object-function comparison used by
+/// the `llvm_ir_object_equivalence` correspondence item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrObjectEquivalence {
+    Equivalent,
+    Different,
+    /// Outside the comparison's narrower subset, or inconclusive — the
+    /// caller records the function as not liftable (fail-closed).
+    NotLiftable(&'static str),
+}
+
+/// Whether a source model's signature is inside the direct
+/// IR ↔ object comparison's scalar-i64 subset (design memo §7 Step 3
+/// slice). Callers use this to record `skipped` without paying for an
+/// IR encode; `check_function_against_ir` re-checks it internally.
+pub fn ir_object_signature_liftable(model: &PureI64Body) -> bool {
+    model.inputs.len() <= MAX_ARGUMENT_COUNT
+        && model.inputs.iter().all(|input| input.get_size() == 64)
+        && model.result_shape.is_none()
+        // At most one integer 64-bit result leaf: a scalar i128 result
+        // (`[false, false]`) or an f64 result (`[true]`) is outside.
+        // An omitted return annotation leaves the list empty — an
+        // inferred-i64 body still compares; a genuinely void atom is
+        // already excluded by the source signature check upstream.
+        && model.result_leaf_doubles.iter().all(|leaf| !*leaf)
+        && model.result_leaf_doubles.len() <= 1
+        // Every parameter a single integer 64-bit scalar leaf: wide
+        // leaves (`[false, false]` for i128/u128) and f64 (`[true]`)
+        // stay out of the subset.
+        && model.param_leaf_doubles.iter().all(|leaves| leaves.as_slice() == [false])
+        && model.param_shapes.iter().all(Option::is_none)
+        && model.array_params.iter().all(Option::is_none)
+        && model.call_sites.is_empty()
+        && model.loop_bound_exits.is_none()
+        && !model.bounded_memory
+}
+
+/// Compare an object function's lifted paths directly against its
+/// LLVM-IR encoding over shared `model.inputs` (design memo §7 Step 3
+/// slice). `ir_returns` is the encoder's `(path condition, return
+/// value)` edge list and `ir_definedness` its `(path condition,
+/// defined)` domain obligations, both produced by
+/// `translation_validation::encode_ir_function_for_comparison` on the
+/// same Z3 context.
+///
+/// Scoped to scalar-i64 signatures: aggregates, f64 leaves, wider
+/// inputs, calls, loops, and bounded memory return `NotLiftable`. For
+/// every lifted path the machine return must equal the IR return of
+/// some covering edge whose definedness obligations hold; an
+/// uncovered path, a diverging edge, or a failed IR domain
+/// obligation each compare `Different`.
+pub fn check_function_against_ir<'ctx>(
+    bytes: &[u8],
+    address: u64,
+    model: &PureI64Body<'ctx>,
+    ir_returns: &[(Bool<'ctx>, BV<'ctx>)],
+    ir_definedness: &[(Bool<'ctx>, Bool<'ctx>)],
+    call_targets: &BTreeMap<u64, CallTarget>,
+    context: &'ctx Context,
+) -> IrObjectEquivalence {
+    if !ir_object_signature_liftable(model) {
+        return IrObjectEquivalence::NotLiftable("unsupported_signature");
+    }
+    if ir_returns.is_empty() || ir_returns.iter().any(|(_, value)| value.get_size() != 64) {
+        return IrObjectEquivalence::NotLiftable("unsupported_ir");
+    }
+    let instructions = match disassemble(bytes, address) {
+        Ok(instructions) => instructions,
+        Err(_) => return IrObjectEquivalence::NotLiftable("unsupported_instruction"),
+    };
+    let function_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let lifted = match lift(&instructions, function_size, model, call_targets, context) {
+        Ok(lifted) => lifted,
+        Err(_) => return IrObjectEquivalence::NotLiftable("lift_failed"),
+    };
+    if lifted.paths.is_empty() {
+        return IrObjectEquivalence::NotLiftable("no_liftable_path");
+    }
+    let substitutions = input_substitutions(model, &lifted.arguments);
+    for path in &lifted.paths {
+        if path.return_values.len() != 1 {
+            return IrObjectEquivalence::NotLiftable("unsupported_signature");
+        }
+        let machine_return = path.return_values[0].substitute(&substitutions);
+        let coverage: Vec<Bool> = ir_returns
+            .iter()
+            .map(|(condition, _)| condition.substitute(&substitutions))
+            .collect();
+        let coverage_refs = coverage.iter().collect::<Vec<_>>();
+        let mut mismatches = vec![Bool::or(context, &coverage_refs).not()];
+        for (condition, value) in ir_returns {
+            let condition = condition.substitute(&substitutions);
+            let value = value.substitute(&substitutions);
+            mismatches.push(Bool::and(
+                context,
+                &[&condition, &machine_return._eq(&value).not()],
+            ));
+        }
+        for (condition, defined) in ir_definedness {
+            let condition = condition.substitute(&substitutions);
+            let defined = defined.substitute(&substitutions);
+            mismatches.push(Bool::and(context, &[&condition, &defined.not()]));
+        }
+        let mismatches_refs = mismatches.iter().collect::<Vec<_>>();
+        let result = check_query_with_simplify_fallback(context, |solver| {
+            assert_path_assumptions(solver, model, &lifted.arguments, path);
+            solver.assert(&Bool::or(context, &mismatches_refs));
+        });
+        match result {
+            SatResult::Unsat => {}
+            SatResult::Sat => return IrObjectEquivalence::Different,
+            SatResult::Unknown => return IrObjectEquivalence::NotLiftable("solver_unknown"),
+        }
+    }
+    IrObjectEquivalence::Equivalent
+}
+
 pub fn check_function_with_frame_memory<'ctx>(
     bytes: &[u8],
     address: u64,
@@ -5619,6 +5736,167 @@ entry:
         assert_eq!(instructions[0].operands, "$7, %eax");
         assert_eq!(instructions[1].offset, 5);
         assert_eq!(instructions[1].mnemonic, "retq");
+    }
+
+    #[test]
+    fn ir_object_equivalence_compares_select_arithmetic() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // icmp + select through both encoders over the shared inputs.
+        let model = source_model(
+            "atom mx(x: i64, y: i64) -> i64 requires: true; ensures: result >= x; body: { if x > y { x } else { y } };",
+            &context,
+        );
+        let ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @helper(i64 %x, i64 %y) {
+entry:
+  %c = icmp sgt i64 %x, %y
+  %r = select i1 %c, i64 %x, i64 %y
+  ret i64 %r
+}
+"#;
+        let (address, bytes) = compiled_function(ir);
+        let (returns, defined) = unsafe {
+            crate::translation_validation::encode_ir_function_for_comparison(
+                ir.as_bytes(),
+                "helper",
+                &model,
+                false,
+                &context,
+            )
+        }
+        .unwrap();
+        assert_eq!(
+            check_function_against_ir(
+                &bytes,
+                address,
+                &model,
+                &returns,
+                &defined,
+                &BTreeMap::new(),
+                &context,
+            ),
+            IrObjectEquivalence::Equivalent
+        );
+    }
+
+    #[test]
+    fn ir_object_equivalence_reports_divergent_return() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom add(x: i64, y: i64) -> i64 requires: true; ensures: result == x + y; body: { x + y };",
+            &context,
+        );
+        let ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @helper(i64 %x, i64 %y) {
+entry:
+  %r = add i64 %x, %y
+  ret i64 %r
+}
+"#;
+        // The IR text claims subtraction while the object function is
+        // `x + y`: the direct comparison must report a divergence.
+        let divergent_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @helper(i64 %x, i64 %y) {
+entry:
+  %r = sub i64 %x, %y
+  ret i64 %r
+}
+"#;
+        let (address, bytes) = compiled_function(ir);
+        let (returns, defined) = unsafe {
+            crate::translation_validation::encode_ir_function_for_comparison(
+                divergent_ir.as_bytes(),
+                "helper",
+                &model,
+                false,
+                &context,
+            )
+        }
+        .unwrap();
+        assert_eq!(
+            check_function_against_ir(
+                &bytes,
+                address,
+                &model,
+                &returns,
+                &defined,
+                &BTreeMap::new(),
+                &context,
+            ),
+            IrObjectEquivalence::Different
+        );
+    }
+
+    #[test]
+    fn ir_object_equivalence_skips_unsupported_signature() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // A calling atom is outside the scalar-i64 no-call subset.
+        let caller = source_model_named(
+            "atom helper(x: i64) -> i64 requires: true; ensures: true; body: { x + 1 };\n\
+             atom caller(x: i64) -> i64 requires: true; ensures: true; body: { helper(x) };",
+            "caller",
+            &context,
+        );
+        let ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @helper(i64 %x) {
+entry:
+  %r = add i64 %x, 1
+  ret i64 %r
+}
+"#;
+        let (address, bytes) = compiled_function(ir);
+        let (returns, defined) = unsafe {
+            crate::translation_validation::encode_ir_function_for_comparison(
+                ir.as_bytes(),
+                "helper",
+                &caller,
+                false,
+                &context,
+            )
+        }
+        .unwrap();
+        assert_eq!(
+            check_function_against_ir(
+                &bytes,
+                address,
+                &caller,
+                &returns,
+                &defined,
+                &BTreeMap::new(),
+                &context,
+            ),
+            IrObjectEquivalence::NotLiftable("unsupported_signature")
+        );
+    }
+
+    #[test]
+    fn ir_object_equivalence_skips_wider_inputs() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        // An i128 parameter flattens into two 64-bit input leaves
+        // (`[false, false]`); the leaf-count check must refuse it
+        // before substituting.
+        let model = source_model_with_admission(
+            "atom wide(x: i128, y: i64) -> i64 requires: true; ensures: result == y; body: { y };",
+            &context,
+            RefinedAdmission::CompositeV21,
+        );
+        assert!(!ir_object_signature_liftable(&model));
+        assert_eq!(
+            check_function_against_ir(&[], 0, &model, &[], &[], &BTreeMap::new(), &context,),
+            IrObjectEquivalence::NotLiftable("unsupported_signature")
+        );
     }
 
     #[test]

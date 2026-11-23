@@ -637,6 +637,13 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     ] {
         assert_eq!(results.get(item).copied(), Some("checked"), "{item}");
     }
+    // Step 4 (design memo §7 direct comparison): the leaf atom's IR
+    // encoding and its object code compare equivalent over the shared
+    // input model — recorded as an inspected item, no verdict change.
+    assert_eq!(
+        results.get("llvm_ir_object_equivalence").copied(),
+        Some("checked")
+    );
 }
 
 #[test]
@@ -6829,6 +6836,23 @@ fn module_bundle_with_inferred_i64_return_builds_as_v27_and_rechecks() {
     assert_success(&recheck_llvm(&source, &bundle, &id));
     assert_success(&recheck_object(&source, &bundle, &id, false));
     assert_success(&recheck_machine_tv(&source, &bundle, &id, false));
+    // Step 4 direct comparison: the omitted annotation leaves
+    // `result_leaf_doubles` empty, but the inferred i64 result still
+    // compares — `inc` records `equivalent`, not `skipped`.
+    let output = recheck_machine_tv(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let checks = descriptor["object_translation"]["correspondence"]["checks"]
+        .as_array()
+        .unwrap();
+    let equivalence = checks
+        .iter()
+        .find(|check| check["item"] == "llvm_ir_object_equivalence")
+        .unwrap();
+    assert_eq!(equivalence["result"], "checked");
+    let detail = equivalence["detail"].as_str().unwrap();
+    assert!(detail.contains("inc: equivalent"), "{detail}");
+
     assert_success(&consume("recheck-exit-status", &source, &bundle, &id));
     assert_success(&accept_object(&source, &bundle, &id, false));
 
