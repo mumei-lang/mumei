@@ -756,6 +756,46 @@ fn recheck_inferred_i64_sidecar_emits_exact_json() {
 }
 
 #[test]
+fn build_rechecks_and_accepts_inferred_refined_returns_under_v28() {
+    const SOURCE: &str = r#"
+type Port = i64 where v >= 1 && v <= 65535;
+atom validate_port_range(port: Port)
+requires: true;
+ensures: result >= 1 && result <= 65535;
+body: port;
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let input = write_input(dir.path(), "verified_config.mm", SOURCE);
+    let output_base = dir.path().join("verified_config");
+    succeeds(run_build(&input, &output_base, true));
+
+    let llvm_path = only_llvm_file(dir.path());
+    let sidecar_path = llvm_path.with_extension("semantic-contract.json");
+    let sidecar: Value = serde_json::from_slice(&fs::read(&sidecar_path).unwrap()).unwrap();
+    assert_eq!(
+        sidecar["contracts"][0]["profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V28
+    );
+    assert!(sidecar["contracts"][0]["assumptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|assumption| assumption == "inferred_refined_return_erased_to_base"));
+
+    succeeds(run_sidecar_recheck(
+        &sidecar_path,
+        &input,
+        &llvm_path,
+        false,
+    ));
+    succeeds(
+        sidecar_accept_command(&sidecar_path, &input, &llvm_path, false)
+            .output()
+            .unwrap(),
+    );
+}
+
+#[test]
 fn recheck_rejects_artifact_bytes_that_differ_from_hash_binding() {
     let dir = tempfile::tempdir().unwrap();
     let input = write_input(dir.path(), "clamp.mm", CLAMP_SOURCE);

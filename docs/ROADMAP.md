@@ -3723,6 +3723,17 @@ types and call forms fail closed. Callback-free V26/V27 sidecar output remains
 byte-identical. Native bundles and translation validation remain on
 CompositeV26 and do not support callback parameters.
 
+The C03 `mumei.pure-i64-composite/v28` sidecar profile also admits omitted
+returns inferred as refined aliases over `i64`, but erases the refinement to
+the base: there is no result-predicate obligation and callers assume only the
+callee's `ensures`. Type propagation (such as `Nat + Nat`) does not prove a
+range guarantee under wrapping i64 arithmetic. Explicit refined return types
+retain their existing obligations and caller assumptions; non-i64 inferred
+aliases remain unsupported. The
+`inferred_refined_return_erased_to_base` disclosure identifies this
+interpretation. Native bundles and translation validation remain on
+CompositeV26.
+
 Remaining signature rejections after v27 (for #651), measured on develop at
 #1355 under CompositeV26: 105 `.mm` files fail with `explicit owned scalar i64
 signature required`. The classifier re-confirmed 104 of them: 71 have one

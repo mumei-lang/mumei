@@ -230,6 +230,9 @@ pub const PURE_I64_COMPOSITE_PROFILE_V26: &str = "mumei.pure-i64-composite/v26";
 /// (`pure-i64-composite/v27`). Native bundles and translation
 /// validation remain outside this profile.
 pub const PURE_I64_COMPOSITE_PROFILE_V27: &str = "mumei.pure-i64-composite/v27";
+/// Inferred refined-alias returns erased to their scalar base for
+/// semantic-contract sidecars (`pure-i64-composite/v28`).
+pub const PURE_I64_COMPOSITE_PROFILE_V28: &str = "mumei.pure-i64-composite/v28";
 
 /// Maximum byte length a `Str` literal may declare under
 /// `pure-i64-composite/v13`: one cell per byte under the
@@ -345,6 +348,9 @@ pub enum RefinedAdmission {
     /// `CompositeV27` additionally admits scalar-only `atom_ref`
     /// parameters for semantic-contract sidecars.
     CompositeV27,
+    /// `CompositeV28` additionally admits omitted returns inferred as
+    /// refined aliases over `i64`, erasing the unproven refinement.
+    CompositeV28,
 }
 
 impl RefinedAdmission {
@@ -531,6 +537,12 @@ impl RefinedAdmission {
     pub fn admits_fn_params(self) -> bool {
         self >= Self::CompositeV27
     }
+
+    /// Whether omitted returns inferred as refined aliases over `i64`
+    /// are admitted after erasing the alias refinement.
+    pub fn admits_inferred_refined_returns(self) -> bool {
+        self >= Self::CompositeV28
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -684,6 +696,7 @@ pub fn extract_pure_i64_contract(
         false,
         false,
         false,
+        false,
         &refined,
         &structs,
         &EnumEnv::new(),
@@ -766,8 +779,10 @@ pub fn extract_pure_i64_module_contracts(
             "expected at least one atom",
         ));
     }
-    let inferred_i64_returns = inferred_i64_return_atoms(&items, admission);
+    let inferred_i64_returns = inferred_i64_return_atoms(&items, &refined, admission);
     let inferred_i64_return_used = !inferred_i64_returns.is_empty();
+    let inferred_refined_return_used =
+        !inferred_refined_return_atoms(&items, &refined, admission).is_empty();
     items
         .into_iter()
         .filter_map(|item| match item {
@@ -781,6 +796,7 @@ pub fn extract_pure_i64_module_contracts(
                     true,
                     inferred_i64_return,
                     inferred_i64_return_used,
+                    inferred_refined_return_used,
                     effect_features_used,
                     &refined,
                     &structs,
@@ -839,13 +855,17 @@ pub fn module_source_profile(
         str_bound_declared,
         wide_leaves,
     ) = admit_pure_i64_atoms(source, true, admission)?;
-    let inferred_i64_return_used = !inferred_i64_return_atoms(&items, admission).is_empty();
+    let inferred_i64_return_used =
+        !inferred_i64_return_atoms(&items, &refined, admission).is_empty();
+    let inferred_refined_return_used =
+        !inferred_refined_return_atoms(&items, &refined, admission).is_empty();
     let effect_features_used = uses_effect_features(&items);
     let array_params_used = uses_array_params(&items);
     let fn_params_used = uses_fn_params(&items);
     Ok(fragment_profile(
         true,
         inferred_i64_return_used,
+        inferred_refined_return_used,
         effect_features_used,
         array_params_used,
         fn_params_used,
@@ -1075,7 +1095,7 @@ fn admit_pure_i64_atoms(
         ));
     }
     let effects = effect_env(&items);
-    let inferred_i64_returns = inferred_i64_return_atoms(&items, admission);
+    let inferred_i64_returns = inferred_i64_return_atoms(&items, &refined, admission);
     let callees: BTreeMap<String, CalleeSig> = items
         .iter()
         .filter_map(|item| {
@@ -1490,11 +1510,15 @@ fn uses_u64_leaves(items: &[Item], inferred_i64_returns: &BTreeSet<String>) -> b
 }
 
 /// Returns atom names whose omitted return types infer to `i64`.
-fn inferred_i64_return_atoms(items: &[Item], admission: RefinedAdmission) -> BTreeSet<String> {
+fn inferred_i64_return_atoms(
+    items: &[Item],
+    refined: &RefinedEnv,
+    admission: RefinedAdmission,
+) -> BTreeSet<String> {
     if !admission.admits_inferred_i64_returns() {
         return BTreeSet::new();
     }
-    items
+    let mut inferred = items
         .iter()
         .filter_map(|item| {
             let Item::Atom(atom) = item else {
@@ -1503,6 +1527,30 @@ fn inferred_i64_return_atoms(items: &[Item], admission: RefinedAdmission) -> BTr
             (atom.return_type.is_none()
                 && crate::mir::infer_atom_return_type(atom).as_deref() == Some("i64"))
             .then(|| atom.name.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    inferred.extend(inferred_refined_return_atoms(items, refined, admission));
+    inferred
+}
+
+fn inferred_refined_return_atoms(
+    items: &[Item],
+    refined: &RefinedEnv,
+    admission: RefinedAdmission,
+) -> BTreeSet<String> {
+    if !admission.admits_inferred_refined_returns() {
+        return BTreeSet::new();
+    }
+    items
+        .iter()
+        .filter_map(|item| {
+            let Item::Atom(atom) = item else {
+                return None;
+            };
+            let inferred = crate::mir::infer_atom_return_type(atom)?;
+            let alias = refined.get(&inferred)?;
+            (atom.return_type.is_none() && alias.base == "i64" && !alias.conjuncts.is_empty())
+                .then(|| atom.name.clone())
         })
         .collect()
 }
@@ -1665,6 +1713,7 @@ fn uses_f64_leaves(items: &[Item], inferred_i64_returns: &BTreeSet<String>) -> b
 fn fragment_profile(
     allow_wrapping_arithmetic: bool,
     inferred_i64_return_used: bool,
+    inferred_refined_return_used: bool,
     effect_features_used: bool,
     array_params_used: bool,
     fn_params_used: bool,
@@ -1689,6 +1738,8 @@ fn fragment_profile(
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if inferred_refined_return_used {
+        PURE_I64_COMPOSITE_PROFILE_V28
     } else if fn_params_used {
         PURE_I64_COMPOSITE_PROFILE_V27
     } else if array_params_used {
@@ -1876,6 +1927,7 @@ fn atom_contract(
     allow_wrapping_arithmetic: bool,
     inferred_i64_return: bool,
     inferred_i64_return_used: bool,
+    inferred_refined_return_used: bool,
     effect_features_used: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
@@ -1909,6 +1961,7 @@ fn atom_contract(
     let profile = fragment_profile(
         allow_wrapping_arithmetic,
         inferred_i64_return_used,
+        inferred_refined_return_used,
         effect_features_used,
         array_param_len_nonnegative,
         fn_params_used,
@@ -2229,6 +2282,11 @@ fn atom_contract(
             "Callback parameters are modeled as uninterpreted functions. Callback contracts are assumed at call sites and are not runtime checked; concrete atom_ref arguments are checked against those contracts using their declared requires and ensures, not their bodies. Native-bundle and translation-validation consumers remain outside this profile.",
         );
     }
+    if inferred_refined_return_used {
+        exclusions.push(
+            "An omitted return inferred as a refined alias over i64 is erased to i64: no result refinement obligation is generated and callers do not assume the alias predicate. Type propagation is not a checked range guarantee; an explicit refined return retains its refinement obligation and caller assumption.",
+        );
+    }
     let mut assumptions = vec![if u64_leaves {
         "Inputs are representable signed 64-bit integers or declared unsigned 64-bit leaves; declared booleans carry 0/1."
     } else if allow_wrapping_arithmetic {
@@ -2238,6 +2296,9 @@ fn atom_contract(
     }];
     if array_param_len_nonnegative {
         assumptions.push("array_param_len_nonnegative");
+    }
+    if inferred_refined_return_used {
+        assumptions.push("inferred_refined_return_erased_to_base");
     }
     if specification
         .callback_parameters
@@ -2886,7 +2947,7 @@ fn call_return_kinds<'ctx>(
     admission: RefinedAdmission,
     context: &'ctx Context,
 ) -> BodyResult<CallShapes<'ctx>> {
-    let inferred_i64_returns = inferred_i64_return_atoms(items, admission);
+    let inferred_i64_returns = inferred_i64_return_atoms(items, refined, admission);
     let mut callback_parameters = BTreeMap::new();
     let mut callee_callback_params = BTreeMap::new();
     for item in items {
@@ -18847,6 +18908,86 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
         assert_eq!(
             serde_json::to_vec(&v26).unwrap(),
             serde_json::to_vec(&v27).unwrap()
+        );
+    }
+
+    #[test]
+    fn composite_v28_erases_inferred_refined_returns_to_i64() {
+        let nat = "type Nat = i64 where v >= 0;\n\
+            atom f(n: Nat) requires: true; ensures: result >= 0; body: n;";
+        let contracts =
+            extract_pure_i64_module_contracts(nat, "m.mm", None, RefinedAdmission::CompositeV28)
+                .unwrap();
+        assert_eq!(contracts[0].profile, PURE_I64_COMPOSITE_PROFILE_V28);
+        assert!(contracts[0]
+            .assumptions
+            .contains(&"inferred_refined_return_erased_to_base"));
+        assert_eq!(
+            module_source_profile(nat, RefinedAdmission::CompositeV28).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V28
+        );
+        assert!(matches!(
+            extract_pure_i64_module_contracts(nat, "m.mm", None, RefinedAdmission::CompositeV27),
+            Err(SemanticContractError::Unsupported(
+                "explicit owned scalar i64 signature required"
+            ))
+        ));
+        assert!(
+            refined_module_outcomes_admission(nat, RefinedAdmission::CompositeV28)
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat)
+        );
+
+        let wrapping_add = "type Nat = i64 where v >= 0;\n\
+            atom safe_add(a: Nat, b: Nat) requires: true; \
+            ensures: result >= 0; body: a + b;";
+        let wrapping_outcomes =
+            refined_module_outcomes_admission(wrapping_add, RefinedAdmission::CompositeV28);
+        assert!(
+            wrapping_outcomes.contains(&z3::SatResult::Sat),
+            "{wrapping_outcomes:?}"
+        );
+
+        let no_result_guarantee = "type Nat = i64 where v >= 0;\n\
+            atom f_noensures(n: Nat) requires: true; ensures: true; body: n;\n\
+            atom g(x: Nat) -> i64 requires: true; ensures: result >= 0; body: f_noensures(x);";
+        let call_outcomes =
+            refined_module_outcomes_admission(no_result_guarantee, RefinedAdmission::CompositeV28);
+        assert!(
+            call_outcomes.contains(&z3::SatResult::Sat),
+            "{call_outcomes:?}"
+        );
+
+        let u64_alias = "type U = u64 where v >= 0;\n\
+            atom f(n: U) requires: true; ensures: true; body: n;";
+        assert!(matches!(
+            extract_pure_i64_module_contracts(
+                u64_alias,
+                "m.mm",
+                None,
+                RefinedAdmission::CompositeV28
+            ),
+            Err(SemanticContractError::Unsupported(_))
+        ));
+
+        let inferred_i64 = include_str!("../../tests/fixtures/semantic_contract_inferred_i64.mm");
+        let v27 = extract_pure_i64_module_contracts(
+            inferred_i64,
+            "m.mm",
+            None,
+            RefinedAdmission::CompositeV27,
+        )
+        .unwrap();
+        let v28 = extract_pure_i64_module_contracts(
+            inferred_i64,
+            "m.mm",
+            None,
+            RefinedAdmission::CompositeV28,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&v27).unwrap(),
+            serde_json::to_vec(&v28).unwrap()
         );
     }
 }

@@ -1713,6 +1713,24 @@ native-bundle or LLVM correspondence guarantees. Sidecar identity still binds
 only the sidecar and emitted artifact bytes as documented above; callback
 contracts are not runtime checked.
 
+### Inferred refined-alias returns in semantic-contract sidecars (v28)
+
+The C03 `mumei.pure-i64-composite/v28` profile admits an omitted atom return
+type when compiler inference names a refined alias whose resolved base is
+exactly `i64`. The sidecar erases that return to `i64`: it generates no
+refinement-predicate obligation for the result, and callers assume only the
+callee's declared `ensures`, not the alias predicate. This is deliberate
+because type propagation is not a checked range guarantee — for example,
+`Nat + Nat` can wrap outside `Nat` under the existing i64 arithmetic model.
+An explicit `-> Nat` keeps its existing result obligation and caller-side
+refinement assumption. The `inferred_refined_return_erased_to_base` disclosure
+marks use of this weaker inferred-return interpretation. Refined aliases over
+non-i64 bases remain unsupported.
+
+V28 is limited to semantic-contract sidecars. Native-bundle consumers and
+LLVM translation validation remain pinned to CompositeV26. Sidecars without
+inferred refined-alias returns retain byte-identical V27/V28 contract output.
+
 Nothing deeper is claimed: the fragment admitted by the profile grew,
 the guarantees did not — the same identity-plus-recheck scopes apply,
 with no optimizer/object/linker/runtime/ABI/final-executable semantics
