@@ -2255,10 +2255,15 @@ correspondence table (`ir_function`, `object_symbol`, `object_section`,
 `object_offset`, `object_size`, `executable_address` when resolvable), and
 every text-section relocation with its section, offset, kind, target symbol,
 addend, and the computed pc-relative `resolved_value` when it can be derived.
-The source-to-machine edge is named
-`checked_source_machine_tv_within_profile` and carries no
+The source-to-machine edge names
+`checked_source_machine_tv_within_profile` when the machine-TV
+evaluation accepted every source-atom function, and
+`unchecked_not_translation_validated` when residual unverified
+functions remain — the edge mirrors the check block's verdict rather
+than claiming coverage it does not have. It carries no
 `output_identity` — machine code is evaluated in memory and never
-persisted as an artifact. `llvm_ir -> object_code` keeps
+persisted as an artifact — and is appended last so the two
+digest-bearing edges keep their positions in the list. `llvm_ir -> object_code` keeps
 `unchecked_not_translation_validated`; the link
 edge names the `checked_object_link_correspondence` method only when that
 check ran and reports the check's outcome in a separate `result` key so

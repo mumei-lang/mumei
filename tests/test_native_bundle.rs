@@ -588,33 +588,35 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     assert_eq!(object_translation["status"], "checked_correspondence");
     let transformations = object_translation["transformations"].as_array().unwrap();
     assert_eq!(transformations.len(), 3);
-    assert_eq!(transformations[0]["from"], "source_atom");
-    assert_eq!(transformations[0]["to"], "machine_code");
+    // The digest-bearing edges keep indices 0 and 1 for consumer
+    // compatibility; the source->machine edge is appended last.
+    assert_eq!(transformations[0]["from"], "llvm_ir");
+    assert_eq!(transformations[0]["to"], "object_code");
     assert_eq!(
-        transformations[0]["relation"],
+        transformations[0]["validation"],
+        "unchecked_not_translation_validated"
+    );
+    assert_eq!(transformations[1]["from"], "object_code");
+    assert_eq!(transformations[1]["to"], "linked_executable");
+    // `validation` names the method; the check's outcome is a separate key.
+    assert_eq!(
+        transformations[1]["validation"],
+        "checked_object_link_correspondence"
+    );
+    assert_eq!(transformations[1]["result"], "checked_correspondence");
+    assert_eq!(transformations[2]["from"], "source_atom");
+    assert_eq!(transformations[2]["to"], "machine_code");
+    assert_eq!(
+        transformations[2]["relation"],
         "machine_code_translation_validation"
     );
     // Machine code is evaluated in memory and never persisted, so its
     // edge carries no artifact digest.
-    assert!(transformations[0]["output_identity"].is_null());
-    assert_eq!(
-        transformations[0]["validation"],
-        "checked_source_machine_tv_within_profile"
-    );
-    assert_eq!(transformations[1]["from"], "llvm_ir");
-    assert_eq!(transformations[1]["to"], "object_code");
-    assert_eq!(
-        transformations[1]["validation"],
-        "unchecked_not_translation_validated"
-    );
-    assert_eq!(transformations[2]["from"], "object_code");
-    assert_eq!(transformations[2]["to"], "linked_executable");
-    // `validation` names the method; the check's outcome is a separate key.
+    assert!(transformations[2]["output_identity"].is_null());
     assert_eq!(
         transformations[2]["validation"],
-        "checked_object_link_correspondence"
+        "checked_source_machine_tv_within_profile"
     );
-    assert_eq!(transformations[2]["result"], "checked_correspondence");
     let functions = object_translation["functions"].as_array().unwrap();
     assert_eq!(functions.len(), 2);
     let main_record = functions
