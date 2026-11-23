@@ -587,9 +587,10 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     // verdict-bearing claim).
     assert_eq!(object_translation["status"], "checked_correspondence");
     let transformations = object_translation["transformations"].as_array().unwrap();
-    assert_eq!(transformations.len(), 3);
+    assert_eq!(transformations.len(), 4);
     // The digest-bearing edges keep indices 0 and 1 for consumer
-    // compatibility; the source->machine edge is appended last.
+    // compatibility; the source->machine and hir->llvm_ir edges are
+    // appended after them.
     assert_eq!(transformations[0]["from"], "llvm_ir");
     assert_eq!(transformations[0]["to"], "object_code");
     assert_eq!(
@@ -613,6 +614,17 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     // Machine code is evaluated in memory and never persisted, so its
     // edge carries no artifact digest.
     assert!(transformations[2]["output_identity"].is_null());
+    // The hir->llvm_ir edge names the HIR-anchored model comparison;
+    // `result` mirrors the check item: every in-subset atom proved
+    // equivalent on this bundle.
+    assert_eq!(transformations[3]["from"], "hir");
+    assert_eq!(transformations[3]["to"], "llvm_ir");
+    assert_eq!(transformations[3]["relation"], "existing_llvm_emitter");
+    assert_eq!(
+        transformations[3]["validation"],
+        "checked_hir_llvm_model_correspondence"
+    );
+    assert_eq!(transformations[3]["result"], "checked_correspondence");
     assert_eq!(
         transformations[2]["validation"],
         "checked_source_machine_tv_within_profile"
@@ -6350,7 +6362,7 @@ fn accept_object_accepts_loop_bundle_with_object_link() {
     };
     assert_eq!(translation["status"], expected_translation_status);
     let transformations = translation["transformations"].as_array().unwrap();
-    assert_eq!(transformations.len(), 3);
+    assert_eq!(transformations.len(), 4);
     let link_edge = transformations
         .iter()
         .find(|edge| edge["relation"] == "static_link_relocation_placement")

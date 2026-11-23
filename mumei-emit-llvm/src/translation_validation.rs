@@ -453,10 +453,17 @@ pub fn validate_hir_pure_i64_leaf(
     // A declared target or data layout must match the emitter's — a
     // foreign layout could truncate GEP indices the array model reads
     // as 64-bit. A module declaring neither gets LLVM's defaults, like
-    // the pinned fixture modules the tests compare.
+    // the pinned fixture modules the tests compare. The native
+    // triple joins TARGET because the recheck compares bundle
+    // modules emitted under it (`validate_native_module` admits the
+    // same pair).
     let triple = module.get_triple();
     let layout = module.get_data_layout();
-    if (!triple.as_str().is_empty() && triple.as_str().to_bytes() != TARGET.as_bytes())
+    if (!triple.as_str().is_empty()
+        && !matches!(
+            triple.as_str().to_bytes(),
+            bytes if bytes == TARGET.as_bytes() || bytes == NATIVE_TARGET.as_bytes()
+        ))
         || (!layout.as_str().is_empty() && layout.as_str().to_bytes() != DATA_LAYOUT.as_bytes())
     {
         return Err(ValidationError("unsupported target or data layout"));

@@ -2328,6 +2328,19 @@ function compared equivalent and none diverged, `inconsistent` when any
 function diverged, and `unchecked` when none could be lifted. An
 `inconsistent` item is
 reported in place; it is not promoted into a verdict or a performed check.
+A further item, `hir_llvm_model_correspondence`, runs the HIR-anchored
+model comparison of `docs/DESIGN_HIR_LLVM_CORRESPONDENCE.md`: each parsed
+source atom is lowered against the bundle's module env and compared with
+the emitted LLVM IR by `validate_hir_pure_i64_leaf`, over the member
+subset the atom's call graph reaches (the emitter's `__mumei_user_main`
+member stands in for the `main` atom; the C `main` wrapper stays out of
+scope). The item is `checked` when every compared atom proved equivalent
+within the leaf subset — atoms outside the subset are named in `detail`,
+never silently covered — `inconsistent` on any divergence, and
+`unchecked` when no source atoms or IR were on hand. The
+`hir → llvm_ir` transformation entry reports the same aggregate as
+`result`, so `validation: "checked_hir_llvm_model_correspondence"` names
+the method while `result` stays honest about coverage.
 
 Step 5 of the record pipeline surfaces the aggregate status on the text
 path too: `recheck-machine-tv` and `accept-object` without `--json`

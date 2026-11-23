@@ -463,6 +463,7 @@ pub fn prepare_source(source: &str) -> Result<(SourceBinding, parser::Atom), Bun
     // The native-bundle profile declares the object-stage relations on
     // its contracts; plain `verify` extractions keep the six originals.
     contract.emit_native_object_transformations();
+    contract.emit_native_hir_llvm_transformation();
     let mut items =
         parser::parse_module_checked(source).map_err(|_| BundleError("invalid source"))?;
     let Some(parser::Item::Atom(mut atom)) = items.pop() else {
@@ -937,6 +938,7 @@ pub fn prepare_module_source(
     // Same profile-conditional relation emit as `prepare_source`.
     for contract in &mut contracts {
         contract.emit_native_object_transformations();
+        contract.emit_native_hir_llvm_transformation();
     }
     let mut items =
         parser::parse_module_checked(source).map_err(|_| BundleError("invalid source"))?;
