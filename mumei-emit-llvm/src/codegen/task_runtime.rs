@@ -1,5 +1,6 @@
 use crate::codegen::lowering::{
-    box_payload_to_i64, release_boxed_payload, unbox_payload_from_i64, ArrayPtrMap,
+    box_payload_to_i64, release_boxed_payload, type_contains_array_enum, unbox_payload_from_i64,
+    ArrayPtrMap,
 };
 use crate::codegen::stmt_emit::compile_hir_stmt;
 use inkwell::builder::Builder;
@@ -425,6 +426,10 @@ pub(crate) fn emit_task_spawn_only<'a>(
         }
         inner_vars.insert(name.clone(), len_loaded);
     }
+
+    inner_array_ptrs.return_contains_array_enum =
+        super::expr_emit::infer_stmt_struct_type_name(body, &inner_var_types, module_env)
+            .is_some_and(|type_name| type_contains_array_enum(module_env, &type_name));
 
     let task_group_runtime = if let Some((group_id_idx, group_result_idx)) = group_fields {
         let group_id_ptr = llvm!(builder.build_struct_gep(

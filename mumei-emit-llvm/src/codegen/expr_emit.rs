@@ -1583,7 +1583,7 @@ pub(crate) fn infer_struct_type_name(
     }
 }
 
-fn infer_stmt_struct_type_name(
+pub(crate) fn infer_stmt_struct_type_name(
     stmt: &HirStmt,
     var_types: &HashMap<String, String>,
     module_env: &ModuleEnv,

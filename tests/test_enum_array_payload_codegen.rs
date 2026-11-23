@@ -114,6 +114,14 @@ fn unsupported_scalar_array_payload_shapes_fail_codegen_without_panicking() {
             "stack-backed array",
         ),
         (
+            "test_enum_array_payload_codegen_task_escape_direct.mm",
+            "stack-backed array payload cannot escape through an array-bearing enum return",
+        ),
+        (
+            "test_enum_array_payload_codegen_task_escape_let.mm",
+            "stack-backed array payload cannot escape through an array-bearing enum return",
+        ),
+        (
             "test_enum_array_payload_codegen_slot_conflict.mm",
             "array payload conflicts",
         ),
