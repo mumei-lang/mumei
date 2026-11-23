@@ -18139,6 +18139,34 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
     }
 
     #[test]
+    fn composite_v24_infers_omitted_returns_with_forward_calls() {
+        // Callers declared before their callees still resolve through
+        // the fixpoint — inference does not depend on declaration
+        // order.
+        let source = "atom top(z: i64) requires: true; ensures: result == z; body: mid(z);\n\
+            atom mid(y: i64) requires: true; ensures: result == y; body: base(y);\n\
+            atom base(x: i64) requires: true; ensures: result == x; body: x;\n\
+            atom main() -> i64 requires: true; ensures: result == 2; body: top(2);";
+        let contracts =
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV24)
+                .unwrap();
+        assert_eq!(contracts.len(), 4);
+    }
+
+    #[test]
+    fn composite_v24_omitted_return_joining_an_int_width_call_infers_i64() {
+        // `narrow` declares `-> i32`; at the contract level its result
+        // is an i64, so `pick` still infers i64 through the `if` join.
+        let source = "atom narrow(x: i64) -> i32 requires: true; ensures: result == x; body: x;\n\
+            atom pick(flag: bool) requires: flag == true || flag == false; ensures: result == result; body: if flag { narrow(0) } else { 0 };\n\
+            atom main() -> i64 requires: true; ensures: result - result == 0; body: pick(true);";
+        let contracts =
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV24)
+                .unwrap();
+        assert_eq!(contracts.len(), 3);
+    }
+
+    #[test]
     fn composite_v24_keeps_explicit_i64_contract_bytes_unchanged() {
         let source =
             "atom add(a: i64, b: i64) -> i64 requires: true; ensures: result == a + b; body: a + b;";

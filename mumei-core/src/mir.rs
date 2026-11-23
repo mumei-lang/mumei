@@ -677,7 +677,16 @@ impl LowerCtx {
                 if name == "len" {
                     Some("i64".to_string())
                 } else {
-                    self.callee_returns.get(name).cloned()
+                    self.callee_returns.get(name).map(|ty| match ty.as_str() {
+                        // Integer-width spellings are all i64 at the
+                        // contract level — a callee declared `-> i32`
+                        // still yields an i64 result, so a caller like
+                        // `if f { narrow() } else { 0 }` infers i64 and
+                        // stays inside the pure-i64 signature gate.
+                        "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "i128"
+                        | "u128" => "i64".to_string(),
+                        _ => ty.clone(),
+                    })
                 }
             }
             // P25: `recv(ch)` yields the channel's declared payload type.
