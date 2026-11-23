@@ -563,6 +563,7 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
         descriptor["checks_not_performed"],
         serde_json::json!([
             "optimizer_semantics",
+            "object_data_section_correspondence",
             "raw_link_argument_vector_reproduction",
             "abi_runtime_semantics",
             "os_exit_status_observation",
@@ -3997,8 +3998,8 @@ fn module_bundle_with_struct_results_builds_as_v6_and_rechecks() {
     // Step 3d: a register-resident integer aggregate result joins the
     // direct LLVM-IR comparison — `make` records `equivalent`, while
     // callers whose struct-returning call site stays outside the
-    // scalar-i64 call subset record `skipped` (inspection only, no
-    // verdict).
+    // scalar-i64 call subset record their `NotLiftable` reason
+    // (inspection only, no verdict).
     let checks = machine_tv["object_translation"]["correspondence"]["checks"]
         .as_array()
         .unwrap();
@@ -4013,8 +4014,11 @@ fn module_bundle_with_struct_results_builds_as_v6_and_rechecks() {
     // (`sret`) in the object code but still compares `equivalent`
     // against the aggregate `ret` in the produced IR.
     assert!(detail.contains("make4: equivalent"), "{detail}");
-    assert!(detail.contains("uselet: skipped"), "{detail}");
-    assert!(detail.contains("__mumei_user_main: skipped"), "{detail}");
+    assert!(detail.contains("uselet: unsupported_signature"), "{detail}");
+    assert!(
+        detail.contains("__mumei_user_main: unsupported_signature"),
+        "{detail}"
+    );
     // A v6 record re-pinned as v5 is refused: v5 keeps struct values out.
     let mut record = module_record(&bundle);
     record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V5.into());
@@ -4540,7 +4544,7 @@ fn module_bundle_with_f64_leaves_builds_as_v15_and_rechecks() {
     // comparison — `pick` selects between two `double` leaves
     // bit-exactly and records `equivalent`, while `wrap`'s
     // mixed-leaf aggregate result and `unwrap`'s composite
-    // parameter stay `skipped`.
+    // parameter stay outside the subset with their reason recorded.
     let machine_tv = recheck_machine_tv(&source, &bundle, &id, true);
     assert_success(&machine_tv);
     let machine_tv: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
@@ -4560,7 +4564,10 @@ fn module_bundle_with_f64_leaves_builds_as_v15_and_rechecks() {
         );
     }
     for function in ["wrap", "unwrap"] {
-        assert!(detail.contains(&format!("{function}: skipped")), "{detail}");
+        assert!(
+            detail.contains(&format!("{function}: unsupported_signature")),
+            "{detail}"
+        );
     }
     // A v15 record re-pinned as v14 is refused: v14 keeps f64 leaves
     // out of the vocabulary.
@@ -5317,7 +5324,8 @@ fn module_bundle_with_i128_leaves_builds_as_v24_and_rechecks() {
     // Step 3e: scalar i128/u128 signatures join the direct LLVM-IR
     // comparison — `add`/`lt`/`callee` record `equivalent`, while
     // `caller`'s i128 call site stays outside the scalar-i64 call
-    // subset and records `skipped` (inspection only, no verdict).
+    // subset and records its `NotLiftable` reason (inspection only,
+    // no verdict).
     let checks = machine_tv["object_translation"]["correspondence"]["checks"]
         .as_array()
         .unwrap();
@@ -5333,7 +5341,7 @@ fn module_bundle_with_i128_leaves_builds_as_v24_and_rechecks() {
             "{detail}"
         );
     }
-    assert!(detail.contains("caller: skipped"), "{detail}");
+    assert!(detail.contains("caller: unsupported_signature"), "{detail}");
     // A v24 record re-pinned as v23 is refused — v23 keeps the wide
     // leaf out of the composite shape.
     let mut record = module_record(&bundle);

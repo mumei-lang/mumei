@@ -2321,11 +2321,20 @@ assert the source parameter domain and definedness obligations, so
 inputs where the source itself is undefined — e.g. a 64-bit shift by
 64 or more, which x86 answers by masking — are excluded rather than
 reported as IR↔object differences. The comparison is
-scoped to scalar-i64 signatures — functions with aggregates, f64
-leaves, calls, loops, or bounded memory, or whose IR fails to encode,
-are `skipped` in `detail`; the item is `checked` when at least one
-function compared equivalent and none diverged, `inconsistent` when any
-function diverged, and `unchecked` when none could be lifted. An
+scoped to the admitted signature subset — scalar 64-bit parameters
+and scalar results carrying integer or f64 bit-patterns (f64 compares
+pass-through/select only; FP arithmetic itself stays out), scalar
+`i128`/`u128` on wide-scalar modules, all-`i64` aggregate results
+(register-resident or `sret`), scalar-`i64` call sites, and bounded
+local memory; loops and wider shapes stay out. Functions outside the subset, or whose IR fails to
+encode, record their verbatim `NotLiftable` reason
+(`unsupported_signature`, `unsupported_ir`, `unsupported_instruction`,
+`lift_failed`, `no_liftable_path`) in `detail`; a comparison
+that ran but the solver could not decide records `unknown`. The item is
+`checked` when at least one function compared equivalent, none
+diverged, and none is `unknown`; `inconsistent` when any function
+diverged, and `unchecked` when none could be lifted or any stayed
+undecidable (`unknown` is fail-closed — never counted as skipped). An
 `inconsistent` item is
 reported in place; it is not promoted into a verdict or a performed check.
 A further item, `hir_llvm_model_correspondence`, runs the HIR-anchored
