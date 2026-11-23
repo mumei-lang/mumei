@@ -1799,7 +1799,7 @@ fn check_atom_loop_exit_domain(
     }
     solver.reset();
     solver.assert(&atom.domain);
-    solver.assert(&atom.requires);
+    solver.assert(&atom.postcondition_hypotheses);
     solver.assert(&atom.loop_exits);
     match solver.check() {
         z3::SatResult::Sat => Ok(inconclusive),
@@ -1809,8 +1809,8 @@ fn check_atom_loop_exit_domain(
 }
 
 /// Check whether each atom's input domain intersects the bounded-loop
-/// exit hypotheses used by its obligations. Returns true if any query is
-/// inconclusive.
+/// exit hypotheses and postcondition assumptions used by its obligations.
+/// Returns true if any query is inconclusive.
 pub fn check_module_loop_exit_domains(
     atoms: &[semantic_contract::ModuleAtomObligations<'_>],
     solver: &z3::Solver,
@@ -2276,7 +2276,7 @@ mod source_recheck_tests {
 
         solver.reset();
         solver.assert(&atom.domain);
-        solver.assert(&atom.requires);
+        solver.assert(&atom.postcondition_hypotheses);
         solver.assert(&atom.loop_exits);
         assert_eq!(solver.check(), SatResult::Unsat);
 
@@ -2298,6 +2298,38 @@ mod source_recheck_tests {
             check_module_source(control).unwrap(),
             SourceRecheck::RecheckedWithinProfile
         );
+    }
+
+    #[test]
+    fn module_recheck_checks_loop_domain_under_postcondition_hypotheses() {
+        let source = "atom id(x: i64) -> i64 requires: true; ensures: result == x; body: x;\n\
+            atom count(n: i64) -> i64\n\
+            requires: n >= 10 && n <= 20;\n\
+            ensures: result == 999;\n\
+            body: { let m = id(n); let i = 0; while i < m invariant: i >= 0 decreases: m - i { i = i + 1 }; i };";
+        let config = Config::new();
+        let context = Context::new(&config);
+        let atoms = semantic_contract::encode_pure_i64_module_obligations(
+            source,
+            &context,
+            RefinedAdmission::CompositeV26,
+        )
+        .unwrap();
+        let solver = Solver::new(&context);
+        for atom in &atoms {
+            solver.reset();
+            solver.assert(&atom.domain);
+            solver.assert(&atom.loop_exits);
+            assert_eq!(solver.check(), SatResult::Sat, "{}", atom.atom);
+            for obligation in &atom.obligations {
+                solver.reset();
+                solver.assert(obligation);
+                assert_eq!(solver.check(), SatResult::Unsat, "{}", atom.atom);
+            }
+        }
+
+        let error = check_module_loop_exit_domains(&atoms, &solver).unwrap_err();
+        assert_eq!(error.0, "requires and loop exits empty on all inputs");
     }
 
     #[test]
