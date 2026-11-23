@@ -33,12 +33,18 @@
   （`model.inputs` 上の Z3 項 + definedness obligations）へ持ち上げる。
   scalar-i64・call・bounded memory・整数集約/sret・i128・f64 leaf の
   サブセットと post-O2 プロファイルまで整備済み（§7 Steps 3a–3f）。
-- **比較ハーネス**: `compare_function` — covering edge 上で
-  machine/model の戻り値一致・definedness の一方向照合。
-  「同じモデル空間に両側を lift して比較する」型はそのまま使える。
-- ** Step 3 の連鎖**: machine-TV は機械語を IR モデルと照合するため、
-  source→(IR model)→machine の2ホップで IR 意味論は間接的に検査
-  されている。
+- **比較の型**: `compare_function` は LLVM 関数を内部で encode して
+  **source モデル**（`PureI64Body`）と照合する — iki encode 済み
+  modeli parametre olarak kabul etmez. Dolayısıyla "aynı model uzayında
+  iki tarafı karşılaştır" kalıbı (inputs paylaşımı, covering-edge
+  return eşitliği, definedness yön kontrolü) yeniden kullanılır ama
+  fonksiyonun kendisi değil: iki encode edilmiş modeli kabul eden yeni
+  bir iki-model karşılaştırma girişi gerekir.
+- **`recheck-llvm`（C09）は anlamsal karşılaştırma yapar** —
+  `validate_native_main`/`validate_pure_i64_module` üzerinden
+  kaynak modeli ile IR'i karşılaştırır ve `Outcome::Different` /
+  `UndefinedBehavior`'ı `Different` olarak döndürür. Ancak çapası
+  **source**'tur, HIR değil.
 
 ### 埋まっていないもの
 
@@ -47,12 +53,18 @@
   バリアント）なので、source-atom 用エンコーダを HIR に転用するのは
   意味論的に誤り — `hir→llvm_ir` の主張は「lowerer が HIR 意味論を
   保存したか」であり、モデルは HIR から組み立てる必要がある。
-- `recheck-llvm`（C09）は `.ll` バイト列の snapshot/identity 再検で
-  意味論照合ではない。
+- `recheck-llvm`（C09）`tv::validate_native_main` /
+  `validate_pure_i64_module` üzerinden **anlamsal** source↔LLVM-IR
+  karşılaştırması yapar (`Outcome::Different`/`UndefinedBehavior` →
+  `Different`) — ama çapası **source**'tur, HIR değil.
 - `translator_ir` メタデータ・`bridge_lemma_hash` も identity 系。
 
-このため現状、HIR→IR の誤 lowering は「machine vs IR の乖離」として
-しか現れず、原因段の帰属が付かない。
+Bu yüzden bugün HIR→IR yanlış bir lowering yakalanamaz: machine↔IR
+uyuşması, makinenin (yanlış indirgenmiş olabilen) IR'e sadık olduğu
+anlamına gelir; `recheck-llvm`'in source↔IR uyuşması da uyuşmazlığın
+`source→HIR` mi yoksa `HIR→IR` mı aşamasında doğduğunu ayıramaz.
+Ancak HIR'in kendisi referans alınırsa iki yarı (`source→HIR` ve
+`HIR→IR`) ayrı ayrı doğrulanabilir.
 
 ## 3. 昇格に必要な構成要素
 
@@ -63,8 +75,11 @@
    IR 側と同じ staged 戦略が妥当（scalar-i64 → call → bounded
    memory → aggregate/sret → i128 → f64 leaf の順、各段 fail-closed
    で `outside_profile`）。
-2. **比較**: encoded HIR 関数 vs `encode_ir_function_for_comparison`
-   の出力を `compare_function` 相当で対関数照合。
+2. **比較**: `compare_function` LLVM fonksiyonunu içeride encode edip
+   source modeliyle karşılaştırır — iki encode modeli doğrudan almaz;
+   encoded-HIR ↔ encoded-IR için aynı karşılaştırma çekirdeğini
+   (covering-edge return eşitliği + definedness yön kontrolü) saran
+   yeni bir iki-model girişi gerekir.
 3. **語彙**: 新しい validation 名（候補
    `checked_hir_llvm_model_correspondence`）— 新語彙なので採用時に
    承認を取る。実行されなかった場合の fail-closed は
