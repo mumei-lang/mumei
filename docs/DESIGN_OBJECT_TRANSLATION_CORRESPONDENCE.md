@@ -233,7 +233,23 @@ mumei native-bundle recheck-machine-tv bundle loop.mm --expected-build-id "$buil
   昇格するか（object 段とは別の問題。machine-TV を IR モデル比較に
   切り替える Step 3 が部分的に解くが、HIR 段の fingerprint 検証は別途必要）
 - object 段の relation を profile 条件付きで emit するか、
-  `native-bundle` 文脈専用の contract 拡張にするか
+  `native-bundle` 文脈専用の contract 拡張にするか — **解決**:
+  profile 条件付き emit を採用。`SemanticContract::emit_native_object_transformations`
+  が `source_atom→machine_code`（`checked_source_machine_tv_within_profile`）、
+  `llvm_ir→object_code`（`unchecked_not_translation_validated` のまま）、
+  `object_code→linked_executable`（`checked_object_link_correspondence`）を
+  追加する。呼び出しは `prepare_source`/`prepare_module_source` の
+  native-bundle 経路のみ（通常 `verify`/sidecar 抽出は従来の6段のまま、
+  fail-closed）。`output_identity` は `None` — artifact digest は
+  descriptor の `object_translation.transformations` が pin 済み。
+  `checked_*` は transformation.validation の値（手法の記述）で
+  verdict・昇格語彙ではない。観測面: descriptor の
+  `object_translation.transformations` に `source_atom→machine_code`
+  を追加して3段すべてを出力し（machine code はメモリ評価のみで
+  digest なし）、link 辺は手法名 `validation` と結果 `result` を
+  分離した。prepare 系の contract オブジェクトは digest 化のみに
+  使われ単体ではシリアライズされないため、emit の観測面は
+  descriptor 側が担う
 - 外部 relocation（libc import）の assumption 語彙を
   `machine_code_callee_saved_preservation_assumed_for_external_callees` と
   共通化するか — **解決**: 名前の統一は不適切（あちらは callee-saved

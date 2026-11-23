@@ -457,8 +457,12 @@ pub struct SourceBinding {
 }
 
 pub fn prepare_source(source: &str) -> Result<(SourceBinding, parser::Atom), BundleError> {
-    let contract = semantic_contract::extract_pure_i64_contract(source, SOURCE_LABEL, None, false)
-        .map_err(|_| BundleError("unsupported or invalid source"))?;
+    let mut contract =
+        semantic_contract::extract_pure_i64_contract(source, SOURCE_LABEL, None, false)
+            .map_err(|_| BundleError("unsupported or invalid source"))?;
+    // The native-bundle profile declares the object-stage relations on
+    // its contracts; plain `verify` extractions keep the six originals.
+    contract.emit_native_object_transformations();
     let mut items =
         parser::parse_module_checked(source).map_err(|_| BundleError("invalid source"))?;
     let Some(parser::Item::Atom(mut atom)) = items.pop() else {
@@ -927,9 +931,13 @@ pub fn prepare_module_source(
     source: &str,
     admission: RefinedAdmission,
 ) -> Result<ModuleSourceParts, BundleError> {
-    let contracts =
+    let mut contracts =
         semantic_contract::extract_pure_i64_module_contracts(source, SOURCE_LABEL, None, admission)
             .map_err(|_| BundleError("unsupported or invalid module source"))?;
+    // Same profile-conditional relation emit as `prepare_source`.
+    for contract in &mut contracts {
+        contract.emit_native_object_transformations();
+    }
     let mut items =
         parser::parse_module_checked(source).map_err(|_| BundleError("invalid source"))?;
     // Under composite v9 the admission above instantiated every generic

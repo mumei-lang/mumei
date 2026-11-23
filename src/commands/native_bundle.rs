@@ -4908,7 +4908,18 @@ fn write_machine_tv(
             ),
             "input_domain": evaluation.input_domain,
             "functions": evaluation.functions,
-            "object_translation": object_translation_json(&data),
+            "object_translation": object_translation_json(
+                &data,
+                if machine_tv_acceptance_decision(
+                    &evaluation.outcomes,
+                    evaluation.entry_wrapper_applicable,
+                ) == ObjectMachineTvAcceptanceDecision::Accepted
+                {
+                    "checked_source_machine_tv_within_profile"
+                } else {
+                    "unchecked_not_translation_validated"
+                },
+            ),
             "source_machine_tv": source_machine_tv_within_profile_json(
                 &evaluation,
                 &checks_not_performed,
@@ -5646,7 +5657,10 @@ fn object_translation_correspondence_text(data: &ObjectRecheckData) -> Vec<Strin
     object_translation_correspondence_report_lines(&correspondence)
 }
 
-fn object_translation_json(data: &ObjectRecheckData) -> serde_json::Value {
+fn object_translation_json(
+    data: &ObjectRecheckData,
+    machine_tv_validation: &str,
+) -> serde_json::Value {
     let record = data
         .object_translation
         .clone()
@@ -5686,6 +5700,29 @@ fn object_translation_json(data: &ObjectRecheckData) -> serde_json::Value {
                 "relation": "static_link_relocation_placement",
                 "output_identity": executable_sha256,
                 "validation": link_validation,
+                // `validation` names the method applied; the outcome of
+                // the link-correspondence check is reported separately
+                // so the two are never conflated in one field.
+                "result": if data.object_link_correspondence {
+                    "checked_correspondence"
+                } else {
+                    "unchecked_not_translation_validated"
+                },
+            },
+            {
+                // Machine code is evaluated in memory during the
+                // machine-TV check and never persisted, so there is no
+                // artifact digest to pin for this edge. Appended last
+                // so the two digest-bearing entries keep the indices
+                // consumers already read (0: object, 1: executable);
+                // `validation` mirrors the check block's verdict —
+                // a report with residual unverified functions does
+                // not claim this edge was checked.
+                "from": "source_atom",
+                "to": "machine_code",
+                "relation": "machine_code_translation_validation",
+                "output_identity": null,
+                "validation": machine_tv_validation,
             },
         ],
         "functions": record
@@ -5851,7 +5888,18 @@ fn write_object_machine_tv_acceptance(
             ),
             "input_domain": &evaluation.input_domain,
             "functions": &evaluation.functions,
-            "object_translation": object_translation_json(data),
+            "object_translation": object_translation_json(
+                data,
+                if machine_tv_acceptance_decision(
+                    &evaluation.outcomes,
+                    evaluation.entry_wrapper_applicable,
+                ) == ObjectMachineTvAcceptanceDecision::Accepted
+                {
+                    "checked_source_machine_tv_within_profile"
+                } else {
+                    "unchecked_not_translation_validated"
+                },
+            ),
             "source_machine_tv": source_machine_tv_within_profile_json(
                 evaluation,
                 &checks_not_performed,

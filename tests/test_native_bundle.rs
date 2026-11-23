@@ -587,7 +587,9 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     // verdict-bearing claim).
     assert_eq!(object_translation["status"], "checked_correspondence");
     let transformations = object_translation["transformations"].as_array().unwrap();
-    assert_eq!(transformations.len(), 2);
+    assert_eq!(transformations.len(), 3);
+    // The digest-bearing edges keep indices 0 and 1 for consumer
+    // compatibility; the source->machine edge is appended last.
     assert_eq!(transformations[0]["from"], "llvm_ir");
     assert_eq!(transformations[0]["to"], "object_code");
     assert_eq!(
@@ -596,9 +598,24 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     );
     assert_eq!(transformations[1]["from"], "object_code");
     assert_eq!(transformations[1]["to"], "linked_executable");
+    // `validation` names the method; the check's outcome is a separate key.
     assert_eq!(
         transformations[1]["validation"],
         "checked_object_link_correspondence"
+    );
+    assert_eq!(transformations[1]["result"], "checked_correspondence");
+    assert_eq!(transformations[2]["from"], "source_atom");
+    assert_eq!(transformations[2]["to"], "machine_code");
+    assert_eq!(
+        transformations[2]["relation"],
+        "machine_code_translation_validation"
+    );
+    // Machine code is evaluated in memory and never persisted, so its
+    // edge carries no artifact digest.
+    assert!(transformations[2]["output_identity"].is_null());
+    assert_eq!(
+        transformations[2]["validation"],
+        "checked_source_machine_tv_within_profile"
     );
     let functions = object_translation["functions"].as_array().unwrap();
     assert_eq!(functions.len(), 2);
@@ -6333,7 +6350,7 @@ fn accept_object_accepts_loop_bundle_with_object_link() {
     };
     assert_eq!(translation["status"], expected_translation_status);
     let transformations = translation["transformations"].as_array().unwrap();
-    assert_eq!(transformations.len(), 2);
+    assert_eq!(transformations.len(), 3);
     let link_edge = transformations
         .iter()
         .find(|edge| edge["relation"] == "static_link_relocation_placement")
@@ -6342,6 +6359,7 @@ fn accept_object_accepts_loop_bundle_with_object_link() {
         link_edge["validation"],
         "checked_object_link_correspondence"
     );
+    assert_eq!(link_edge["result"], "checked_correspondence");
     let functions = translation["functions"].as_array().unwrap();
     assert!(functions.len() >= 2);
     let names: Vec<&str> = functions

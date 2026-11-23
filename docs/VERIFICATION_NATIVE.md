@@ -2246,14 +2246,30 @@ consumers must adopt the new preservation check names and function field.
 The machine-TV and object-acceptance JSON descriptors also carry
 `object_translation`: a metadata record (Step 1 of
 `docs/DESIGN_OBJECT_TRANSLATION_CORRESPONDENCE.md`) that emits the
-`llvm_ir -> object_code` and `object_code -> linked_executable`
-transformation relations with their `output_identity` digests, a per-function
+`source_atom -> machine_code`, `llvm_ir -> object_code` and
+`object_code -> linked_executable` transformation relations — the same
+three edges `SemanticContract::emit_native_object_transformations`
+declares on contracts prepared under this profile — plus their
+`output_identity` digests, a per-function
 correspondence table (`ir_function`, `object_symbol`, `object_section`,
 `object_offset`, `object_size`, `executable_address` when resolvable), and
 every text-section relocation with its section, offset, kind, target symbol,
 addend, and the computed pc-relative `resolved_value` when it can be derived.
-`llvm_ir -> object_code` keeps `unchecked_not_translation_validated`; the link
-edge is named `checked_object_link_correspondence` only when that check ran.
+The source-to-machine edge names
+`checked_source_machine_tv_within_profile` when the machine-TV
+evaluation accepted every source-atom function — and, when a
+`main` entry wrapper applies to the module, only when that wrapper
+itself evaluated Equivalent — and
+`unchecked_not_translation_validated` when residual unverified
+functions remain — the edge mirrors the check block's verdict rather
+than claiming coverage it does not have. It carries no
+`output_identity` — machine code is evaluated in memory and never
+persisted as an artifact — and is appended last so the two
+digest-bearing edges keep their positions in the list. `llvm_ir -> object_code` keeps
+`unchecked_not_translation_validated`; the link
+edge names the `checked_object_link_correspondence` method only when that
+check ran and reports the check's outcome in a separate `result` key so
+method and result are never conflated in one field.
 Emitting this record performs no `object_translation_correspondence` check —
 it stays absent from both check lists as before.
 
