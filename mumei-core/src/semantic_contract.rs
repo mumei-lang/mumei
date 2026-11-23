@@ -8715,6 +8715,7 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                     result_is_double: false,
                     result_shape: CallValueShape::Scalar { leaf_count: 1 },
                     result_leaf_doubles: vec![false],
+                    result_store: None,
                     guard: guard.clone(),
                     callback_arguments: Vec::new(),
                 });
