@@ -8608,6 +8608,8 @@ capability model は Stage 1 のみが opt-in 拡張として上積みされて�
 
 **契約への影響**: なし。報告経路は既存の `verification_status` / `verification_violations` / `next_steps` と proof certificate をそのまま使う。新しい verdict 分類や別名は追加しない。
 
+- ✅ **追補（2026-11-22, 37）— 追補（36）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: 新規なし。mumei-agent: C06 — map の `remove_entry`/`pop_first`/`pop_last` の `Option<(K,V)>` ペア、`Option::replace`、`VecDeque::swap_remove_*`/`Vec`/`VecDeque::swap_remove` の payload、Option head テーブルの `HashSet`/`BTreeSet`/`BinaryHeap`/`LinkedList` への拡大（[mumei-agent#1247](https://github.com/mumei-lang/mumei-agent/pull/1247)）。mumei-demo: 新規シナリオなし。
+
 
 **関連ファイル**:
 - `scripts/measure_composability.py` / `scripts/scale_trust_surface.py` — 合成性 ablation と scale trust surface の測定
