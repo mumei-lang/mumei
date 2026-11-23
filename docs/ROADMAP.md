@@ -3705,10 +3705,23 @@ sidecar production, recheck and acceptance use CompositeV26.
 The C03 `mumei.pure-i64-composite/v26` profile adds read-only owned
 `[i64]` parameters with explicit in-bounds obligations and a disclosed
 nonnegative-length assumption. Native module and multifile bundle v29
-and semantic-contract sidecar consumers now use CompositeV26. Native
-translation validation maps the `{ i64, ptr }` ABI and fails closed on
-unsupported pointer uses; object-level machine TV remains unsupported
-for these signatures, so object acceptance is inconclusive.
+uses CompositeV26. Native translation validation maps the `{ i64, ptr }`
+ABI and fails closed on unsupported pointer uses; object-level machine TV
+remains unsupported for these signatures, so object acceptance is
+inconclusive.
+
+The C03 `mumei.pure-i64-composite/v27` profile is limited to semantic-contract
+sidecars and adds scalar-only callback parameters. Callback calls use fresh
+uninterpreted functions, check argument domains and callback preconditions as
+guarded obligations, and assume callback result domains and postconditions.
+Passing `atom_ref(g)` checks exact signature agreement and, when a callback
+contract exists, verifies contract precondition/postcondition subsumption
+using `g`'s contract rather than its body. Callback contracts accept only
+verifier positional aliases and are disclosed as
+`callback_contract_assumed_not_runtime_checked`. Unsupported callback values,
+types and call forms fail closed. Callback-free V26/V27 sidecar output remains
+byte-identical. Native bundles and translation validation remain on
+CompositeV26 and do not support callback parameters.
 
 `mumei build --semantic-contract` is an opt-in production sidecar. It binds the
 exact emitted `.ll` bytes by SHA-256 only; correspondence remains unchecked,

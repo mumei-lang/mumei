@@ -1,6 +1,7 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use mumei_core::native_bundle::{self, BundleFile, RECORD_FILE};
+use mumei_core::semantic_contract::{extract_pure_i64_module_contracts, RefinedAdmission};
 use object::{Object, ObjectSection, ObjectSymbol, SymbolKind};
 use std::{
     collections::BTreeMap,
@@ -3635,6 +3636,66 @@ fn effect_free_single_atom_main_keeps_the_single_bundle_profile() {
     let record = module_record(&bundle);
     assert_eq!(record["schema"], native_bundle::SCHEMA);
     assert_eq!(record["profile"], native_bundle::PROFILE);
+}
+
+#[test]
+fn native_bundle_rejects_scalar_callback_parameter_sources() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source.mm");
+    let bundle = root.path().join("bundle");
+    let callback_source =
+        "atom zero(x: i64) -> i64 requires: true; ensures: result == 0; body: 0;\n\
+        atom apply(f: atom_ref(i64) -> i64) -> i64 requires: true; \
+        ensures: result >= 0; contract(f): ensures: result >= 0; body: call(f, 0);\n\
+        atom main() -> i64 requires: true; ensures: result >= 0; \
+        body: apply(atom_ref(zero));";
+    fs::write(&source, callback_source).unwrap();
+
+    let contracts = extract_pure_i64_module_contracts(
+        callback_source,
+        "callback.mm",
+        None,
+        RefinedAdmission::CompositeV27,
+    )
+    .expect("callback source should extract under CompositeV27");
+    assert!(!contracts.is_empty());
+
+    assert!(matches!(
+        extract_pure_i64_module_contracts(
+            callback_source,
+            "callback.mm",
+            None,
+            RefinedAdmission::CompositeV26,
+        ),
+        Err(
+            mumei_core::semantic_contract::SemanticContractError::Unsupported(
+                "explicit owned scalar i64 signature required"
+            )
+        )
+    ));
+
+    let output = cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]);
+    let output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "native bundles must stay on CompositeV26 for callback parameters; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output_text.contains("unsupported or invalid module source"),
+        "native bundle should retain its generic profile rejection; output: {output_text}"
+    );
 }
 
 #[test]

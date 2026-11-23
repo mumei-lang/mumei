@@ -1671,8 +1671,47 @@ skipping them.
 The length model assumes nonnegative lengths. This is an in-language
 producer invariant, not a check performed at FFI boundaries. Native
 module and multifile bundles pin V26 sources at profile v29; sidecar
-production, recheck and acceptance use CompositeV26. Array-free bundle
-profile pins and sidecar bytes remain unchanged.
+production, recheck and acceptance use CompositeV27 when callback
+parameters are present. Callback-free V26/V27 sidecar bytes remain
+unchanged.
+
+### Scalar callback parameters in semantic-contract sidecars (v27)
+
+The C03 `mumei.pure-i64-composite/v27` admission is limited to semantic-
+contract sidecars. It adds scalar-only `atom_ref` function-type parameters
+whose argument and result leaves are already supported by the bounded scalar
+model. Arrays, `Str`, structs, enums, generic or nested function types, and
+unsupported leaves remain outside the profile. Callback contracts retain the
+parameter type and clauses in the sidecar. Contract identifiers must use the
+verifier's positional aliases (`arg0`, `arg1`, …, `x`, `y`, and `result`);
+other identifiers fail closed.
+
+Each callback parameter is modeled as a fresh uninterpreted function named
+`fparam_<atom>_<parameter>`, with bit-vector arguments and result at the
+existing leaf widths. A call through that parameter returns the function
+application. Under the call's path guard and clause-specific hypotheses, the
+checker creates definedness obligations for callback argument domains and
+the callback's `requires`. The callback result domain and `ensures` are
+assumptions. Passing a direct `atom_ref(g)` to such a parameter requires an
+exact signature match; when a callback contract is present, module
+obligations check that the receiving contract's precondition implies `g`'s
+precondition and that `g`'s precondition and postcondition imply the
+receiving postcondition. These checks use `g`'s contract, not its body.
+
+Closures, callback values outside a direct callback argument, callback
+binding/aliasing/returning/storing/passing onward, non-parameter indirect
+calls, callback parameters in `perform` arguments, signature mismatches, and
+calls through a passed callback from the receiving atom's own contracts are
+rejected for this slice. The disclosure
+`callback_contract_assumed_not_runtime_checked` identifies callback
+contracts used as assumptions. Callback-free V26 and V27 contract output
+remains byte-identical.
+
+Native bundle production/recheck and translation validation remain on
+CompositeV26 and reject callback-parameter sources; V27 does not expand
+native-bundle or LLVM correspondence guarantees. Sidecar identity still binds
+only the sidecar and emitted artifact bytes as documented above; callback
+contracts are not runtime checked.
 
 Nothing deeper is claimed: the fragment admitted by the profile grew,
 the guarantees did not — the same identity-plus-recheck scopes apply,

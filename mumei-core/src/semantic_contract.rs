@@ -1,6 +1,7 @@
 //! An opt-in, deliberately small description of one scalar source obligation.
 //! Extraction is not verification or translation validation.
 
+use crate::ast::TypeRef;
 use crate::hir::lower_atom_to_hir;
 use crate::mir::lower_hir_to_mir;
 use crate::parser::{
@@ -225,6 +226,10 @@ pub const PURE_I64_COMPOSITE_PROFILE_V25: &str = "mumei.pure-i64-composite/v25";
 /// Read-only `[i64]` array parameters with in-bounds read obligations
 /// (`pure-i64-composite/v26`).
 pub const PURE_I64_COMPOSITE_PROFILE_V26: &str = "mumei.pure-i64-composite/v26";
+/// Scalar-only `atom_ref` parameters for semantic-contract consumers
+/// (`pure-i64-composite/v27`). Native bundles and translation
+/// validation remain outside this profile.
+pub const PURE_I64_COMPOSITE_PROFILE_V27: &str = "mumei.pure-i64-composite/v27";
 
 /// Maximum byte length a `Str` literal may declare under
 /// `pure-i64-composite/v13`: one cell per byte under the
@@ -337,6 +342,9 @@ pub enum RefinedAdmission {
     /// whose reads carry in-bounds obligations
     /// (`pure-i64-composite/v26`).
     CompositeV26,
+    /// `CompositeV27` additionally admits scalar-only `atom_ref`
+    /// parameters for semantic-contract sidecars.
+    CompositeV27,
 }
 
 impl RefinedAdmission {
@@ -517,6 +525,12 @@ impl RefinedAdmission {
     pub fn admits_array_params(self) -> bool {
         self >= Self::CompositeV26
     }
+
+    /// Whether scalar-only `atom_ref` function-type parameters are
+    /// admitted by the semantic-contract sidecar profile.
+    pub fn admits_fn_params(self) -> bool {
+        self >= Self::CompositeV27
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -543,12 +557,23 @@ pub struct ScalarSpecification {
     pub binders: Vec<TypedBinder>,
     pub requires: String,
     pub ensures: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub callback_parameters: Vec<CallbackParameterContract>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effects: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effect_pre: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effect_post: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CallbackParameterContract {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub type_name: String,
+    pub requires: Option<String>,
+    pub ensures: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -817,11 +842,13 @@ pub fn module_source_profile(
     let inferred_i64_return_used = !inferred_i64_return_atoms(&items, admission).is_empty();
     let effect_features_used = uses_effect_features(&items);
     let array_params_used = uses_array_params(&items);
+    let fn_params_used = uses_fn_params(&items);
     Ok(fragment_profile(
         true,
         inferred_i64_return_used,
         effect_features_used,
         array_params_used,
+        fn_params_used,
         &refined,
         &structs,
         &enums,
@@ -1063,6 +1090,43 @@ fn admit_pure_i64_atoms(
                         .iter()
                         .map(|p| param_shape(p, &refined, &structs, &enums))
                         .collect(),
+                    callback_params: sibling
+                        .params
+                        .iter()
+                        .map(|param| {
+                            param
+                                .type_ref
+                                .as_ref()
+                                .filter(|ty| ty.is_fn_type())
+                                .and_then(|ty| callback_signature(ty, &refined).ok())
+                        })
+                        .collect(),
+                    callback_calls_in_contracts: sibling
+                        .params
+                        .iter()
+                        .map(|param| {
+                            if !param.type_ref.as_ref().is_some_and(|ty| ty.is_fn_type()) {
+                                return false;
+                            }
+                            [&sibling.requires, &sibling.ensures].iter().any(|clause| {
+                                parse_expression_checked(clause).is_ok_and(|expression| {
+                                    contains_callback_call(&expression, &param.name)
+                                })
+                            })
+                        })
+                        .collect(),
+                    param_type_names: sibling
+                        .params
+                        .iter()
+                        .map(|param| {
+                            param
+                                .type_ref
+                                .as_ref()
+                                .map(TypeRef::display_name)
+                                .or_else(|| param.type_name.clone())
+                                .unwrap_or_default()
+                        })
+                        .collect(),
                     return_kind: return_shape(
                         sibling,
                         inferred_i64_returns.contains(&sibling.name),
@@ -1070,6 +1134,11 @@ fn admit_pure_i64_atoms(
                         &structs,
                         &enums,
                     ),
+                    return_type_name: effective_return_type(
+                        sibling,
+                        inferred_i64_returns.contains(&sibling.name),
+                    )
+                    .map(str::to_owned),
                 },
             ))
         })
@@ -1108,6 +1177,7 @@ fn admit_pure_i64_atoms(
             admission.admits_wide_leaves(),
             admission.admits_effects(),
             admission.admits_array_params(),
+            admission.admits_fn_params(),
         )?;
         // Every atom's contract is checked against the complete callee map,
         // not only the tail's: module validation compares each atom
@@ -1125,6 +1195,7 @@ fn admit_pure_i64_atoms(
             &effects,
             admission.admits_effects(),
             admission.admits_array_params(),
+            admission.admits_fn_params(),
             admission.admits_struct_values(),
             admission.admits_field_writes(),
             admission.admits_enum_values(),
@@ -1241,6 +1312,16 @@ fn uses_array_params(items: &[Item]) -> bool {
             .params
             .iter()
             .any(|param| param.type_name.as_deref() == Some("[i64]")),
+        _ => false,
+    })
+}
+
+fn uses_fn_params(items: &[Item]) -> bool {
+    items.iter().any(|item| match item {
+        Item::Atom(atom) => atom
+            .params
+            .iter()
+            .any(|param| param.type_ref.as_ref().is_some_and(|ty| ty.is_fn_type())),
         _ => false,
     })
 }
@@ -1586,6 +1667,7 @@ fn fragment_profile(
     inferred_i64_return_used: bool,
     effect_features_used: bool,
     array_params_used: bool,
+    fn_params_used: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
@@ -1607,6 +1689,8 @@ fn fragment_profile(
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if fn_params_used {
+        PURE_I64_COMPOSITE_PROFILE_V27
     } else if array_params_used {
         PURE_I64_COMPOSITE_PROFILE_V26
     } else if effect_features_used {
@@ -1818,11 +1902,16 @@ fn atom_contract(
         .params
         .iter()
         .any(|param| param.type_name.as_deref() == Some("[i64]"));
+    let fn_params_used = atom
+        .params
+        .iter()
+        .any(|param| param.type_ref.as_ref().is_some_and(|ty| ty.is_fn_type()));
     let profile = fragment_profile(
         allow_wrapping_arithmetic,
         inferred_i64_return_used,
         effect_features_used,
         array_param_len_nonnegative,
+        fn_params_used,
         refined,
         structs,
         enums,
@@ -1849,9 +1938,23 @@ fn atom_contract(
     // an enum parameter a tag binder (`p.tag`) plus one per payload
     // slot (`p.{i}`) — the flat expansion the obligation encodes —
     // never a scalar binder for the composite value itself.
+    let callback_parameters: Vec<_> = atom
+        .params
+        .iter()
+        .filter_map(|param| {
+            let type_ref = param.type_ref.as_ref().filter(|ty| ty.is_fn_type())?;
+            Some(CallbackParameterContract {
+                name: param.name.clone(),
+                type_name: type_ref.display_name(),
+                requires: param.fn_contract_requires.clone(),
+                ensures: param.fn_contract_ensures.clone(),
+            })
+        })
+        .collect();
     let mut binders: Vec<_> = atom
         .params
         .iter()
+        .filter(|p| !p.type_ref.as_ref().is_some_and(|ty| ty.is_fn_type()))
         .flat_map(|p| match struct_fields(p, structs) {
             Some(fields) => flattened_struct_fields(structs, enums, fields)
                 .iter()
@@ -1916,6 +2019,7 @@ fn atom_contract(
         binders,
         requires: atom.requires.clone(),
         ensures: atom.ensures.clone(),
+        callback_parameters,
         effects: effect_data_used.then(|| {
             atom.effects
                 .iter()
@@ -1982,6 +2086,11 @@ fn atom_contract(
     });
     if inferred_i64_return {
         specification_identity["inferred_return_type"] = serde_json::json!("i64");
+    }
+    if !specification.callback_parameters.is_empty() {
+        specification_identity["callback_parameters"] =
+            serde_json::to_value(&specification.callback_parameters)
+                .map_err(|_| SemanticContractError::Encoding)?;
     }
     if let Some(effects) = &specification.effects {
         specification_identity["effects"] = serde_json::json!(effects);
@@ -2115,6 +2224,11 @@ fn atom_contract(
             "Array parameters are read-only with unconstrained elements; indexed reads require separate in-bounds obligations. The `array_param_len_nonnegative` assumption relies on in-language producers and is not checked at FFI boundaries. Aliasing, mutation, whole-value use, array call arguments, returns and perform arguments are outside this profile.",
         );
     }
+    if fn_params_used {
+        exclusions.push(
+            "Callback parameters are modeled as uninterpreted functions. Callback contracts are assumed at call sites and are not runtime checked; concrete atom_ref arguments are checked against those contracts using their declared requires and ensures, not their bodies. Native-bundle and translation-validation consumers remain outside this profile.",
+        );
+    }
     let mut assumptions = vec![if u64_leaves {
         "Inputs are representable signed 64-bit integers or declared unsigned 64-bit leaves; declared booleans carry 0/1."
     } else if allow_wrapping_arithmetic {
@@ -2124,6 +2238,13 @@ fn atom_contract(
     }];
     if array_param_len_nonnegative {
         assumptions.push("array_param_len_nonnegative");
+    }
+    if specification
+        .callback_parameters
+        .iter()
+        .any(|callback| callback.requires.is_some() || callback.ensures.is_some())
+    {
+        assumptions.push("callback_contract_assumed_not_runtime_checked");
     }
     Ok(SemanticContract {
         schema_version: SEMANTIC_CONTRACT_VERSION,
@@ -2242,7 +2363,129 @@ fn atom_contract(
 /// the call Bool-typed.
 struct CalleeSig {
     param_kinds: Vec<ValueKind>,
+    callback_params: Vec<Option<CallbackSignature>>,
+    callback_calls_in_contracts: Vec<bool>,
+    param_type_names: Vec<String>,
     return_kind: ValueKind,
+    return_type_name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CallbackLeaf {
+    type_name: String,
+    kind: ScalarKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CallbackSignature {
+    params: Vec<CallbackLeaf>,
+    result: CallbackLeaf,
+}
+
+struct CallbackParameterModel<'ctx> {
+    declaration: FuncDecl<'ctx>,
+    signature: CallbackSignature,
+    requires: Option<String>,
+    ensures: Option<String>,
+}
+
+#[derive(Clone)]
+struct CallbackCall<'ctx> {
+    guard: Bool<'ctx>,
+    argument_domain: Bool<'ctx>,
+    precondition: Bool<'ctx>,
+    precondition_definedness: Vec<Bool<'ctx>>,
+    postcondition: Option<Bool<'ctx>>,
+    postcondition_definedness: Vec<Bool<'ctx>>,
+    result_domain: Bool<'ctx>,
+}
+
+#[derive(Clone)]
+pub struct CallbackArgument {
+    pub parameter_index: usize,
+    pub target_atom: String,
+}
+
+fn callback_signature(
+    ty: &TypeRef,
+    refined: &RefinedEnv,
+) -> Result<CallbackSignature, SemanticContractError> {
+    if !ty.is_fn_type() || ty.effect_set.is_some() || ty.capability.is_some() {
+        return Err(SemanticContractError::Unsupported(
+            "callback function type outside scalar profile",
+        ));
+    }
+    let params = ty.type_args[..ty.type_args.len() - 1]
+        .iter()
+        .map(|param| callback_leaf(param, refined))
+        .collect::<Result<Vec<_>, _>>()?;
+    let result = ty
+        .fn_return_type()
+        .ok_or(SemanticContractError::Unsupported(
+            "callback function result outside scalar profile",
+        ))?;
+    Ok(CallbackSignature {
+        params,
+        result: callback_leaf(result, refined)?,
+    })
+}
+
+fn callback_leaf(
+    ty: &TypeRef,
+    refined: &RefinedEnv,
+) -> Result<CallbackLeaf, SemanticContractError> {
+    if ty.is_fn_type() {
+        return Err(SemanticContractError::Unsupported(
+            "nested function type outside profile",
+        ));
+    }
+    if !ty.type_args.is_empty() || ty.effect_set.is_some() || ty.capability.is_some() {
+        return Err(SemanticContractError::Unsupported(
+            "callback signature requires scalar leaves",
+        ));
+    }
+    let type_name = ty.display_name();
+    let kind = match type_name.as_str() {
+        "i64" | "isize" | "i8" | "i16" | "i32" | "u8" | "u16" | "u32" => ScalarKind::I64,
+        "bool" => ScalarKind::Bool,
+        "u64" | "usize" => ScalarKind::U64,
+        "f64" => ScalarKind::F64,
+        "i128" => ScalarKind::I128,
+        "u128" => ScalarKind::U128,
+        name => refined
+            .get(name)
+            .map(|alias| alias.kind)
+            .filter(|kind| {
+                !matches!(
+                    kind,
+                    ScalarKind::ArrayI64 | ScalarKind::ArrayU64 | ScalarKind::Str | ScalarKind::Num
+                )
+            })
+            .ok_or(SemanticContractError::Unsupported(
+                "callback signature requires scalar leaves",
+            ))?,
+    };
+    Ok(CallbackLeaf { type_name, kind })
+}
+
+fn function_param_shape(
+    param: &crate::parser::ast::Param,
+    admit_fn_params: bool,
+    refined: &RefinedEnv,
+) -> Option<CallbackSignature> {
+    let ty = param.type_ref.as_ref().filter(|ty| ty.is_fn_type())?;
+    let type_name = ty.display_name();
+    if !admit_fn_params
+        || param.type_name.as_deref() != Some(type_name.as_str())
+        || param.consume
+        || param.is_ref
+        || param.is_ref_mut
+        || ty.effect_set.is_some()
+        || ty.capability.is_some()
+    {
+        return None;
+    }
+    callback_signature(ty, refined).ok()
 }
 
 /// The shape a declared parameter carries: a profile scalar, or a
@@ -2272,6 +2515,7 @@ type EffectEnv = BTreeMap<String, EffectInfo>;
 #[derive(Clone)]
 struct KindEnv<'a> {
     callees: &'a BTreeMap<String, CalleeSig>,
+    callback_params: BTreeMap<String, CallbackSignature>,
     effects: &'a EffectEnv,
     atom_effects: BTreeSet<String>,
     admit_effects: bool,
@@ -2509,10 +2753,15 @@ fn declared_param_shape(
     admit_f64: bool,
     admit_wide: bool,
     admit_array_params: bool,
+    admit_fn_params: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
 ) -> Option<ValueKind> {
+    if param.type_ref.as_ref().is_some_and(|ty| ty.is_fn_type()) {
+        return function_param_shape(param, admit_fn_params, refined)
+            .map(|_| ValueKind::Scalar(ScalarKind::I64));
+    }
     match param.type_name.as_deref() {
         Some(name) if structs.contains_key(name) => {
             plain_param(param, name).then(|| ValueKind::Struct(name.to_owned()))
@@ -2550,6 +2799,9 @@ fn param_shape(
     structs: &StructEnv,
     enums: &EnumEnv,
 ) -> ValueKind {
+    if param.type_ref.as_ref().is_some_and(|ty| ty.is_fn_type()) {
+        return ValueKind::Scalar(ScalarKind::I64);
+    }
     match param.type_name.as_deref() {
         Some(name) if structs.contains_key(name) => ValueKind::Struct(name.to_owned()),
         Some(name) if enums.contains_key(name) => ValueKind::Enum(name.to_owned()),
@@ -2632,9 +2884,49 @@ fn call_return_kinds<'ctx>(
     structs: &StructEnv,
     enums: &EnumEnv,
     admission: RefinedAdmission,
-) -> CallShapes<'ctx> {
+    context: &'ctx Context,
+) -> BodyResult<CallShapes<'ctx>> {
     let inferred_i64_returns = inferred_i64_return_atoms(items, admission);
-    CallShapes {
+    let mut callback_parameters = BTreeMap::new();
+    let mut callee_callback_params = BTreeMap::new();
+    for item in items {
+        let Item::Atom(atom) = item else {
+            continue;
+        };
+        let mut callee_params = Vec::with_capacity(atom.params.len());
+        for param in &atom.params {
+            let Some(ty) = param.type_ref.as_ref().filter(|ty| ty.is_fn_type()) else {
+                callee_params.push(None);
+                continue;
+            };
+            let signature = callback_signature(ty, refined)?;
+            let domains: Vec<Sort> = signature
+                .params
+                .iter()
+                .map(|leaf| Sort::bitvector(context, callback_leaf_width(leaf.kind)))
+                .collect();
+            let range = Sort::bitvector(context, callback_leaf_width(signature.result.kind));
+            let domain_refs: Vec<&Sort> = domains.iter().collect();
+            let declaration = FuncDecl::new(
+                context,
+                format!("fparam_{}_{}", atom.name, param.name),
+                &domain_refs,
+                &range,
+            );
+            callback_parameters.insert(
+                (atom.name.clone(), param.name.clone()),
+                CallbackParameterModel {
+                    declaration,
+                    signature: signature.clone(),
+                    requires: param.fn_contract_requires.clone(),
+                    ensures: param.fn_contract_ensures.clone(),
+                },
+            );
+            callee_params.push(Some(signature));
+        }
+        callee_callback_params.insert(atom.name.clone(), callee_params);
+    }
+    Ok(CallShapes {
         returns: items
             .iter()
             .filter_map(|item| {
@@ -2698,7 +2990,19 @@ fn call_return_kinds<'ctx>(
         next_array_id: std::cell::Cell::new(0),
         alloc_stores: std::cell::RefCell::new(HashMap::new()),
         perform_definedness: std::cell::RefCell::new(Vec::new()),
+        callback_parameters,
+        callee_callback_params,
+        callback_calls: std::cell::RefCell::new(Vec::new()),
+        refined: refined.clone(),
         str_bound: std::cell::Cell::new(STR_BOUND),
+    })
+}
+
+fn callback_leaf_width(kind: ScalarKind) -> u32 {
+    if matches!(kind, ScalarKind::I128 | ScalarKind::U128) {
+        128
+    } else {
+        64
     }
 }
 
@@ -2757,6 +3061,10 @@ struct CallShapes<'ctx> {
     /// Definedness checks from effect arguments and array-parameter
     /// reads, retained as explicit module obligations.
     perform_definedness: std::cell::RefCell<Vec<Bool<'ctx>>>,
+    callback_parameters: BTreeMap<(String, String), CallbackParameterModel<'ctx>>,
+    callee_callback_params: BTreeMap<String, Vec<Option<CallbackSignature>>>,
+    callback_calls: std::cell::RefCell<Vec<CallbackCall<'ctx>>>,
+    refined: RefinedEnv,
     /// The current atom's effective `Str` literal bound — set by
     /// `encode_atom_body` before each atom's body is encoded.
     str_bound: std::cell::Cell<usize>,
@@ -3218,6 +3526,7 @@ fn check_atom_contract(
     effects: &EffectEnv,
     admit_effects: bool,
     admit_array_params: bool,
+    admit_fn_params: bool,
     admit_struct_values: bool,
     admit_field_writes: bool,
     admit_enum_values: bool,
@@ -3246,7 +3555,17 @@ fn check_atom_contract(
     let mut scope: BTreeMap<String, ScalarKind> = BTreeMap::new();
     let mut composites: BTreeMap<String, &str> = BTreeMap::new();
     let mut array_params = BTreeSet::new();
+    let mut callback_params = BTreeMap::new();
     for p in &atom.params {
+        if p.type_ref.as_ref().is_some_and(|ty| ty.is_fn_type()) {
+            let Some(signature) = function_param_shape(p, admit_fn_params, refined) else {
+                return Err(SemanticContractError::Unsupported(
+                    "callback function type outside scalar profile",
+                ));
+            };
+            callback_params.insert(p.name.clone(), signature);
+            continue;
+        }
         match param_shape(p, refined, structs, enums) {
             ValueKind::Scalar(ScalarKind::ArrayI64) => {
                 array_params.insert(p.name.clone());
@@ -3295,6 +3614,7 @@ fn check_atom_contract(
         .collect();
     let env = KindEnv {
         callees,
+        callback_params,
         effects,
         atom_effects: atom
             .effects
@@ -3338,6 +3658,50 @@ fn check_atom_contract(
         f64_arithmetic_used,
         str_bound: atom.str_bound.unwrap_or(STR_BOUND),
     };
+    for param in &atom.params {
+        let Some(signature) = env.callback_params.get(&param.name) else {
+            continue;
+        };
+        let mut aliases = BTreeMap::new();
+        for (index, leaf) in signature.params.iter().enumerate() {
+            aliases.insert(format!("arg{index}"), leaf.kind);
+            if index == 0 {
+                aliases.insert("x".to_owned(), leaf.kind);
+            } else if index == 1 {
+                aliases.insert("y".to_owned(), leaf.kind);
+            }
+        }
+        for (clause, allow_result) in [
+            (param.fn_contract_requires.as_deref(), false),
+            (param.fn_contract_ensures.as_deref(), true),
+        ] {
+            let Some(clause) = clause else {
+                continue;
+            };
+            let mut clause_aliases = aliases.clone();
+            if allow_result {
+                clause_aliases.insert("result".to_owned(), signature.result.kind);
+            }
+            let expression =
+                parse_expression_checked(clause).map_err(|_| SemanticContractError::Parse)?;
+            if !callback_contract_alias_only(&expression, &clause_aliases) {
+                return Err(SemanticContractError::Unsupported(
+                    "callback contract identifier outside positional aliases",
+                ));
+            }
+            expect_kind(
+                expression_kind(
+                    &expression,
+                    &clause_aliases,
+                    true,
+                    allow_wrapping_arithmetic,
+                    &BTreeSet::new(),
+                    &env,
+                )?,
+                ScalarKind::Bool,
+            )?;
+        }
+    }
     for p in &atom.params {
         env.bind(&p.name)?;
     }
@@ -3470,6 +3834,20 @@ fn check_atom_contract(
     Ok(())
 }
 
+fn callback_contract_alias_only(expr: &Expr, aliases: &BTreeMap<String, ScalarKind>) -> bool {
+    match expr {
+        Expr::Number(_) | Expr::Float(_) => true,
+        Expr::Variable(name) => {
+            matches!(name.as_str(), "true" | "false") || aliases.contains_key(name)
+        }
+        Expr::BinaryOp(left, _, right) => {
+            callback_contract_alias_only(left, aliases)
+                && callback_contract_alias_only(right, aliases)
+        }
+        _ => false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_atom(
     atom: &Atom,
@@ -3486,6 +3864,7 @@ fn validate_atom(
     admit_wide: bool,
     admit_effects: bool,
     admit_array_params: bool,
+    admit_fn_params: bool,
 ) -> Result<(), SemanticContractError> {
     // A declared subrange integer result lowers to an i64 return like
     // the parameters — the emitter emits no truncation, so the checked
@@ -3523,6 +3902,7 @@ fn validate_atom(
                 admit_f64,
                 admit_wide,
                 admit_array_params,
+                admit_fn_params,
                 refined,
                 structs,
                 enums,
@@ -3639,6 +4019,7 @@ fn expect_kind(actual: ScalarKind, expected: ScalarKind) -> Result<(), SemanticC
 /// to, the kind that literal carries in this profile, and the
 /// declaration's refinement conjuncts — each conjunct's declared operand
 /// name is substituted with the use-site value at encoding time.
+#[derive(Clone)]
 struct ResolvedAlias {
     base: &'static str,
     kind: ScalarKind,
@@ -3936,7 +4317,7 @@ fn slot_type_name<'a>(slot: &SignatureSlot<'a>) -> Option<&'a str> {
         | SignatureSlot::WideScalar(type_name)
         | SignatureSlot::EnumField { type_name, .. }
         | SignatureSlot::EnumWideField { type_name, .. } => *type_name,
-        SignatureSlot::EnumTag { .. } => None,
+        SignatureSlot::EnumTag { .. } | SignatureSlot::Callback => None,
     }
 }
 
@@ -4467,6 +4848,7 @@ fn enum_slot_leaf_slots<'a>(
 /// otherwise.
 fn signature_slot_weight(slot: &SignatureSlot<'_>) -> usize {
     match slot {
+        SignatureSlot::Callback => 1,
         SignatureSlot::WideScalar(_) | SignatureSlot::EnumWideField { .. } => 2,
         _ => 1,
     }
@@ -5333,6 +5715,7 @@ fn resolve_alias(
                 &BTreeSet::new(),
                 &KindEnv {
                     callees: &BTreeMap::new(),
+                    callback_params: BTreeMap::new(),
                     effects: &EffectEnv::new(),
                     atom_effects: BTreeSet::new(),
                     admit_effects: false,
@@ -5575,6 +5958,11 @@ fn validate_perform_statement(
         ));
     }
     for arg in args {
+        if matches!(arg, Expr::Variable(name) if env.callback_params.contains_key(name)) {
+            return Err(SemanticContractError::Unsupported(
+                "function parameter in perform arguments",
+            ));
+        }
         let kind = expression_kind(
             arg,
             scope,
@@ -6642,7 +7030,67 @@ fn check_call<'a>(
             "array argument outside profile",
         ));
     }
-    for (arg, kind) in args.iter().zip(&sig.param_kinds) {
+    for (index, (arg, kind)) in args.iter().zip(&sig.param_kinds).enumerate() {
+        if let Some(expected) = sig.callback_params.get(index).and_then(Option::as_ref) {
+            match arg {
+                Expr::AtomRef { name: target } => {
+                    if sig
+                        .callback_calls_in_contracts
+                        .get(index)
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        return Err(SemanticContractError::Unsupported(
+                            "callback call in containing atom contract outside profile",
+                        ));
+                    }
+                    let Some(target_sig) = env.callees.get(target) else {
+                        return Err(SemanticContractError::Unsupported(
+                            "atom_ref target outside module",
+                        ));
+                    };
+                    let exact = target_sig.param_type_names.len() == expected.params.len()
+                        && target_sig
+                            .param_type_names
+                            .iter()
+                            .zip(&expected.params)
+                            .all(|(actual, expected)| actual == &expected.type_name)
+                        && target_sig.return_type_name.as_deref()
+                            == Some(expected.result.type_name.as_str());
+                    if !exact {
+                        return Err(SemanticContractError::Unsupported(
+                            "callback signature mismatch",
+                        ));
+                    }
+                }
+                Expr::Lambda { .. } => {
+                    return Err(SemanticContractError::Unsupported(
+                        "lambda callback argument outside profile",
+                    ));
+                }
+                Expr::Variable(var) if env.callback_params.contains_key(var) => {
+                    return Err(SemanticContractError::Unsupported(
+                        "function parameter passed onward outside profile",
+                    ));
+                }
+                _ => {
+                    return Err(SemanticContractError::Unsupported(
+                        "callback argument must be a direct atom_ref",
+                    ));
+                }
+            }
+            continue;
+        }
+        if matches!(arg, Expr::AtomRef { .. }) {
+            return Err(SemanticContractError::Unsupported(
+                "atom_ref outside a callback argument",
+            ));
+        }
+        if matches!(arg, Expr::Lambda { .. }) {
+            return Err(SemanticContractError::Unsupported(
+                "lambda callback argument outside profile",
+            ));
+        }
         match kind {
             ValueKind::Scalar(kind) => expect_kind(
                 expression_kind(
@@ -6923,6 +7371,9 @@ fn expression_kind(
                 "array parameter used as a whole value",
             ))
         }
+        Expr::Variable(name) if env.callback_params.contains_key(name) => Err(
+            SemanticContractError::Unsupported("function parameter used outside a call"),
+        ),
         Expr::Variable(name) => scope
             .get(name.as_str())
             .copied()
@@ -6930,6 +7381,35 @@ fn expression_kind(
             .ok_or(SemanticContractError::Unsupported(
                 "expression or unbound name",
             )),
+        Expr::CallRef { callee, args } => {
+            let Expr::Variable(name) = callee.as_ref() else {
+                return Err(SemanticContractError::Unsupported(
+                    "callback call target is not a function parameter",
+                ));
+            };
+            let Some(signature) = env.callback_params.get(name) else {
+                return Err(SemanticContractError::Unsupported(
+                    "call target is not a function parameter",
+                ));
+            };
+            if args.len() != signature.params.len() {
+                return Err(SemanticContractError::Unsupported(
+                    "callback call arity mismatch",
+                ));
+            }
+            for (arg, expected) in args.iter().zip(&signature.params) {
+                let kind = expression_kind(
+                    arg,
+                    scope,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    &BTreeSet::new(),
+                    env,
+                )?;
+                expect_kind(kind, expected.kind)?;
+            }
+            Ok(signature.result.kind)
+        }
         Expr::BinaryOp(left, op, right) => {
             // Enum equality (`pure-i64-composite/v14`): `e == e'` on
             // two values of one declared enum yields `bool` — the
@@ -7462,6 +7942,7 @@ pub struct CallSite<'ctx> {
     pub result_shape: CallValueShape,
     pub result_leaf_doubles: Vec<bool>,
     pub guard: Bool<'ctx>,
+    pub callback_arguments: Vec<CallbackArgument>,
 }
 
 pub struct PureI64Body<'ctx> {
@@ -7526,6 +8007,7 @@ pub struct PureI64Body<'ctx> {
     /// field slots concatenated in declaration order (field 0 in the
     /// most significant 64 bits, see `aggregate_value`).
     pub result_shape: Option<usize>,
+    callback_calls: Vec<CallbackCall<'ctx>>,
     /// Per-parameter leaf kinds in declaration order, flattened exactly
     /// like `param_shapes`: `true` for a pass-through `f64` leaf
     /// (`pure-i64-composite/v11`), `false` for an integer leaf (`i64`,
@@ -7593,6 +8075,7 @@ impl<'ctx> PureI64Body<'ctx> {
             call_result_bounds: Vec::new(),
             definedness: Vec::new(),
             perform_definedness: Vec::new(),
+            callback_calls: Vec::new(),
             param_domain: Vec::new(),
             array_len_domain: Vec::new(),
             subrange_params: false,
@@ -7654,8 +8137,14 @@ pub fn encode_pure_i64_body<'ctx>(
         has_non_i64_scalar_features,
         has_wide_scalar_features,
     ) = bounded_pure_i64_module(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
-    let call_returns =
-        call_return_kinds(&items, &refined, &structs, &enums, RefinedAdmission::Reject);
+    let call_returns = call_return_kinds(
+        &items,
+        &refined,
+        &structs,
+        &enums,
+        RefinedAdmission::Reject,
+        context,
+    )?;
     let Some(Item::Atom(atom)) = items.pop() else {
         return Err(SemanticContractError::Unsupported("source atom"));
     };
@@ -7701,7 +8190,7 @@ pub fn encode_pure_i64_module<'ctx>(
         has_non_i64_scalar_features,
         has_wide_scalar_features,
     ) = bounded_pure_i64_module(source, allow_wrapping_arithmetic, admission)?;
-    let call_returns = call_return_kinds(&items, &refined, &structs, &enums, admission);
+    let call_returns = call_return_kinds(&items, &refined, &structs, &enums, admission, context)?;
     items
         .iter()
         .filter_map(|item| match item {
@@ -7895,6 +8384,7 @@ fn encode_atom_body<'ctx>(
             struct_fields(p, structs).is_none()
                 && enum_variants(p, enums).is_none()
                 && p.type_name.as_deref() != Some("[i64]")
+                && !p.type_ref.as_ref().is_some_and(TypeRef::is_fn_type)
         })
         .map(|p| p.name.clone())
         .collect();
@@ -7936,6 +8426,11 @@ fn encode_atom_body<'ctx>(
         SourceValue::Array { .. } => {
             return Err(SemanticContractError::Unsupported(
                 "array value in a result position",
+            ))
+        }
+        SourceValue::Callback { .. } => {
+            return Err(SemanticContractError::Unsupported(
+                "callback parameter used as a result",
             ))
         }
         // A struct result's value is its field slots concatenated in
@@ -7993,6 +8488,7 @@ fn encode_atom_body<'ctx>(
             SignatureSlot::EnumField { type_name, .. }
             | SignatureSlot::EnumWideField { type_name, .. } => *type_name,
             SignatureSlot::EnumTag { .. } => None,
+            SignatureSlot::Callback => None,
         };
         name.is_some_and(|n| refined.contains_key(n))
     }) || atom
@@ -8094,6 +8590,7 @@ fn encode_atom_body<'ctx>(
         subrange_params,
         refined_signature,
         composite_signature,
+        callback_calls: std::mem::take(&mut *call_returns.callback_calls.borrow_mut()),
         param_shapes: atom
             .params
             .iter()
@@ -8246,6 +8743,10 @@ fn encode_atom_body<'ctx>(
 #[derive(Clone)]
 enum SignatureSlot<'a> {
     Scalar(Option<&'a str>),
+    /// An opaque function pointer parameter, represented by one i64
+    /// source input but modeled separately as a fresh uninterpreted
+    /// function.
+    Callback,
     /// A 128-bit leaf (`i128`/`u128`): one declared leaf occupying TWO
     /// consecutive 64-bit input slots (`pure-i64-composite/v21`). The
     /// variant keeps the pairing explicit — consumers that do not know
@@ -8305,6 +8806,9 @@ fn signature_slots<'a>(
                 .into_iter()
                 .map(|(_, slot)| slot)
                 .collect(),
+            None if p.type_ref.as_ref().is_some_and(|ty| ty.is_fn_type()) => {
+                vec![SignatureSlot::Callback]
+            }
             None => match enum_variants(p, enums) {
                 Some(variants) => {
                     let mut slots = vec![SignatureSlot::EnumTag {
@@ -8556,6 +9060,9 @@ fn signature_domain<'ctx>(
             SignatureSlot::Scalar(type_name) => {
                 enum_tags[0] = None;
                 domain.extend(declared_slot_domain(type_name, v, context, refined)?);
+            }
+            SignatureSlot::Callback => {
+                enum_tags[0] = None;
             }
             // Consumed above — a wide leaf takes two input slots.
             SignatureSlot::WideScalar(_) | SignatureSlot::EnumWideField { .. } => unreachable!(),
@@ -8874,7 +9381,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
             "expected at least one atom",
         ));
     }
-    let call_returns = call_return_kinds(&items, &refined, &structs, &enums, admission);
+    let call_returns = call_return_kinds(&items, &refined, &structs, &enums, admission, context)?;
     let bodies: Vec<PureI64Body> = atom_items
         .iter()
         .map(|atom| {
@@ -8938,6 +9445,264 @@ pub struct ModuleAtomObligations<'ctx> {
     pub obligations: Vec<Bool<'ctx>>,
 }
 
+fn contains_callback_call(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::CallRef { callee, args } => {
+            matches!(callee.as_ref(), Expr::Variable(callee_name) if callee_name == name)
+                || contains_callback_call(callee, name)
+                || args.iter().any(|arg| contains_callback_call(arg, name))
+        }
+        Expr::BinaryOp(left, _, right) => {
+            contains_callback_call(left, name) || contains_callback_call(right, name)
+        }
+        Expr::Call(call_name, args) if call_name == "call" => {
+            matches!(args.first(), Some(Expr::Variable(callee)) if callee == name)
+                || args.iter().any(|arg| contains_callback_call(arg, name))
+        }
+        Expr::Call(_, args) | Expr::ArrayLit(args) | Expr::Perform { args, .. } => {
+            args.iter().any(|arg| contains_callback_call(arg, name))
+        }
+        Expr::ArrayAccess(_, index) | Expr::Await { expr: index } => {
+            contains_callback_call(index, name)
+        }
+        Expr::FieldAccess(target, _) => contains_callback_call(target, name),
+        Expr::Block(body) | Expr::Async { body } | Expr::Lambda { body, .. } => {
+            contains_callback_call_stmt(body, name)
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            contains_callback_call(cond, name)
+                || contains_callback_call_stmt(then_branch, name)
+                || contains_callback_call_stmt(else_branch, name)
+        }
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| contains_callback_call(value, name)),
+        Expr::Match { target, arms } => {
+            contains_callback_call(target, name)
+                || arms.iter().any(|arm| {
+                    arm.guard
+                        .as_deref()
+                        .is_some_and(|guard| contains_callback_call(guard, name))
+                        || contains_callback_call_stmt(&arm.body, name)
+                })
+        }
+        Expr::ChanSend { channel, value } => {
+            contains_callback_call(channel, name) || contains_callback_call(value, name)
+        }
+        Expr::ChanRecv { channel } => contains_callback_call(channel, name),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => false,
+    }
+}
+
+fn contains_callback_call_stmt(stmt: &Stmt, name: &str) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => contains_callback_call(value, name),
+        Stmt::ArrayStore { index, value, .. } => {
+            contains_callback_call(index, name) || contains_callback_call(value, name)
+        }
+        Stmt::Block(stmts, _)
+        | Stmt::TaskGroup {
+            children: stmts, ..
+        } => stmts
+            .iter()
+            .any(|stmt| contains_callback_call_stmt(stmt, name)),
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            contains_callback_call(cond, name)
+                || contains_callback_call(invariant, name)
+                || decreases
+                    .as_deref()
+                    .is_some_and(|expr| contains_callback_call(expr, name))
+                || contains_callback_call_stmt(body, name)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            contains_callback_call_stmt(body, name)
+        }
+        Stmt::Expr(value, _) => contains_callback_call(value, name),
+        Stmt::Cancel { .. } => false,
+    }
+}
+
+fn encode_callback_clause<'ctx>(
+    clause: Option<&str>,
+    env: &HashMap<String, SourceValue<'ctx>>,
+    call_returns: &CallShapes<'ctx>,
+    context: &'ctx Context,
+    enums: &EnumEnv,
+) -> BodyResult<(Bool<'ctx>, Vec<Bool<'ctx>>)> {
+    let Some(clause) = clause else {
+        return Ok((Bool::from_bool(context, true), Vec::new()));
+    };
+    let expression = parse_expression_checked(clause).map_err(|_| SemanticContractError::Parse)?;
+    let mut definedness = Vec::new();
+    let mut loop_exits = Vec::new();
+    let mut call_sites = Vec::new();
+    let value = source_expr(
+        &expression,
+        context,
+        env,
+        &Bool::from_bool(context, true),
+        &mut definedness,
+        0,
+        &BTreeSet::new(),
+        &mut HashMap::new(),
+        &mut loop_exits,
+        &mut call_sites,
+        call_returns,
+        enums,
+    )?
+    .boolean()?;
+    if !loop_exits.is_empty() || !call_sites.is_empty() {
+        return Err(SemanticContractError::Unsupported(
+            "callback contract calls or loops outside profile",
+        ));
+    }
+    Ok((value, definedness))
+}
+
+fn callback_contract_subsumption<'ctx>(
+    caller: &Atom,
+    callback_param: &crate::parser::ast::Param,
+    target: &Atom,
+    call_returns: &CallShapes<'ctx>,
+    context: &'ctx Context,
+    refined: &RefinedEnv,
+    enums: &EnumEnv,
+) -> BodyResult<Vec<Bool<'ctx>>> {
+    if callback_param.fn_contract_requires.is_none() && callback_param.fn_contract_ensures.is_none()
+    {
+        return Ok(Vec::new());
+    }
+    let ty = callback_param
+        .type_ref
+        .as_ref()
+        .ok_or(SemanticContractError::Unsupported(
+            "callback function type outside profile",
+        ))?;
+    let signature = callback_signature(ty, refined)?;
+    let mut callback_env = HashMap::new();
+    let mut target_env = HashMap::new();
+    let mut argument_domains = Vec::new();
+    for (index, leaf) in signature.params.iter().enumerate() {
+        let value = BV::new_const(
+            context,
+            format!(
+                "callback_subsumption_{}_{}_{}_arg{index}",
+                caller.name, target.name, callback_param.name
+            ),
+            callback_leaf_width(leaf.kind),
+        );
+        argument_domains.extend(callback_leaf_domain(leaf, &value, context, refined)?);
+        let source = callback_value(leaf.kind, value, context);
+        callback_env.insert(format!("arg{index}"), source.clone());
+        if index == 0 {
+            callback_env.insert("x".to_owned(), source.clone());
+        } else if index == 1 {
+            callback_env.insert("y".to_owned(), source.clone());
+        }
+        let target_param = target
+            .params
+            .get(index)
+            .ok_or(SemanticContractError::Unsupported(
+                "callback signature mismatch",
+            ))?;
+        target_env.insert(target_param.name.clone(), source);
+    }
+    let result = BV::new_const(
+        context,
+        format!(
+            "callback_subsumption_{}_{}_{}_result",
+            caller.name, target.name, callback_param.name
+        ),
+        callback_leaf_width(signature.result.kind),
+    );
+    let result_domain = Bool::and(
+        context,
+        &callback_leaf_domain(&signature.result, &result, context, refined)?
+            .iter()
+            .collect::<Vec<_>>(),
+    );
+    let result_value = callback_value(signature.result.kind, result, context);
+    callback_env.insert("result".to_owned(), result_value.clone());
+    target_env.insert("result".to_owned(), result_value);
+    let (callback_requires, callback_requires_definedness) = encode_callback_clause(
+        callback_param.fn_contract_requires.as_deref(),
+        &callback_env,
+        call_returns,
+        context,
+        enums,
+    )?;
+    let (callback_ensures, callback_ensures_definedness) = encode_callback_clause(
+        callback_param.fn_contract_ensures.as_deref(),
+        &callback_env,
+        call_returns,
+        context,
+        enums,
+    )?;
+    let (target_requires, target_requires_definedness) = encode_callback_clause(
+        Some(&target.requires),
+        &target_env,
+        call_returns,
+        context,
+        enums,
+    )?;
+    let (target_ensures, target_ensures_definedness) = encode_callback_clause(
+        Some(&target.ensures),
+        &target_env,
+        call_returns,
+        context,
+        enums,
+    )?;
+    let domain = Bool::and(context, &argument_domains.iter().collect::<Vec<_>>());
+    let mut obligations = vec![
+        Bool::and(
+            context,
+            &[&domain, &callback_requires, &target_requires.not()],
+        ),
+        Bool::and(
+            context,
+            &[
+                &domain,
+                &result_domain,
+                &target_requires,
+                &target_ensures,
+                &callback_ensures.not(),
+            ],
+        ),
+    ];
+    obligations.extend(
+        callback_requires_definedness
+            .iter()
+            .chain(target_requires_definedness.iter())
+            .map(|defined| Bool::and(context, &[&domain, &defined.not()])),
+    );
+    obligations.extend(
+        callback_ensures_definedness
+            .iter()
+            .chain(target_ensures_definedness.iter())
+            .map(|defined| {
+                Bool::and(
+                    context,
+                    &[&domain, &result_domain, &target_requires, &defined.not()],
+                )
+            }),
+    );
+    Ok(obligations)
+}
+
 /// The module-atom obligation family — every entry must be `unsat`:
 ///
 /// - entry 0: `requires ∧ assumptions ∧ ¬ensures` — the caller's own
@@ -8992,11 +9757,13 @@ fn module_atom_obligations<'ctx>(
         call_returns,
     )?;
     call_returns.perform_definedness.borrow_mut().clear();
+    call_returns.callback_calls.borrow_mut().clear();
     let requires =
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
     let top = Bool::from_bool(context, true);
     let mut sink = Vec::new();
     let mut requires_exits = Vec::new();
+    let mut requires_call_sites = Vec::new();
     // Contract literals belong to this atom's clause — the shared
     // `str_bound` cell still holds whatever the last encoded body left.
     call_returns
@@ -9012,11 +9779,12 @@ fn module_atom_obligations<'ctx>(
         &BTreeSet::new(),
         &mut HashMap::new(),
         &mut requires_exits,
-        &mut Vec::new(),
+        &mut requires_call_sites,
         call_returns,
         &EnumEnv::new(),
     )?
     .boolean()?;
+    let requires_callback_calls = std::mem::take(&mut *call_returns.callback_calls.borrow_mut());
     let requires_definedness = std::mem::take(&mut *call_returns.perform_definedness.borrow_mut());
     let requires_loop_exits = Bool::and(context, &requires_exits.iter().collect::<Vec<_>>());
     loop_exit_terms.extend(requires_exits.iter().cloned());
@@ -9033,6 +9801,7 @@ fn module_atom_obligations<'ctx>(
     let ensures =
         parse_expression_checked(&atom.ensures).map_err(|_| SemanticContractError::Parse)?;
     let mut ensures_exits = Vec::new();
+    let mut ensures_call_sites = Vec::new();
     let ensures = source_expr(
         &ensures,
         context,
@@ -9043,11 +9812,12 @@ fn module_atom_obligations<'ctx>(
         &BTreeSet::new(),
         &mut HashMap::new(),
         &mut ensures_exits,
-        &mut Vec::new(),
+        &mut ensures_call_sites,
         call_returns,
         &EnumEnv::new(),
     )?
     .boolean()?;
+    let ensures_callback_calls = std::mem::take(&mut *call_returns.callback_calls.borrow_mut());
     loop_exit_terms.extend(ensures_exits.iter().cloned());
     let ensures_definedness = std::mem::take(&mut *call_returns.perform_definedness.borrow_mut());
     // A refined result type adds its declaration conjuncts to the
@@ -9070,12 +9840,58 @@ fn module_atom_obligations<'ctx>(
     let post = Bool::and(context, &post.iter().collect::<Vec<_>>());
     let mut assumptions = Vec::new();
     let mut domain_obligations = Vec::new();
+    let source_domain_formula = Bool::and(context, &source_domain.iter().collect::<Vec<_>>());
+    let mut callback_subsumption_obligations = Vec::new();
     for site in &body.call_sites {
         let Some(callee) = callees.get(&site.callee) else {
             return Err(SemanticContractError::Unsupported(
                 "call target outside module",
             ));
         };
+        for callback_argument in &site.callback_arguments {
+            let param = callee.params.get(callback_argument.parameter_index).ok_or(
+                SemanticContractError::Unsupported("callback parameter position outside profile"),
+            )?;
+            if param.fn_contract_requires.is_some() || param.fn_contract_ensures.is_some() {
+                let Some(target) = callees.get(&callback_argument.target_atom) else {
+                    return Err(SemanticContractError::Unsupported(
+                        "atom_ref target outside module",
+                    ));
+                };
+                callback_subsumption_obligations.extend(callback_contract_subsumption(
+                    atom,
+                    param,
+                    target,
+                    call_returns,
+                    context,
+                    refined,
+                    enums,
+                )?);
+            }
+            let callback_param_names: BTreeSet<String> = callee
+                .params
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| {
+                    site.callback_arguments
+                        .iter()
+                        .any(|argument| argument.parameter_index == *index)
+                })
+                .map(|(_, candidate)| candidate.name.clone())
+                .collect();
+            for clause in [&callee.requires, &callee.ensures] {
+                let expression =
+                    parse_expression_checked(clause).map_err(|_| SemanticContractError::Parse)?;
+                if callback_param_names
+                    .iter()
+                    .any(|name| contains_callback_call(&expression, name))
+                {
+                    return Err(SemanticContractError::Unsupported(
+                        "callback call in containing atom contract outside profile",
+                    ));
+                }
+            }
+        }
         let site_env = param_env(
             &callee.params,
             &site.args,
@@ -9231,11 +10047,126 @@ fn module_atom_obligations<'ctx>(
         let site_domain = Bool::and(context, &[&site.guard, &exits_domain]);
         assumptions.push(site_domain.implies(&callee_post));
     }
+    for site in requires_call_sites.iter().chain(ensures_call_sites.iter()) {
+        let Some(callee) = callees.get(&site.callee) else {
+            return Err(SemanticContractError::Unsupported(
+                "call target outside module",
+            ));
+        };
+        let callback_param_names: BTreeSet<String> = site
+            .callback_arguments
+            .iter()
+            .filter_map(|argument| callee.params.get(argument.parameter_index))
+            .map(|param| param.name.clone())
+            .collect();
+        for argument in &site.callback_arguments {
+            let param = callee.params.get(argument.parameter_index).ok_or(
+                SemanticContractError::Unsupported("callback parameter position outside profile"),
+            )?;
+            if param.fn_contract_requires.is_some() || param.fn_contract_ensures.is_some() {
+                let target = callees.get(&argument.target_atom).ok_or(
+                    SemanticContractError::Unsupported("atom_ref target outside module"),
+                )?;
+                callback_subsumption_obligations.extend(callback_contract_subsumption(
+                    atom,
+                    param,
+                    target,
+                    call_returns,
+                    context,
+                    refined,
+                    enums,
+                )?);
+            }
+        }
+        for clause in [&callee.requires, &callee.ensures] {
+            let expression =
+                parse_expression_checked(clause).map_err(|_| SemanticContractError::Parse)?;
+            if callback_param_names
+                .iter()
+                .any(|name| contains_callback_call(&expression, name))
+            {
+                return Err(SemanticContractError::Unsupported(
+                    "callback call in containing atom contract outside profile",
+                ));
+            }
+        }
+    }
+    domain_obligations.extend(callback_subsumption_obligations);
+    let regular_assumptions = assumptions.clone();
+    let callback_calls: Vec<&CallbackCall<'ctx>> = body
+        .callback_calls
+        .iter()
+        .chain(requires_callback_calls.iter())
+        .chain(ensures_callback_calls.iter())
+        .collect();
+    let callback_assumptions: Vec<Bool> = callback_calls
+        .iter()
+        .map(|callback| {
+            let mut terms = vec![callback.result_domain.clone()];
+            if let Some(postcondition) = &callback.postcondition {
+                terms.push(postcondition.clone());
+            }
+            terms.extend(callback.postcondition_definedness.iter().cloned());
+            callback
+                .guard
+                .implies(&Bool::and(context, &terms.iter().collect::<Vec<_>>()))
+        })
+        .collect();
+    assumptions.extend(callback_assumptions.iter().cloned());
+    let requires_callback_start = body.callback_calls.len();
+    let requires_callback_end = requires_callback_start + requires_callback_calls.len();
+    let mut callback_definedness_obligations = Vec::new();
+    for (index, callback) in callback_calls.iter().enumerate() {
+        let mut checks = vec![
+            callback.argument_domain.clone(),
+            callback.precondition.clone(),
+        ];
+        checks.extend(callback.precondition_definedness.iter().cloned());
+        let precondition = callback
+            .guard
+            .implies(&Bool::and(context, &checks.iter().collect::<Vec<_>>()));
+        let post_definedness = callback.guard.implies(
+            &callback.result_domain.implies(&Bool::and(
+                context,
+                &callback
+                    .postcondition_definedness
+                    .iter()
+                    .collect::<Vec<_>>(),
+            )),
+        );
+        if (requires_callback_start..requires_callback_end).contains(&index) {
+            let hypotheses = Bool::and(context, &[&source_domain_formula, &requires_loop_exits]);
+            callback_definedness_obligations
+                .push(Bool::and(context, &[&hypotheses, &precondition.not()]));
+            if !callback.postcondition_definedness.is_empty() {
+                callback_definedness_obligations
+                    .push(Bool::and(context, &[&hypotheses, &post_definedness.not()]));
+            }
+            continue;
+        }
+        let mut hypotheses = vec![requires.clone()];
+        hypotheses.extend(regular_assumptions.iter().cloned());
+        hypotheses.extend(
+            callback_assumptions
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other < index)
+                .map(|(_, assumption)| assumption.clone()),
+        );
+        hypotheses.extend(requires_exits.iter().chain(ensures_exits.iter()).cloned());
+        hypotheses.extend(source_domain.iter().cloned());
+        let hypotheses = Bool::and(context, &hypotheses.iter().collect::<Vec<_>>());
+        callback_definedness_obligations
+            .push(Bool::and(context, &[&hypotheses, &precondition.not()]));
+        if !callback.postcondition_definedness.is_empty() {
+            callback_definedness_obligations
+                .push(Bool::and(context, &[&hypotheses, &post_definedness.not()]));
+        }
+    }
     assumptions.extend(requires_exits.iter().chain(ensures_exits.iter()).cloned());
     assumptions.extend(source_domain.iter().cloned());
     let assumption = Bool::and(context, &assumptions.iter().collect::<Vec<_>>());
     let mut obligations = vec![Bool::and(context, &[&requires, &assumption, &post.not()])];
-    let source_domain_formula = Bool::and(context, &source_domain.iter().collect::<Vec<_>>());
     for defined in &requires_definedness {
         obligations.push(Bool::and(
             context,
@@ -9253,6 +10184,7 @@ fn module_atom_obligations<'ctx>(
         ));
     }
     obligations.extend(domain_obligations);
+    obligations.extend(callback_definedness_obligations);
     let loop_exits = if loop_exit_terms.is_empty() {
         Bool::from_bool(context, true)
     } else {
@@ -9388,6 +10320,10 @@ enum SourceValue<'ctx> {
         tag: BV<'ctx>,
         slots: Vec<SourceValue<'ctx>>,
     },
+    Callback {
+        atom: String,
+        parameter: String,
+    },
     /// A `let`-bound fixed-size array (`bounded-memory`): cell contents
     /// as an SMT `BV64 -> BV64` array — the same index-domain the
     /// emitted `alloca`/GEP/`store`/`load` uses — plus the stored
@@ -9493,6 +10429,10 @@ fn substitute_source_value<'ctx>(
         SourceValue::Float64(v) => SourceValue::Float64(v.substitute(substitutions)),
         SourceValue::Number(v) => SourceValue::Number(v.substitute(substitutions)),
         SourceValue::Boolean(v) => SourceValue::Boolean(v.substitute(substitutions)),
+        SourceValue::Callback { atom, parameter } => SourceValue::Callback {
+            atom: atom.clone(),
+            parameter: parameter.clone(),
+        },
         SourceValue::Composite(fields) => SourceValue::Composite(
             fields
                 .iter()
@@ -9555,7 +10495,23 @@ fn param_env<'ctx>(
     let mut slots = inputs.iter();
     let mut env = HashMap::new();
     for p in params {
-        let value = if p.type_name.as_deref() == Some("[i64]") {
+        let value = if p.type_ref.as_ref().is_some_and(|ty| ty.is_fn_type()) {
+            let _function_pointer = slots
+                .next()
+                .ok_or(SemanticContractError::Unsupported("source signature arity"))?;
+            if !call_returns
+                .callback_parameters
+                .contains_key(&(atom_name.to_owned(), p.name.clone()))
+            {
+                return Err(SemanticContractError::Unsupported(
+                    "callback parameter outside profile",
+                ));
+            }
+            SourceValue::Callback {
+                atom: atom_name.to_owned(),
+                parameter: p.name.clone(),
+            }
+        } else if p.type_name.as_deref() == Some("[i64]") {
             let store = Array::new_const(
                 ctx,
                 format!("array_param_{atom_name}_{}_store", p.name),
@@ -10777,6 +11733,9 @@ fn lower_scalar<'ctx>(value: SourceValue<'ctx>, ctx: &'ctx Context) -> BodyResul
         SourceValue::Array { .. } => Err(SemanticContractError::Unsupported(
             "source array value in a scalar position",
         )),
+        SourceValue::Callback { .. } => Err(SemanticContractError::Unsupported(
+            "function parameter used outside a call",
+        )),
     }
 }
 
@@ -10955,6 +11914,30 @@ fn result_value<'ctx>(
     }
 }
 
+fn callback_value<'ctx>(
+    kind: ScalarKind,
+    value: BV<'ctx>,
+    ctx: &'ctx Context,
+) -> SourceValue<'ctx> {
+    match kind {
+        ScalarKind::Bool => SourceValue::Boolean(value._eq(&BV::from_u64(ctx, 0, 64)).not()),
+        ScalarKind::U64 => SourceValue::Unsigned(value),
+        ScalarKind::F64 => SourceValue::Float64(value),
+        ScalarKind::I128 => SourceValue::Wide(value),
+        ScalarKind::U128 => SourceValue::UWide(value),
+        _ => SourceValue::Integer(value),
+    }
+}
+
+fn callback_leaf_domain<'ctx>(
+    leaf: &CallbackLeaf,
+    value: &BV<'ctx>,
+    ctx: &'ctx Context,
+    refined: &RefinedEnv,
+) -> BodyResult<Vec<Bool<'ctx>>> {
+    declared_slot_domain(Some(leaf.type_name.as_str()), value, ctx, refined)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn source_expr<'ctx>(
     expr: &Expr,
@@ -11000,6 +11983,11 @@ fn source_expr<'ctx>(
                         "array argument outside profile",
                     ));
                 }
+                if matches!(value, SourceValue::Callback { .. }) {
+                    return Err(SemanticContractError::Unsupported(
+                        "function parameter in perform arguments",
+                    ));
+                }
             }
             call_returns
                 .perform_definedness
@@ -11026,6 +12014,158 @@ fn source_expr<'ctx>(
                 ));
             }
             value
+        }
+        Expr::CallRef { callee, args } => {
+            let Expr::Variable(parameter) = callee.as_ref() else {
+                return Err(SemanticContractError::Unsupported(
+                    "callback call target is not a function parameter",
+                ));
+            };
+            let Some(SourceValue::Callback {
+                atom,
+                parameter: callback_parameter,
+            }) = env.get(parameter)
+            else {
+                return Err(SemanticContractError::Unsupported(
+                    "call target is not a function parameter",
+                ));
+            };
+            let key = (atom.clone(), callback_parameter.clone());
+            let model = call_returns.callback_parameters.get(&key).ok_or(
+                SemanticContractError::Unsupported("callback parameter outside profile"),
+            )?;
+            if args.len() != model.signature.params.len() {
+                return Err(SemanticContractError::Unsupported(
+                    "callback call arity mismatch",
+                ));
+            }
+            let mut values = Vec::with_capacity(args.len());
+            let mut actuals = Vec::with_capacity(args.len());
+            let mut argument_domains = Vec::new();
+            for (arg, expected) in args.iter().zip(&model.signature.params) {
+                let value = source_expr(
+                    arg,
+                    ctx,
+                    env,
+                    guard,
+                    definedness,
+                    depth + 1,
+                    assignable,
+                    written,
+                    loop_exits,
+                    call_sites,
+                    call_returns,
+                    enums,
+                )?;
+                let mut lowered = lower_scalar(value.clone(), ctx)?;
+                let expected_width = callback_leaf_width(expected.kind);
+                if lowered.get_size() != expected_width {
+                    if expected_width == 128 && matches!(value, SourceValue::Number(_)) {
+                        lowered = if expected.kind == ScalarKind::U128 {
+                            lowered.zero_ext(64)
+                        } else {
+                            lowered.sign_ext(64)
+                        };
+                    } else {
+                        return Err(SemanticContractError::Unsupported(
+                            "callback argument width mismatch",
+                        ));
+                    }
+                }
+                argument_domains.extend(callback_leaf_domain(
+                    expected,
+                    &lowered,
+                    ctx,
+                    &call_returns.refined,
+                )?);
+                values.push(callback_value(expected.kind, lowered.clone(), ctx));
+                actuals.push(lowered);
+            }
+            let refs: Vec<&dyn Ast> = actuals.iter().map(|value| value as &dyn Ast).collect();
+            let result = model.declaration.apply(&refs).as_bv().ok_or(
+                SemanticContractError::Unsupported("callback call result kind"),
+            )?;
+            let mut aliases = HashMap::new();
+            for (index, value) in values.into_iter().enumerate() {
+                aliases.insert(format!("arg{index}"), value.clone());
+                if index == 0 {
+                    aliases.insert("x".to_owned(), value.clone());
+                } else if index == 1 {
+                    aliases.insert("y".to_owned(), value.clone());
+                }
+            }
+            aliases.insert(
+                "result".to_owned(),
+                callback_value(model.signature.result.kind, result.clone(), ctx),
+            );
+            let mut precondition = Bool::from_bool(ctx, true);
+            let mut precondition_definedness = Vec::new();
+            if let Some(requires) = &model.requires {
+                let expression =
+                    parse_expression_checked(requires).map_err(|_| SemanticContractError::Parse)?;
+                let mut precondition_aliases = aliases.clone();
+                precondition_aliases.remove("result");
+                precondition = source_expr(
+                    &expression,
+                    ctx,
+                    &precondition_aliases,
+                    guard,
+                    &mut precondition_definedness,
+                    depth + 1,
+                    &BTreeSet::new(),
+                    written,
+                    loop_exits,
+                    call_sites,
+                    call_returns,
+                    enums,
+                )?
+                .boolean()?;
+            }
+            let mut postcondition_definedness = Vec::new();
+            let postcondition = if let Some(ensures) = &model.ensures {
+                let expression =
+                    parse_expression_checked(ensures).map_err(|_| SemanticContractError::Parse)?;
+                Some(
+                    source_expr(
+                        &expression,
+                        ctx,
+                        &aliases,
+                        guard,
+                        &mut postcondition_definedness,
+                        depth + 1,
+                        &BTreeSet::new(),
+                        written,
+                        loop_exits,
+                        call_sites,
+                        call_returns,
+                        enums,
+                    )?
+                    .boolean()?,
+                )
+            } else {
+                None
+            };
+            let result_domain = Bool::and(
+                ctx,
+                &callback_leaf_domain(
+                    &model.signature.result,
+                    &result,
+                    ctx,
+                    &call_returns.refined,
+                )?
+                .iter()
+                .collect::<Vec<_>>(),
+            );
+            call_returns.callback_calls.borrow_mut().push(CallbackCall {
+                guard: guard.clone(),
+                argument_domain: Bool::and(ctx, &argument_domains.iter().collect::<Vec<_>>()),
+                precondition,
+                precondition_definedness,
+                postcondition,
+                postcondition_definedness,
+                result_domain,
+            });
+            callback_value(model.signature.result.kind, result, ctx)
         }
         Expr::FieldAccess(target, field) => {
             // A nullary `E::V` — parsed as field access on the enum
@@ -12111,7 +13251,46 @@ fn source_expr<'ctx>(
             let mut arg_leaf_doubles = Vec::with_capacity(args.len());
             let mut argument_shapes = Vec::with_capacity(args.len());
             let mut has_composite_arguments = false;
-            for arg in args {
+            let mut callback_arguments = Vec::new();
+            for (parameter_index, arg) in args.iter().enumerate() {
+                if let Some(signature) = call_returns
+                    .callee_callback_params
+                    .get(name)
+                    .and_then(|params| params.get(parameter_index))
+                    .and_then(Option::as_ref)
+                {
+                    let Expr::AtomRef { name: target_atom } = arg else {
+                        return Err(SemanticContractError::Unsupported(
+                            "callback argument must be a direct atom_ref",
+                        ));
+                    };
+                    let target = BV::new_const(ctx, format!("atom_ref_{target_atom}"), 64);
+                    applied.push(target);
+                    arg_leaf_doubles.push(false);
+                    argument_shapes.push(CallValueShape::Scalar { leaf_count: 1 });
+                    callback_arguments.push(CallbackArgument {
+                        parameter_index,
+                        target_atom: target_atom.clone(),
+                    });
+                    let _ = signature;
+                    continue;
+                }
+                if matches!(arg, Expr::AtomRef { .. }) {
+                    return Err(SemanticContractError::Unsupported(
+                        "atom_ref outside a callback argument",
+                    ));
+                }
+                if matches!(arg, Expr::Lambda { .. }) {
+                    return Err(SemanticContractError::Unsupported(
+                        "lambda callback argument outside profile",
+                    ));
+                }
+                if matches!(arg, Expr::Variable(var) if matches!(env.get(var), Some(SourceValue::Callback { .. })))
+                {
+                    return Err(SemanticContractError::Unsupported(
+                        "function parameter passed onward outside profile",
+                    ));
+                }
                 let lower = |value: SourceValue<'ctx>| lower_scalar(value, ctx);
                 let value = source_expr(
                     arg,
@@ -12221,6 +13400,7 @@ fn source_expr<'ctx>(
                     },
                     result_leaf_doubles,
                     guard: guard.clone(),
+                    callback_arguments: callback_arguments.clone(),
                 });
                 return Ok(composite_from_slots(
                     call_returns,
@@ -12266,6 +13446,7 @@ fn source_expr<'ctx>(
                     },
                     result_leaf_doubles,
                     guard: guard.clone(),
+                    callback_arguments: callback_arguments.clone(),
                 });
                 return Ok(SourceValue::Enum {
                     name: enum_name.to_owned(),
@@ -12298,6 +13479,7 @@ fn source_expr<'ctx>(
                     result_shape: CallValueShape::Scalar { leaf_count: 2 },
                     result_leaf_doubles: vec![false; 2],
                     guard: guard.clone(),
+                    callback_arguments: callback_arguments.clone(),
                 });
                 let agg = aggregate_value(&slots);
                 return Ok(if call_returns.returns_u128(name) {
@@ -12322,6 +13504,7 @@ fn source_expr<'ctx>(
                 result_shape: CallValueShape::Scalar { leaf_count: 1 },
                 result_leaf_doubles: vec![call_returns.returns_f64(name)],
                 guard: guard.clone(),
+                callback_arguments,
             });
             // The uninterpreted result is a bitvector; a callee whose
             // return kind is bool reads it under the profile's 0/1
@@ -12335,6 +13518,16 @@ fn source_expr<'ctx>(
             } else {
                 I(value)
             }
+        }
+        Expr::AtomRef { .. } => {
+            return Err(SemanticContractError::Unsupported(
+                "atom_ref outside a direct callback argument",
+            ))
+        }
+        Expr::Lambda { .. } => {
+            return Err(SemanticContractError::Unsupported(
+                "lambda callback argument outside profile",
+            ))
         }
         _ => {
             return Err(SemanticContractError::Unsupported(
@@ -17309,6 +18502,346 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
                 "array argument outside profile"
             ))
         ));
+    }
+
+    #[test]
+    fn composite_v27_admits_scalar_callback_contracts_and_checks_obligations() {
+        let positives = [
+            include_str!("../../tests/positive/test_callback_contract_ok.mm"),
+            include_str!("../../tests/positive/test_callback_contract_alias_ok.mm"),
+            include_str!("../../tests/positive/test_callback_contract_plain_ensures.mm"),
+            include_str!("../../tests/positive/test_callback_contract_requires_ok.mm"),
+            include_str!("../../tests/positive/test_callback_contract_requires_only_call_ok.mm"),
+            include_str!("../../tests/positive/test_spec_callback_domain.mm"),
+            "atom accepts(f: atom_ref(i64) -> i64) -> i64 requires: call(f, 0) >= 0; \
+                ensures: true; contract(f): ensures: result >= 0; body: 0;",
+            "atom identity(value: i64) -> i64 requires: true; \
+                ensures: result == value; body: value;\n\
+                atom apply(x: i64, f: atom_ref(i64) -> i64) -> i64 requires: true; \
+                ensures: result == x; contract(f): ensures: result == arg0; body: call(f, x);\n\
+                atom main() -> i64 requires: true; ensures: result == 0; \
+                body: apply(0, atom_ref(identity));",
+            "atom truth(value: bool) -> i64 requires: true; \
+                ensures: result >= 0; body: if value { 1 } else { 0 };\n\
+                atom apply(f: atom_ref(bool) -> i64) -> i64 requires: true; \
+                ensures: result >= 0; contract(f): ensures: result >= 0; \
+                body: call(f, true);\n\
+                atom main() -> i64 requires: true; ensures: result >= 0; \
+                body: apply(atom_ref(truth));",
+            "atom apply(x: u64, f: atom_ref(u64) -> u64) -> u64 requires: true; \
+                ensures: result == x; contract(f): ensures: result == arg0; body: call(f, x);",
+            "atom apply(x: i128, f: atom_ref(i128) -> i128) -> i128 requires: true; \
+                ensures: result == x; contract(f): ensures: result == arg0; body: call(f, x);",
+            "atom apply(x: u128, f: atom_ref(u128) -> u128) -> u128 requires: true; \
+                ensures: result == x; contract(f): ensures: result == arg0; body: call(f, x);",
+            "atom apply(x: f64, f: atom_ref(f64) -> f64) -> f64 requires: true; \
+                ensures: true; contract(f): ensures: true; body: call(f, x);",
+        ];
+        for source in positives {
+            let contracts = extract_pure_i64_module_contracts(
+                source,
+                "callback.mm",
+                None,
+                RefinedAdmission::CompositeV27,
+            )
+            .unwrap();
+            assert!(contracts.iter().all(|contract| {
+                if contract.specification.callback_parameters.is_empty() {
+                    contract.profile != PURE_I64_COMPOSITE_PROFILE_V27
+                } else {
+                    contract.profile == PURE_I64_COMPOSITE_PROFILE_V27
+                }
+            }));
+            assert!(contracts.iter().any(|contract| {
+                contract
+                    .specification
+                    .callback_parameters
+                    .iter()
+                    .any(|callback| {
+                        callback.type_name.contains("atom_ref")
+                            && (callback.requires.is_some() || callback.ensures.is_some())
+                    })
+            }));
+            assert!(contracts.iter().any(|contract| {
+                contract
+                    .assumptions
+                    .contains(&"callback_contract_assumed_not_runtime_checked")
+            }));
+            let outcomes =
+                refined_module_outcomes_admission(source, RefinedAdmission::CompositeV27);
+            assert!(
+                outcomes
+                    .iter()
+                    .all(|result| *result == z3::SatResult::Unsat),
+                "{outcomes:?}"
+            );
+            assert!(extract_pure_i64_module_contracts(
+                source,
+                "callback.mm",
+                None,
+                RefinedAdmission::CompositeV26
+            )
+            .is_err());
+        }
+
+        let negatives = [
+            include_str!("../../tests/negative/test_callback_contract_violation.mm"),
+            include_str!("../../tests/negative/test_callback_contract_requires_violation.mm"),
+            include_str!(
+                "../../tests/negative/test_callback_contract_requires_only_call_violation.mm"
+            ),
+            include_str!("../../tests/negative/test_spec_callback_domain_oob.mm"),
+        ];
+        for source in negatives {
+            extract_pure_i64_module_contracts(
+                source,
+                "callback.mm",
+                None,
+                RefinedAdmission::CompositeV27,
+            )
+            .unwrap();
+            let outcomes =
+                refined_module_outcomes_admission(source, RefinedAdmission::CompositeV27);
+            assert!(
+                outcomes.iter().any(|result| *result == z3::SatResult::Sat),
+                "{outcomes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn composite_v27_callback_subsumption_separates_positional_aliases_from_target_names() {
+        let source = |target_requires: &str| {
+            format!(
+                "atom g(y: i64, x: i64) -> i64 requires: {target_requires}; \
+                ensures: true; body: 0;\n\
+                atom apply(f: atom_ref(i64, i64) -> i64) -> i64 requires: true; \
+                ensures: true; contract(f): requires: x > y; body: 0;\n\
+                atom main() -> i64 requires: true; ensures: true; \
+                body: apply(atom_ref(g));"
+            )
+        };
+
+        let false_subsumption = source("x >= y");
+        let outcomes =
+            refined_module_outcomes_admission(&false_subsumption, RefinedAdmission::CompositeV27);
+        assert!(
+            outcomes.iter().any(|result| *result == z3::SatResult::Sat),
+            "{outcomes:?}"
+        );
+
+        let matching_subsumption = source("y > x");
+        let outcomes = refined_module_outcomes_admission(
+            &matching_subsumption,
+            RefinedAdmission::CompositeV27,
+        );
+        assert!(
+            outcomes
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat),
+            "{outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn composite_v27_callback_preconditions_use_only_prior_call_assumptions() {
+        let repeated_calls = "atom apply(x: i64, f: atom_ref(i64) -> i64) -> i64\n\
+            requires: true; ensures: true;\n\
+            contract(f): requires: x >= 0, ensures: x >= 0;\n\
+            body: call(f, x) + call(f, x);";
+        let outcomes =
+            refined_module_outcomes_admission(repeated_calls, RefinedAdmission::CompositeV27);
+        assert!(
+            outcomes.iter().any(|result| *result == z3::SatResult::Sat),
+            "{outcomes:?}"
+        );
+
+        let nested_calls = "atom apply(x: i64, f: atom_ref(i64) -> i64) -> i64\n\
+            requires: x >= 0; ensures: true;\n\
+            contract(f): requires: x >= 0, ensures: result >= 0;\n\
+            body: call(f, call(f, x));";
+        let outcomes =
+            refined_module_outcomes_admission(nested_calls, RefinedAdmission::CompositeV27);
+        assert!(
+            outcomes
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat),
+            "{outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn composite_v27_callback_post_definedness_uses_result_domain() {
+        let source = "type Pos = i64 where v > 0;\n\
+            atom apply(f: atom_ref(i64) -> Pos) -> i64\n\
+                requires: true; ensures: true;\n\
+                contract(f): ensures: 10 / result >= 0;\n\
+                body: call(f, 0);";
+        let outcomes = refined_module_outcomes_admission(source, RefinedAdmission::CompositeV27);
+        assert!(
+            outcomes
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat),
+            "{outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn composite_v27_callback_contracts_fail_closed_on_unsupported_forms() {
+        let callback_clause =
+            parse_expression_checked("call(f, x) >= 0").expect("callback clause parses");
+        assert!(contains_callback_call(&callback_clause, "f"));
+
+        let non_alias = "atom apply(f: atom_ref(i64) -> i64) -> i64\n\
+            requires: true; ensures: true;\n\
+            contract(f): requires: value >= 0;\n\
+            body: call(f, 0);";
+        assert!(matches!(
+            extract_pure_i64_module_contracts(
+                non_alias,
+                "callback.mm",
+                None,
+                RefinedAdmission::CompositeV27
+            ),
+            Err(SemanticContractError::Unsupported(
+                "callback contract identifier outside positional aliases"
+            ))
+        ));
+
+        let signature_mismatch = "atom g(x: u64) -> u64 requires: true; ensures: true; body: x;\n\
+            atom apply(f: atom_ref(i64) -> i64) -> i64 requires: true; ensures: true; \
+            body: call(f, 0);\n\
+            atom main() -> i64 requires: true; ensures: true; \
+            body: apply(atom_ref(g));";
+        assert!(matches!(
+            extract_pure_i64_module_contracts(
+                signature_mismatch,
+                "callback.mm",
+                None,
+                RefinedAdmission::CompositeV27
+            ),
+            Err(SemanticContractError::Unsupported(
+                "callback signature mismatch"
+            ))
+        ));
+
+        let callback_call_in_receiving_contract = "atom g(x: i64) -> i64 requires: true; \
+            ensures: true; body: x;\n\
+            atom apply(x: i64, f: atom_ref(i64) -> i64) -> i64 \
+            requires: call(f, x) >= 0; ensures: true; \
+            contract(f): requires: x >= 0; body: 0;\n\
+            atom main() -> i64 requires: true; ensures: true; \
+            body: apply(0, atom_ref(g));";
+        assert!(matches!(
+            extract_pure_i64_module_contracts(
+                callback_call_in_receiving_contract,
+                "callback.mm",
+                None,
+                RefinedAdmission::CompositeV27
+            ),
+            Err(SemanticContractError::Unsupported(
+                "callback call in containing atom contract outside profile"
+            ))
+        ));
+
+        let callback_in_perform = "effect Door;\n\
+            atom apply(f: atom_ref(i64) -> i64) -> i64 effects: [Door]; \
+            requires: true; ensures: true; \
+            body: { perform Door.open(f); 0 };";
+        assert!(matches!(
+            extract_pure_i64_module_contracts(
+                callback_in_perform,
+                "callback.mm",
+                None,
+                RefinedAdmission::CompositeV27
+            ),
+            Err(SemanticContractError::Unsupported(
+                "function parameter in perform arguments"
+            ))
+        ));
+
+        let unsupported = [
+            include_str!("../../tests/positive/test_callback_contract_array_ok.mm"),
+            include_str!("../../tests/positive/test_callback_contract_str_ok.mm"),
+            "atom g(x: i64) -> i64 requires: true; ensures: true; body: x;\n\
+                atom apply(f: atom_ref(i64) -> i64) -> i64 requires: true; ensures: true; \
+                body: call(f, 0);\n\
+                atom main() -> i64 requires: true; ensures: true; body: apply(|x: i64| -> i64 { x });",
+            "atom apply(f: atom_ref(i64) -> i64) -> i64 requires: true; ensures: true; \
+                body: { let alias = f; call(alias, 0) };",
+            "atom g(x: i64) -> i64 requires: true; ensures: true; body: x;\n\
+                atom main() -> i64 requires: true; ensures: true; body: atom_ref(g);",
+            "atom apply(f: atom_ref(i64) -> i64) -> i64 requires: true; ensures: true; \
+                body: call(atom_ref(g), 0);\n\
+                atom g(x: i64) -> i64 requires: true; ensures: true; body: x;",
+            "atom apply(f: atom_ref(i64) -> i64) -> i64 requires: true; ensures: true; \
+                body: call(g, 0);\n\
+                atom g(x: i64) -> i64 requires: true; ensures: true; body: x;",
+            "atom apply(f: atom_ref(i64) -> i64) -> i64 requires: true; ensures: true; \
+                contract(f): requires: result >= 0; body: call(f, 0);",
+            "atom apply(f: atom_ref(i64) -> i64) -> i64 requires: true; ensures: true; \
+                body: forward(f);\n\
+                atom forward(g: atom_ref(i64) -> i64) -> i64 requires: true; \
+                ensures: true; body: call(g, 0);",
+            "atom apply(f: atom_ref(i64) -> i64) -> i64 requires: true; ensures: true; \
+                body: call(f, 0);\n\
+                atom use(f: atom_ref(i64) -> i64) -> i64 requires: true; \
+                ensures: true; body: apply(f);",
+            "atom return_callback(f: atom_ref(i64) -> i64) \
+                -> atom_ref(i64) -> i64 requires: true; ensures: true; body: f;",
+            "struct Holder { callback: atom_ref(i64) -> i64 }\n\
+                atom store_callback(f: atom_ref(i64) -> i64) -> i64 \
+                requires: true; ensures: true; body: { let holder = Holder { callback: f }; 0 };",
+            "struct Box { value: i64 }\n\
+                atom apply(f: atom_ref(Box) -> i64) -> i64 \
+                requires: true; ensures: true; body: 0;",
+            "enum Choice { First, Second }\n\
+                atom apply(f: atom_ref(Choice) -> i64) -> i64 \
+                requires: true; ensures: true; body: 0;",
+            "atom apply<T>(f: atom_ref(T) -> i64) -> i64 \
+                requires: true; ensures: true; body: 0;",
+            "atom apply(f: atom_ref(atom_ref(i64) -> i64) -> i64) -> i64 \
+                requires: true; ensures: true; body: 0;",
+        ];
+        for source in unsupported {
+            let result = extract_pure_i64_module_contracts(
+                source,
+                "callback.mm",
+                None,
+                RefinedAdmission::CompositeV27,
+            );
+            assert!(
+                matches!(result, Err(SemanticContractError::Unsupported(_))),
+                "accepted unsupported callback source: {source}"
+            );
+        }
+        let opaque = "atom opaque(x: i64, f: atom_ref(i64) -> i64) -> i64\n\
+            requires: true; ensures: result >= 0; body: call(f, x);";
+        let outcomes = refined_module_outcomes_admission(opaque, RefinedAdmission::CompositeV27);
+        assert!(
+            outcomes.iter().any(|result| *result == z3::SatResult::Sat),
+            "{outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn composite_v27_keeps_callback_free_contract_bytes_identical_to_v26() {
+        let source = "atom inc(x: i64) -> i64 requires: x >= 0; \
+            ensures: result == x + 1; body: x + 1;\n\
+            atom main() -> i64 requires: true; ensures: result == 1; body: inc(0);";
+        let v26 =
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV26)
+                .unwrap();
+        let v27 =
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV27)
+                .unwrap();
+        assert!(v27
+            .iter()
+            .all(|contract| contract.profile != PURE_I64_COMPOSITE_PROFILE_V27));
+        assert_eq!(
+            serde_json::to_vec(&v26).unwrap(),
+            serde_json::to_vec(&v27).unwrap()
+        );
     }
 }
 
