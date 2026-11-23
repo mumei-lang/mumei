@@ -5976,9 +5976,14 @@ fn loop_bundle_links_and_pins_runtime_but_keeps_runtime_out_of_claims() {
         .as_array()
         .unwrap()
     {
+        // `.get()` distinguishes "emitted as null" from "key dropped" —
+        // index access returns Null for a missing key and would hide
+        // the field being removed from the JSON.
+        let assumption = relocation
+            .get("assumption")
+            .expect("relocation is missing the assumption key");
         assert!(
-            relocation["assumption"].is_null()
-                || relocation["assumption"] == "assumed_external_callee",
+            assumption.is_null() || *assumption == "assumed_external_callee",
             "unexpected assumption marker: {relocation}"
         );
     }
