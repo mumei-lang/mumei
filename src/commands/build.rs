@@ -1260,7 +1260,7 @@ fn emit_semantic_contract_sidecars(input: &str, source: &str, llvm_paths: &[Path
             source,
             input_basename,
             None,
-            mumei_core::semantic_contract::RefinedAdmission::CompositeV27,
+            mumei_core::semantic_contract::RefinedAdmission::CompositeV28,
         )
         .map_err(|error| error.to_string())?;
         let contracts = serde_json::to_value(contracts)

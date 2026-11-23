@@ -3710,6 +3710,58 @@ fn native_bundle_rejects_scalar_callback_parameter_sources() {
 }
 
 #[test]
+fn native_bundle_rejects_inferred_refined_return_outside_composite_v26() {
+    let root = tempfile::tempdir().unwrap();
+    let source_path = root.path().join("source.mm");
+    let bundle = root.path().join("bundle");
+    let source = "type Nat = i64 where v >= 0;\n\
+        atom identity(n: Nat) requires: true; ensures: result == n; body: n;\n\
+        atom main() -> i64 requires: true; ensures: result >= 0; body: identity(1);";
+    fs::write(&source_path, source).unwrap();
+
+    let contracts = extract_pure_i64_module_contracts(
+        source,
+        "source.mm",
+        None,
+        RefinedAdmission::CompositeV28,
+    )
+    .expect("inferred refined return should extract under CompositeV28");
+    assert!(contracts.iter().any(|contract| contract.profile
+        == mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V28));
+    assert!(matches!(
+        extract_pure_i64_module_contracts(
+            source,
+            "source.mm",
+            None,
+            RefinedAdmission::CompositeV26
+        ),
+        Err(
+            mumei_core::semantic_contract::SemanticContractError::Unsupported(
+                "explicit owned scalar i64 signature required"
+            )
+        )
+    ));
+
+    let output = cli(&[
+        "native-bundle",
+        "build",
+        source_path.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]);
+    let output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success());
+    assert!(
+        output_text.contains("unsupported or invalid module source"),
+        "native bundles must remain pinned to CompositeV26; output: {output_text}"
+    );
+}
+
+#[test]
 fn module_bundle_with_struct_and_single_main_takes_the_module_path() {
     // A lone `main` beside a struct declaration is still a composite
     // module — the single-atom path rejects every non-atom item.
