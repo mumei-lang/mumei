@@ -9577,7 +9577,8 @@ define i64 @after_five(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i128 %x) {
         // `shld`/`shrd` move the cross-word bits while `test $0x40,%cl`
         // + `cmov` select the `count >= 64` fallback — both halves of
         // the pattern are lifted, so the whole sequence is equivalent
-        // over the source's defined shift domain (`n` in 0..64).
+        // over the source's defined wide-shift domain (`n` in 0..128;
+        // the `requires` bound does not enter the compared domain).
         let ir = r#"target triple = "x86_64-unknown-linux-gnu"
 define i128 @shl128(i128 %x, i128 %n) {
   %r = shl i128 %x, %n

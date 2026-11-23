@@ -5108,9 +5108,10 @@ fn module_bundle_v24_rejects_a_tampered_leaf_widths_pin() {
 fn module_bundle_with_i128_variable_shifts_rechecks() {
     // A variable `i128`/`u128` shift lowers to `shld`/`shrd` +
     // `test $0x40,%cl`/`cmov` on the generic target — the machine-TV
-    // lifter models the whole sequence. The `requires` bound is the
-    // source verifier's shift domain (0..64); the machine path keeps
-    // the `count >= 64` fallback outside the compared domain.
+    // lifter models the whole sequence. The `requires` bound satisfies
+    // the source verifier's 0..64 shift check; the compared domain is
+    // the wide definedness range 0..128, so the `count >= 64` cmov
+    // fallback is exercised too.
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build_source(
         root.path(),
