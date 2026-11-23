@@ -990,6 +990,26 @@ pub unsafe fn encode_parsed_function_for_comparison<'ctx>(
             array_params_admitted: false,
         },
     )?;
+    // The shared gate admits a 128-bit scalar return and a checked
+    // direct call; both stay outside the scalar-i64 comparison subset.
+    // An `i128`-returning or call-bearing IR is not compared — it is
+    // rejected here so the caller records the function as not
+    // liftable rather than silently binding a mis-shaped encoding.
+    let ret = LLVMGetReturnType(LLVMGlobalGetValueType(raw));
+    if aggregate_fields(ret).is_some() || width(ret)? != 64 {
+        return Err(ValidationError("unsupported LLVM signature"));
+    }
+    let mut block = LLVMGetFirstBasicBlock(raw);
+    while !block.is_null() {
+        let mut inst = LLVMGetFirstInstruction(block);
+        while !inst.is_null() {
+            if LLVMGetInstructionOpcode(inst) == LLVMOpcode::LLVMCall {
+                return Err(ValidationError("LLVM call outside comparison subset"));
+            }
+            inst = LLVMGetNextInstruction(inst);
+        }
+        block = LLVMGetNextBasicBlock(block);
+    }
     let no_renames = BTreeMap::new();
     let mut encoder = IrEncoder::new(context, &no_renames, false, optimized);
     let returns = encoder.encode(

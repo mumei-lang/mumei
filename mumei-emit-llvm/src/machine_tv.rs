@@ -6033,6 +6033,43 @@ entry:
             }
             .is_err());
         }
+        // The shared gate admits shapes the scalar-i64 comparison
+        // subset excludes: an `i128` return (the gate allows 64|128
+        // bits for a scalar result) and a checked direct call both
+        // encode unless the comparison path rejects them itself.
+        for outside_subset_ir in [
+            r#"target triple = "x86_64-unknown-linux-gnu"
+define i128 @helper(i64 %x, i64 %y) {
+entry:
+  %a = zext i64 %x to i128
+  %b = zext i64 %y to i128
+  %r = add i128 %a, %b
+  ret i128 %r
+}
+"#,
+            r#"target triple = "x86_64-unknown-linux-gnu"
+define i64 @callee(i64 %x) {
+entry:
+  ret i64 %x
+}
+define i64 @helper(i64 %x, i64 %y) {
+entry:
+  %r = call i64 @callee(i64 %x)
+  ret i64 %r
+}
+"#,
+        ] {
+            assert!(unsafe {
+                crate::translation_validation::encode_ir_function_for_comparison(
+                    outside_subset_ir.as_bytes(),
+                    "helper",
+                    &model,
+                    false,
+                    &context,
+                )
+            }
+            .is_err());
+        }
     }
 
     #[test]
