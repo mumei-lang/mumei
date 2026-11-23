@@ -2204,7 +2204,7 @@ argument/result convention itself remains assumed, not validated. Agent
 consumers must adopt the new preservation check names and function field.
 
 The machine-TV and object-acceptance JSON descriptors also carry
-`object_translation`: a metadata-only record (Step 1 of
+`object_translation`: a metadata record (Step 1 of
 `docs/DESIGN_OBJECT_TRANSLATION_CORRESPONDENCE.md`) that emits the
 `llvm_ir -> object_code` and `object_code -> linked_executable`
 transformation relations with their `output_identity` digests, a per-function
@@ -2218,11 +2218,18 @@ Emitting this record performs no `object_translation_correspondence` check —
 it stays absent from both check lists as before.
 
 Step 2 adds `object_translation.correspondence`: an inspection of the emitted
-metadata that stays honestly unvalidated. `correspondence.status` is always
-`unchecked_not_translation_validated`; each entry of `correspondence.checks`
+metadata. Each entry of `correspondence.checks`
 reports one item's `result` — `checked` when the comparison ran and passed,
 `unchecked` when it could not run, or `inconsistent` with the offending names
-or offsets in `detail`. The items are `function_coverage` (every IR-defined
+or offsets in `detail`. Step 3 of the record pipeline (aggregate status
+wiring; unrelated to the design memo's §7 Step 3, direct LLVM-IR comparison,
+which is not implemented) aggregates those results:
+`correspondence.status` is `checked_correspondence` only when every item
+checked, `inconsistent_correspondence` when any item is inconsistent, and
+`unchecked_not_translation_validated` otherwise; `object_translation.status`
+moves from `metadata_only` to `checked_correspondence` on the same condition.
+Neither is a verdict-bearing claim — the record stays a report and no check,
+grade or verdict is promoted. The items are `function_coverage` (every IR-defined
 function maps to exactly one record function and vice versa),
 `function_count`, `relocation_targets` (every relocation target resolves to a
 record function, a linked executable symbol, an IR-declared callee, or a
