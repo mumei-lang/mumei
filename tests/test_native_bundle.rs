@@ -590,7 +590,7 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
     // entity is external, so the symbol-attribute item verifies
     // `checked` end to end — the precheck admits external linkage
     // only, so internal/private functions never reach it.
-    let symbol_attribute_item = object_translation["checks"]
+    let symbol_attribute_item = object_translation["correspondence"]["checks"]
         .as_array()
         .unwrap()
         .iter()
