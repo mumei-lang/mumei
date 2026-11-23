@@ -787,7 +787,7 @@ pub fn function_has_reachable_cycle(
 }
 
 pub fn supports_signature(model: &PureI64Body<'_>) -> bool {
-    if model.array_params.iter().any(Option::is_some) {
+    if model.array_params.iter().any(Option::is_some) || model.array_result.is_some() {
         return false;
     }
     let parameter_leaf_count = model

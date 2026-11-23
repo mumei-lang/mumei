@@ -8175,6 +8175,11 @@ pub struct PureI64Body<'ctx> {
     pub has_non_i64_scalar_features: bool,
     /// True when the admitted module uses i128 or u128 leaves.
     pub has_wide_scalar_features: bool,
+    /// A `-> [i64]` body's result as its `(len, element store)` pair
+    /// (`pure-i64-composite/v29`) — `Some` only when the declared
+    /// return is `[i64]`; `value` then carries the `len` application.
+    /// Machine TV treats such a body as outside profile.
+    pub array_result: Option<(BV<'ctx>, Array<'ctx>)>,
 }
 
 impl<'ctx> PureI64Body<'ctx> {
@@ -8215,6 +8220,7 @@ impl<'ctx> PureI64Body<'ctx> {
             has_f64_features: false,
             has_non_i64_scalar_features: false,
             has_wide_scalar_features: false,
+            array_result: None,
         }
     }
 }
@@ -8520,6 +8526,7 @@ fn encode_atom_body<'ctx>(
         .str_bound
         .set(atom.str_bound.unwrap_or(STR_BOUND));
     call_returns.perform_definedness.borrow_mut().clear();
+    let mut array_result = None;
     let value = match source_stmt(
         &body,
         context,
@@ -8543,10 +8550,14 @@ fn encode_atom_body<'ctx>(
         SourceValue::Boolean(value) => {
             value.ite(&BV::from_u64(context, 1, 64), &BV::from_u64(context, 0, 64))
         }
-        SourceValue::Array { .. } => {
-            return Err(SemanticContractError::Unsupported(
-                "array value in a result position",
-            ))
+        SourceValue::Array { store, len, .. } => {
+            if result_type != Some("[i64]") {
+                return Err(SemanticContractError::Unsupported(
+                    "array value in a result position",
+                ));
+            }
+            array_result = Some((len.clone(), store));
+            len
         }
         SourceValue::Callback { .. } => {
             return Err(SemanticContractError::Unsupported(
@@ -8709,6 +8720,7 @@ fn encode_atom_body<'ctx>(
         value,
         call_sites,
         call_result_bounds,
+        array_result,
         definedness,
         perform_definedness,
         param_domain,
@@ -9917,7 +9929,7 @@ fn module_atom_obligations<'ctx>(
     loop_exit_terms.extend(requires_exits.iter().cloned());
     env.insert(
         "result".to_string(),
-        result_value(&atom.name, &body.value, context, call_returns),
+        body_result_value(&atom.name, body, context, call_returns),
     );
     // `ensures` reads post-write composite fields — the same post-state
     // the verifier's env and the emitted code observe. Scalar rebinds
@@ -10120,7 +10132,7 @@ fn module_atom_obligations<'ctx>(
         }
         ensures_env.insert(
             "result".to_string(),
-            result_value(&callee.name, &site.result, context, call_returns),
+            call_site_result_value(site, &callee.name, context, call_returns),
         );
         let callee_ensures =
             parse_expression_checked(&callee.ensures).map_err(|_| SemanticContractError::Parse)?;
@@ -10380,7 +10392,7 @@ fn atom_obligation<'ctx>(
     .boolean()?;
     env.insert(
         "result".to_string(),
-        result_value(&atom.name, &body.value, context, call_returns),
+        body_result_value(&atom.name, body, context, call_returns),
     );
     // Same post-state composite view as `module_atom_obligations`.
     for (name, value) in &body.post_writes {
@@ -12011,6 +12023,55 @@ fn seed_merged_alloc<'ctx>(
 /// The `result` binding of an atom's (or call site's) result value:
 /// a struct result splits into its field slots, a `bool` result reads
 /// the 0/1 convention, an i64 result binds directly.
+/// A `[i64]` result binds as its `(len, element store)` pair — the
+/// same `SourceValue::Array` shape a parameter array carries, so
+/// `len(result)` and `result[i]` in `ensures` read through the
+/// uninterpreted applications (`pure-i64-composite/v29`).
+fn array_result_source<'ctx>(
+    len: &BV<'ctx>,
+    store: &Array<'ctx>,
+    call_returns: &CallShapes<'ctx>,
+) -> SourceValue<'ctx> {
+    let alloc = call_returns.fresh_array_alloc();
+    call_returns
+        .alloc_stores
+        .borrow_mut()
+        .insert(alloc, store.clone());
+    SourceValue::Array {
+        store: store.clone(),
+        len: len.clone(),
+        elem: ScalarKind::I64,
+        parameter: false,
+        alloc,
+    }
+}
+
+fn body_result_value<'ctx>(
+    atom: &str,
+    body: &PureI64Body<'ctx>,
+    ctx: &'ctx Context,
+    call_returns: &CallShapes<'ctx>,
+) -> SourceValue<'ctx> {
+    if let Some((len, store)) = &body.array_result {
+        array_result_source(len, store, call_returns)
+    } else {
+        result_value(atom, &body.value, ctx, call_returns)
+    }
+}
+
+fn call_site_result_value<'ctx>(
+    site: &CallSite<'ctx>,
+    callee: &str,
+    ctx: &'ctx Context,
+    call_returns: &CallShapes<'ctx>,
+) -> SourceValue<'ctx> {
+    if let (CallValueShape::Array, Some(store)) = (site.result_shape, &site.result_store) {
+        array_result_source(&site.result, store, call_returns)
+    } else {
+        result_value(callee, &site.result, ctx, call_returns)
+    }
+}
+
 fn result_value<'ctx>(
     atom: &str,
     value: &BV<'ctx>,
