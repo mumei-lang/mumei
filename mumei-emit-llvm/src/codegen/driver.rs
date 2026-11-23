@@ -1,9 +1,10 @@
 use crate::codegen::expr_emit::{chan_payload_key, emit_array_literal};
 use crate::codegen::lowering::{
-    declare_extern_functions, resolve_param_type, resolve_return_type, type_contains_array_enum,
-    ArrayPtrMap,
+    array_elem_llvm_type, declare_extern_functions, resolve_param_type, resolve_return_type,
+    type_contains_array_enum, ArrayPtrMap,
 };
 use crate::codegen::stmt_emit::compile_hir_stmt;
+use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Linkage;
 use inkwell::module::Module;
@@ -11,6 +12,7 @@ use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
 };
 use inkwell::types::{BasicType, BasicTypeEnum};
+use inkwell::values::BasicValueEnum;
 use inkwell::OptimizationLevel;
 use mumei_core::emitter::EmitAtom;
 use mumei_core::hir::HirAtom;
@@ -194,17 +196,108 @@ pub fn compile_atom_into_module<'ctx>(
             _ => None,
         };
         let tail_slots = match lit_tail {
-            Some((len_val, _, data_ptr)) => Some((len_val, data_ptr)),
-            None => tail_var
-                .and_then(|name| array_ptrs.get(name))
-                .map(|&(len_val, _, data_ptr)| (len_val, data_ptr)),
+            // A literal's backing store is always an entry-block alloca,
+            // so it is callee-local by construction.
+            Some((len_val, elem_ty, data_ptr)) => Some((len_val, elem_ty, data_ptr, true)),
+            None => tail_var.and_then(|name| {
+                array_ptrs.get(name).map(|&(len_val, elem_ty, data_ptr)| {
+                    (
+                        len_val,
+                        elem_ty,
+                        data_ptr,
+                        array_ptrs.stack_backed.contains(name),
+                    )
+                })
+            }),
         };
-        let Some((len_val, data_ptr)) = tail_slots else {
+        // A `f(..)` (or `if`/`match`) tail can already produce the
+        // `{i64, ptr}` aggregate — compile it and unpack instead of
+        // rejecting. A call tail is stack-backed only when it may pass a
+        // stack-backed array argument through unchanged; any other
+        // aggregate tail stays conservative and gets a heap copy.
+        let tail_slots = match tail_slots {
+            Some(slots) => Some(slots),
+            None => match tail_expr {
+                Some(expr) => {
+                    // `result_val` is the tail's value — `Expr` and
+                    // `Block{tail_expr}` bodies return it from
+                    // `compile_hir_stmt`. Reusing it avoids re-emitting
+                    // an `if`/`match` tail a second time.
+                    let val = result_val;
+                    let BasicValueEnum::StructValue(fat_ptr) = val else {
+                        return Err(MumeiError::codegen(format!(
+                            "array return of '{}' requires the body tail to be an array \
+                             parameter, binding, or call (got {:?})",
+                            signature.name, tail_expr
+                        )));
+                    };
+                    let len_val =
+                        llvm!(builder.build_extract_value(fat_ptr, 0, "ret_call_arr_len"));
+                    let data_ptr =
+                        llvm!(builder.build_extract_value(fat_ptr, 1, "ret_call_arr_data"));
+                    let elem_ty = signature
+                        .return_type
+                        .as_deref()
+                        .and_then(|name| {
+                            array_elem_llvm_type(context, name, module_env)
+                                .ok()
+                                .flatten()
+                        })
+                        .ok_or_else(|| {
+                            MumeiError::codegen(format!(
+                                "array return of '{}' cannot resolve its element type",
+                                signature.name
+                            ))
+                        })?;
+                    let stack_backed = match expr {
+                        mumei_core::hir::HirExpr::Call { name, args, .. } => {
+                            let fqn_name = name.replace('.', "::");
+                            let callee = module_env
+                                .get_atom(name)
+                                .or_else(|| module_env.get_atom(&fqn_name));
+                            args.iter().enumerate().any(|(i, arg)| {
+                                let param_is_array = callee
+                                    .and_then(|c| c.params.get(i))
+                                    .and_then(|p| p.type_name.as_deref())
+                                    .is_some_and(|ty_name| {
+                                        matches!(
+                                            mumei_core::lowering::lower(
+                                                &module_env.resolve_base_type(ty_name)
+                                            ),
+                                            mumei_core::lowering::LoweredType::Array(_)
+                                        )
+                                    });
+                                param_is_array
+                                    && match arg {
+                                        mumei_core::hir::HirExpr::Variable(arg_name) => {
+                                            array_ptrs.stack_backed.contains(arg_name)
+                                                || !array_ptrs.contains_key(arg_name)
+                                        }
+                                        _ => true,
+                                    }
+                            })
+                        }
+                        _ => true,
+                    };
+                    Some((len_val, elem_ty, data_ptr, stack_backed))
+                }
+                None => None,
+            },
+        };
+        let Some((len_val, elem_ty, data_ptr, stack_backed)) = tail_slots else {
             return Err(MumeiError::codegen(format!(
                 "array return of '{}' requires the body tail to be an array \
-                 parameter or binding (got {:?})",
+                 parameter, binding, or call (got {:?})",
                 signature.name, tail_expr
             )));
+        };
+        // A callee-local backing store (literal or stack-bound alias)
+        // dangles once the frame returns — copy it to heap storage the
+        // caller owns. Passing a parameter back keeps the caller's buffer.
+        let data_ptr = if stack_backed {
+            copy_array_to_heap(context, &builder, module, len_val, elem_ty, data_ptr)?
+        } else {
+            data_ptr
         };
         let struct_ty = super::lowering::array_struct_type(context);
         let mut agg: inkwell::values::AggregateValueEnum = struct_ty.get_undef().into();
@@ -240,6 +333,40 @@ pub fn compile_atom_into_module<'ctx>(
     llvm!(builder.build_return(Some(&result_val)));
 
     Ok(())
+}
+
+/// Copies `len` elements of `elem_ty` from `data_ptr` into freshly `malloc`ed
+/// storage and returns the heap pointer. Used when a `-> [T]` atom's tail is
+/// callee-local (an array literal or a stack-bound alias): the `alloca` it
+/// points into dies with the frame, so the returned fat pointer must own a
+/// heap copy instead. Ownership convention: the caller owns the returned
+/// buffer (there is no `free` on this path yet — the bounded-memory model
+/// does not track it).
+fn copy_array_to_heap<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    len_val: BasicValueEnum<'a>,
+    elem_ty: BasicTypeEnum<'a>,
+    data_ptr: BasicValueEnum<'a>,
+) -> MumeiResult<BasicValueEnum<'a>> {
+    let malloc_fn = module.get_function("malloc").unwrap_or_else(|| {
+        let ptr_type = context.ptr_type(inkwell::AddressSpace::default());
+        let fn_type = ptr_type.fn_type(&[context.i64_type().into()], false);
+        module.add_function("malloc", fn_type, Some(Linkage::External))
+    });
+    let elem_size = elem_ty
+        .size_of()
+        .ok_or_else(|| MumeiError::codegen("array element type is unsized"))?;
+    let byte_size =
+        llvm!(builder.build_int_mul(len_val.into_int_value(), elem_size, "ret_arr_bytes"));
+    let heap_ptr = llvm!(builder.build_call(malloc_fn, &[byte_size.into()], "ret_arr_malloc"))
+        .try_as_basic_value()
+        .left()
+        .ok_or_else(|| MumeiError::codegen("malloc returned no value"))?
+        .into_pointer_value();
+    llvm!(builder.build_memcpy(heap_ptr, 8, data_ptr.into_pointer_value(), 8, byte_size,));
+    Ok(heap_ptr.into())
 }
 
 /// P7-A: Compile an HirAtom into a standalone in-memory LLVM Module.

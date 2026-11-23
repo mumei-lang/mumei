@@ -41,6 +41,8 @@ fn array_reassignment_fixtures_run() {
     assert_run("tests/positive/array_branch_local_scope.mm", 12);
     assert_run("tests/positive/array_branch_store.mm", 50);
     assert_run("tests/positive/array_loop_shadow.mm", 7);
+    assert_run("tests/positive/array_reassign_from_call.mm", 2);
+    assert_run("tests/positive/array_return_from_call.mm", 13);
 }
 
 #[test]
@@ -49,14 +51,6 @@ fn array_reassignment_failures_stay_fail_closed() {
     let text = combined(&output);
     assert!(!output.status.success(), "{text}");
     assert!(text.contains("reassigned inside a loop"), "{text}");
-
-    let output = run("tests/negative/array_reassign_from_call_codegen.mm");
-    let text = combined(&output);
-    assert!(!output.status.success(), "{text}");
-    assert!(
-        text.contains("can only be reassigned from an array literal"),
-        "{text}"
-    );
 
     let output = run("tests/negative/array_reassign_in_loop_nested_codegen.mm");
     let text = combined(&output);
@@ -76,7 +70,8 @@ fn array_reassignment_fixtures_verify_before_codegen() {
         "tests/positive/array_loop_shadow.mm",
         "tests/negative/array_reassign_in_loop_codegen.mm",
         "tests/negative/array_reassign_in_loop_nested_codegen.mm",
-        "tests/negative/array_reassign_from_call_codegen.mm",
+        "tests/positive/array_reassign_from_call.mm",
+        "tests/positive/array_return_from_call.mm",
     ] {
         let output = verify(file);
         let text = combined(&output);

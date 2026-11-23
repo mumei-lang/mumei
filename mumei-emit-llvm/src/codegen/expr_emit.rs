@@ -2977,23 +2977,124 @@ pub(crate) fn compile_hir_expr<'a>(
             llvm!(builder.build_unconditional_branch(merge_block));
 
             builder.position_at_end(merge_block);
-            // A `Num` literal branch adapts to the other branch's
-            // declared width in the verifier's merge — widen the
-            // narrower LLVM value the same way before the phi
-            // (`pure-i64-composite/v22`).
-            let (phi_type, widened) = widen_merge_incomings(
-                context,
-                builder,
-                &[(then_val, then_end_block), (else_val, else_end_block)],
-                &[
-                    stmt_int_type_name(then_branch, &then_var_types, module_env),
-                    stmt_int_type_name(else_branch, &else_var_types, module_env),
-                ],
-            )?;
-            let phi = llvm!(builder.build_phi(phi_type, "if_result"));
-            for (val, block) in &widened {
-                phi.add_incoming(&[(val, *block)]);
-            }
+            // Array-producing branches merge their `(len, data)` slots
+            // into a single `{i64, ptr}` phi — the scalar merge below
+            // would compare a call's fat pointer against a binding's
+            // length. A branch supplies slots either as a `Variable`
+            // tail resolving through its `array_ptrs` entry, or as an
+            // aggregate value a call/`if` tail already produced.
+            // Extracts must be emitted inside the branch's end block —
+            // phi incomings have to be defined in (or dominate) the
+            // predecessor they attach to.
+            let branch_slots = |branch: &HirStmt,
+                                val: BasicValueEnum<'a>,
+                                arrays: &ArrayPtrMap<'a>,
+                                end_block: inkwell::basic_block::BasicBlock<'a>|
+             -> MumeiResult<
+                Option<(BasicValueEnum<'a>, BasicValueEnum<'a>)>,
+            > {
+                if let Some(name) = hir_stmt_tail_expr(branch).and_then(|e| {
+                    if let HirExpr::Variable(name) = e {
+                        Some(name.as_str())
+                    } else {
+                        None
+                    }
+                }) {
+                    if let Some(&(len, _, data)) = arrays.get(name) {
+                        return Ok(Some((len, data)));
+                    }
+                }
+                if let BasicValueEnum::StructValue(fat) = val {
+                    if fat.get_type() == array_struct_type(context) {
+                        let saved = builder.get_insert_block();
+                        if let Some(term) = end_block.get_terminator() {
+                            builder.position_before(&term);
+                        } else {
+                            builder.position_at_end(end_block);
+                        }
+                        let len = llvm!(builder.build_extract_value(fat, 0, "if_arr_branch_len"));
+                        let data = llvm!(builder.build_extract_value(fat, 1, "if_arr_branch_data"));
+                        if let Some(saved) = saved {
+                            builder.position_at_end(saved);
+                        }
+                        return Ok(Some((len, data)));
+                    }
+                }
+                Ok(None)
+            };
+            let then_slots = branch_slots(then_branch, then_val, &then_arrays, then_end_block)?;
+            let else_slots = branch_slots(else_branch, else_val, &else_arrays, else_end_block)?;
+            let scalar_result = match (then_slots, else_slots) {
+                (Some((then_len, then_data)), Some((else_len, else_data))) => {
+                    if then_len.get_type() != else_len.get_type()
+                        || then_data.get_type() != else_data.get_type()
+                    {
+                        return Err(MumeiError::codegen(
+                            "incompatible branch array value shapes",
+                        ));
+                    }
+                    let len_phi = llvm!(builder.build_phi(then_len.get_type(), "if_arr_len"));
+                    len_phi
+                        .add_incoming(&[(&then_len, then_end_block), (&else_len, else_end_block)]);
+                    let data_phi = llvm!(builder.build_phi(then_data.get_type(), "if_arr_data"));
+                    data_phi.add_incoming(&[
+                        (&then_data, then_end_block),
+                        (&else_data, else_end_block),
+                    ]);
+                    let struct_ty = array_struct_type(context);
+                    let mut agg: inkwell::values::AggregateValueEnum = struct_ty.get_undef().into();
+                    agg = llvm!(builder.build_insert_value(
+                        agg,
+                        len_phi.as_basic_value(),
+                        0,
+                        "if_arr_len_slot"
+                    ));
+                    agg = llvm!(builder.build_insert_value(
+                        agg,
+                        data_phi.as_basic_value(),
+                        1,
+                        "if_arr_data_slot"
+                    ));
+                    Some(match agg {
+                        inkwell::values::AggregateValueEnum::StructValue(s) => {
+                            s.as_basic_value_enum()
+                        }
+                        _ => {
+                            return Err(MumeiError::codegen(
+                                "array if-merge value is not a struct aggregate",
+                            ))
+                        }
+                    })
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    return Err(MumeiError::codegen(
+                        "if branches disagree on whether the result is an array",
+                    ));
+                }
+                (None, None) => None,
+            };
+            let result_val = if let Some(agg) = scalar_result {
+                agg
+            } else {
+                // A `Num` literal branch adapts to the other branch's
+                // declared width in the verifier's merge — widen the
+                // narrower LLVM value the same way before the phi
+                // (`pure-i64-composite/v22`).
+                let (phi_type, widened) = widen_merge_incomings(
+                    context,
+                    builder,
+                    &[(then_val, then_end_block), (else_val, else_end_block)],
+                    &[
+                        stmt_int_type_name(then_branch, &then_var_types, module_env),
+                        stmt_int_type_name(else_branch, &else_var_types, module_env),
+                    ],
+                )?;
+                let phi = llvm!(builder.build_phi(phi_type, "if_result"));
+                for (val, block) in &widened {
+                    phi.add_incoming(&[(val, *block)]);
+                }
+                phi.as_basic_value()
+            };
             *variables = pre_vars.clone();
             for (name, pre_val) in &pre_vars {
                 let then_changed = then_assigned.contains(name);
@@ -3036,7 +3137,7 @@ pub(crate) fn compile_hir_expr<'a>(
                 array_ptrs,
                 variables,
             )?;
-            Ok(phi.as_basic_value())
+            Ok(result_val)
         }
 
         HirExpr::StructInit { type_name, fields } => {
