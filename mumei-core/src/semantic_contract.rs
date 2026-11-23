@@ -8307,7 +8307,9 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
         expr: &HirExpr,
         env: &HashMap<String, BV<'ctx>>,
         context: &'ctx Context,
+        guard: &Bool<'ctx>,
         definedness: &mut Vec<Bool<'ctx>>,
+        call_sites: &mut Vec<CallSite<'ctx>>,
     ) -> Result<BV<'ctx>, SemanticContractError> {
         let zero = BV::from_i64(context, 0, 64);
         let one = BV::from_i64(context, 1, 64);
@@ -8319,8 +8321,18 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                 .cloned()
                 .ok_or(SemanticContractError::Unsupported("hir free variable")),
             HirExpr::BinaryOp(lhs, op, rhs) => {
-                let l = encode_expr(lhs, env, context, definedness)?;
-                let r = encode_expr(rhs, env, context, definedness)?;
+                let l = encode_expr(lhs, env, context, guard, definedness, call_sites)?;
+                // `&&`/`||`/`=>` short-circuit like the emitter and the
+                // source encoder: the right operand's partial operations
+                // bind only when the left one lets it run.
+                let r_guard = match op {
+                    HirBinOp::And | HirBinOp::Implies => {
+                        Bool::and(context, &[guard, &l._eq(&zero).not()])
+                    }
+                    HirBinOp::Or => Bool::and(context, &[guard, &l._eq(&zero)]),
+                    _ => guard.clone(),
+                };
+                let r = encode_expr(rhs, env, context, &r_guard, definedness, call_sites)?;
                 let l_nz = l._eq(&zero).not();
                 let r_nz = r._eq(&zero).not();
                 Ok(match op {
@@ -8328,13 +8340,17 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                     HirBinOp::Sub => l.bvsub(&r),
                     HirBinOp::Mul => l.bvmul(&r),
                     HirBinOp::Div | HirBinOp::Rem => {
-                        // The same obligations the source side binds: a
-                        // nonzero divisor and no i64::MIN / -1 overflow.
-                        definedness.push(r_nz.clone());
+                        // The same obligations the source side binds, each
+                        // under its path guard: a nonzero divisor and no
+                        // i64::MIN / -1 overflow.
+                        definedness.push(guard.implies(&r_nz));
                         let min = BV::from_i64(context, i64::MIN, 64);
                         let neg_one = BV::from_i64(context, -1, 64);
-                        definedness
-                            .push(Bool::and(context, &[&l._eq(&min), &r._eq(&neg_one)]).not());
+                        definedness.push(
+                            guard.implies(
+                                &Bool::and(context, &[&l._eq(&min), &r._eq(&neg_one)]).not(),
+                            ),
+                        );
                         if matches!(op, HirBinOp::Div) {
                             l.bvsdiv(&r)
                         } else {
@@ -8358,15 +8374,71 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                 then_branch,
                 else_branch,
             } => {
-                let (HirStmt::Expr(then_e), HirStmt::Expr(else_e)) =
-                    (then_branch.as_ref(), else_branch.as_ref())
-                else {
+                // A branch is admitted as a bare tail expression — the
+                // form the lowerer produces for `{ e }` — or as a
+                // statement-free block ending in one.
+                fn branch_expr(branch: &HirStmt) -> Option<&HirExpr> {
+                    match branch {
+                        HirStmt::Expr(e) => Some(e),
+                        HirStmt::Block { stmts, tail_expr }
+                            if stmts.is_empty() && tail_expr.is_some() =>
+                        {
+                            tail_expr.as_deref()
+                        }
+                        _ => None,
+                    }
+                }
+                let (Some(then_e), Some(else_e)) = (
+                    branch_expr(then_branch.as_ref()),
+                    branch_expr(else_branch.as_ref()),
+                ) else {
                     return Err(SemanticContractError::Unsupported("hir if branch"));
                 };
-                let c = encode_expr(cond, env, context, definedness)?;
-                let t = encode_expr(then_e, env, context, definedness)?;
-                let e = encode_expr(else_e, env, context, definedness)?;
+                let c = encode_expr(cond, env, context, guard, definedness, call_sites)?;
+                let c_nz = c._eq(&zero).not();
+                let then_guard = Bool::and(context, &[guard, &c_nz]);
+                let else_guard = Bool::and(context, &[guard, &c_nz.not()]);
+                let t = encode_expr(then_e, env, context, &then_guard, definedness, call_sites)?;
+                let e = encode_expr(else_e, env, context, &else_guard, definedness, call_sites)?;
                 Ok(c._eq(&zero).not().ite(&t, &e))
+            }
+            HirExpr::Call { name, args, .. } => {
+                // The same uninterpreted site the source encoder and the
+                // IR `call` encoding produce: `mumei_call_<name>_<arity>`
+                // applied to the encoded args. The callee's own body is a
+                // separate obligation — bool-returning callees (whose
+                // 0/1 bound needs the module signature env) stay outside
+                // this slice.
+                let mut applied = Vec::with_capacity(args.len());
+                for arg in args {
+                    applied.push(encode_expr(
+                        arg,
+                        env,
+                        context,
+                        guard,
+                        definedness,
+                        call_sites,
+                    )?);
+                }
+                let refs: Vec<&dyn Ast> = applied.iter().map(|v| v as &dyn Ast).collect();
+                let value = call_decl(context, name, applied.len())
+                    .apply(&refs)
+                    .as_bv()
+                    .ok_or(SemanticContractError::Unsupported("hir call result"))?;
+                call_sites.push(CallSite {
+                    callee: name.clone(),
+                    args: applied.clone(),
+                    arg_leaf_doubles: vec![false; applied.len()],
+                    argument_shapes: vec![CallValueShape::Scalar { leaf_count: 1 }; applied.len()],
+                    has_composite_arguments_or_result: false,
+                    result: value.clone(),
+                    result_is_double: false,
+                    result_shape: CallValueShape::Scalar { leaf_count: 1 },
+                    result_leaf_doubles: vec![false],
+                    guard: guard.clone(),
+                    callback_arguments: Vec::new(),
+                });
+                Ok(value)
             }
             _ => Err(SemanticContractError::Unsupported("hir expression")),
         }
@@ -8383,23 +8455,47 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
         _ => return Err(SemanticContractError::Unsupported("hir body shape")),
     };
     let mut definedness = Vec::new();
+    let mut call_sites = Vec::new();
+    let top_guard = Bool::from_bool(context, true);
     for stmt in stmts {
         match stmt {
             HirStmt::Let { var, value, .. } => {
-                let bound = encode_expr(value, &env, context, &mut definedness)?;
+                let bound = encode_expr(
+                    value,
+                    &env,
+                    context,
+                    &top_guard,
+                    &mut definedness,
+                    &mut call_sites,
+                )?;
                 env.insert(var.clone(), bound);
             }
             HirStmt::Expr(e) => {
-                encode_expr(e, &env, context, &mut definedness)?;
+                encode_expr(
+                    e,
+                    &env,
+                    context,
+                    &top_guard,
+                    &mut definedness,
+                    &mut call_sites,
+                )?;
             }
             _ => return Err(SemanticContractError::Unsupported("hir statement")),
         }
     }
-    let value = encode_expr(tail, &env, context, &mut definedness)?;
+    let value = encode_expr(
+        tail,
+        &env,
+        context,
+        &top_guard,
+        &mut definedness,
+        &mut call_sites,
+    )?;
 
     let mut body = PureI64Body::synthetic_scalar(atom.signature.name.clone(), value);
     body.inputs = inputs;
     body.definedness = definedness;
+    body.call_sites = call_sites;
     body.array_params = vec![None; atom.signature.params.len()];
     body.param_shapes = vec![None; atom.signature.params.len()];
     body.param_leaf_doubles = vec![vec![false]; atom.signature.params.len()];

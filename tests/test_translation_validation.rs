@@ -4211,8 +4211,9 @@ fn hir_leaf_compare_binds_definedness_both_ways() {
 
 #[test]
 fn hir_leaf_compare_rejects_atoms_outside_the_subset() {
-    // A call site is outside the leaf subset — fail closed, no verdict.
-    let Item::Atom(atom) = parse_module_checked(&source("x: i64", "g(x)"))
+    // A non-i64 parameter is outside the leaf subset — fail closed, no
+    // verdict.
+    let Item::Atom(atom) = parse_module_checked(&source("x: f64", "1"))
         .unwrap()
         .remove(0)
     else {
@@ -4225,4 +4226,54 @@ fn hir_leaf_compare_rejects_atoms_outside_the_subset() {
         Options::default()
     )
     .is_err());
+}
+
+#[test]
+fn hir_leaf_compare_binds_scalar_i64_call_sites() {
+    // f calls g: both sides produce `mumei_call_g_1` on the same arg —
+    // the call compares as an uninterpreted site, so a wrong IR call
+    // (to h, or with swapped args) is caught.
+    let src = source("x: i64", "g(x + 1)");
+    let ir = pin(
+        "define i64 @g(i64 %a) { %r = add i64 %a, 0\n ret i64 %r }\n\
+         define i64 @f(i64 %x) { %v = add i64 %x, 1\n %r = call i64 @g(i64 %v)\n ret i64 %r }",
+    );
+    assert_eq!(hir_outcome(&src, &ir), Outcome::EquivalentWithinProfile);
+
+    // Same shape, different callee — the site names differ.
+    let wrong = pin(
+        "define i64 @h(i64 %a) { %r = add i64 %a, 0\n ret i64 %r }\n\
+         define i64 @g(i64 %a) { %r = add i64 %a, 0\n ret i64 %r }\n\
+         define i64 @f(i64 %x) { %v = add i64 %x, 1\n %r = call i64 @h(i64 %v)\n ret i64 %r }",
+    );
+    assert_eq!(hir_outcome(&src, &wrong), Outcome::Different);
+
+    // Same callee, different argument.
+    let wrong_arg = pin(
+        "define i64 @g(i64 %a) { %r = add i64 %a, 0\n ret i64 %r }\n\
+         define i64 @f(i64 %x) { %v = add i64 %x, 2\n %r = call i64 @g(i64 %v)\n ret i64 %r }",
+    );
+    assert_eq!(hir_outcome(&src, &wrong_arg), Outcome::Different);
+}
+
+#[test]
+fn hir_leaf_compare_guards_branch_definedness() {
+    // `x / y` only in the else arm: y = 0 is in-domain whenever
+    // x > 0 (then-branch taken), so the check stays equivalent.
+    let src = source("x: i64, y: i64", "if x > 0 { 1 } else { x / y }");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn hir_leaf_compare_short_circuits_rhs_definedness() {
+    // `c` may be 0 whenever `a == 0`: `&&` never runs the rhs there, so
+    // the comparison cannot bind `c != 0` on those inputs.
+    let src = source("a: i64, b: i64, c: i64", "a != 0 && (b / c) > 0");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
 }
