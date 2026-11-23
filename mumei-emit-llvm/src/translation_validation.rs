@@ -969,6 +969,47 @@ pub unsafe fn encode_parsed_function_for_comparison<'ctx>(
     optimized: bool,
     context: &'ctx Context,
 ) -> Result<IrFunctionEncoding<'ctx>> {
+    // Reuse the validation gate so an arity or signature mismatch on
+    // the IR side fails closed as a encode error instead of silently
+    // comparing a mis-bound function (design memo §7 Step 3a). The
+    // comparison subset is scalar-i64 with no array params and no
+    // calls: the model-side pre-gate keeps such models out, and the
+    // same restriction is applied to the IR surface here.
+    let array_param_mask: Vec<bool> = model.array_params.iter().map(Option::is_some).collect();
+    check_function(
+        raw,
+        model.param_shapes.len(),
+        model.result_shape,
+        Some(&model.result_leaf_doubles),
+        CheckGates {
+            allow_cycles: model.loop_bound_exits.is_some(),
+            bounded_memory: model.bounded_memory,
+            f64_arithmetic: false,
+            optimized,
+            array_param_mask: Some(&array_param_mask),
+            array_params_admitted: false,
+        },
+    )?;
+    // The shared gate admits a 128-bit scalar return and a checked
+    // direct call; both stay outside the scalar-i64 comparison subset.
+    // An `i128`-returning or call-bearing IR is not compared — it is
+    // rejected here so the caller records the function as not
+    // liftable rather than silently binding a mis-shaped encoding.
+    let ret = LLVMGetReturnType(LLVMGlobalGetValueType(raw));
+    if aggregate_fields(ret).is_some() || width(ret)? != 64 {
+        return Err(ValidationError("LLVM return outside comparison subset"));
+    }
+    let mut block = LLVMGetFirstBasicBlock(raw);
+    while !block.is_null() {
+        let mut inst = LLVMGetFirstInstruction(block);
+        while !inst.is_null() {
+            if LLVMGetInstructionOpcode(inst) == LLVMOpcode::LLVMCall {
+                return Err(ValidationError("LLVM call outside comparison subset"));
+            }
+            inst = LLVMGetNextInstruction(inst);
+        }
+        block = LLVMGetNextBasicBlock(block);
+    }
     let no_renames = BTreeMap::new();
     let mut encoder = IrEncoder::new(context, &no_renames, false, optimized);
     let returns = encoder.encode(
