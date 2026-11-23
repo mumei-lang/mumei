@@ -8298,20 +8298,25 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
         .map(|p| p.ty.as_deref())
         .collect();
     tys.push(atom.signature.return_type.as_deref());
+    // `f64` leaves are their own pass-through subset: every parameter
+    // and the result is `f64`, and the body may only carry them through
+    // (variables and lets — FP arithmetic stays outside this slice).
+    let float = !tys.is_empty() && tys.iter().all(|ty| *ty == Some("f64"));
     let width = match tys.first() {
-        None | Some(None) | Some(Some("i64")) => 64,
+        None | Some(None) | Some(Some("i64")) | Some(Some("f64")) => 64,
         Some(Some("i128")) | Some(Some("u128")) => 128,
         _ => return Err(SemanticContractError::Unsupported("hir param type")),
     };
-    let signed = !tys.contains(&Some("u128"));
+    let signed = !float && !tys.contains(&Some("u128"));
     let mut inputs = Vec::new();
     let mut env: HashMap<String, BV<'ctx>> = HashMap::new();
     let mut param_leaf_doubles = Vec::new();
     for param in &atom.signature.params {
-        match (param.ty.as_deref(), width, signed) {
-            (None | Some("i64"), 64, _) => {}
-            (Some("i128"), 128, true) => {}
-            (Some("u128"), 128, false) => {}
+        match (param.ty.as_deref(), width, signed, float) {
+            (None | Some("i64"), 64, _, false) => {}
+            (Some("f64"), 64, _, true) => {}
+            (Some("i128"), 128, true, false) => {}
+            (Some("u128"), 128, false, false) => {}
             _ => return Err(SemanticContractError::Unsupported("hir param type")),
         }
         if width == 128 {
@@ -8328,13 +8333,14 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
             let input = BV::new_const(context, format!("param.{}", param.name), 64);
             inputs.push(input.clone());
             env.insert(param.name.clone(), input);
-            param_leaf_doubles.push(vec![false]);
+            param_leaf_doubles.push(vec![float]);
         }
     }
-    match (atom.signature.return_type.as_deref(), width, signed) {
-        (None | Some("i64"), 64, _) => {}
-        (Some("i128"), 128, true) => {}
-        (Some("u128"), 128, false) => {}
+    match (atom.signature.return_type.as_deref(), width, signed, float) {
+        (None | Some("i64"), 64, _, false) => {}
+        (Some("f64"), 64, _, true) => {}
+        (Some("i128"), 128, true, false) => {}
+        (Some("u128"), 128, false, false) => {}
         _ => return Err(SemanticContractError::Unsupported("hir result type")),
     }
 
@@ -8345,12 +8351,18 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
         guard: &Bool<'ctx>,
         definedness: &mut Vec<Bool<'ctx>>,
         call_sites: &mut Vec<CallSite<'ctx>>,
-        scalar: (u32, bool),
+        scalar: (u32, bool, bool),
     ) -> Result<BV<'ctx>, SemanticContractError> {
-        let (width, signed) = scalar;
+        let (width, signed, float) = scalar;
         let zero = BV::from_i64(context, 0, width);
         let one = BV::from_i64(context, 1, width);
         let as_i64 = |b: Bool<'ctx>| b.ite(&one, &zero);
+        if float && !matches!(expr, HirExpr::Variable(_)) {
+            // A uniform-f64 signature is the pass-through leaf subset:
+            // operands arrive as IEEE-754 bit patterns and no operation,
+            // literal or call applies to them in this slice.
+            return Err(SemanticContractError::Unsupported("hir f64 op"));
+        }
         match expr {
             HirExpr::Number(n) => Ok(BV::from_i64(context, *n, width)),
             HirExpr::Variable(name) => env
@@ -8526,7 +8538,7 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
     let mut definedness = Vec::new();
     let mut call_sites = Vec::new();
     let top_guard = Bool::from_bool(context, true);
-    let scalar = (width, signed);
+    let scalar = (width, signed, float);
     for stmt in stmts {
         match stmt {
             HirStmt::Let { var, value, .. } => {
@@ -8572,9 +8584,9 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
     body.array_params = vec![None; atom.signature.params.len()];
     body.param_shapes = vec![None; atom.signature.params.len()];
     body.param_leaf_doubles = param_leaf_doubles;
-    body.result_leaf_doubles = vec![false];
+    body.result_leaf_doubles = vec![float];
     body.has_wide_scalar_features = width == 128;
-    body.has_non_i64_scalar_features = width == 128;
+    body.has_non_i64_scalar_features = width == 128 || float;
     Ok(body)
 }
 

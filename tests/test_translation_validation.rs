@@ -4323,3 +4323,43 @@ fn hir_leaf_compare_rejects_mixed_width_signatures() {
         "mixed-width signatures stay outside the subset"
     );
 }
+
+#[test]
+fn hir_leaf_compare_uniform_f64_pass_through() {
+    let src = source_ret("x: f64, y: f64", "f64", "let z = x; z");
+    assert_eq!(
+        hir_outcome(&src, &emitted(&src)),
+        Outcome::EquivalentWithinProfile
+    );
+    // Returning the other parameter is a mistranslation — the model
+    // binds the IEEE-754 bit pattern, so it shows up as Different.
+    let ir = pin("define double @f(double %x, double %y) { ret double %y }");
+    assert_eq!(hir_outcome(&src, &ir), Outcome::Different);
+}
+
+#[test]
+fn hir_leaf_compare_rejects_f64_operations_and_wrong_ret() {
+    // FP arithmetic stays outside the pass-through subset.
+    let src = source_ret("x: f64, y: f64", "f64", "x + y");
+    let Item::Atom(atom) = parse_module_checked(&src).unwrap().remove(0) else {
+        panic!("atom")
+    };
+    let hir = lower_atom_to_hir(&atom);
+    let ir = pin("define double @f(double %x, double %y) { ret double %x }");
+    assert!(
+        tv::validate_hir_pure_i64_leaf(&hir, &ir, Options::default()).is_err(),
+        "f64 arithmetic stays outside the pass-through subset"
+    );
+    // An `i64` return where the source declares `f64` fails the
+    // declared-kind gate rather than comparing the bit pattern.
+    let src = source_ret("x: f64", "f64", "x");
+    let Item::Atom(atom) = parse_module_checked(&src).unwrap().remove(0) else {
+        panic!("atom")
+    };
+    let hir = lower_atom_to_hir(&atom);
+    let ir = pin("define i64 @f(double %x) { %i = bitcast double %x to i64\n ret i64 %i }");
+    assert!(
+        tv::validate_hir_pure_i64_leaf(&hir, &ir, Options::default()).is_err(),
+        "an i64 return where f64 is declared fails the kind gate"
+    );
+}
