@@ -1856,6 +1856,18 @@ fn lift<'ctx>(
                     width,
                     BitwiseOp::Or,
                 )?;
+            } else if is_double_shift_mnemonic(&instruction.mnemonic) {
+                let previous_flags = state.flags.clone();
+                state.flags = lift_double_shift(
+                    instruction,
+                    &mut state.registers,
+                    &previous_flags,
+                    model,
+                    &state.path_conditions,
+                    &arguments,
+                    context,
+                )
+                .ok_or(FunctionOutcome::OutsideProfile("unsupported_instruction"))?;
             } else if is_shift_mnemonic(&instruction.mnemonic) {
                 let previous_flags = state.flags.clone();
                 state.flags = lift_shift(
@@ -2648,6 +2660,88 @@ fn lift_shift<'ctx>(
         }
     };
     write_register(registers, index, shifted, width).then_some(flags)
+}
+
+fn is_double_shift_mnemonic(mnemonic: &str) -> bool {
+    matches!(mnemonic, "shld" | "shldq" | "shrd" | "shrdq")
+}
+
+/// `shld`/`shrd`, the double-precision shift pair LLVM emits for a
+/// variable `i128` shift (`shl`/`lshr`/`ashr` on a two-word value —
+/// the surrounding `test %cl,0x40`/`cmov` fallback sequence is already
+/// modeled). `shldq c, src, dest` reads the 128-bit `dest:src`
+/// concatenation shifted left and keeps the high word;
+/// `shrdq c, src, dest` reads `src:dest` shifted right and keeps the
+/// low word. The count is masked to 6 bits by the hardware; count 0
+/// leaves the destination and the flags untouched. Only the 64-bit
+/// forms are lifted — the `i128` surface never needs narrower pairs.
+fn lift_double_shift<'ctx>(
+    instruction: &Instruction,
+    registers: &mut [BV<'ctx>],
+    previous_flags: &FlagState<'ctx>,
+    model: &PureI64Body<'ctx>,
+    path_conditions: &[Bool<'ctx>],
+    arguments: &[BV<'ctx>],
+    context: &'ctx Context,
+) -> Option<FlagState<'ctx>> {
+    let left = matches!(instruction.mnemonic.as_str(), "shld" | "shldq");
+    let operands = split_operands(&instruction.operands);
+    let (immediate_count, source, destination) = match operands.as_slice() {
+        [count, source, destination] => match count.strip_prefix('$').and_then(parse_integer) {
+            Some(count) => (Some(count), *source, *destination),
+            None if *count == "%cl" => (None, *source, *destination),
+            None => return None,
+        },
+        _ => return None,
+    };
+    let (destination_index, destination_width) = parse_register(destination)?;
+    let (source_index, source_width) = parse_register(source)?;
+    if destination_width != 64 || source_width != 64 || destination_index == 4 {
+        return None;
+    }
+    let masked_immediate = immediate_count.map(|count| count & 0x3f);
+    let shift_count = if let Some(count) = masked_immediate {
+        BV::from_u64(context, count, 128)
+    } else {
+        registers[1]
+            .extract(7, 0)
+            .bvand(&BV::from_u64(context, 0x3f, 8))
+            .zero_ext(120)
+    };
+    let pair = if left {
+        registers[destination_index].concat(&registers[source_index])
+    } else {
+        registers[source_index].concat(&registers[destination_index])
+    };
+    let shifted = if left {
+        pair.bvshl(&shift_count)
+    } else {
+        pair.bvlshr(&shift_count)
+    };
+    let value = if left {
+        shifted.extract(127, 64)
+    } else {
+        shifted.extract(63, 0)
+    };
+    let flags = match masked_immediate {
+        Some(0) => previous_flags.clone(),
+        Some(_) => FlagState::ZeroFlagResult {
+            value: value.clone(),
+            width: 64,
+        },
+        None => {
+            let count_is_zero = shift_count._eq(&BV::from_u64(context, 0, 128));
+            match call_guard_status(model, &count_is_zero, path_conditions, arguments, context) {
+                Some(true) => previous_flags.clone(),
+                Some(false) => FlagState::ZeroFlagResult {
+                    value: value.clone(),
+                    width: 64,
+                },
+                None => FlagState::Unknown,
+            }
+        }
+    };
+    write_register(registers, destination_index, value, 64).then_some(flags)
 }
 
 fn lift_cmov<'ctx>(
@@ -9449,6 +9543,70 @@ define i64 @after_five(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i128 %x) {
                 &wide_call_targets,
                 &context
             ),
+            FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn i128_variable_shifts_lift_shld_shrd() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = |name| {
+            let source = match name {
+                "shl128" => {
+                    "atom shl128(x: i128, n: i128) -> i128 requires: n >= 0 && n < 64; ensures: true; body: { x << n };"
+                }
+                "lshr128" => {
+                    "atom lshr128(x: u128, n: u128) -> u128 requires: n >= 0 && n < 64; ensures: true; body: { x >> n };"
+                }
+                "ashr128" => {
+                    "atom ashr128(x: i128, n: i128) -> i128 requires: n >= 0 && n < 64; ensures: true; body: { x >> n };"
+                }
+                _ => unreachable!(),
+            };
+            source_model_named_with_admission(
+                source,
+                name,
+                &context,
+                RefinedAdmission::CompositeV21,
+            )
+        };
+        // Real `llc -mcpu=generic` codegen for a variable i128 shift:
+        // `shld`/`shrd` move the cross-word bits while `test $0x40,%cl`
+        // + `cmov` select the `count >= 64` fallback — both halves of
+        // the pattern are lifted, so the whole sequence is equivalent
+        // over the source's defined wide-shift domain (`n` in 0..128;
+        // the `requires` bound does not enter the compared domain).
+        let ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define i128 @shl128(i128 %x, i128 %n) {
+  %r = shl i128 %x, %n
+  ret i128 %r
+}
+define i128 @lshr128(i128 %x, i128 %n) {
+  %r = lshr i128 %x, %n
+  ret i128 %r
+}
+define i128 @ashr128(i128 %x, i128 %n) {
+  %r = ashr i128 %x, %n
+  ret i128 %r
+}
+"#;
+        for name in ["shl128", "lshr128", "ashr128"] {
+            let (address, bytes, targets) = compiled_function_with_targets(ir, name);
+            assert_eq!(
+                check_function(&bytes, address, &model(name), &targets, &context),
+                FunctionOutcome::Equivalent,
+                "{name}"
+            );
+        }
+        // The direction of the double shift is semantic, not cosmetic:
+        // running the `shl128` code against the `lshr128` model must
+        // produce a counterexample, not a vacuous pass.
+        let (address, bytes, targets) = compiled_function_with_targets(ir, "shl128");
+        assert_eq!(
+            check_function(&bytes, address, &model("lshr128"), &targets, &context),
             FunctionOutcome::Different
         );
     }
