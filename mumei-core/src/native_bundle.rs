@@ -1784,14 +1784,26 @@ fn check_atom_loop_exit_domain(
     if atom.loop_exits.as_bool() == Some(true) {
         return Ok(false);
     }
+    let mut inconclusive = false;
     solver.reset();
     solver.assert(&atom.domain);
     solver.assert(&atom.loop_exits);
     match solver.check() {
-        z3::SatResult::Sat => Ok(false),
-        z3::SatResult::Unsat => Err(BundleError(
-            "source domain and loop exits empty on all inputs",
-        )),
+        z3::SatResult::Sat => (),
+        z3::SatResult::Unsat => {
+            return Err(BundleError(
+                "source domain and loop exits empty on all inputs",
+            ))
+        }
+        z3::SatResult::Unknown => inconclusive = true,
+    }
+    solver.reset();
+    solver.assert(&atom.domain);
+    solver.assert(&atom.requires);
+    solver.assert(&atom.loop_exits);
+    match solver.check() {
+        z3::SatResult::Sat => Ok(inconclusive),
+        z3::SatResult::Unsat => Err(BundleError("requires and loop exits empty on all inputs")),
         z3::SatResult::Unknown => Ok(true),
     }
 }
@@ -2232,6 +2244,60 @@ mod source_recheck_tests {
             atom main() -> i64 requires: true; ensures: result == 0; body: 0;";
         let error = check_module_source(source).unwrap_err();
         assert_eq!(error.0, "source domain and loop exits empty on all inputs");
+    }
+
+    #[test]
+    fn module_recheck_rejects_requires_with_no_bounded_loop_exit_inputs() {
+        let source = "atom count(n: i64) -> i64\n\
+            requires: n >= 10 && n <= 20;\n\
+            ensures: result == 999;\n\
+            body: { let i = 0; while i < n invariant: i >= 0 && i <= n decreases: n - i { i = i + 1 }; i };";
+        let config = Config::new();
+        let context = Context::new(&config);
+        let atoms = semantic_contract::encode_pure_i64_module_obligations(
+            source,
+            &context,
+            RefinedAdmission::CompositeV26,
+        )
+        .unwrap();
+        assert_eq!(atoms.len(), 1);
+        let atom = &atoms[0];
+        let solver = Solver::new(&context);
+        solver.assert(&atom.domain);
+        solver.assert(&atom.loop_exits);
+        assert_eq!(solver.check(), SatResult::Sat);
+        for obligation in &atom.obligations {
+            solver.reset();
+            solver.assert(obligation);
+            assert_eq!(solver.check(), SatResult::Unsat);
+        }
+        let error = check_module_loop_exit_domains(&atoms, &solver).unwrap_err();
+        assert_eq!(error.0, "requires and loop exits empty on all inputs");
+
+        solver.reset();
+        solver.assert(&atom.domain);
+        solver.assert(&atom.requires);
+        solver.assert(&atom.loop_exits);
+        assert_eq!(solver.check(), SatResult::Unsat);
+
+        let control = "atom count(n: i64) -> i64\n\
+            requires: n >= 0 && n <= 2;\n\
+            ensures: result == n;\n\
+            body: { let i = 0; while i < n invariant: i >= 0 && i <= n decreases: n - i { i = i + 1 }; i };";
+        let control_config = Config::new();
+        let control_context = Context::new(&control_config);
+        let control_atoms = semantic_contract::encode_pure_i64_module_obligations(
+            control,
+            &control_context,
+            RefinedAdmission::CompositeV26,
+        )
+        .unwrap();
+        let control_solver = Solver::new(&control_context);
+        assert!(!check_module_loop_exit_domains(&control_atoms, &control_solver).unwrap());
+        assert_eq!(
+            check_module_source(control).unwrap(),
+            SourceRecheck::RecheckedWithinProfile
+        );
     }
 
     #[test]

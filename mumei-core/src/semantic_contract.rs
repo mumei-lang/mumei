@@ -9441,6 +9441,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
 pub struct ModuleAtomObligations<'ctx> {
     pub atom: String,
     pub domain: Bool<'ctx>,
+    pub requires: Bool<'ctx>,
     pub loop_exits: Bool<'ctx>,
     pub obligations: Vec<Bool<'ctx>>,
 }
@@ -10193,6 +10194,7 @@ fn module_atom_obligations<'ctx>(
     Ok(ModuleAtomObligations {
         atom: atom.name.clone(),
         domain: source_domain_formula,
+        requires,
         loop_exits,
         obligations,
     })
