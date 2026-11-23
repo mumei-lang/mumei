@@ -236,4 +236,9 @@ mumei native-bundle recheck-machine-tv bundle loop.mm --expected-build-id "$buil
   `native-bundle` 文脈専用の contract 拡張にするか
 - 外部 relocation（libc import）の assumption 語彙を
   `machine_code_callee_saved_preservation_assumed_for_external_callees` と
-  共通化するか
+  共通化するか — **解決**: 名前の統一は不適切（あちらは callee-saved
+  レジスタ保存の仮定、relocation は loader 解決の仮定で別の主張）。
+  代わりに assumption カテゴリを共有: レコードの relocation エントリに
+  `assumption: "assumed_external_callee"` を構造フィールドとして emit
+  し、detail 文字列の `assumed-external` 表記を正準化する
+  （checks リスト・verdict・昇格語彙は不変）
