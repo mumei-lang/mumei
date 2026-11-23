@@ -3340,9 +3340,10 @@ fn object_link_corresponds(
         .filter_map(|symbol| symbol.name().ok().map(str::to_owned))
         .collect();
     let mut plt_stub_addresses = BTreeMap::<String, u64>::new();
-    // Accepted PLT area for unlocatable-stub fields: the union of every
-    // section the linker may place call stubs in (.plt/.plt.sec/.plt.got).
-    let mut plt_range: Option<(u64, u64)> = None;
+    // Accepted PLT areas for unlocatable-stub fields: every section the
+    // linker may place call stubs in (.plt/.plt.sec/.plt.got), kept as
+    // separate ranges so inter-section gaps stay rejected.
+    let mut plt_ranges = Vec::<(u64, u64)>::new();
     for section in executable_file.sections() {
         if !matches!(section.name(), Ok(".plt") | Ok(".plt.sec") | Ok(".plt.got")) {
             continue;
@@ -3350,10 +3351,7 @@ fn object_link_corresponds(
         let Some(section_end) = section.address().checked_add(section.size()) else {
             continue;
         };
-        plt_range = Some(match plt_range {
-            Some((low, high)) => (low.min(section.address()), high.max(section_end)),
-            None => (section.address(), section_end),
-        });
+        plt_ranges.push((section.address(), section_end));
     }
     let plt_stub_layout = executable_file
         .sections()
@@ -3645,7 +3643,9 @@ fn object_link_corresponds(
                     let in_plt = implied_target
                         .and_then(|target| u64::try_from(target).ok())
                         .is_some_and(|target| {
-                            plt_range.is_some_and(|(start, end)| start <= target && target < end)
+                            plt_ranges
+                                .iter()
+                                .any(|(start, end)| *start <= target && target < *end)
                         });
                     if !in_plt {
                         return Ok(Some((
