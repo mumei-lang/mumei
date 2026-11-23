@@ -1830,6 +1830,35 @@ fn merge_array_ptrs<'a>(
     Ok(())
 }
 
+pub(crate) fn array_tail_binding(expr: &HirExpr) -> Option<&str> {
+    fn stmt_tail_binding(stmt: &HirStmt) -> Option<&str> {
+        match stmt {
+            HirStmt::Expr(expr) => array_tail_binding(expr),
+            HirStmt::Block { tail_expr, .. } => array_tail_binding(tail_expr.as_deref()?),
+            _ => None,
+        }
+    }
+
+    match expr {
+        HirExpr::Variable(name) => Some(name),
+        HirExpr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let then_name = stmt_tail_binding(then_branch)?;
+            let else_name = stmt_tail_binding(else_branch)?;
+            (then_name == else_name).then_some(then_name)
+        }
+        HirExpr::Match { arms, .. } => {
+            let mut names = arms.iter().map(|arm| stmt_tail_binding(&arm.body));
+            let first = names.next()??;
+            names.all(|name| name == Some(first)).then_some(first)
+        }
+        _ => None,
+    }
+}
+
 /// Emit `E::V(..)` / `E::V` as a tagged-union struct value. Fail-closed on a
 /// recursive enum (the eager `enum_llvm_type` layout cannot represent it) and
 /// on arity/unknown-variant mismatches — verification rejects those first, so
@@ -1893,22 +1922,33 @@ fn emit_enum_variant_init<'a>(
     for (i, field_expr) in fields.iter().enumerate() {
         let field_type = variant.field_types[i].display_name();
         let is_array = array_elem_llvm_type(context, &field_type, module_env)?.is_some();
-        if is_array && array_ptrs.return_contains_array_enum {
-            let stack_backed = match field_expr {
-                HirExpr::Variable(name) => {
-                    array_ptrs.stack_backed.contains(name) || !array_ptrs.contains_key(name)
-                }
-                _ => true,
-            };
-            if stack_backed {
-                return Err(MumeiError::codegen(
-                    "stack-backed array payload cannot escape through an array-bearing enum return"
-                        .to_string(),
-                ));
-            }
-        }
+        let array_binding = is_array.then(|| array_tail_binding(field_expr)).flatten();
         let field_val = if is_array {
-            if let HirExpr::Variable(name) = field_expr {
+            if let Some(name) = array_binding {
+                match field_expr {
+                    HirExpr::Variable(_) => {}
+                    HirExpr::IfThenElse {
+                        cond, then_branch, ..
+                    } if matches!(cond.as_ref(), HirExpr::Variable(name) if name == "true") => {
+                        super::stmt_emit::compile_hir_stmt(
+                            context,
+                            builder,
+                            module,
+                            function,
+                            then_branch,
+                            variables,
+                            var_types,
+                            array_ptrs,
+                            module_env,
+                        )?;
+                    }
+                    _ => {
+                        compile_hir_expr(
+                            context, builder, module, function, field_expr, variables, var_types,
+                            array_ptrs, module_env,
+                        )?;
+                    }
+                }
                 let (len, elem_ty, data) = array_ptrs.get(name).copied().ok_or_else(|| {
                     MumeiError::codegen(format!(
                         "array payload '{name}' is not registered as a fat pointer"
@@ -1940,10 +1980,16 @@ fn emit_enum_variant_init<'a>(
                     }
                 }
             } else {
-                compile_hir_expr(
+                let value = compile_hir_expr(
                     context, builder, module, function, field_expr, variables, var_types,
                     array_ptrs, module_env,
-                )?
+                )?;
+                if value.get_type() != array_struct_type(context).into() {
+                    return Err(MumeiError::codegen(format!(
+                        "array payload argument for '{enum_name}::{variant_name}' did not resolve to a fat pointer"
+                    )));
+                }
+                value
             }
         } else {
             compile_hir_expr(
@@ -1951,6 +1997,19 @@ fn emit_enum_variant_init<'a>(
                 module_env,
             )?
         };
+        if is_array && array_ptrs.return_contains_array_enum {
+            let stack_backed = array_binding
+                .map(|name| {
+                    array_ptrs.stack_backed.contains(name) || !array_ptrs.contains_key(name)
+                })
+                .unwrap_or(true);
+            if stack_backed {
+                return Err(MumeiError::codegen(
+                    "stack-backed array payload cannot escape through an array-bearing enum return"
+                        .to_string(),
+                ));
+            }
+        }
         let slot_ty = enum_type
             .get_field_type_at_index((i + 1) as u32)
             .ok_or_else(|| {

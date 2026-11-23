@@ -60,6 +60,38 @@ fn assert_verifies(name: &str, bitvec_i64: bool) {
     );
 }
 
+fn assert_native_result(fixture: &str, expected: i32) {
+    let (dir, copied) = copy_fixture(fixture);
+    let binary = dir.path().join("enum_array_payload");
+    let build = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("build")
+        .arg(copied)
+        .arg("--emit")
+        .arg("binary")
+        .arg("-o")
+        .arg(&binary)
+        .current_dir(dir.path())
+        .output()
+        .expect("build enum-array payload fixture");
+    let build_stdout = String::from_utf8_lossy(&build.stdout);
+    let build_stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        build.status.success(),
+        "{fixture} build failed:\n{build_stdout}\n{build_stderr}"
+    );
+
+    let run = Command::new(binary)
+        .output()
+        .expect("run enum-array payload fixture");
+    let run_stdout = String::from_utf8_lossy(&run.stdout);
+    let run_stderr = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(
+        run.status.code(),
+        Some(expected),
+        "{fixture} native result should equal its verified postcondition:\n{run_stdout}\n{run_stderr}"
+    );
+}
+
 #[test]
 fn scalar_array_enum_payloads_build_and_run_with_verified_results() {
     const FIXTURE: &str = "test_enum_array_payload_codegen_positive.mm";
@@ -99,6 +131,15 @@ fn scalar_array_enum_payloads_build_and_run_with_verified_results() {
 }
 
 #[test]
+fn block_tail_array_payload_builds_and_runs_with_verified_result() {
+    let fixture = "test_enum_array_payload_codegen_block_tail.mm";
+    for bitvec_i64 in [false, true] {
+        assert_verifies(fixture, bitvec_i64);
+    }
+    assert_native_result(fixture, 9);
+}
+
+#[test]
 fn unsupported_scalar_array_payload_shapes_fail_codegen_without_panicking() {
     for (fixture, diagnostic) in [
         (
@@ -119,6 +160,10 @@ fn unsupported_scalar_array_payload_shapes_fail_codegen_without_panicking() {
         ),
         (
             "test_enum_array_payload_codegen_task_escape_let.mm",
+            "stack-backed array payload cannot escape through an array-bearing enum return",
+        ),
+        (
+            "test_enum_array_payload_codegen_block_tail_escape.mm",
             "stack-backed array payload cannot escape through an array-bearing enum return",
         ),
         (
