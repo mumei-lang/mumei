@@ -609,6 +609,33 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
         assert!(relocation["target_symbol"].as_str().is_some());
         assert!(relocation["addend"].as_i64().is_some());
     }
+    // Step 2: the strict path confirms every correspondence check item
+    // while the record status stays honestly unvalidated.
+    let correspondence = &object_translation["correspondence"];
+    assert_eq!(
+        correspondence["status"],
+        "unchecked_not_translation_validated"
+    );
+    let results: BTreeMap<String, &str> = correspondence["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|check| {
+            (
+                check["item"].as_str().unwrap().to_owned(),
+                check["result"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    for item in [
+        "function_coverage",
+        "function_count",
+        "relocation_targets",
+        "relocation_bounds",
+        "relocation_resolved_values",
+    ] {
+        assert_eq!(results.get(item).copied(), Some("checked"), "{item}");
+    }
 }
 
 #[test]
@@ -5967,6 +5994,35 @@ fn accept_object_accepts_loop_bundle_without_object_link() {
         assert!(relocation["object_offset"].is_number());
         assert!(relocation["target_symbol"].is_string());
     }
+    // Step 2 correspondence inspection also covers the fallback record.
+    let correspondence = &translation["correspondence"];
+    assert_eq!(
+        correspondence["status"],
+        "unchecked_not_translation_validated"
+    );
+    let results: BTreeMap<String, &str> = correspondence["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|check| {
+            (
+                check["item"].as_str().unwrap().to_owned(),
+                check["result"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    for item in [
+        "function_coverage",
+        "function_count",
+        "relocation_targets",
+        "relocation_bounds",
+    ] {
+        assert_eq!(results.get(item).copied(), Some("checked"), "{item}");
+    }
+    assert!(matches!(
+        results.get("relocation_resolved_values").copied(),
+        Some("checked") | Some("unchecked")
+    ));
 }
 
 #[test]

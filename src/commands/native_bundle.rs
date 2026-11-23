@@ -4499,17 +4499,7 @@ fn object_translation_parse(
     ) else {
         return record;
     };
-    let mut executable_symbols = BTreeMap::<String, Vec<u64>>::new();
-    for symbol in executable_file.symbols() {
-        if symbol.is_global() && symbol.is_definition() && symbol.kind() == SymbolKind::Text {
-            if let Ok(name) = symbol.name() {
-                executable_symbols
-                    .entry(name.to_owned())
-                    .or_default()
-                    .push(symbol.address());
-            }
-        }
-    }
+    let executable_symbols = executable_text_symbols(&executable_file);
     let executable_address_of = |name: &str| -> Option<u64> {
         executable_symbols
             .get(name)
@@ -4591,6 +4581,202 @@ fn object_translation_parse(
     record
 }
 
+/// Global defined text symbols of the linked executable, by name.
+fn executable_text_symbols<'a, R: object::ReadRef<'a>>(
+    executable_file: &object::File<'a, R>,
+) -> BTreeMap<String, Vec<u64>> {
+    let mut symbols = BTreeMap::<String, Vec<u64>>::new();
+    for symbol in executable_file.symbols() {
+        if symbol.is_global() && symbol.is_definition() && symbol.kind() == SymbolKind::Text {
+            if let Ok(name) = symbol.name() {
+                symbols
+                    .entry(name.to_owned())
+                    .or_default()
+                    .push(symbol.address());
+            }
+        }
+    }
+    symbols
+}
+
+/// Step 2 correspondence inspection of the Step 1 metadata record:
+/// compares the emitted function table against the IR-defined surface
+/// and checks every relocation record for a resolvable target and an
+/// in-bounds offset. Each item reports `checked` (the comparison ran
+/// and passed), `unchecked` (it could not run — e.g. no IR surface or
+/// values that cannot be recomputed), or `inconsistent` with the
+/// offending names/offsets in `detail`. The record stays honest
+/// metadata: an inconsistency is reported here, never promoted into a
+/// verdict or a performed check.
+fn object_translation_correspondence_checks(
+    ir_surface: &tv::IrFunctionSurface,
+    executable_bytes: &[u8],
+    record: &ObjectTranslationRecord,
+) -> serde_json::Value {
+    let check = |item: &str, result: &str, detail: String| serde_json::json!({"item": item, "result": result, "detail": detail});
+    let mut checks = Vec::new();
+
+    // function_coverage / function_count: object-side function
+    // enumeration against the IR-defined surface.
+    if ir_surface.defined.is_empty() {
+        checks.push(check(
+            "function_coverage",
+            "unchecked",
+            "no IR-defined function surface to compare".to_owned(),
+        ));
+        checks.push(check(
+            "function_count",
+            "unchecked",
+            "no IR-defined function surface to compare".to_owned(),
+        ));
+    } else {
+        let mut missing = Vec::new();
+        for name in &ir_surface.defined {
+            if !record
+                .functions
+                .iter()
+                .any(|function| function.ir_function == *name)
+            {
+                missing.push(name.clone());
+            }
+        }
+        let mut extra = Vec::new();
+        for function in &record.functions {
+            if !ir_surface.defined.contains(&function.ir_function) {
+                extra.push(function.ir_function.clone());
+            }
+        }
+        if missing.is_empty() && extra.is_empty() {
+            checks.push(check(
+                "function_coverage",
+                "checked",
+                format!(
+                    "{} IR-defined functions each map to one object record",
+                    ir_surface.defined.len()
+                ),
+            ));
+        } else {
+            checks.push(check(
+                "function_coverage",
+                "inconsistent",
+                format!("unmapped IR functions: {missing:?}; unmapped object records: {extra:?}"),
+            ));
+        }
+        if record.functions.len() == ir_surface.defined.len() {
+            checks.push(check(
+                "function_count",
+                "checked",
+                format!("{} function records", record.functions.len()),
+            ));
+        } else {
+            checks.push(check(
+                "function_count",
+                "inconsistent",
+                format!(
+                    "{} function records vs {} IR-defined functions",
+                    record.functions.len(),
+                    ir_surface.defined.len()
+                ),
+            ));
+        }
+    }
+
+    // relocation_targets / relocation_bounds / relocation_resolved_values.
+    let executable_file = object::File::parse(executable_bytes).ok();
+    let executable_symbols = executable_file
+        .as_ref()
+        .map(executable_text_symbols)
+        .unwrap_or_default();
+    let resolvable_target = |target: &str| -> bool {
+        record
+            .functions
+            .iter()
+            .any(|function| function.object_symbol == target)
+            || executable_symbols.contains_key(target)
+            || ir_surface.declared.contains(target)
+            || machine_tv::is_ti3_libcall(target)
+    };
+    let unresolvable: Vec<String> = record
+        .relocations
+        .iter()
+        .filter(|relocation| !resolvable_target(&relocation.target_symbol))
+        .map(|relocation| relocation.target_symbol.clone())
+        .collect();
+    if executable_file.is_none() {
+        checks.push(check(
+            "relocation_targets",
+            "unchecked",
+            "executable could not be parsed".to_owned(),
+        ));
+    } else if unresolvable.is_empty() {
+        checks.push(check(
+            "relocation_targets",
+            "checked",
+            format!("{} relocation targets resolvable", record.relocations.len()),
+        ));
+    } else {
+        checks.push(check(
+            "relocation_targets",
+            "inconsistent",
+            format!("unresolvable relocation targets: {unresolvable:?}"),
+        ));
+    }
+    let out_of_bounds: Vec<(String, u64)> = record
+        .relocations
+        .iter()
+        .filter(|relocation| {
+            !record.functions.iter().any(|function| {
+                function.object_section == relocation.object_section
+                    && function.object_offset <= relocation.object_offset
+                    && relocation.object_offset < function.object_offset + function.object_size
+            })
+        })
+        .map(|relocation| (relocation.object_section.clone(), relocation.object_offset))
+        .collect();
+    if out_of_bounds.is_empty() {
+        checks.push(check(
+            "relocation_bounds",
+            "checked",
+            format!(
+                "{} relocations inside an enumerated function",
+                record.relocations.len()
+            ),
+        ));
+    } else {
+        checks.push(check(
+            "relocation_bounds",
+            "inconsistent",
+            format!("relocations outside every function record: {out_of_bounds:?}"),
+        ));
+    }
+    let resolved = record
+        .relocations
+        .iter()
+        .filter(|relocation| relocation.resolved_value.is_some())
+        .count();
+    if resolved == record.relocations.len() {
+        checks.push(check(
+            "relocation_resolved_values",
+            "checked",
+            format!("{resolved} relocation values recomputed"),
+        ));
+    } else {
+        checks.push(check(
+            "relocation_resolved_values",
+            "unchecked",
+            format!(
+                "{resolved}/{} relocation values recomputed",
+                record.relocations.len()
+            ),
+        ));
+    }
+
+    serde_json::json!({
+        "status": "unchecked_not_translation_validated",
+        "checks": checks,
+    })
+}
+
 fn object_translation_json(data: &ObjectRecheckData) -> serde_json::Value {
     let record = data
         .object_translation
@@ -4651,6 +4837,11 @@ fn object_translation_json(data: &ObjectRecheckData) -> serde_json::Value {
                 "resolved_value": relocation.resolved_value,
             }))
             .collect::<Vec<_>>(),
+        "correspondence": object_translation_correspondence_checks(
+            &data.ir_surface,
+            data.executable_bytes.as_slice(),
+            &record,
+        ),
     })
 }
 
@@ -6627,5 +6818,148 @@ entry:
         ] {
             assert_eq!(compare_evidence(fresh, &saved).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn object_translation_correspondence_checks_report_checked_and_inconsistent_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let ir_path = dir.path().join("module.ll");
+        let object_path = dir.path().join("module.o");
+        let executable_path = dir.path().join("module");
+        let ir = br#"
+define i64 @helper(i64 %argument) {
+entry:
+  %value = add i64 %argument, 1
+  ret i64 %value
+}
+
+define i64 @__mumei_user_main() {
+entry:
+  %value = call i64 @helper(i64 5)
+  ret i64 %value
+}
+
+define i32 @main() {
+entry:
+  %value = call i64 @__mumei_user_main()
+  %exit = trunc i64 %value to i32
+  ret i32 %exit
+}
+"#;
+        fs::write(&ir_path, ir).unwrap();
+        mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ir_path, &object_path)
+            .unwrap();
+        linker::link_recorded(std::slice::from_ref(&object_path), &executable_path).unwrap();
+        let object_bytes = fs::read(&object_path).unwrap();
+        let executable_bytes = fs::read(&executable_path).unwrap();
+        let ir_surface = tv::ir_function_surface(ir).unwrap();
+        let record = &object_link_corresponds(&object_bytes, &executable_bytes)
+            .unwrap()
+            .unwrap()
+            .2;
+
+        let results_of = |report: &serde_json::Value| -> BTreeMap<String, String> {
+            assert_eq!(
+                report["status"].as_str().unwrap(),
+                "unchecked_not_translation_validated"
+            );
+            report["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|check| {
+                    (
+                        check["item"].as_str().unwrap().to_owned(),
+                        check["result"].as_str().unwrap().to_owned(),
+                    )
+                })
+                .collect()
+        };
+        let results = results_of(&object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            record,
+        ));
+        assert_eq!(
+            results,
+            BTreeMap::from([
+                ("function_coverage".to_owned(), "checked".to_owned()),
+                ("function_count".to_owned(), "checked".to_owned()),
+                ("relocation_targets".to_owned(), "checked".to_owned()),
+                ("relocation_bounds".to_owned(), "checked".to_owned()),
+                (
+                    "relocation_resolved_values".to_owned(),
+                    "checked".to_owned()
+                ),
+            ])
+        );
+
+        // A record missing a function is unmappable and count-mismatched.
+        let mut short = record.clone();
+        short.functions.pop();
+        let results = results_of(&object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            &short,
+        ));
+        assert_eq!(results["function_coverage"], "inconsistent");
+        assert_eq!(results["function_count"], "inconsistent");
+
+        // An extra record function not in the IR surface is unmappable.
+        let mut extra = record.clone();
+        extra.functions.push(ObjectFunctionRecord {
+            ir_function: "phantom".to_owned(),
+            object_symbol: "phantom".to_owned(),
+            object_section: ".text".to_owned(),
+            object_offset: 0,
+            object_size: 1,
+            executable_address: Some(0),
+        });
+        let results = results_of(&object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            &extra,
+        ));
+        assert_eq!(results["function_coverage"], "inconsistent");
+        assert_eq!(results["function_count"], "inconsistent");
+
+        // A relocation to an unknown symbol is an inconsistent target.
+        let mut bogus_target = record.clone();
+        bogus_target.relocations[0].target_symbol = "nonexistent_target".to_owned();
+        let results = results_of(&object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            &bogus_target,
+        ));
+        assert_eq!(results["relocation_targets"], "inconsistent");
+
+        // A relocation outside every function record is out of bounds.
+        let mut out_of_bounds = record.clone();
+        out_of_bounds.relocations[0].object_offset = u64::MAX - 7;
+        let results = results_of(&object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            &out_of_bounds,
+        ));
+        assert_eq!(results["relocation_bounds"], "inconsistent");
+
+        // A relocation without a recomputed value stays honestly unchecked.
+        let mut unresolved = record.clone();
+        unresolved.relocations[0].resolved_value = None;
+        let results = results_of(&object_translation_correspondence_checks(
+            &ir_surface,
+            &executable_bytes,
+            &unresolved,
+        ));
+        assert_eq!(results["relocation_resolved_values"], "unchecked");
+
+        // Without an IR surface the function checks stay unchecked.
+        let results = results_of(&object_translation_correspondence_checks(
+            &tv::IrFunctionSurface::default(),
+            &executable_bytes,
+            record,
+        ));
+        assert_eq!(results["function_coverage"], "unchecked");
+        assert_eq!(results["function_count"], "unchecked");
     }
 }
