@@ -62,15 +62,14 @@ agent 側に `native-object-accept` ルート（`object_source_machine_code_corr
    `llvm_ir_object_equivalence`・`object_data_correspondence`・
    `object_symbol_attribute_correspondence`・relocation 4項目・
    `hir_llvm_model_correspondence` が `unchecked`/`inconsistent` でも
-   `accepted: true` が出うる。到達可能な具体例: anonymous
-   `unnamed_addr` 定数を含む bundle では
-   `object_data_correspondence` が `merged`（項目は `unchecked`
-   のまま）になり、linkage から導出不能な binding を持つ
-   シンボルでは `object_symbol_attribute_correspondence` も
-   `unchecked` になる — いずれも機械語 TV は素通しで
-   `accepted: true` が emit される。（`inconsistent` の受理は
-   byte 同一の再現検査が先に止まるため実際には到達しにくく、
-   項目の役割は defense-in-depth。）
+   `accepted: true` が出うる。到達可能な具体例: solver が
+   判定不能な関数（`solver_unknown`）を含む bundle では
+   `llvm_ir_object_equivalence` が `unchecked` のまま、
+   `.eh_frame` 系など bounded 解析が解決できない再配置を含む
+   bundle では relocation 項目が `unchecked` のまま、それぞれ
+   機械語 TV は素通しで `accepted: true` が emit される。
+   （`inconsistent` の受理は byte 同一の再現検査が先に止まる
+   ため実際には到達しにくく、項目の役割は defense-in-depth。）
 2. **object-translation 受理を名指す語彙がない**。scope は
    machine-code TV に scoped された名前だけで、「再現 object が
    pinned LLVM IR に対応する」claim を表す値がない。
@@ -119,16 +118,21 @@ agent 側に `native-object-accept` ルート（`object_source_machine_code_corr
    `unchecked`/`unknown` が1件でも → inconclusive
    （`solver_unknown` は既に `unknown` として分離済みなので
    ここに来る）。
+   境界の正直な記述: relocation 項目は全エントリの解決を要求
+   するので、`.eh_frame` 系など bounded 解析が値を解決できない
+   再配置を含む bundle は集約が `unchecked` のまま inconclusive
+   —— 受理できない。これは意図した fail-closed 境界で、
+   例外を入れて受理を広げない。
 3. **再現条件**: `fresh_same_profile_source_recheck`・
    `llvm_snapshot_translation_recheck`・
    `toolchain_object_executable_reproduction` が performed かつ成功。
    `pinned_member_merge_rederivation` は複数ファイル bundle の
    場合のみ必須（単一ファイル bundle では項目自体が存在しない）。
-   `canonical_link_argument_vector_compared` は link 再現が
-   走ったとき必須（missing → inconclusive）。
-   `_without_object_link` では link 再現も argv 比較も
-   not_performed になるので、argv 要件は link あり scope に
-   だけ効く。
+   `canonical_link_argument_vector_compared` は pinned argv が
+   記録されている限り link 対照の有無と独立に必須（relink は
+   `_without_object_link` scope でも走る。未比較 → inconclusive）。
+   `_without_object_link` が外すのは `object_link_correspondence`
+   項目だけであり、argv 比較は引き続き要求する。
 4. **machine-TV**: `machine_tv_acceptance_decision` が `Accepted`。
    object-translation 受理は machine-TV 受理の superset ——
    「再現 object が pinned LLVM IR に対応する」に加えて
@@ -172,12 +176,16 @@ correspondence profile で立証可能な範囲で対応している」。
   は語彙として維持する — 過去に emit された記述子を解釈する
   ための値として残る。ただし Step 2 後の `accept-object` は
   新 scope だけを emit する（dual-emit・切替 flag なし）。
-  machine-TV slice だけの受理を新規に得る経路はなくなるが、
-  object-translation 受理はその superset claim なので
-  既存利用者の受理面は狭まらない（受理に必要な条件は厳しく
-  なる方向のみ）。移行順序: Core が新 scope を emit 開始 →
-  agent 側が scope allowlist と項目集合写像を更新 → 新記述子の
-  消費開始。旧 scope の記述子を読む経路は互換のため残す。
+  影響の正直な記述: 受理の主張は強くなるが受理対象は狭まる。
+  unchecked 項目を残す bundle は機械語 TV に合格しても新しい
+  受理記述子を得られない（inconclusive、exit 3）—— 旧記述子を
+  読めることと新記述子を発行できることは別で、machine-TV slice
+  だけの受理を新規に得る経路はなくなる。これは意図した
+  fail-closed の狭まり。移行順序: 先に agent 側が新旧両 scope
+  を受理できるよう allowlist と項目集合写像を更新してから、
+  Core が新 scope への emit を切り替える（Core を先に切ると
+  旧 agent は正当な新記述子も scope 不一致で拒む空白ができる）。
+  旧 scope の記述子を読む経路は互換のため残す。
 - **checks_performed**: correspondence 項目名をそのまま列挙
   （`llvm_ir_object_equivalence`、`object_data_correspondence`、
   `object_symbol_attribute_correspondence`、`hir_llvm_model_correspondence`、
@@ -211,16 +219,18 @@ correspondence profile で立証可能な範囲で対応している」。
   `native_bundle_object_translation_correspondence` に更新し、
   checks_performed/not_performed を項目名レベルに拡張。
   machine-TV 受理との superset 関係を docs に記述。旧 scope を
-  ピン留めした既存テスト・agent 側の scope allowlist はこの
-  タイミングで新値に更新（旧値は語彙として残す）。
+  ピン留めした既存テストはこのタイミングで新値に更新
+  （旧値は語彙として残す）。Core emit の切替自体は Step 3 の
+  agent 側更新が先（下記の順序依存を参照）。
 - **Step 3**: e2e —— 正常受理（全項目 checked → `accepted`）、
   data/symbol-attribute/relocation が unchecked のとき
   inconclusive、`inconsistent` で reject、`_without_object_link`
   scope、`canonical_argv` 欠損で inconclusive、の6ケース。
-  その後 agent 側（parent lane）で `native-object-accept` の
-  項目集合写像・scope allowlist 更新（`native_object_translation_accept`
-  相当の demo scenario）。Core 側は合意した項目名・scope・schema
-  を docs に確定。
+  agent 側（parent lane）は先に `native-object-accept` を新旧両
+  scope と項目集合写像に対応させてから、Core が emit を新
+  scope に切り替える —— 逆順だと旧 agent が正当な新記述子を
+  scope 不一致で拒む空白ができる。Core 側は合意した項目名・
+  scope・schema を docs に確定。
 - **Step 4（deferred）**: liftable subset が広がったら受理条件の
   項目追加を再評価。
 
