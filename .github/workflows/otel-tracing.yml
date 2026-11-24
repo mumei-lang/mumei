@@ -23,6 +23,7 @@ on:
       - 'Cargo.toml'
       - 'mumei-core/Cargo.toml'
       - '.agents/skills/testing-mumei-cli/SKILL.md'
+      - '.agents/skills/testing-mumei-cli/references/otel-tracing.md'
       - '.github/workflows/otel-tracing.yml'
   workflow_dispatch:
 
