@@ -43,6 +43,13 @@ on:
       - '.github/workflows/verify-std.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify-std:
     runs-on: ubuntu-24.04
