@@ -8345,7 +8345,10 @@ impl<'ctx> PureI64Body<'ctx> {
 /// other declared type drops the call site out of the leaf subset.
 /// A callee absent from the map keeps the legacy all-scalar fallback —
 /// the bundle recheck passes every module atom's signature, so the map
-/// is complete wherever composite callees can appear.
+/// is complete wherever composite callees can appear. Generic
+/// instantiations a callee introduces (`mk3() -> Triple<i64>` where the
+/// caller's own signature never names `Triple<i64>`) are specialized by
+/// the caller-side `structs` map built from every signature.
 pub struct HirCallLeafSig {
     pub params: Vec<Option<String>>,
     pub result: Option<String>,
