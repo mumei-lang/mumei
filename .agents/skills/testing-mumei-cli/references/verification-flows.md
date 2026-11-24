@@ -84,7 +84,7 @@ Expected assertions:
 - Output includes a normal postcondition/verification failure.
 - Output does not include `Spurious counterexample candidate` or `Spurious counterexample detected`.
 
-For certificate metadata, run the Proof Certificate flow below and additionally assert:
+For certificate metadata, run the Proof Certificate flow in [certificates-emitters-lean.md](certificates-emitters-lean.md#proof-certificate-generation-and-verification) and additionally assert:
 - Each atom has `symbol_provenance` as an array.
 - `counterexample_validation` and `unused_hypotheses`, when present, are objects or `null`.
 - Clean up generated `cross_spec.json`, proof cert files, and `/home/ubuntu/mumei-p8a-fixtures` after the test.
