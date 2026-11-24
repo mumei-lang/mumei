@@ -6196,6 +6196,26 @@ fn hir_llvm_atom_outcomes(data: &ObjectRecheckData) -> Option<BTreeMap<String, &
         }
     }
     let (module_header, members) = llvm_module_members(llvm_ir);
+    // Call-site leaf shapes come from the declared signatures, so a
+    // composite parameter or result flattens to its leaf slots the way
+    // the IR `call` encoding splices them — a callee absent here keeps
+    // the legacy all-scalar assumption.
+    let calls: BTreeMap<String, semantic_contract::HirCallLeafSig> = atoms
+        .iter()
+        .map(|atom| {
+            (
+                atom.name.clone(),
+                semantic_contract::HirCallLeafSig {
+                    params: atom
+                        .params
+                        .iter()
+                        .map(|param| param.type_name.clone())
+                        .collect(),
+                    result: atom.return_type.clone(),
+                },
+            )
+        })
+        .collect();
     // Generic struct declarations specialize per instantiation at
     // build time; the recheck applies the same substitution from each
     // atom's own signature (`Pair<i64>` → field `T` binds `i64`) so a
@@ -6244,9 +6264,8 @@ fn hir_llvm_atom_outcomes(data: &ObjectRecheckData) -> Option<BTreeMap<String, &
         let outcome = match tv::validate_hir_pure_i64_leaf(
             &hir_atom,
             &structs,
+            &calls,
             &subset_ir,
-            // The bundle emitter renames `main` to `__mumei_user_main`
-            // — the rename is this path's alone.
             true,
             tv::Options::default(),
         ) {

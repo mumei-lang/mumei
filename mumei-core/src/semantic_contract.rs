@@ -8338,6 +8338,19 @@ impl<'ctx> PureI64Body<'ctx> {
     }
 }
 
+/// The declared signature a leaf call site is checked against in
+/// `encode_hir_pure_i64_leaf`: parameter type names in order and the
+/// return type name. A type naming an admitted `structs` entry is
+/// composite (one leaf per field); `i64`/`None` is a scalar leaf; any
+/// other declared type drops the call site out of the leaf subset.
+/// A callee absent from the map keeps the legacy all-scalar fallback —
+/// the bundle recheck passes every module atom's signature, so the map
+/// is complete wherever composite callees can appear.
+pub struct HirCallLeafSig {
+    pub params: Vec<Option<String>>,
+    pub result: Option<String>,
+}
+
 /// Encode a `HirAtom` into the same `PureI64Body` model the source-side
 /// encoder produces, so the `hir → llvm_ir` correspondence reuses the
 /// existing IR comparison (the comparison encodes the LLVM function
@@ -8362,6 +8375,7 @@ impl<'ctx> PureI64Body<'ctx> {
 pub fn encode_hir_pure_i64_leaf<'ctx>(
     atom: &crate::hir::HirAtom,
     structs: &BTreeMap<String, Vec<(String, String)>>,
+    calls: &BTreeMap<String, HirCallLeafSig>,
     context: &'ctx Context,
 ) -> Result<PureI64Body<'ctx>, SemanticContractError> {
     use crate::hir::{HirBinOp, HirExpr, HirStmt};
@@ -8527,9 +8541,12 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
         _ => return Err(SemanticContractError::Unsupported("hir result type")),
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn encode_expr<'ctx>(
         expr: &HirExpr,
         env: &HashMap<String, HirLeafValue<'ctx>>,
+        structs: &BTreeMap<String, Vec<String>>,
+        calls: &BTreeMap<String, HirCallLeafSig>,
         context: &'ctx Context,
         guard: &Bool<'ctx>,
         definedness: &mut Vec<Bool<'ctx>>,
@@ -8611,13 +8628,31 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                         "hir access on a non-array binding",
                     ));
                 };
-                let (i, i_call) =
-                    encode_expr(index, env, context, guard, definedness, call_sites, scalar)?;
+                let (i, i_call) = encode_expr(
+                    index,
+                    env,
+                    structs,
+                    calls,
+                    context,
+                    guard,
+                    definedness,
+                    call_sites,
+                    scalar,
+                )?;
                 Ok((array_read(context, store, len, &i), i_call))
             }
             HirExpr::BinaryOp(lhs, op, rhs) => {
-                let (l, l_call) =
-                    encode_expr(lhs, env, context, guard, definedness, call_sites, scalar)?;
+                let (l, l_call) = encode_expr(
+                    lhs,
+                    env,
+                    structs,
+                    calls,
+                    context,
+                    guard,
+                    definedness,
+                    call_sites,
+                    scalar,
+                )?;
                 // `&&`/`||`/`=>` short-circuit like the emitter and the
                 // source encoder: the right operand's partial operations
                 // bind only when the left one lets it run.
@@ -8628,8 +8663,17 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                     HirBinOp::Or => Bool::and(context, &[guard, &l._eq(&zero)]),
                     _ => guard.clone(),
                 };
-                let (r, r_call) =
-                    encode_expr(rhs, env, context, &r_guard, definedness, call_sites, scalar)?;
+                let (r, r_call) = encode_expr(
+                    rhs,
+                    env,
+                    structs,
+                    calls,
+                    context,
+                    &r_guard,
+                    definedness,
+                    call_sites,
+                    scalar,
+                )?;
                 if (l_call || r_call)
                     && matches!(
                         op,
@@ -8719,14 +8763,25 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                 ) else {
                     return Err(SemanticContractError::Unsupported("hir if branch"));
                 };
-                let (c, c_call) =
-                    encode_expr(cond, env, context, guard, definedness, call_sites, scalar)?;
+                let (c, c_call) = encode_expr(
+                    cond,
+                    env,
+                    structs,
+                    calls,
+                    context,
+                    guard,
+                    definedness,
+                    call_sites,
+                    scalar,
+                )?;
                 let c_nz = c._eq(&zero).not();
                 let then_guard = Bool::and(context, &[guard, &c_nz]);
                 let else_guard = Bool::and(context, &[guard, &c_nz.not()]);
                 let (t, t_call) = encode_expr(
                     then_e,
                     env,
+                    structs,
+                    calls,
                     context,
                     &then_guard,
                     definedness,
@@ -8736,6 +8791,8 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                 let (e, e_call) = encode_expr(
                     else_e,
                     env,
+                    structs,
+                    calls,
                     context,
                     &else_guard,
                     definedness,
@@ -8744,56 +8801,206 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                 )?;
                 Ok((c._eq(&zero).not().ite(&t, &e), c_call || t_call || e_call))
             }
-            HirExpr::Call { name, args, .. } => {
-                // `len(a)` on a `[i64]` parameter reads its stored
-                // element count — the emitted `arrlen` slot load.
-                if name == "len" && args.len() == 1 {
-                    if let HirExpr::Variable(var) = &args[0] {
-                        if let Some(HirLeafValue::Array(len, _)) = env.get(var) {
-                            return Ok((len.clone(), false));
-                        }
-                    }
-                }
-                // The same uninterpreted site the source encoder and the
-                // IR `call` encoding produce: `mumei_call_<name>_<arity>`
-                // applied to the encoded args. The callee's own body is a
-                // separate obligation — bool-returning callees (whose
-                // 0/1 bound needs the module signature env) stay outside
-                // this slice.
-                if width != 64 {
-                    // `call_decl` is the i64-carrying uninterpreted site;
-                    // wide call conventions are a later slice.
-                    return Err(SemanticContractError::Unsupported("hir wide call"));
-                }
-                let mut applied = Vec::with_capacity(args.len());
-                for arg in args {
-                    applied.push(
-                        encode_expr(arg, env, context, guard, definedness, call_sites, scalar)?.0,
-                    );
-                }
-                let refs: Vec<&dyn Ast> = applied.iter().map(|v| v as &dyn Ast).collect();
-                let value = call_decl(context, name, applied.len())
-                    .apply(&refs)
-                    .as_bv()
-                    .ok_or(SemanticContractError::Unsupported("hir call result"))?;
-                call_sites.push(CallSite {
-                    callee: name.clone(),
-                    args: applied.clone(),
-                    arg_leaf_doubles: vec![false; applied.len()],
-                    argument_shapes: vec![CallValueShape::Scalar { leaf_count: 1 }; applied.len()],
-                    has_composite_arguments_or_result: false,
-                    result: value.clone(),
-                    result_is_double: false,
-                    result_shape: CallValueShape::Scalar { leaf_count: 1 },
-                    result_leaf_doubles: vec![false],
-                    result_store: None,
-                    guard: guard.clone(),
-                    callback_arguments: Vec::new(),
-                });
-                Ok((value, true))
-            }
+            HirExpr::Call { name, args, .. } => match encode_call(
+                name,
+                args,
+                env,
+                structs,
+                calls,
+                context,
+                guard,
+                definedness,
+                call_sites,
+                scalar,
+            )? {
+                HirLeafValue::Scalar(value, call) => Ok((value, call)),
+                _ => Err(SemanticContractError::Unsupported(
+                    "hir aggregate call result in scalar position",
+                )),
+            },
             _ => Err(SemanticContractError::Unsupported("hir expression")),
         }
+    }
+
+    /// A call site the leaf model shares with the IR `call` encoding:
+    /// `mumei_call_<name>_<flattened arity>` applied to the leaf-
+    /// flattened arguments — an aggregate argument splices its leaf
+    /// slots in the order `call_operands` uses on the IR side — and a
+    /// composite result one `mumei_call_field` application per leaf.
+    /// The declared signature (`calls`) decides the leaf shapes: a
+    /// callee absent from the map keeps the legacy all-scalar
+    /// `i64`-carrying assumption, while a callee whose declared
+    /// parameter or result type is no leaf type drops the site out of
+    /// the subset instead of being silently scalarised.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_call<'ctx>(
+        name: &str,
+        args: &[HirExpr],
+        env: &HashMap<String, HirLeafValue<'ctx>>,
+        structs: &BTreeMap<String, Vec<String>>,
+        calls: &BTreeMap<String, HirCallLeafSig>,
+        context: &'ctx Context,
+        guard: &Bool<'ctx>,
+        definedness: &mut Vec<Bool<'ctx>>,
+        call_sites: &mut Vec<CallSite<'ctx>>,
+        scalar: (u32, bool, bool),
+    ) -> Result<HirLeafValue<'ctx>, SemanticContractError> {
+        let (width, _, _) = scalar;
+        // `len(a)` on a `[i64]` parameter reads its stored
+        // element count — the emitted `arrlen` slot load.
+        if name == "len" && args.len() == 1 {
+            if let HirExpr::Variable(var) = &args[0] {
+                if let Some(HirLeafValue::Array(len, _)) = env.get(var) {
+                    return Ok(HirLeafValue::Scalar(len.clone(), false));
+                }
+            }
+        }
+        // The callee's own body is a separate obligation —
+        // bool-returning callees (whose 0/1 bound needs the module
+        // signature env) and wide call conventions stay outside this
+        // slice.
+        if width != 64 {
+            return Err(SemanticContractError::Unsupported("hir wide call"));
+        }
+        let sig = calls.get(name);
+        if let Some(sig) = sig {
+            if sig.params.len() != args.len() {
+                return Err(SemanticContractError::Unsupported("hir call arity"));
+            }
+        }
+        let mut applied = Vec::new();
+        let mut argument_shapes = Vec::with_capacity(args.len());
+        let mut has_composite = false;
+        for (index, arg) in args.iter().enumerate() {
+            let value = encode_value(
+                arg,
+                env,
+                structs,
+                calls,
+                context,
+                guard,
+                definedness,
+                call_sites,
+                scalar,
+            )?;
+            // The declared parameter shape under a known signature: a
+            // `structs` member flattens to its leaves, `i64`/`None`
+            // stays a scalar leaf — anything else is outside.
+            let composite_param = match sig.map(|sig| sig.params[index].as_deref()) {
+                Some(Some(ty)) => match structs.get(ty) {
+                    Some(fields) => Some(fields.len()),
+                    None if ty == "i64" => None,
+                    None => {
+                        return Err(SemanticContractError::Unsupported(
+                            "hir call parameter outside the leaf subset",
+                        ))
+                    }
+                },
+                _ => None,
+            };
+            match value {
+                HirLeafValue::Aggregate(leaves) => {
+                    let Some(expected) = composite_param else {
+                        return Err(SemanticContractError::Unsupported(
+                            "hir aggregate call argument",
+                        ));
+                    };
+                    if leaves.len() != expected {
+                        return Err(SemanticContractError::Unsupported(
+                            "hir call argument shape",
+                        ));
+                    }
+                    has_composite = true;
+                    argument_shapes.push(CallValueShape::Struct {
+                        leaf_count: leaves.len(),
+                        has_enum: false,
+                        has_f64: false,
+                    });
+                    applied.extend(leaves.into_iter().map(|(_, leaf, _)| leaf));
+                }
+                HirLeafValue::Scalar(leaf, _) => {
+                    if composite_param.is_some() {
+                        return Err(SemanticContractError::Unsupported(
+                            "hir scalar call argument",
+                        ));
+                    }
+                    argument_shapes.push(CallValueShape::Scalar { leaf_count: 1 });
+                    applied.push(leaf);
+                }
+                HirLeafValue::Array(..) => {
+                    return Err(SemanticContractError::Unsupported(
+                        "hir array call argument",
+                    ));
+                }
+            }
+        }
+        let result_ty = sig.and_then(|sig| sig.result.as_deref());
+        let refs: Vec<&dyn Ast> = applied.iter().map(|v| v as &dyn Ast).collect();
+        if let Some(fields) = result_ty.and_then(|ty| structs.get(ty)) {
+            // A struct-returning call applies one uninterpreted function
+            // per field slot — the same declarations the source encoder
+            // and the IR `call` encoding apply at the site.
+            let slots: Vec<BV> = (0..fields.len())
+                .map(|i| {
+                    call_field_decl(context, name, applied.len(), i)
+                        .apply(&refs)
+                        .as_bv()
+                        .ok_or(SemanticContractError::Unsupported("hir call result"))
+                })
+                .collect::<Result<_, _>>()?;
+            call_sites.push(CallSite {
+                callee: name.to_owned(),
+                args: applied.clone(),
+                arg_leaf_doubles: vec![false; applied.len()],
+                argument_shapes,
+                has_composite_arguments_or_result: true,
+                result: aggregate_value(&slots),
+                result_is_double: false,
+                result_shape: CallValueShape::Struct {
+                    leaf_count: fields.len(),
+                    has_enum: false,
+                    has_f64: false,
+                },
+                result_leaf_doubles: vec![false; fields.len()],
+                result_store: None,
+                guard: guard.clone(),
+                callback_arguments: Vec::new(),
+            });
+            return Ok(HirLeafValue::Aggregate(
+                fields
+                    .iter()
+                    .cloned()
+                    .zip(slots)
+                    .map(|(field, leaf)| (field, leaf, true))
+                    .collect(),
+            ));
+        }
+        if let Some(ty) = result_ty {
+            if ty != "i64" {
+                return Err(SemanticContractError::Unsupported(
+                    "hir call result outside the leaf subset",
+                ));
+            }
+        }
+        let value = call_decl(context, name, applied.len())
+            .apply(&refs)
+            .as_bv()
+            .ok_or(SemanticContractError::Unsupported("hir call result"))?;
+        call_sites.push(CallSite {
+            callee: name.to_owned(),
+            args: applied.clone(),
+            arg_leaf_doubles: vec![false; applied.len()],
+            argument_shapes,
+            has_composite_arguments_or_result: has_composite,
+            result: value.clone(),
+            result_is_double: false,
+            result_shape: CallValueShape::Scalar { leaf_count: 1 },
+            result_leaf_doubles: vec![false],
+            result_store: None,
+            guard: guard.clone(),
+            callback_arguments: Vec::new(),
+        });
+        Ok(HirLeafValue::Scalar(value, true))
     }
 
     /// A `let`/tail value, where an aggregate is admissible: a struct
@@ -8807,6 +9014,7 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
         expr: &HirExpr,
         env: &HashMap<String, HirLeafValue<'ctx>>,
         structs: &BTreeMap<String, Vec<String>>,
+        calls: &BTreeMap<String, HirCallLeafSig>,
         context: &'ctx Context,
         guard: &Bool<'ctx>,
         definedness: &mut Vec<Bool<'ctx>>,
@@ -8826,8 +9034,17 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                     let Some((_, init)) = fields.iter().find(|(n, _)| n == name) else {
                         return Err(SemanticContractError::Unsupported("hir struct init field"));
                     };
-                    let (leaf, call) =
-                        encode_expr(init, env, context, guard, definedness, call_sites, scalar)?;
+                    let (leaf, call) = encode_expr(
+                        init,
+                        env,
+                        structs,
+                        calls,
+                        context,
+                        guard,
+                        definedness,
+                        call_sites,
+                        scalar,
+                    )?;
                     leaves.push((name.clone(), leaf, call));
                 }
                 Ok(HirLeafValue::Aggregate(leaves))
@@ -8837,14 +9054,44 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                     Ok(HirLeafValue::Aggregate(leaves.clone()))
                 }
                 _ => {
-                    let (leaf, call) =
-                        encode_expr(expr, env, context, guard, definedness, call_sites, scalar)?;
+                    let (leaf, call) = encode_expr(
+                        expr,
+                        env,
+                        structs,
+                        calls,
+                        context,
+                        guard,
+                        definedness,
+                        call_sites,
+                        scalar,
+                    )?;
                     Ok(HirLeafValue::Scalar(leaf, call))
                 }
             },
+            HirExpr::Call { name, args, .. } => encode_call(
+                name,
+                args,
+                env,
+                structs,
+                calls,
+                context,
+                guard,
+                definedness,
+                call_sites,
+                scalar,
+            ),
             _ => {
-                let (leaf, call) =
-                    encode_expr(expr, env, context, guard, definedness, call_sites, scalar)?;
+                let (leaf, call) = encode_expr(
+                    expr,
+                    env,
+                    structs,
+                    calls,
+                    context,
+                    guard,
+                    definedness,
+                    call_sites,
+                    scalar,
+                )?;
                 Ok(HirLeafValue::Scalar(leaf, call))
             }
         }
@@ -8871,6 +9118,7 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                     value,
                     &env,
                     &structs,
+                    calls,
                     context,
                     &top_guard,
                     &mut definedness,
@@ -8883,6 +9131,8 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
                 encode_expr(
                     e,
                     &env,
+                    &structs,
+                    calls,
                     context,
                     &top_guard,
                     &mut definedness,
@@ -8897,6 +9147,7 @@ pub fn encode_hir_pure_i64_leaf<'ctx>(
         tail,
         &env,
         &structs,
+        calls,
         context,
         &top_guard,
         &mut definedness,

@@ -2677,7 +2677,7 @@ fn composite_aggregates_outside_struct_formal_reads_and_pass_through_fail_closed
     assert!(composite(&scalar, COMPOSITE_IR).is_err());
 }
 
-const STRUCT_RESULT_SOURCE: &str = "struct P { x: i64, y: i64 }\n\
+const STRUCT_RESULT_SOURCE: &str = "struct Pair { x: i64, y: i64 }\n\
     atom make(a: i64) -> P requires: true; ensures: result.x == a; body: { P { x: a, y: a + 1 } };\n\
     atom usep(a: i64) -> i64 requires: true; ensures: true; body: { make(a).y };\n\
     atom initlet(a: i64) -> i64 requires: true; ensures: result == a; body: { let q = P { x: 5, y: a }; q.y };\n\
@@ -2877,7 +2877,7 @@ fn composite_v6_bool_padding_slots_compare_against_normalized_source_values() {
     assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
 }
 
-const BRANCH_MERGED_COMPOSITE_SOURCE: &str = "struct P { x: i64, y: i64 }\nenum Shape { Dot, Edge(w: i64) }\natom pick(p: P, c: i64) -> P requires: c >= 0 && p.x >= 0; ensures: result.x >= 0; body: { if c == 0 { p } else { P { x: c, y: c } } };\natom pick_enum(s: Shape, c: i64) -> Shape requires: c >= 0; ensures: true; body: { if c == 0 { s } else { Shape::Edge(c) } };\natom main() -> i64 requires: true; ensures: true; body: { let q = pick(P { x: 1, y: 2 }, 3); q.x };";
+const BRANCH_MERGED_COMPOSITE_SOURCE: &str = "struct Pair { x: i64, y: i64 }\nenum Shape { Dot, Edge(w: i64) }\natom pick(p: P, c: i64) -> P requires: c >= 0 && p.x >= 0; ensures: result.x >= 0; body: { if c == 0 { p } else { P { x: c, y: c } } };\natom pick_enum(s: Shape, c: i64) -> Shape requires: c >= 0; ensures: true; body: { if c == 0 { s } else { Shape::Edge(c) } };\natom main() -> i64 requires: true; ensures: true; body: { let q = pick(P { x: 1, y: 2 }, 3); q.x };";
 
 #[test]
 fn composite_v7_branch_merged_aggregates_validate_against_phi_ir() {
@@ -4174,7 +4174,15 @@ fn hir_outcome(source: &str, ir: &str) -> Outcome {
         panic!("atom")
     };
     let hir = lower_atom_to_hir(&atom);
-    tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), ir, false, Options::default()).unwrap()
+    tv::validate_hir_pure_i64_leaf(
+        &hir,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        ir,
+        false,
+        Options::default(),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -4240,6 +4248,7 @@ fn hir_leaf_compare_rejects_atoms_outside_the_subset() {
     let hir = lower_atom_to_hir(&atom);
     assert!(tv::validate_hir_pure_i64_leaf(
         &hir,
+        &BTreeMap::new(),
         &BTreeMap::new(),
         &pin("define i64 @f(i64 %x) { ret i64 %x }"),
         false,
@@ -4339,8 +4348,15 @@ fn hir_leaf_compare_rejects_mixed_width_signatures() {
     let hir = lower_atom_to_hir(&atom);
     let ir = pin("define i64 @f(i64 %x) { ret i64 %x }");
     assert!(
-        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, false, Options::default())
-            .is_err(),
+        tv::validate_hir_pure_i64_leaf(
+            &hir,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &ir,
+            false,
+            Options::default()
+        )
+        .is_err(),
         "mixed-width signatures stay outside the subset"
     );
 }
@@ -4368,8 +4384,15 @@ fn hir_leaf_compare_rejects_f64_operations_and_wrong_ret() {
     let hir = lower_atom_to_hir(&atom);
     let ir = pin("define double @f(double %x, double %y) { ret double %x }");
     assert!(
-        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, false, Options::default())
-            .is_err(),
+        tv::validate_hir_pure_i64_leaf(
+            &hir,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &ir,
+            false,
+            Options::default()
+        )
+        .is_err(),
         "f64 arithmetic stays outside the pass-through subset"
     );
     // An `i64` return where the source declares `f64` fails the
@@ -4384,8 +4407,15 @@ fn hir_leaf_compare_rejects_f64_operations_and_wrong_ret() {
     // this would compare `Different` instead of erroring.
     let ir = pin("define i64 @f(double %x) { ret i64 0 }");
     assert!(
-        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, false, Options::default())
-            .is_err(),
+        tv::validate_hir_pure_i64_leaf(
+            &hir,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &ir,
+            false,
+            Options::default()
+        )
+        .is_err(),
         "an i64 return where f64 is declared fails the kind gate"
     );
 }
@@ -4422,8 +4452,15 @@ fn hir_leaf_compare_rejects_ordered_ops_over_call_results() {
     let hir = lower_atom_to_hir(&atom);
     let ir = pin("declare i64 @g(i64)\ndefine i64 @f(i64 %x, i64 %y) { %c = call i64 @g(i64 %x)\n %cmp = icmp sgt i64 %c, %y\n %r = zext i1 %cmp to i64\n ret i64 %r }");
     assert!(
-        tv::validate_hir_pure_i64_leaf(&hir, &BTreeMap::new(), &ir, false, Options::default())
-            .is_err(),
+        tv::validate_hir_pure_i64_leaf(
+            &hir,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &ir,
+            false,
+            Options::default()
+        )
+        .is_err(),
         "ordered ops over a call result stay outside the subset"
     );
 }
@@ -4470,6 +4507,7 @@ fn hir_leaf_compare_rejects_array_writes_and_whole_values() {
             tv::validate_hir_pure_i64_leaf(
                 &hir,
                 &BTreeMap::new(),
+                &BTreeMap::new(),
                 &real_ir,
                 false,
                 Options::default()
@@ -4488,13 +4526,44 @@ fn hir_atom(source: &str) -> mumei_core::hir::HirAtom {
     lower_atom_to_hir(&atom)
 }
 
+/// The module's callee signatures for `encode_hir_pure_i64_leaf` —
+/// the same map `hir_llvm_atom_outcomes` derives from `env.atoms` on
+/// the recheck path.
+fn call_sigs(source: &str) -> BTreeMap<String, mumei_core::semantic_contract::HirCallLeafSig> {
+    parse_module_checked(source)
+        .unwrap()
+        .iter()
+        .filter_map(|item| match item {
+            Item::Atom(atom) => Some((
+                atom.name.clone(),
+                mumei_core::semantic_contract::HirCallLeafSig {
+                    params: atom
+                        .params
+                        .iter()
+                        .map(|param| param.type_name.clone())
+                        .collect(),
+                    result: atom.return_type.clone(),
+                },
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
 fn hir_outcome_with_structs(
     source: &str,
     structs: &BTreeMap<String, Vec<(String, String)>>,
     ir: &str,
 ) -> Outcome {
-    tv::validate_hir_pure_i64_leaf(&hir_atom(source), structs, ir, false, Options::default())
-        .unwrap()
+    tv::validate_hir_pure_i64_leaf(
+        &hir_atom(source),
+        structs,
+        &call_sigs(source),
+        ir,
+        false,
+        Options::default(),
+    )
+    .unwrap()
 }
 
 /// `emitted` for sources whose first item is a struct declaration:
@@ -4573,6 +4642,65 @@ fn hir_leaf_compare_handles_aggregate_results() {
 }
 
 #[test]
+fn hir_leaf_compare_models_composite_call_sites() {
+    // A struct-returning call applies one `mumei_call_field`
+    // uninterpreted function per leaf, and a composite argument
+    // splices its leaf slots — the same terms the IR `call` encoding
+    // produces at the site, so a `sum(mk(1, 2))` chain compares
+    // equivalent instead of diverging on mismatched arities.
+    let src = "struct Pair { x: i64, y: i64 }\n\
+               atom caller() -> i64 requires: true; ensures: true; body: { sum(mk(1, 2)) };\n\
+               atom sum(p: Pair) -> i64 requires: true; ensures: true; body: { p.x + p.y };\n\
+               atom mk(a: i64, b: i64) -> Pair requires: true; ensures: true; body: { Pair { x: a, y: b } };";
+    let ir = pin(
+        "define {i64, i64} @mk(i64 %a, i64 %b) {\n  %p0 = insertvalue {i64, i64} undef, i64 %a, 0\n  %p = insertvalue {i64, i64} %p0, i64 %b, 1\n  ret {i64, i64} %p\n}\n\
+         define i64 @sum({i64, i64} %p) {\n  %x = extractvalue {i64, i64} %p, 0\n  %y = extractvalue {i64, i64} %p, 1\n  %r = add i64 %x, %y\n  ret i64 %r\n}\n\
+         define i64 @caller() {\n  %p = call {i64, i64} @mk(i64 1, i64 2)\n  %r = call i64 @sum({i64, i64} %p)\n  ret i64 %r\n}",
+    );
+    assert_eq!(
+        hir_outcome_with_structs(src, &pair_env(), &ir),
+        Outcome::EquivalentWithinProfile
+    );
+    // Reordering the callee's leaf arguments is a genuine mismatch.
+    let swapped = pin(
+        "define {i64, i64} @mk(i64 %a, i64 %b) {\n  %p0 = insertvalue {i64, i64} undef, i64 %a, 0\n  %p = insertvalue {i64, i64} %p0, i64 %b, 1\n  ret {i64, i64} %p\n}\n\
+         define i64 @sum({i64, i64} %p) {\n  %x = extractvalue {i64, i64} %p, 0\n  %y = extractvalue {i64, i64} %p, 1\n  %r = add i64 %x, %y\n  ret i64 %r\n}\n\
+         define i64 @caller() {\n  %p = call {i64, i64} @mk(i64 2, i64 1)\n  %r = call i64 @sum({i64, i64} %p)\n  ret i64 %r\n}",
+    );
+    assert_eq!(
+        hir_outcome_with_structs(src, &pair_env(), &swapped),
+        Outcome::Different
+    );
+}
+
+#[test]
+fn hir_leaf_compare_flattens_composite_call_arguments() {
+    // `sum(p)` passes the parameter's leaf slots — `sum_2(p.x, p.y)`
+    // on both sides — so a struct-parameter pass-through call site
+    // stays inside the leaf subset.
+    let src = "struct Pair { x: i64, y: i64 }\n\
+               atom fwd(p: Pair) -> i64 requires: true; ensures: true; body: { sum(p) };\n\
+               atom sum(p: Pair) -> i64 requires: true; ensures: true; body: { p.x + p.y };";
+    let ir = pin(
+        "define i64 @sum({i64, i64} %p) {\n  %x = extractvalue {i64, i64} %p, 0\n  %y = extractvalue {i64, i64} %p, 1\n  %r = add i64 %x, %y\n  ret i64 %r\n}\n\
+         define i64 @fwd({i64, i64} %p) {\n  %r = call i64 @sum({i64, i64} %p)\n  ret i64 %r\n}",
+    );
+    assert_eq!(
+        hir_outcome_with_structs(src, &pair_env(), &ir),
+        Outcome::EquivalentWithinProfile
+    );
+    // Swapped leaf order at the site is a genuine mismatch.
+    let swapped = pin(
+        "define i64 @sum({i64, i64} %p) {\n  %x = extractvalue {i64, i64} %p, 0\n  %y = extractvalue {i64, i64} %p, 1\n  %r = add i64 %x, %y\n  ret i64 %r\n}\n\
+         define i64 @fwd({i64, i64} %p) {\n  %a = extractvalue {i64, i64} %p, 1\n  %b = extractvalue {i64, i64} %p, 0\n  %q0 = insertvalue {i64, i64} undef, i64 %a, 0\n  %q = insertvalue {i64, i64} %q0, i64 %b, 1\n  %r = call i64 @sum({i64, i64} %q)\n  ret i64 %r\n}",
+    );
+    assert_eq!(
+        hir_outcome_with_structs(src, &pair_env(), &swapped),
+        Outcome::Different
+    );
+}
+
+#[test]
 fn hir_leaf_compare_rejects_aggregate_misuse() {
     // A whole aggregate cannot stand in a scalar position: not as a
     // scalar-typed tail, an operand, or a call argument.
@@ -4586,6 +4714,7 @@ fn hir_leaf_compare_rejects_aggregate_misuse() {
             tv::validate_hir_pure_i64_leaf(
                 &hir_atom(&src),
                 &pair_env(),
+                &BTreeMap::new(),
                 &real_ir,
                 false,
                 Options::default()
@@ -4601,6 +4730,7 @@ fn hir_leaf_compare_rejects_aggregate_misuse() {
         tv::validate_hir_pure_i64_leaf(
             &hir_atom(unknown),
             &pair_env(),
+            &call_sigs(unknown),
             &emitted_atom(unknown),
             false,
             Options::default()
@@ -4621,6 +4751,7 @@ atom f(w: Wide) -> i64 requires: true; ensures: true; body: { w.a };";
         tv::validate_hir_pure_i64_leaf(
             &hir_atom(wide),
             &wide_env,
+            &call_sigs(wide),
             &emitted_atom(wide),
             false,
             Options::default()
@@ -4635,6 +4766,7 @@ atom f() -> Unit requires: true; ensures: true; body: { Unit {} };";
         tv::validate_hir_pure_i64_leaf(
             &hir_atom(empty),
             &empty_env,
+            &call_sigs(empty),
             &emitted_atom(empty),
             false,
             Options::default()

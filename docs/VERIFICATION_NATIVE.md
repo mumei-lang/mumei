@@ -2339,7 +2339,11 @@ scoped to the admitted signature subset — scalar 64-bit parameters
 and scalar results carrying integer or f64 bit-patterns (f64 compares
 pass-through/select only; FP arithmetic itself stays out), scalar
 `i128`/`u128` on wide-scalar modules, all-`i64` aggregate results
-(register-resident or `sret`), scalar-`i64` call sites, and bounded
+(register-resident or `sret`), call sites whose parameters and result
+are scalar `i64` leaves or all-`i64` aggregates (a composite argument
+flattens to its leaf slots and a composite result is one uninterpreted
+application per leaf slot — the same terms the IR `call` encoding
+produces), and bounded
 local memory; loops and wider shapes stay out. Functions outside the subset, or whose IR fails to
 encode, record their verbatim `NotLiftable` reason
 (`unsupported_signature`, `unsupported_ir`, `unsupported_instruction`,
