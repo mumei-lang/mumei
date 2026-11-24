@@ -52,7 +52,7 @@ agent 側に `native-object-accept` ルート（`object_source_machine_code_corr
 | `llvm_ir_object_edge_result` + `LLVM_IR_OBJECT_GATE_ITEMS` | 辺 result 集約（全項目 checked → `checked_correspondence`、1件 inconsistent → `inconsistent_correspondence`、1件 unchecked → `unchecked_not_translation_validated`） | 受理判定と同じ3値集約ルールとして再利用 |
 | `object_symbol_correspondence` / `object_call_edge_correspondence` / `object_link_correspondence` | 構造的なシンボル・呼出辺・リンク配置の対照（hard gate） | 受理の前提条件として既存（これらが fail したら記述子自体が出ない） |
 | canonical argv pin（`canonical_link_argument_vector_compared`） | リンクの再現決定性を固定 | 受理条件の一部として既存 |
-| `evidence::decode` + saved-evidence recheck | 記述子の証跡（build_id, sha256）を他 producer が検証 | 受理記述子の消費側経路として既存 |
+| saved-evidence recheck の考え方 | pinned bundle から再導出して証跡（build_id, sha256）を照合 | 消費側パターンとして再利用。`evidence::decode` 自体は `mumei.native-evidence/v1` 専用で受理記述子 schema（`mumei.native-evidence-acceptance/v1`）は読めない — 受理記述子側のデコードは別途必要（消費は agent 側の想定） |
 | e2e harness（`accept_object_emits_bounded_descriptor` 等） | accept-object の JSON/exit-code 検証 | 新受理条件の e2e パターンとして再利用 |
 
 ## 3. 欠けている部分
@@ -62,9 +62,15 @@ agent 側に `native-object-accept` ルート（`object_source_machine_code_corr
    `llvm_ir_object_equivalence`・`object_data_correspondence`・
    `object_symbol_attribute_correspondence`・relocation 4項目・
    `hir_llvm_model_correspondence` が `unchecked`/`inconsistent` でも
-   `accepted: true` が出うる。具体例: `.rodata` の1バイト改竄で
-   `object_data_correspondence` が `inconsistent` になる bundle は、
-   machine-TV が通れば受理される。
+   `accepted: true` が出うる。到達可能な具体例: anonymous
+   `unnamed_addr` 定数を含む bundle では
+   `object_data_correspondence` が `merged`（項目は `unchecked`
+   のまま）になり、linkage から導出不能な binding を持つ
+   シンボルでは `object_symbol_attribute_correspondence` も
+   `unchecked` になる — いずれも機械語 TV は素通しで
+   `accepted: true` が emit される。（`inconsistent` の受理は
+   byte 同一の再現検査が先に止まるため実際には到達しにくく、
+   項目の役割は defense-in-depth。）
 2. **object-translation 受理を名指す語彙がない**。scope は
    machine-code TV に scoped された名前だけで、「再現 object が
    pinned LLVM IR に対応する」claim を表す値がない。
@@ -93,28 +99,37 @@ agent 側に `native-object-accept` ルート（`object_source_machine_code_corr
 記述子なし）。fail-closed。
 
 1. **構造前提**: `object_symbol_correspondence`・
-   `object_call_edge_correspondence`・`object_link_correspondence` が
-   checked（既存の hard gate で保証）。link 未検査のときは scope に
-   `_without_object_link` suffix を付けて受理範囲を明示（既存
-   convention と同じ）。
-2. **`llvm_ir→object_code` 辺**: `correspondence.status ==
-   "checked_correspondence"`。すなわち集約内の全項目 —
-   `function_coverage` / `function_count` /
-   `llvm_ir_object_equivalence` / relocation 4項目 —
-   が `checked`。`inconsistent` → reject、`unchecked`/`unknown` →
-   inconclusive（`solver_unknown` は Step 1 で `unknown` として
-   分離済みなのでここに来る）。
-3. **補助対照**: `hir_llvm_model_correspondence`・
-   `object_data_correspondence`・`object_symbol_attribute_correspondence`
-   が `checked`。
-4. **再現条件**: `pinned_member_merge_rederivation`・
-   `fresh_same_profile_source_recheck`・
+   `object_call_edge_correspondence` が checked（既存の hard gate で
+   保証）。`object_link_correspondence` は link 再現が走ったとき
+   checked が必須、link 未検査のときは not_performed として
+   scope に `_without_object_link` suffix を付けて受理範囲を
+   明示（既存 convention と同じ）。
+2. **対照項目の集約**: 判定が読むのは
+   `object_translation.correspondence` の項目集約
+   （`correspondence.status`）であって、`llvm_ir→object_code` 辺の
+   result（`checked_llvm_ir_object_model_correspondence` 評価）
+   ではない。後者は link 対照と canonical argv を内部で要求する
+   ため、`_without_object_link` では立たない —— 項目集約は
+   link 非依存なので両 scope で使える。集約に含まれる全項目
+   （`function_coverage` / `function_count` /
+   `llvm_ir_object_equivalence` / relocation 4項目 /
+   `hir_llvm_model_correspondence` / `object_data_correspondence` /
+   `object_symbol_attribute_correspondence`）が `checked` で
+   受理条件成立。`inconsistent` が1件でも → reject、
+   `unchecked`/`unknown` が1件でも → inconclusive
+   （`solver_unknown` は既に `unknown` として分離済みなので
+   ここに来る）。
+3. **再現条件**: `fresh_same_profile_source_recheck`・
    `llvm_snapshot_translation_recheck`・
    `toolchain_object_executable_reproduction` が performed かつ成功。
-   `canonical_link_argument_vector_compared` は受理に必須 — 未実行
-   の場合は inconclusive（リンク再現の決定性が取れない受理は名乗ら
-   ない）。
-5. **machine-TV**: `machine_tv_acceptance_decision` が `Accepted`。
+   `pinned_member_merge_rederivation` は複数ファイル bundle の
+   場合のみ必須（単一ファイル bundle では項目自体が存在しない）。
+   `canonical_link_argument_vector_compared` は link 再現が
+   走ったとき必須（missing → inconclusive）。
+   `_without_object_link` では link 再現も argv 比較も
+   not_performed になるので、argv 要件は link あり scope に
+   だけ効く。
+4. **machine-TV**: `machine_tv_acceptance_decision` が `Accepted`。
    object-translation 受理は machine-TV 受理の superset ——
    「再現 object が pinned LLVM IR に対応する」に加えて
    「source ↔ machine 等価が profile 内で立つ」を併せて受理する。
@@ -154,7 +169,15 @@ correspondence profile で立証可能な範囲で対応している」。
   （新規値。`_without_object_link` suffix convention は継承）。
   machine-TV slice の既存 scope
   （`native_bundle_object_machine_code_translation_correspondence`）
-  は維持 — 受理 claim が違うため別値にする。
+  は語彙として維持する — 過去に emit された記述子を解釈する
+  ための値として残る。ただし Step 2 後の `accept-object` は
+  新 scope だけを emit する（dual-emit・切替 flag なし）。
+  machine-TV slice だけの受理を新規に得る経路はなくなるが、
+  object-translation 受理はその superset claim なので
+  既存利用者の受理面は狭まらない（受理に必要な条件は厳しく
+  なる方向のみ）。移行順序: Core が新 scope を emit 開始 →
+  agent 側が scope allowlist と項目集合写像を更新 → 新記述子の
+  消費開始。旧 scope の記述子を読む経路は互換のため残す。
 - **checks_performed**: correspondence 項目名をそのまま列挙
   （`llvm_ir_object_equivalence`、`object_data_correspondence`、
   `object_symbol_attribute_correspondence`、`hir_llvm_model_correspondence`、
@@ -187,7 +210,9 @@ correspondence profile で立証可能な範囲で対応している」。
   集約を接続。scope を
   `native_bundle_object_translation_correspondence` に更新し、
   checks_performed/not_performed を項目名レベルに拡張。
-  machine-TV 受理との superset 関係を docs に記述。
+  machine-TV 受理との superset 関係を docs に記述。旧 scope を
+  ピン留めした既存テスト・agent 側の scope allowlist はこの
+  タイミングで新値に更新（旧値は語彙として残す）。
 - **Step 3**: e2e —— 正常受理（全項目 checked → `accepted`）、
   data/symbol-attribute/relocation が unchecked のとき
   inconclusive、`inconsistent` で reject、`_without_object_link`
@@ -205,7 +230,9 @@ correspondence profile で立証可能な範囲で対応している」。
   拡張。受理は同じ再現パイプラインの上に乗る claim で、別コマンド
   にすると whole reproduction を二重化する。scope 名を変えるので
   受理の意味論もはっきり分かれる。`accepted` が correspondence
-  項目を見ずに立つのは矛盾なので緩めない。
+  項目を見ずに立つのは矛盾なので緩めない。machine-TV slice だけ
+  の受理経路は残さない —— superset claim に置き換わり、受理は
+  厳しくなる方向のみ（旧 scope の記述子は語彙として残る）。
 - **(b) 受理に要求する項目集合**: 推奨は「`correspondence.checks`
   内の全項目 checked」＝ `correspondence.status ==
   "checked_correspondence"` と同じ集約ルール。
@@ -215,9 +242,13 @@ correspondence profile で立証可能な範囲で対応している」。
   `native_bundle_object_translation_correspondence`
   （machine-TV の scope とは別、`_without_object_link` 継承）。
   既存 scope を変更しない —— 受理意味の変化は値名で表す。
-- **(d) canonical argv**: 推奨は必須（missing → inconclusive）。
-  リンク再現決定性が取れない受理は名乗らない。link 全体が
-  uncheckable の場合のみ `_without_object_link` で受理。
+- **(d) canonical argv**: 推奨は link 再現が走ったとき必須
+  （missing → inconclusive）。リンク再現決定性が取れない受理は
+  名乗らない。link 全体が uncheckable の場合は link・argv とも
+  not_performed の `_without_object_link` scope で受理
+  （argv 要件は link あり scope にのみ効く）。判定の入力は
+  辺の result ではなく項目集約なので no-link でも受理条件は
+  立つ。
 - **(e) agent-owned 名の emit**: 推奨は継続して emit しない。
   `native-object-accept` が項目名集合から自分の
   `object_translation_correspondence` 名に写像する設計にする。
