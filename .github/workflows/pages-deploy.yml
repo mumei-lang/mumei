@@ -1,0 +1,20 @@
+# Deploys the docs site to GitHub Pages via the shared reusable workflow
+# (jekyll-gh-pages.yml). Kept thin on purpose — deploy logic lives in one place
+# so mumei-agent and mumei-demo can reuse it (B3, mumei-lang/mumei#1449).
+name: Deploy docs to GitHub Pages
+
+on:
+  push:
+    branches: ["develop"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  pages:
+    uses: ./.github/workflows/jekyll-gh-pages.yml
+    with:
+      post_build_command: sudo cp -p scripts/install.sh _site/install.sh
