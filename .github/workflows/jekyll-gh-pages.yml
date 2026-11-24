@@ -29,10 +29,12 @@ on:
         required: false
         type: string
         default: ""
-  workflow_dispatch: # allow manual verification runs of this file itself
 
-# GITHUB_TOKEN permissions are granted by the calling job; direct
-# workflow_dispatch runs need the same blocks here.
+# Deploys only through callers — this file intentionally has no push or
+# workflow_dispatch trigger, so a direct run can never publish a site built
+# without a caller's post_build_command (e.g. the install.sh copy).
+#
+# GITHUB_TOKEN permissions are granted by the calling job.
 permissions:
   contents: read
   pages: write
@@ -64,6 +66,8 @@ jobs:
         run: ${{ inputs.post_build_command }}
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ inputs.destination || './_site' }}
 
   # Deployment job
   deploy:
