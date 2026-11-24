@@ -282,6 +282,7 @@ tri-state verdict plumbing in `commands/verify.rs`, or `split_top_level_conjunct
 cross_spec.json`) before every run — a warm cache masks verdict changes.
 
 Fixtures and expected verdicts (each distinguishes a broken build):
+> The `exit 1` expectations below predate the exit-code contract, which maps `unverifiable` to exit 3; see [notes-exit-codes-json.md](notes-exit-codes-json.md#exit-codejson-contract-testing).
 - Symbolic exponent in ensures (`ensures: result == x**y && result == x;`) → `unverifiable ⚠`,
   exit 1. Must NOT be `verified` and must NOT hard-error.
 - Encodable-but-false postcondition (`ensures: result > x + 1; body: x;`) → `refuted/failed`,
