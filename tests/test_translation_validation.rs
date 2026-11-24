@@ -4530,8 +4530,20 @@ fn hir_atom(source: &str) -> mumei_core::hir::HirAtom {
 /// the same map `hir_llvm_atom_outcomes` derives from `env.atoms` on
 /// the recheck path.
 fn call_sigs(source: &str) -> BTreeMap<String, mumei_core::semantic_contract::HirCallLeafSig> {
-    parse_module_checked(source)
-        .unwrap()
+    let items = parse_module_checked(source).unwrap();
+    // Mirror the recheck's env resolution: refined aliases fold to
+    // their machine base (`Pos` → `i64`) the way the IR operand does.
+    let mut env = mumei_core::verification::ModuleEnv::default();
+    for item in &items {
+        match item {
+            Item::TypeDef(typedef) => env.register_type(typedef),
+            Item::StructDef(def) => env.register_struct(def),
+            Item::EnumDef(def) => env.register_enum(def),
+            Item::Atom(atom) => env.register_atom(atom),
+            _ => {}
+        }
+    }
+    items
         .iter()
         .filter_map(|item| match item {
             Item::Atom(atom) => Some((
@@ -4540,9 +4552,17 @@ fn call_sigs(source: &str) -> BTreeMap<String, mumei_core::semantic_contract::Hi
                     params: atom
                         .params
                         .iter()
-                        .map(|param| param.type_name.clone())
+                        .map(|param| {
+                            param
+                                .type_name
+                                .as_deref()
+                                .map(|ty| env.resolve_base_type(ty))
+                        })
                         .collect(),
-                    result: atom.return_type.clone(),
+                    result: atom
+                        .return_type
+                        .as_deref()
+                        .map(|ty| env.resolve_base_type(ty)),
                 },
             )),
             _ => None,

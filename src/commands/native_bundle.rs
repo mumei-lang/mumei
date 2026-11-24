@@ -6199,7 +6199,9 @@ fn hir_llvm_atom_outcomes(data: &ObjectRecheckData) -> Option<BTreeMap<String, &
     // Call-site leaf shapes come from the declared signatures, so a
     // composite parameter or result flattens to its leaf slots the way
     // the IR `call` encoding splices them — a callee absent here keeps
-    // the legacy all-scalar assumption.
+    // the legacy all-scalar assumption. Refined aliases resolve to
+    // their machine base (`Pos` → `i64`), matching how the IR operand
+    // carries the leaf.
     let calls: BTreeMap<String, semantic_contract::HirCallLeafSig> = atoms
         .iter()
         .map(|atom| {
@@ -6209,9 +6211,17 @@ fn hir_llvm_atom_outcomes(data: &ObjectRecheckData) -> Option<BTreeMap<String, &
                     params: atom
                         .params
                         .iter()
-                        .map(|param| param.type_name.clone())
+                        .map(|param| {
+                            param
+                                .type_name
+                                .as_deref()
+                                .map(|ty| env.resolve_base_type(ty))
+                        })
                         .collect(),
-                    result: atom.return_type.clone(),
+                    result: atom
+                        .return_type
+                        .as_deref()
+                        .map(|ty| env.resolve_base_type(ty)),
                 },
             )
         })
