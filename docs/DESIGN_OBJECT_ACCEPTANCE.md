@@ -219,11 +219,11 @@ correspondence profile で立証可能な範囲で対応している」。
 - **Step 1**: 受理判定関数 `object_translation_acceptance_decision`
   （correspondence 集合 → `Accepted`/`Inconclusive`/`Different`）を
   純粋関数として実装 + 単体テスト。emit にはまだつなげない。
+  （本 PR で実装 — 必須項目名は
+  `OBJECT_TRANSLATION_ACCEPTANCE_ITEMS` として固定。）
 - **Step 2**: `accept-object` の `accepted` 判定に correspondence
-  集約を接続。scope を
-  `native_bundle_object_translation_correspondence` に更新し、
-  checks_performed/not_performed を項目名レベルに拡張。
-  machine-TV 受理との superset 関係を docs に記述。この時点の
+  集約を接続し、checks_performed/not_performed を項目名レベルに
+  拡張。machine-TV 受理との superset 関係を docs に記述。この時点の
   emit scope はまだ旧値のまま —— 判定だけが先に厳しくなる
   （受理対象が狭まる方向のみの変更）。旧 scope をピン留めした
   既存テストの期待値は、emit が新値に切り替わる Step 3 の変更と

@@ -4370,6 +4370,56 @@ fn machine_tv_acceptance_decision(
     }
 }
 
+/// Correspondence items the object-translation acceptance requires
+/// `checked` (DESIGN_OBJECT_ACCEPTANCE.md §4-2): the full surface of
+/// the `object_translation.correspondence` aggregation — the edge gate
+/// items plus the supplementary correspondences.
+const OBJECT_TRANSLATION_ACCEPTANCE_ITEMS: [&str; 10] = [
+    "function_coverage",
+    "function_count",
+    "llvm_ir_object_equivalence",
+    "relocation_targets",
+    "relocation_bounds",
+    "relocation_resolved_values",
+    "relocation_applied_values",
+    "hir_llvm_model_correspondence",
+    "object_data_correspondence",
+    "object_symbol_attribute_correspondence",
+];
+
+/// Object-translation acceptance decision over the
+/// `object_translation.correspondence.checks` item list
+/// (DESIGN_OBJECT_ACCEPTANCE.md §4 / §6 Step 1): every required item
+/// `checked` — and nothing else left `unchecked`/`unknown` — is
+/// `Accepted`; any `inconsistent` item is `Different` (reject); a
+/// missing required item or anything undecided is `Inconclusive`.
+/// Fail-closed by construction. Step 1 only: not wired into the
+/// `accept-object` emit path yet (Step 2).
+#[allow(dead_code)]
+fn object_translation_acceptance_decision(
+    checks: &[serde_json::Value],
+) -> ObjectMachineTvAcceptanceDecision {
+    if checks
+        .iter()
+        .any(|check| check["result"].as_str() == Some("inconsistent"))
+    {
+        return ObjectMachineTvAcceptanceDecision::Different;
+    }
+    let every_emitted_checked = checks
+        .iter()
+        .all(|check| check["result"].as_str() == Some("checked"));
+    let all_required_checked = OBJECT_TRANSLATION_ACCEPTANCE_ITEMS.iter().all(|required| {
+        checks.iter().any(|check| {
+            check["item"].as_str() == Some(required) && check["result"].as_str() == Some("checked")
+        })
+    });
+    if every_emitted_checked && all_required_checked {
+        ObjectMachineTvAcceptanceDecision::Accepted
+    } else {
+        ObjectMachineTvAcceptanceDecision::Inconclusive
+    }
+}
+
 /// Design memo §7 Step 2: emit the source↔machine within-profile gate
 /// as metadata — whether every source-atom function came back
 /// `equivalent_within_profile`, which functions did not, and the
@@ -7112,6 +7162,64 @@ mod tests {
         assert_eq!(
             machine_tv_acceptance_decision(&only_non_source, false),
             ObjectMachineTvAcceptanceDecision::Inconclusive
+        );
+    }
+
+    #[test]
+    fn object_translation_acceptance_decision_is_fail_closed() {
+        let item = |name: &str, result: &str| serde_json::json!({"item": name, "result": result, "detail": "test"});
+        let checked_all: Vec<serde_json::Value> = OBJECT_TRANSLATION_ACCEPTANCE_ITEMS
+            .iter()
+            .map(|name| item(name, "checked"))
+            .collect();
+        assert_eq!(
+            object_translation_acceptance_decision(&checked_all),
+            ObjectMachineTvAcceptanceDecision::Accepted
+        );
+
+        // One validation that ran and failed rejects the whole surface.
+        let mut diverged = checked_all.clone();
+        diverged[2] = item("llvm_ir_object_equivalence", "inconsistent");
+        assert_eq!(
+            object_translation_acceptance_decision(&diverged),
+            ObjectMachineTvAcceptanceDecision::Different
+        );
+
+        // Anything undecided — unchecked, unknown, or an
+        // unrecognized result — is inconclusive, never accepted.
+        for result in ["unchecked", "unknown", "skipped", ""] {
+            let mut undecided = checked_all.clone();
+            undecided[6] = item("relocation_applied_values", result);
+            assert_eq!(
+                object_translation_acceptance_decision(&undecided),
+                ObjectMachineTvAcceptanceDecision::Inconclusive,
+                "result {result:?}"
+            );
+        }
+
+        // A required item absent from the list is inconclusive.
+        assert_eq!(
+            object_translation_acceptance_decision(&checked_all[1..]),
+            ObjectMachineTvAcceptanceDecision::Inconclusive
+        );
+        assert_eq!(
+            object_translation_acceptance_decision(&[]),
+            ObjectMachineTvAcceptanceDecision::Inconclusive
+        );
+
+        // An extra undecided item outside the required set still
+        // blocks acceptance — the whole surface must be checked.
+        let mut extra_unchecked = checked_all.clone();
+        extra_unchecked.push(item("future_item", "unchecked"));
+        assert_eq!(
+            object_translation_acceptance_decision(&extra_unchecked),
+            ObjectMachineTvAcceptanceDecision::Inconclusive
+        );
+        let mut extra_checked = checked_all;
+        extra_checked.push(item("future_item", "checked"));
+        assert_eq!(
+            object_translation_acceptance_decision(&extra_checked),
+            ObjectMachineTvAcceptanceDecision::Accepted
         );
     }
 
