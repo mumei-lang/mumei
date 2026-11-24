@@ -938,12 +938,78 @@ pub(crate) fn run(command: NativeBundleCommand) {
                     evaluation.entry_wrapper_applicable,
                 ) {
                     ObjectMachineTvAcceptanceDecision::Accepted => {
-                        write_object_machine_tv_acceptance(
-                            &data,
-                            &evaluation,
-                            &expected_build_id,
-                            json,
-                        )
+                        // DESIGN_OBJECT_ACCEPTANCE.md §4: acceptance
+                        // additionally requires the canonical argv
+                        // reproduction and every correspondence item
+                        // checked — the machine-TV gate alone must not
+                        // carry `accepted` (Step 2).
+                        if !data.canonical_argv_compared {
+                            drop(data);
+                            report_object_acceptance_inconclusive(
+                                "Canonical link argument vector not reproduced",
+                            );
+                        }
+                        let record = data
+                            .object_translation
+                            .clone()
+                            .unwrap_or_else(|| {
+                                object_translation_parse(
+                                    &data.object_bytes,
+                                    &data.executable_bytes,
+                                )
+                            });
+                        let correspondence =
+                            object_translation_correspondence_json(&data, &record);
+                        let empty: Vec<serde_json::Value> = Vec::new();
+                        let checks = correspondence["checks"]
+                            .as_array()
+                            .unwrap_or(&empty);
+                        match object_translation_acceptance_decision(checks) {
+                            ObjectMachineTvAcceptanceDecision::Accepted => {
+                                write_object_machine_tv_acceptance(
+                                    &data,
+                                    &evaluation,
+                                    &expected_build_id,
+                                    json,
+                                    &record,
+                                    &correspondence,
+                                )
+                            }
+                            ObjectMachineTvAcceptanceDecision::Different => {
+                                let divergent: Vec<&str> = checks
+                                    .iter()
+                                    .filter(|check| {
+                                        check["result"].as_str()
+                                            == Some("inconsistent")
+                                    })
+                                    .filter_map(|check| check["item"].as_str())
+                                    .collect();
+                                Err(BundleError(Box::leak(
+                                    format!(
+                                        "object translation correspondence inconsistent with the pinned LLVM IR ({})",
+                                        divergent.join(", ")
+                                    )
+                                    .into_boxed_str(),
+                                )))
+                            }
+                            ObjectMachineTvAcceptanceDecision::Inconclusive => {
+                                drop(data);
+                                let undecided: Vec<&str> = checks
+                                    .iter()
+                                    .filter(|check| {
+                                        check["result"].as_str()
+                                            != Some("checked")
+                                    })
+                                    .filter_map(|check| check["item"].as_str())
+                                    .collect();
+                                report_object_acceptance_inconclusive(
+                                    &format!(
+                                        "Object translation correspondence not fully checked ({})",
+                                        undecided.join(", ")
+                                    ),
+                                );
+                            }
+                        }
                     }
                     ObjectMachineTvAcceptanceDecision::Different => Err(BundleError(
                         "reproduced object machine code differs from the verified source",
@@ -4393,9 +4459,9 @@ const OBJECT_TRANSLATION_ACCEPTANCE_ITEMS: [&str; 10] = [
 /// `checked` — and nothing else left `unchecked`/`unknown` — is
 /// `Accepted`; any `inconsistent` item is `Different` (reject); a
 /// missing required item or anything undecided is `Inconclusive`.
-/// Fail-closed by construction. Step 1 only: not wired into the
-/// `accept-object` emit path yet (Step 2).
-#[allow(dead_code)]
+/// Fail-closed by construction. Step 2 wires it into the
+/// `accept-object` emit path together with the machine-TV decision
+/// and the canonical argv gate.
 fn object_translation_acceptance_decision(
     checks: &[serde_json::Value],
 ) -> ObjectMachineTvAcceptanceDecision {
@@ -4941,6 +5007,10 @@ fn write_machine_tv(
         }
         checks_performed.extend(evaluation.coverage.0.iter().copied());
         checks_not_performed.extend(evaluation.coverage.1.iter().copied());
+        let record = data.object_translation.clone().unwrap_or_else(|| {
+            object_translation_parse(&data.object_bytes, &data.executable_bytes)
+        });
+        let correspondence = object_translation_correspondence_json(&data, &record);
         let descriptor = serde_json::json!({
             "schema_version": "mumei.machine-code-tv/v1",
             "scope": evaluation.scope,
@@ -4969,6 +5039,8 @@ fn write_machine_tv(
                 } else {
                     "unchecked_not_translation_validated"
                 },
+                &record,
+                &correspondence,
             ),
             "source_machine_tv": source_machine_tv_within_profile_json(
                 &evaluation,
@@ -6393,11 +6465,9 @@ fn object_translation_correspondence_text(data: &ObjectRecheckData) -> Vec<Strin
 fn object_translation_json(
     data: &ObjectRecheckData,
     machine_tv_validation: &str,
+    record: &ObjectTranslationRecord,
+    correspondence: &serde_json::Value,
 ) -> serde_json::Value {
-    let record = data
-        .object_translation
-        .clone()
-        .unwrap_or_else(|| object_translation_parse(&data.object_bytes, &data.executable_bytes));
     let object_sha256 = {
         use sha2::{Digest, Sha256};
         format!("{:x}", Sha256::digest(&data.object_bytes))
@@ -6411,7 +6481,6 @@ fn object_translation_json(
     } else {
         "unchecked_not_translation_validated"
     };
-    let correspondence = object_translation_correspondence_json(data, &record);
     let status = if correspondence["status"].as_str() == Some("checked_correspondence") {
         "checked_correspondence"
     } else {
@@ -6642,6 +6711,7 @@ fn object_machine_tv_acceptance_checks(
     if object_link_correspondence {
         checks_performed.push("object_link_correspondence");
     }
+    checks_performed.extend(OBJECT_TRANSLATION_ACCEPTANCE_ITEMS);
     checks_performed.extend(coverage.0.iter().copied());
     checks_performed.push("object_source_machine_code_correspondence");
 
@@ -6693,6 +6763,8 @@ fn write_object_machine_tv_acceptance(
     evaluation: &MachineTvEvaluation,
     expected_build_id: &str,
     json: bool,
+    record: &ObjectTranslationRecord,
+    correspondence: &serde_json::Value,
 ) -> Result<(), BundleError> {
     let scope = object_machine_tv_acceptance_scope(data.object_link_correspondence);
     if json {
@@ -6739,6 +6811,8 @@ fn write_object_machine_tv_acceptance(
                 } else {
                     "unchecked_not_translation_validated"
                 },
+                record,
+                correspondence,
             ),
             "source_machine_tv": source_machine_tv_within_profile_json(
                 evaluation,
@@ -6787,7 +6861,7 @@ fn write_object_machine_tv_acceptance(
             "{}",
             source_machine_tv_within_profile_line(evaluation, unchecked_domains.len())
         );
-        for line in object_translation_correspondence_text(data) {
+        for line in object_translation_correspondence_report_lines(correspondence) {
             println!("{line}");
         }
         Ok(())

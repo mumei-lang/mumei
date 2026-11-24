@@ -2588,10 +2588,16 @@ and machine-TV pipeline as `recheck-machine-tv`, then emits an acceptance
 descriptor only when at least one source-atom function is present, every
 source-atom function defined in the reproduced object is
 `equivalent_within_profile`, the applicable C `main` entry wrapper is
-`equivalent_within_profile`, and every remaining object function has the exact
-`outside_profile` reason `not_a_source_atom`. A machine-code difference exits
-1. Unknown, any other outside-profile result, or no source-atom functions
-exits 3 with no descriptor; identity or artifact mismatches exit 1 as well.
+`equivalent_within_profile`, every remaining object function has the exact
+`outside_profile` reason `not_a_source_atom`, the canonical link argument
+vector was reproduced, and every `object_translation.correspondence` check item
+(function coverage/count, the LLVM-IR↔object equivalence, the four relocation
+record items, the HIR↔LLVM model correspondence, the object data and symbol
+attribute correspondences) is `checked` (DESIGN_OBJECT_ACCEPTANCE.md §4). A
+machine-code difference or an `inconsistent` correspondence item exits 1.
+Unknown, any other outside-profile result, no source-atom functions, an
+unchecked/unknown correspondence item, or a missing canonical argv pin exits 3
+with no descriptor; identity or artifact mismatches exit 1 as well.
 
 When the source `main` model has the supported i64-carrier signature and
 `__mumei_user_main` is defined, `machine_code_entry_wrapper_tv` checks that the

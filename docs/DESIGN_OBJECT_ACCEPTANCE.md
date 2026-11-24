@@ -228,6 +228,9 @@ correspondence profile で立証可能な範囲で対応している」。
   （受理対象が狭まる方向のみの変更）。旧 scope をピン留めした
   既存テストの期待値は、emit が新値に切り替わる Step 3 の変更と
   同時に更新する（先行すると現行出力と乖離して fail する）。
+  （本 PR で実装 — canonical argv 再現と全 correspondence 項目
+  checked を受理条件に追加し、`checks_performed` に必須項目名を
+  列挙。scope は旧値のまま。）
 - **Step 3**: e2e —— 正常受理（全項目 checked → `accepted`）、
   data/symbol-attribute/relocation が unchecked のとき
   inconclusive、`inconsistent` で reject、`_without_object_link`
