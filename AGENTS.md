@@ -2,6 +2,37 @@
 
 These rules are for coding agents and harnesses that work in this repository (Devin, Codex, Claude Code, Cursor and others). [`.claude/CLAUDE.md`](.claude/CLAUDE.md) covers the MCP workflow and `.mm` syntax. The rules below apply in addition to it.
 
+## Fast path
+
+Build, lint and test locally before opening a PR. The toolchain needs LLVM 17 and Z3:
+
+```bash
+export LLVM_SYS_170_PREFIX=/usr/lib/llvm-17
+export LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu
+
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test --workspace --lib --bins
+cargo run -- verify std/contracts.mm --json   # smoke-test the verifier
+python -m pytest tests/test_mcp_server.py -v  # needs: pip install pytest -r requirements-mcp.txt
+```
+
+For the full CI gate, also run the integration tests that `--lib --bins` skips (the two Lean-bridge skips match `core-tests.yml`, which doesn't check out mumei-lean):
+
+```bash
+cargo test --workspace --exclude mumei-ffi-tests --test '*' --no-fail-fast -- \
+  --skip escalate_lean_promotes_outside_fragment_to_candidate_bundle \
+  --skip nlsat_first_fixture_outside_window_keeps_lean_escalation
+```
+
+The pre-commit hooks run the same checks; install them once with `pre-commit install`. Note the hooks *fix* files rather than check them: `cargo fmt` rewrites sources in place, and the Rust hooks only run when the staged change includes Rust files.
+
+Known gotchas:
+
+- `cargo build`/`cargo run` fail without `LLVM_SYS_170_PREFIX` when LLVM is not on the default path.
+- Narrow test runs are fine (`cargo test -p mumei-core <name>`); run the full workspace before pushing.
+- GitHub Actions workflows under `.github/workflows/` gate on path filters, so a docs-only PR may legitimately show no Rust checks.
+
 ## Secrets and sensitive data
 
 These rules follow the OWASP Logging and Secrets Management cheat sheets, CWE-200, CWE-532 and CWE-798.
