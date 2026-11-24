@@ -548,11 +548,11 @@ jobs:
         run: |
           set -euo pipefail
           dispatched_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          gh workflow run jekyll-gh-pages.yml --ref develop
+          gh workflow run pages-deploy.yml --ref develop
 
           run_id=""
           for _ in $(seq 1 30); do
-            run_id="$(gh run list --workflow jekyll-gh-pages.yml --branch develop --event workflow_dispatch \
+            run_id="$(gh run list --workflow pages-deploy.yml --branch develop --event workflow_dispatch \
               --json databaseId,createdAt \
               --jq "map(select(.createdAt >= \"$dispatched_at\")) | sort_by(.createdAt) | first | .databaseId // empty")"
             if [[ -n "$run_id" ]]; then

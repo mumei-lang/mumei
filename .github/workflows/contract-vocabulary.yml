@@ -5,7 +5,7 @@ on:
     paths:
       - 'docs/**'
       - 'README.md'
-      - 'instruction.md'
+      - 'docs/instruction.md'
       - 'mcp_server.py'
       - 'src/cli.rs'
       - 'scripts/check_contract_vocabulary.py'
@@ -36,7 +36,7 @@ on:
     paths:
       - 'docs/**'
       - 'README.md'
-      - 'instruction.md'
+      - 'docs/instruction.md'
       - 'mcp_server.py'
       - 'src/cli.rs'
       - 'scripts/check_contract_vocabulary.py'

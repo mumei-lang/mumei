@@ -241,7 +241,7 @@ Mumei caches verification results per-atom in `.mumei/cache/verification_cache.j
 
 ## 11. Current Development Phase: Strategic Roadmap v0.3.0+
 
-> Details: [`docs/ROADMAP.md`](docs/ROADMAP.md)
+> Details: [`docs/ROADMAP.md`](ROADMAP.md)
 
 ### LSP Status: Active
 
@@ -257,7 +257,7 @@ The LSP server (`mumei lsp`) has the following features implemented:
 - `shutdown` / `exit` handling
 - Parsed items cache for efficient completion and definition lookups
 
-Editor configuration examples: [`docs/EDITORS.md`](docs/EDITORS.md)
+Editor configuration examples: [`docs/EDITORS.md`](EDITORS.md)
 
 **Deferred items**:
 - Counter-example highlighting in editors
