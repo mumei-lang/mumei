@@ -2615,9 +2615,11 @@ function entries, input domain and dynamically composed checks. Its
 `object_source_machine_code_correspondence` check means every source-atom
 function in the reproduced `program.o` matches its verified source model within
 the machine-code TV profile, under the assumed register convention and
-input domain. If object-to-executable link correspondence is uncheckable, the
-accepted descriptor uses the `_without_object_link` scope and leaves
-`object_link_correspondence` not performed.
+input domain. The descriptor's `scope` is
+`native_bundle_object_translation_correspondence`; if object-to-executable
+link correspondence is uncheckable, it uses
+`native_bundle_object_translation_correspondence_without_object_link` and
+leaves `object_link_correspondence` not performed.
 
 This is not reusable Evidence or a certificate and does not promote a grade.
 The register convention is assumed, not validated; CRT and loader behavior,

@@ -1489,6 +1489,15 @@ fn canonical_link_arguments_are_pinned_and_reproduced() {
         "unchecked_not_translation_validated"
     );
 
+    // …and accept-object cannot accept either: the canonical argv
+    // comparison is an unconditional acceptance precondition, so the
+    // unpinned record is inconclusive with no descriptor.
+    let output = accept_object(&source, &bundle, &unpinned_id, true);
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Canonical link argument vector"));
+
     // A wrong pin fails the reproduction check.
     record["link_build"]["canonical_arguments_sha256"] = serde_json::json!("0".repeat(64));
     let bytes = serde_json::to_vec(&record).unwrap();
@@ -6290,7 +6299,7 @@ fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
     assert!(descriptor.get("pin_envelope").is_none());
     assert_eq!(
         descriptor["scope"],
-        "native_bundle_object_machine_code_translation_correspondence"
+        "native_bundle_object_translation_correspondence"
     );
     assert_eq!(descriptor["build_id"], id);
     assert_eq!(
@@ -6347,8 +6356,12 @@ fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
     assert!(!not_performed
         .iter()
         .any(|check| check == "object_entry_wrapper_semantics"));
-    let descriptor_text = String::from_utf8_lossy(&output.stdout);
-    assert!(!descriptor_text.contains("object_translation_correspondence"));
+    // The agent-owned `object_translation_correspondence` item name is
+    // never emitted as a check name — the Core descriptor only claims its
+    // own items (the new scope value legitimately contains the substring).
+    for check in performed.iter().chain(not_performed.iter()) {
+        assert_ne!(check, "object_translation_correspondence");
+    }
 
     let text = accept_object(&source, &bundle, &id, false);
     assert_success(&text);
@@ -6381,7 +6394,7 @@ fn accept_object_accepts_loop_bundle_with_object_link() {
     let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         descriptor["scope"],
-        "native_bundle_object_machine_code_translation_correspondence"
+        "native_bundle_object_translation_correspondence"
     );
     assert_eq!(
         descriptor["input_domain"],

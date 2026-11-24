@@ -241,6 +241,14 @@ correspondence profile で立証可能な範囲で対応している」。
   この emit 切替と同じ変更で更新する。逆順だと旧 agent が正当な
   新記述子を scope 不一致で拒む空白ができる。Core 側は合意した
   項目名・scope・schema を docs に確定。
+  （本 PR で実装 — emit scope を
+  `native_bundle_object_translation_correspondence[_without_object_link]`
+  に切替（agent#1323 が両 scope を受理済み）。e2e: 正常受理・
+  unchecked→inconclusive・inconsistent→reject・canonical_argv
+  欠損→inconclusive は実 fixture で pin。`_without_object_link`
+  scope は単体テストで pin —— fresh ELF の fixture から
+  `object_link_corresponds` の uncheckable 経路は到達不能なため。
+  旧 scope 値は語彙として維持、emit 経路は新値のみ。）
 - **Step 4（deferred）**: liftable subset が広がったら受理条件の
   項目追加を再評価。
 
