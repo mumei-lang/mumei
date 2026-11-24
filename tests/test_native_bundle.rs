@@ -747,6 +747,48 @@ fn recheck_machine_tv_reports_good_leaf_and_wrapper_outcomes() {
 }
 
 #[test]
+fn hir_llvm_correspondence_models_composite_call_sites() {
+    // A call chain through struct-carrying signatures — `sum(mk(1, 2))`
+    // and the `sum(p)` pass-through — flattens to the same leaf slots
+    // the IR `call` encoding splices, so these atoms verify inside the
+    // leaf subset instead of diverging on scalarised call terms.
+    for source_text in [
+        "struct P { x: i64, y: i64 }\n\
+         atom sum(p: P) -> i64 requires: true; ensures: true; body: { p.x + p.y };\n\
+         atom mk(a: i64, b: i64) -> P requires: true; ensures: true; body: { P { x: a, y: b } };\n\
+         atom caller() -> i64 requires: true; ensures: true; body: { sum(mk(1, 2)) };\n\
+         atom fwd(p: P) -> i64 requires: true; ensures: true; body: { sum(p) };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };\n",
+        "struct T { a: i64, b: i64, c: i64 }\n\
+         atom sum3(p: T) -> i64 requires: true; ensures: true; body: { p.a + p.b + p.c };\n\
+         atom mk3(a: i64, b: i64, c: i64) -> T requires: true; ensures: true; body: { T { a: a, b: b, c: c } };\n\
+         atom caller() -> i64 requires: true; ensures: true; body: { sum3(mk3(1, 2, 3)) };\n\
+         atom fwd(p: T) -> i64 requires: true; ensures: true; body: { sum3(p) };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };\n",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let (source, bundle, id) = build_source(root.path(), source_text);
+        let output = recheck_machine_tv(&source, &bundle, &id, true);
+        assert_success(&output);
+        let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let hir_check = descriptor["object_translation"]["correspondence"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["item"] == "hir_llvm_model_correspondence")
+            .unwrap();
+        assert_eq!(hir_check["result"], "checked");
+        assert_eq!(
+            hir_check["detail"],
+            "5 of 5 atoms equivalent within the leaf subset (0 outside)"
+        );
+        // The full acceptance gate accepts the module bundle.
+        let accepted = accept_object(&source, &bundle, &id, false);
+        assert_success(&accepted);
+    }
+}
+
+#[test]
 fn hir_llvm_correspondence_covers_main_callers_and_generic_structs() {
     // `caller` calls `main()`, which the bundle emitter renames to
     // `__mumei_user_main` — the model comparison must meet the emitted
@@ -4985,15 +5027,13 @@ fn recheck_machine_tv_accepts_small_integer_struct_aggregates() {
         .iter()
         .any(|check| check == "machine_code_composite_register_aggregate_tv"));
 
-    // DESIGN_OBJECT_ACCEPTANCE.md §4: `caller` diverges on the
-    // HIR↔LLVM model comparison (its callee `sum` is outside the
-    // liftable subset) → `hir_llvm_model_correspondence` is
-    // `inconsistent`, so acceptance rejects with exit 1 even though
-    // machine-TV proved every source atom equivalent.
+    // The composite call sites flatten to the same leaf slots the IR
+    // `call` encoding splices, so every atom verifies inside the leaf
+    // subset and the object is accepted.
     let accepted = accept_object(&source, &bundle, &id, true);
-    assert_eq!(accepted.status.code(), Some(1));
-    assert!(accepted.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&accepted.stderr).contains("hir_llvm_model_correspondence"));
+    assert_success(&accepted);
+    let accepted: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(accepted["accepted"], true);
 }
 
 #[test]
@@ -5035,15 +5075,13 @@ fn recheck_machine_tv_accept_object_three_leaf_struct_aggregates_in_one_source_f
         .iter()
         .any(|check| check == "machine_code_tv_sysv_memory_class_aggregate_abi"));
 
-    // DESIGN_OBJECT_ACCEPTANCE.md §4: `caller` diverges on the
-    // HIR↔LLVM model comparison (its callee `sum3` is outside the
-    // liftable subset) → `hir_llvm_model_correspondence` is
-    // `inconsistent`, so acceptance rejects with exit 1 even though
-    // machine-TV proved every source atom equivalent.
+    // The composite call sites flatten to the same leaf slots the IR
+    // `call` encoding splices, so every atom verifies inside the leaf
+    // subset and the object is accepted.
     let accepted = accept_object(&source, &bundle, &id, true);
-    assert_eq!(accepted.status.code(), Some(1));
-    assert!(accepted.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&accepted.stderr).contains("hir_llvm_model_correspondence"));
+    assert_success(&accepted);
+    let accepted: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(accepted["accepted"], true);
 }
 
 #[test]
@@ -7114,11 +7152,12 @@ fn module_bundle_with_enum_values_rechecks_machine_tv_and_accept_object() {
         .iter()
         .any(|check| check == "machine_code_composite_register_aggregate_tv"));
 
-    // DESIGN_OBJECT_ACCEPTANCE.md §4: `main` calls `get`/`mk`, which
-    // are outside the HIR↔LLVM subset, so that item is `inconsistent`
-    // and acceptance rejects with exit 1.
+    // DESIGN_OBJECT_ACCEPTANCE.md §4: `main` calls `get`/`mk`, whose
+    // `Opt` parameter/result are outside the HIR↔LLVM leaf subset, so
+    // `hir_llvm_model_correspondence` is `unchecked` and acceptance
+    // reports inconclusive with exit 3.
     let accepted = accept_object(&source, &bundle, &id, true);
-    assert_eq!(accepted.status.code(), Some(1));
+    assert_eq!(accepted.status.code(), Some(3));
     assert!(accepted.stdout.is_empty());
     assert!(String::from_utf8_lossy(&accepted.stderr).contains("hir_llvm_model_correspondence"));
 }

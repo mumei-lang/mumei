@@ -618,7 +618,9 @@ pub fn validate_pure_i64_optimized(
 /// two-slot carriers, or `f64` pass-through leaves), `let` bindings,
 /// short-circuit `&&`/`||`/`=>`, tail `if` branches, i64-carrying
 /// uninterpreted call sites (ordered operations over a call result
-/// stay outside until callee signatures are wired in), and read-only
+/// stay outside; `calls` carries the module's callee signatures so a
+/// composite parameter or result flattens to its leaf slots the way
+/// the IR `call` encoding splices them), and read-only
 /// `[i64]` parameters inside the i64 domain (`a[i]` as the
 /// bounds-checked read, `len(a)` as the stored count), and
 /// register-resident aggregates whose fields are all `i64` leaves —
@@ -638,6 +640,7 @@ pub fn validate_pure_i64_optimized(
 pub fn validate_hir_pure_i64_leaf(
     atom: &mumei_core::hir::HirAtom,
     structs: &std::collections::BTreeMap<String, Vec<(String, String)>>,
+    calls: &std::collections::BTreeMap<String, mumei_core::semantic_contract::HirCallLeafSig>,
     llvm_ir: &str,
     // `true` only on the native-bundle recheck path: the bundle
     // emitter renames the user `main` member to `__mumei_user_main`,
@@ -654,8 +657,9 @@ pub fn validate_hir_pure_i64_leaf(
     config.set_timeout_msec(options.timeout_ms as u64);
     config.set_param_value("rlimit", &options.resource_limit.to_string());
     let context = Context::new(&config);
-    let model = mumei_core::semantic_contract::encode_hir_pure_i64_leaf(atom, structs, &context)
-        .map_err(|_| ValidationError("hir atom outside the scalar-i64 leaf subset"))?;
+    let model =
+        mumei_core::semantic_contract::encode_hir_pure_i64_leaf(atom, structs, calls, &context)
+            .map_err(|_| ValidationError("hir atom outside the scalar-i64 leaf subset"))?;
     let llvm_context = LlvmContext::create();
     let module = llvm_context
         .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
