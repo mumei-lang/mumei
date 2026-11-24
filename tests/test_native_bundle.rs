@@ -4389,14 +4389,13 @@ fn module_bundle_with_bounded_arrays_builds_as_v14_and_rechecks() {
         .as_str()
         .unwrap()
         .contains("_leaf_red_zone_frame_memory_assumed_unclobbered"));
+    // DESIGN_OBJECT_ACCEPTANCE.md §4: `main` calls the array atoms,
+    // which sit outside the HIR↔LLVM liftable subset, leaving
+    // `hir_llvm_model_correspondence` unchecked → inconclusive.
     let accepted = accept_object(&source, &bundle, &id, true);
-    assert_success(&accepted);
-    let accepted: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
-    assert_eq!(accepted["accepted"], true);
-    assert!(accepted["register_convention_assumed"]
-        .as_str()
-        .unwrap()
-        .contains("_leaf_red_zone_frame_memory_assumed_unclobbered"));
+    assert_eq!(accepted.status.code(), Some(3));
+    assert!(accepted.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&accepted.stderr).contains("hir_llvm_model_correspondence"));
     // A v14 record re-pinned as v13 is refused: v13 keeps arrays out of
     // the vocabulary.
     let mut record = module_record(&bundle);
@@ -4697,10 +4696,13 @@ fn module_bundle_with_nested_field_writes_builds_as_v18_and_rechecks() {
         .unwrap()
         .iter()
         .any(|check| check == "machine_code_composite_register_aggregate_tv"));
+    // DESIGN_OBJECT_ACCEPTANCE.md §4: `main` calls `bump`, whose
+    // struct return is outside both correspondence subsets → the
+    // unchecked items keep acceptance inconclusive.
     let accepted = accept_object(&source, &bundle, &id, true);
-    assert_success(&accepted);
-    let accepted: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
-    assert_eq!(accepted["accepted"], true);
+    assert_eq!(accepted.status.code(), Some(3));
+    assert!(accepted.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&accepted.stderr).contains("llvm_ir_object_equivalence"));
     // A v18 record re-pinned as v16 is refused: v16 keeps nested
     // leaf writes out of the composite shape.
     let mut record = module_record(&bundle);
@@ -4974,19 +4976,15 @@ fn recheck_machine_tv_accepts_small_integer_struct_aggregates() {
         .iter()
         .any(|check| check == "machine_code_composite_register_aggregate_tv"));
 
+    // DESIGN_OBJECT_ACCEPTANCE.md §4: `caller` diverges on the
+    // HIR↔LLVM model comparison (its callee `sum` is outside the
+    // liftable subset) → `hir_llvm_model_correspondence` is
+    // `inconsistent`, so acceptance rejects with exit 1 even though
+    // machine-TV proved every source atom equivalent.
     let accepted = accept_object(&source, &bundle, &id, true);
-    assert_success(&accepted);
-    let accepted: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
-    assert_eq!(accepted["accepted"], true);
-    assert_eq!(
-        accepted["register_convention_assumed"],
-        "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax_two_eightbyte_integer_aggregates_in_consecutive_gprs_result_rax_rdx"
-    );
-    assert!(accepted["checks_performed"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|check| check == "machine_code_composite_register_aggregate_tv"));
+    assert_eq!(accepted.status.code(), Some(1));
+    assert!(accepted.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&accepted.stderr).contains("hir_llvm_model_correspondence"));
 }
 
 #[test]
@@ -5028,19 +5026,15 @@ fn recheck_machine_tv_accept_object_three_leaf_struct_aggregates_in_one_source_f
         .iter()
         .any(|check| check == "machine_code_tv_sysv_memory_class_aggregate_abi"));
 
+    // DESIGN_OBJECT_ACCEPTANCE.md §4: `caller` diverges on the
+    // HIR↔LLVM model comparison (its callee `sum3` is outside the
+    // liftable subset) → `hir_llvm_model_correspondence` is
+    // `inconsistent`, so acceptance rejects with exit 1 even though
+    // machine-TV proved every source atom equivalent.
     let accepted = accept_object(&source, &bundle, &id, true);
-    assert_success(&accepted);
-    let accepted: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
-    assert_eq!(accepted["accepted"], true);
-    assert_eq!(
-        accepted["register_convention_assumed"],
-        "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax_llvm_first_class_aggregates_split_into_registers_result_rax_rdx_rcx_xmm0_xmm1"
-    );
-    assert!(accepted["checks_not_performed"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|check| check == "machine_code_tv_sysv_memory_class_aggregate_abi"));
+    assert_eq!(accepted.status.code(), Some(1));
+    assert!(accepted.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&accepted.stderr).contains("hir_llvm_model_correspondence"));
 }
 
 #[test]
@@ -5140,14 +5134,14 @@ fn recheck_machine_tv_accept_object_sixteen_leaf_struct_arguments_spill_to_stack
         .iter()
         .any(|check| check == "machine_code_tv_sysv_memory_class_aggregate_abi"));
 
+    // DESIGN_OBJECT_ACCEPTANCE.md §4: `llvm_ir_object_equivalence` is
+    // unchecked for a 16-leaf spilled aggregate signature — outside the
+    // IR↔object comparison subset — so acceptance is inconclusive
+    // (fail-closed; machine-TV equivalence alone no longer suffices).
     let accepted = accept_object(&source, &bundle, &id, true);
-    assert_success(&accepted);
-    let accepted: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
-    assert_eq!(accepted["accepted"], true);
-    assert_eq!(
-        accepted["register_convention_assumed"],
-        machine_tv["register_convention_assumed"]
-    );
+    assert_eq!(accepted.status.code(), Some(3));
+    assert!(accepted.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&accepted.stderr).contains("llvm_ir_object_equivalence"));
 }
 
 #[test]
@@ -6332,6 +6326,17 @@ fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
     assert!(performed
         .iter()
         .any(|check| check == "object_link_correspondence"));
+    // Step 2 (DESIGN_OBJECT_ACCEPTANCE.md §6): the checks lists name
+    // the correspondence items that gated the acceptance.
+    for item in [
+        "function_coverage",
+        "llvm_ir_object_equivalence",
+        "hir_llvm_model_correspondence",
+        "object_data_correspondence",
+        "object_symbol_attribute_correspondence",
+    ] {
+        assert!(performed.iter().any(|check| check == item), "{item}");
+    }
     assert!(performed
         .iter()
         .any(|check| check == "machine_code_callee_saved_register_preservation"));
@@ -7096,10 +7101,13 @@ fn module_bundle_with_enum_values_rechecks_machine_tv_and_accept_object() {
         .iter()
         .any(|check| check == "machine_code_composite_register_aggregate_tv"));
 
+    // DESIGN_OBJECT_ACCEPTANCE.md §4: `main` calls `get`/`mk`, which
+    // are outside the HIR↔LLVM subset, so that item is `inconsistent`
+    // and acceptance rejects with exit 1.
     let accepted = accept_object(&source, &bundle, &id, true);
-    assert_success(&accepted);
-    let accepted: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
-    assert_eq!(accepted["accepted"], true);
+    assert_eq!(accepted.status.code(), Some(1));
+    assert!(accepted.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&accepted.stderr).contains("hir_llvm_model_correspondence"));
 }
 
 #[test]
