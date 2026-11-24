@@ -1,0 +1,10 @@
+# Mark generated artifacts so GitHub diffs and `linguist` stats stay focused
+# on hand-written sources (B4, mumei-lang/mumei#1449).
+Cargo.lock linguist-generated
+generated/** linguist-generated
+reports/** linguist-generated
+docs/_site/** linguist-generated
+*.proof-cert.json linguist-generated
+
+# Test fixtures under tests/ are hand-reviewed inputs, not generated output.
+tests/** -linguist-generated
