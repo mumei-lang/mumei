@@ -1,0 +1,5 @@
+# Pinned toolchain for local dev and agents (B5, mumei-lang/mumei#1449).
+# CI installs the same channel via dtolnay/rust-toolchain@stable.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
