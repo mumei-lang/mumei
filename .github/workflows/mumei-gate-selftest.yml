@@ -12,6 +12,13 @@ on:
       - tests/fixtures/mumei-gate/**
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   workflow-contract:
     runs-on: ubuntu-24.04

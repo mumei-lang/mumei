@@ -17,6 +17,13 @@ on:
       - '.github/workflows/verifier-spec.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verifier-spec:
     runs-on: ubuntu-latest
