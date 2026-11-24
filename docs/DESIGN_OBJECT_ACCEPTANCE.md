@@ -43,7 +43,7 @@ agent 側に `native-object-accept` ルート（`object_source_machine_code_corr
 
 | 機構 | 内容 | 位置づけ |
 | --- | --- | --- |
-| `mumei native-bundle accept-object`（#1228） | bundle 再現 + symbol/call-edge/link 再検査 + bounded machine-TV を走らせ、`mumei.native-evidence-acceptance/v1` を emit | 実装済み。受理 claim は machine-TV slice（`native_bundle_object_machine_code_translation_correspondence[_without_object_link]`） |
+| `mumei native-bundle accept-object`（#1228） | bundle 再現 + symbol/call-edge/link 再検査 + bounded machine-TV を走らせ、`mumei.native-evidence-acceptance/v1` を emit | 実装済み。受理 claim は machine-TV slice — 移行前の emit scope は `native_bundle_object_machine_code_translation_correspondence[_without_object_link]`、Step 3 以降は `native_bundle_object_translation_correspondence[_without_object_link]` を emit（現行出力は後者） |
 | `machine_tv_acceptance_decision` | `Outcome` 集合を `Accepted` / `Different` / `Unknown` に写像（Different→reject、Unknown→inconclusive、全件 equivalent で accepted） | 受理判定関数のパターンとして再利用（純粋関数で単体テスト可能） |
 | `write_object_machine_tv_acceptance` | JSON/text 出力、build_id・llvm_sha256・object_sha256 バインド、checks_performed / checks_not_performed 列挙 | 記述子 emit 経路として再利用 |
 | `report_object_acceptance_inconclusive` | inconclusive 時は記述子を emit せず終了コード 3 | fail-closed 境界の既存実装 |
@@ -241,6 +241,14 @@ correspondence profile で立証可能な範囲で対応している」。
   この emit 切替と同じ変更で更新する。逆順だと旧 agent が正当な
   新記述子を scope 不一致で拒む空白ができる。Core 側は合意した
   項目名・scope・schema を docs に確定。
+  （本 PR で実装 — emit scope を
+  `native_bundle_object_translation_correspondence[_without_object_link]`
+  に切替（agent#1323 が両 scope を受理済み）。e2e: 正常受理・
+  unchecked→inconclusive・inconsistent→reject・canonical_argv
+  欠損→inconclusive は実 fixture で pin。`_without_object_link`
+  scope は単体テストで pin —— fresh ELF の fixture から
+  `object_link_corresponds` の uncheckable 経路は到達不能なため。
+  旧 scope 値は語彙として維持、emit 経路は新値のみ。）
 - **Step 4（deferred）**: liftable subset が広がったら受理条件の
   項目追加を再評価。
 

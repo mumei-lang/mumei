@@ -6679,9 +6679,9 @@ fn object_machine_tv_source_atom_count(outcomes: &BTreeMap<String, FunctionOutco
 
 fn object_machine_tv_acceptance_scope(object_link_correspondence: bool) -> &'static str {
     if object_link_correspondence {
-        "native_bundle_object_machine_code_translation_correspondence"
+        "native_bundle_object_translation_correspondence"
     } else {
-        "native_bundle_object_machine_code_translation_correspondence_without_object_link"
+        "native_bundle_object_translation_correspondence_without_object_link"
     }
 }
 
@@ -7556,7 +7556,7 @@ entry:
         }
         assert_eq!(
             object_machine_tv_acceptance_scope(false),
-            "native_bundle_object_machine_code_translation_correspondence_without_object_link"
+            "native_bundle_object_translation_correspondence_without_object_link"
         );
     }
 
