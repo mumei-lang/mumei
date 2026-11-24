@@ -14,10 +14,18 @@ cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --workspace --lib --bins
 cargo run -- verify std/contracts.mm --json   # smoke-test the verifier
-python -m pytest tests/test_mcp_server.py -v  # MCP server tests
+python -m pytest tests/test_mcp_server.py -v  # needs: pip install pytest -r requirements-mcp.txt
 ```
 
-The pre-commit hooks run the same fmt/clippy/test checks; install them once with `pre-commit install`.
+For the full CI gate, also run the integration tests that `--lib --bins` skips (the two Lean-bridge skips match `core-tests.yml`, which doesn't check out mumei-lean):
+
+```bash
+cargo test --workspace --exclude mumei-ffi-tests --test '*' --no-fail-fast -- \
+  --skip escalate_lean_promotes_outside_fragment_to_candidate_bundle \
+  --skip nlsat_first_fixture_outside_window_keeps_lean_escalation
+```
+
+The pre-commit hooks run the same checks; install them once with `pre-commit install`. Note the hooks *fix* files rather than check them: `cargo fmt` rewrites sources in place, and the Rust hooks only run when the staged change includes Rust files.
 
 Known gotchas:
 
