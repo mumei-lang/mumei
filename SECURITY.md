@@ -8,7 +8,7 @@ The project is pre-1.0. Security fixes are applied to the `develop` branch and c
 
 Please do **not** open a public GitHub issue for security vulnerabilities.
 
-Report vulnerabilities privately via [GitHub Security Advisories](https://github.com/mumei-lang/mumei/security/advisories/new) ("Report a vulnerability"), or by emailing the maintainer listed on the repository profile.
+Report vulnerabilities privately via [GitHub Security Advisories](https://github.com/mumei-lang/mumei/security/advisories/new) ("Report a vulnerability"). If private vulnerability reporting is not yet enabled on this repository, contact the maintainer directly through the email on their GitHub profile instead of opening a public issue.
 
 Please include:
 
@@ -20,6 +20,6 @@ We aim to acknowledge reports within 7 days and will coordinate disclosure timin
 
 ## Scope Notes
 
-- `mumei` executes generated/native code only through documented user-invoked commands (`build`, `run`, emitter plugins); untrusted `.mm` input is expected to be *verified*, not sandboxed — sandbox gaps are still in scope.
+- `mumei` executes generated/native code only through documented user-invoked commands (`build`, `run`, `repl`, emitter plugins); untrusted `.mm` input is expected to be *verified*, not sandboxed — sandbox gaps are still in scope.
 - Proof certificates (`.proof-cert.json`) and remote registry artifacts are trust boundaries: bypasses of certificate verification or registry integrity checks are security issues.
 - Secrets handling rules for contributors live in [`AGENTS.md`](AGENTS.md); leaks of credentials into outputs, logs or artifacts are treated as security issues.
