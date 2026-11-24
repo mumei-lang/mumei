@@ -6222,7 +6222,7 @@ fn hir_llvm_atom_outcomes(data: &ObjectRecheckData) -> Option<BTreeMap<String, &
     // concrete all-i64 instantiation is not dropped by the raw `T`.
     let mut outcomes = BTreeMap::new();
     for atom in &atoms {
-        let structs = specialized_struct_map(atom, &struct_defs);
+        let structs = specialized_struct_map(atom, &struct_defs, &calls);
         // The bundle emitter renames the user `main` atom to
         // `__mumei_user_main` and adds a C `main` wrapper — the model
         // comparison must target the user member, not the wrapper.
@@ -6280,12 +6280,17 @@ fn hir_llvm_atom_outcomes(data: &ObjectRecheckData) -> Option<BTreeMap<String, &
 
 /// The `structs` map for one atom: plain definitions as declared,
 /// generic definitions specialized by the instantiation the atom's
-/// own signature uses (`p: Pair<i64>` binds `T` to `i64`). A def the
-/// atom does not instantiate concretely keeps its raw field types and
-/// fails the encoder's leaf-subset admission honestly.
+/// own signature uses (`p: Pair<i64>` binds `T` to `i64`) — and by
+/// every callee signature, since a generic instantiation can appear
+/// only in a callee's signature (`caller() { mk3(1, 2, 3) }` where
+/// `mk3` returns `Triple<i64>`) while the call-site flattening
+/// resolves the callee's type strings verbatim against this map. A
+/// def the atom does not instantiate concretely keeps its raw field
+/// types and fails the encoder's leaf-subset admission honestly.
 fn specialized_struct_map(
     atom: &parser::Atom,
     defs: &[parser::StructDef],
+    calls: &BTreeMap<String, semantic_contract::HirCallLeafSig>,
 ) -> BTreeMap<String, Vec<(String, String)>> {
     // `Name<arg, ...>` → (Name, [args]); signature type strings are
     // parser-produced, so a shallow split is a reliable shape.
@@ -6309,6 +6314,13 @@ fn specialized_struct_map(
         .iter()
         .filter_map(|param| param.type_name.clone())
         .chain(atom.return_type.clone())
+        .chain(calls.values().flat_map(|sig| {
+            sig.params
+                .iter()
+                .flatten()
+                .cloned()
+                .chain(sig.result.clone())
+        }))
         .collect();
     while let Some(type_name) = worklist.pop() {
         if let Some((name, args)) = instantiation(&type_name) {

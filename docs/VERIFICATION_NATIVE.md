@@ -2339,11 +2339,7 @@ scoped to the admitted signature subset — scalar 64-bit parameters
 and scalar results carrying integer or f64 bit-patterns (f64 compares
 pass-through/select only; FP arithmetic itself stays out), scalar
 `i128`/`u128` on wide-scalar modules, all-`i64` aggregate results
-(register-resident or `sret`), call sites whose parameters and result
-are scalar `i64` leaves or all-`i64` aggregates (a composite argument
-flattens to its leaf slots and a composite result is one uninterpreted
-application per leaf slot — the same terms the IR `call` encoding
-produces), and bounded
+(register-resident or `sret`), scalar-`i64` call sites, and bounded
 local memory; loops and wider shapes stay out. Functions outside the subset, or whose IR fails to
 encode, record their verbatim `NotLiftable` reason
 (`unsupported_signature`, `unsupported_ir`, `unsupported_instruction`,
@@ -2361,7 +2357,15 @@ source atom is lowered against the bundle's module env and compared with
 the emitted LLVM IR by `validate_hir_pure_i64_leaf`, over the member
 subset the atom's call graph reaches (the emitter's `__mumei_user_main`
 member stands in for the `main` atom; the C `main` wrapper stays out of
-scope). The item is `checked` when every compared atom proved equivalent
+scope). Call sites are modeled the way the IR `call` encoding models
+them: scalar arguments pass their leaf, an all-`i64` aggregate argument
+splices its leaf slots in declaration order, and a composite result
+applies one uninterpreted `mumei_call_field` function per field —
+resolved against the module's declared callee signatures, with any
+parameter or result type outside the leaf subset failing closed. A
+generic instantiation that appears only in a callee's signature
+(`caller() { mk3(1, 2, 3) }`) is specialized from the callee's
+signature the same way the atom's own is. The item is `checked` when every compared atom proved equivalent
 within the leaf subset — atoms outside the subset are named in `detail`,
 never silently covered — `inconsistent` on any divergence, and
 `unchecked` when no source atoms or IR were on hand. The
