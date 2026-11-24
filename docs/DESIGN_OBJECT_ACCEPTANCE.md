@@ -128,11 +128,13 @@ agent 側に `native-object-accept` ルート（`object_source_machine_code_corr
    `toolchain_object_executable_reproduction` が performed かつ成功。
    `pinned_member_merge_rederivation` は複数ファイル bundle の
    場合のみ必須（単一ファイル bundle では項目自体が存在しない）。
-   `canonical_link_argument_vector_compared` は pinned argv が
-   記録されている限り link 対照の有無と独立に必須（relink は
-   `_without_object_link` scope でも走る。未比較 → inconclusive）。
-   `_without_object_link` が外すのは `object_link_correspondence`
-   項目だけであり、argv 比較は引き続き要求する。
+   `canonical_link_argument_vector_compared` は無条件必須 ——
+   pinned argv が記録されているなら比較が実行され一致している
+   こと、pin 自体が無い bundle はリンク再現の決定性を名乗れず
+   inconclusive。この要件は `object_link_correspondence` の可否と
+   独立 —— `_without_object_link` が外すのはリンク対照項目
+   だけで、argv 比較は引き続き要求する（relink は
+   `_without_object_link` scope でも走る）。
 4. **machine-TV**: `machine_tv_acceptance_decision` が `Accepted`。
    object-translation 受理は machine-TV 受理の superset ——
    「再現 object が pinned LLVM IR に対応する」に加えて
@@ -174,8 +176,11 @@ correspondence profile で立証可能な範囲で対応している」。
   machine-TV slice の既存 scope
   （`native_bundle_object_machine_code_translation_correspondence`）
   は語彙として維持する — 過去に emit された記述子を解釈する
-  ための値として残る。ただし Step 2 後の `accept-object` は
-  新 scope だけを emit する（dual-emit・切替 flag なし）。
+  ための値として残る。最終的に `accept-object` は新 scope だけを
+  emit する（dual-emit・切替 flag なし）。Step 2 の判定接続
+  時点では旧 scope のまま emit し（厳しい方向のみの変更なので
+  既存 consumer は拒まない）、Step 3 で agent 側の準備が整って
+  から emit を新値に切り替える。
   影響の正直な記述: 受理の主張は強くなるが受理対象は狭まる。
   unchecked 項目を残す bundle は機械語 TV に合格しても新しい
   受理記述子を得られない（inconclusive、exit 3）—— 旧記述子を
@@ -218,19 +223,21 @@ correspondence profile で立証可能な範囲で対応している」。
   集約を接続。scope を
   `native_bundle_object_translation_correspondence` に更新し、
   checks_performed/not_performed を項目名レベルに拡張。
-  machine-TV 受理との superset 関係を docs に記述。旧 scope を
-  ピン留めした既存テストはこのタイミングで新値に更新
-  （旧値は語彙として残す）。Core emit の切替自体は Step 3 の
-  agent 側更新が先（下記の順序依存を参照）。
+  machine-TV 受理との superset 関係を docs に記述。この時点の
+  emit scope はまだ旧値のまま —— 判定だけが先に厳しくなる
+  （受理対象が狭まる方向のみの変更）。旧 scope をピン留めした
+  既存テストの期待値は、emit が新値に切り替わる Step 3 の変更と
+  同時に更新する（先行すると現行出力と乖離して fail する）。
 - **Step 3**: e2e —— 正常受理（全項目 checked → `accepted`）、
   data/symbol-attribute/relocation が unchecked のとき
   inconclusive、`inconsistent` で reject、`_without_object_link`
   scope、`canonical_argv` 欠損で inconclusive、の6ケース。
   agent 側（parent lane）は先に `native-object-accept` を新旧両
-  scope と項目集合写像に対応させてから、Core が emit を新
-  scope に切り替える —— 逆順だと旧 agent が正当な新記述子を
-  scope 不一致で拒む空白ができる。Core 側は合意した項目名・
-  scope・schema を docs に確定。
+  scope と項目集合写像に対応させてから、Core が emit scope を
+  新値に切り替える —— scope をピン留めした既存テストの期待値は
+  この emit 切替と同じ変更で更新する。逆順だと旧 agent が正当な
+  新記述子を scope 不一致で拒む空白ができる。Core 側は合意した
+  項目名・scope・schema を docs に確定。
 - **Step 4（deferred）**: liftable subset が広がったら受理条件の
   項目追加を再評価。
 
@@ -252,13 +259,13 @@ correspondence profile で立証可能な範囲で対応している」。
   `native_bundle_object_translation_correspondence`
   （machine-TV の scope とは別、`_without_object_link` 継承）。
   既存 scope を変更しない —— 受理意味の変化は値名で表す。
-- **(d) canonical argv**: 推奨は link 再現が走ったとき必須
-  （missing → inconclusive）。リンク再現決定性が取れない受理は
-  名乗らない。link 全体が uncheckable の場合は link・argv とも
-  not_performed の `_without_object_link` scope で受理
-  （argv 要件は link あり scope にのみ効く）。判定の入力は
-  辺の result ではなく項目集約なので no-link でも受理条件は
-  立つ。
+- **(d) canonical argv**: 推奨は無条件必須 —— pinned argv が
+  記録されているなら比較実行・一致が必要で、pin 自体が無い
+  bundle はリンク再現の決定性を名乗れず inconclusive。この要件は
+  `object_link_correspondence` の可否と独立 ——
+  `_without_object_link` が外すのはリンク対照項目だけで、
+  argv 比較は scope に関わらず要求する。判定の入力は辺の
+  result ではなく項目集約なので no-link でも受理条件は立つ。
 - **(e) agent-owned 名の emit**: 推奨は継続して emit しない。
   `native-object-accept` が項目名集合から自分の
   `object_translation_correspondence` 名に写像する設計にする。
