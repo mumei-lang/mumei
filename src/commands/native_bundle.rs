@@ -6861,7 +6861,7 @@ fn write_object_machine_tv_acceptance(
             "{}",
             source_machine_tv_within_profile_line(evaluation, unchecked_domains.len())
         );
-        for line in object_translation_correspondence_text(data) {
+        for line in object_translation_correspondence_report_lines(correspondence) {
             println!("{line}");
         }
         Ok(())
