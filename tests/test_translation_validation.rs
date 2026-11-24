@@ -2677,7 +2677,7 @@ fn composite_aggregates_outside_struct_formal_reads_and_pass_through_fail_closed
     assert!(composite(&scalar, COMPOSITE_IR).is_err());
 }
 
-const STRUCT_RESULT_SOURCE: &str = "struct Pair { x: i64, y: i64 }\n\
+const STRUCT_RESULT_SOURCE: &str = "struct P { x: i64, y: i64 }\n\
     atom make(a: i64) -> P requires: true; ensures: result.x == a; body: { P { x: a, y: a + 1 } };\n\
     atom usep(a: i64) -> i64 requires: true; ensures: true; body: { make(a).y };\n\
     atom initlet(a: i64) -> i64 requires: true; ensures: result == a; body: { let q = P { x: 5, y: a }; q.y };\n\
@@ -2877,7 +2877,7 @@ fn composite_v6_bool_padding_slots_compare_against_normalized_source_values() {
     assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
 }
 
-const BRANCH_MERGED_COMPOSITE_SOURCE: &str = "struct Pair { x: i64, y: i64 }\nenum Shape { Dot, Edge(w: i64) }\natom pick(p: P, c: i64) -> P requires: c >= 0 && p.x >= 0; ensures: result.x >= 0; body: { if c == 0 { p } else { P { x: c, y: c } } };\natom pick_enum(s: Shape, c: i64) -> Shape requires: c >= 0; ensures: true; body: { if c == 0 { s } else { Shape::Edge(c) } };\natom main() -> i64 requires: true; ensures: true; body: { let q = pick(P { x: 1, y: 2 }, 3); q.x };";
+const BRANCH_MERGED_COMPOSITE_SOURCE: &str = "struct P { x: i64, y: i64 }\nenum Shape { Dot, Edge(w: i64) }\natom pick(p: P, c: i64) -> P requires: c >= 0 && p.x >= 0; ensures: result.x >= 0; body: { if c == 0 { p } else { P { x: c, y: c } } };\natom pick_enum(s: Shape, c: i64) -> Shape requires: c >= 0; ensures: true; body: { if c == 0 { s } else { Shape::Edge(c) } };\natom main() -> i64 requires: true; ensures: true; body: { let q = pick(P { x: 1, y: 2 }, 3); q.x };";
 
 #[test]
 fn composite_v7_branch_merged_aggregates_validate_against_phi_ir() {
