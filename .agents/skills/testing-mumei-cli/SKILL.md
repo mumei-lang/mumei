@@ -34,7 +34,7 @@ cd /home/ubuntu/repos/mumei
 export LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu
 cargo build
 ./target/debug/mumei verify std/contracts.mm --json        # smoke test
-./target/debug/mumei verify --report-dir /tmp/r tests/test_contradiction.mm  # diagnostics -> /tmp/r/report.json
+./target/debug/mumei verify --report-dir /tmp/r tests/test_contradiction.mm  # exits 1 by design (contradictory fixture); diagnostics -> /tmp/r/report.json
 ```
 
 1. Build the branch binary (above) and run the focused Rust test for the area first, when one exists (`cargo test --test <name>`).
