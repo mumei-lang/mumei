@@ -722,3 +722,48 @@ body: call(atom_ref(nested_quantified_req), arr, n, x, y);
     );
     std::fs::remove_dir_all(dir).ok();
 }
+
+const TRAILING_COMMA_CALLEE: &str = r#"
+atom trailing_comma_callee(arr: [i64], n: i64) -> i64
+requires: n >= 1 && len(arr) >= n && forall(i, 0, n, arr[i] > 0,);
+ensures: result > 0;
+body: arr[0];
+"#;
+
+// C7: a direct caller accepts the reconstructed quantified precondition of
+// a callee whose source used one trailing argument comma.
+#[test]
+fn direct_call_accepts_reconstructed_precondition_from_trailing_comma_callee() {
+    let (dir, output, payload) = verify_json(
+        "direct_trailing_comma",
+        &format!(
+            r#"{TRAILING_COMMA_CALLEE}
+atom direct_trailing_comma(arr: [i64], n: i64) -> i64
+requires: n >= 1 && len(arr) >= n && forall(i, 0, n, arr[i] > 0);
+ensures: result > 0;
+body: trailing_comma_callee(arr, n);
+"#
+        ),
+    );
+    assert_verified(&output, &payload);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+// C8: `call(atom_ref(...))` accepts the same reconstructed quantified
+// precondition through its separate call path.
+#[test]
+fn atom_ref_call_accepts_reconstructed_precondition_from_trailing_comma_callee() {
+    let (dir, output, payload) = verify_json(
+        "ref_trailing_comma",
+        &format!(
+            r#"{TRAILING_COMMA_CALLEE}
+atom ref_trailing_comma(arr: [i64], n: i64) -> i64
+requires: n >= 1 && len(arr) >= n && forall(i, 0, n, arr[i] > 0);
+ensures: result > 0;
+body: call(atom_ref(trailing_comma_callee), arr, n);
+"#
+        ),
+    );
+    assert_verified(&output, &payload);
+    std::fs::remove_dir_all(dir).ok();
+}
