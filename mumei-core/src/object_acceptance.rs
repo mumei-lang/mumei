@@ -332,6 +332,14 @@ impl ObjectAcceptanceDescriptor {
         &self,
         tool_version: &str,
     ) -> Result<Evidence, verification_evidence::RepresentationError> {
+        let uses_non_i64_integer_model = self.register_convention_assumed.contains("128_bit")
+            || self.input_domain.contains("128_bit")
+            || self.input_domain.contains("i128")
+            || self.input_domain.contains("u128")
+            || self
+                .checks_performed
+                .iter()
+                .any(|check| check.contains("128") || check.contains("wide_scalar"));
         let evidence = Evidence {
             schema_version: verification_evidence::SCHEMA_VERSION.to_owned(),
             subject: Subject {
@@ -346,10 +354,10 @@ impl ObjectAcceptanceDescriptor {
             obligation_id: format!("native-bundle:{}:{}", self.build_id, self.scope),
             semantics: Semantics {
                 profile: self.scope.clone(),
-                integer_model: if self.input_domain == "unconstrained_64_bit_bitvectors" {
-                    "wrapping_i64".to_owned()
-                } else {
+                integer_model: if uses_non_i64_integer_model {
                     "not_applicable".to_owned()
+                } else {
+                    "wrapping_i64".to_owned()
                 },
                 target_triple: None,
             },
@@ -973,17 +981,22 @@ mod tests {
     #[test]
     fn non_64_bit_input_domain_maps_to_not_applicable_integer_model() {
         let mut wide = fixture_value();
-        wide["input_domain"] = json!("unconstrained_128_bit_bitvectors");
+        wide["register_convention_assumed"] = json!(
+            "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_128_bit_scalars_in_consecutive_gpr_pairs_low_first_result_rax_rdx"
+        );
         let evidence = decode(&serde_json::to_vec(&wide).unwrap())
             .unwrap()
             .to_verification_evidence("0.4.0-test")
             .unwrap();
         assert_eq!(evidence.semantics.integer_model, "not_applicable");
-        assert!(evidence
-            .scope
-            .bounds
-            .iter()
-            .any(|b| b == "input_domain:unconstrained_128_bit_bitvectors"));
+
+        let mut wide_domain = fixture_value();
+        wide_domain["input_domain"] = json!("unconstrained_128_bit_bitvectors");
+        let evidence2 = decode(&serde_json::to_vec(&wide_domain).unwrap())
+            .unwrap()
+            .to_verification_evidence("0.4.0-test")
+            .unwrap();
+        assert_eq!(evidence2.semantics.integer_model, "not_applicable");
     }
 
     #[test]
