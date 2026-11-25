@@ -38,6 +38,9 @@ def test_without_object_link_scope_conforms() -> None:
         "unchecked_not_translation_validated"
     )
     doc["source_machine_tv"]["unchecked_domains"].append("object_link_correspondence")
+    doc["object_translation"]["transformations"][0]["result"] = (
+        "unchecked_not_translation_validated"
+    )
     doc["object_translation"]["transformations"][1]["result"] = (
         "unchecked_not_translation_validated"
     )

@@ -513,7 +513,7 @@ fn validate_consistency(
     if llvm_to_obj.from != "llvm_ir"
         || llvm_to_obj.to != "object_code"
         || llvm_to_obj.output_identity.as_deref() != Some(object_sha256)
-        || llvm_to_obj.result.as_deref() != Some("checked_correspondence")
+        || llvm_to_obj.result.as_deref() != Some(expected_link_result)
     {
         return Err(RepresentationError::InconsistentDescriptor);
     }
@@ -974,6 +974,12 @@ mod tests {
             .unwrap()
             .push(json!(OBJECT_LINK_CHECK_NAME));
         value["source_machine_tv"]["object_link_correspondence"] =
+            json!(UNCHECKED_OBJECT_LINK_STATUS);
+        value["source_machine_tv"]["unchecked_domains"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(OBJECT_LINK_CHECK_NAME));
+        value["object_translation"]["transformations"][0]["result"] =
             json!(UNCHECKED_OBJECT_LINK_STATUS);
         value["object_translation"]["transformations"][1]["result"] =
             json!(UNCHECKED_OBJECT_LINK_STATUS);
