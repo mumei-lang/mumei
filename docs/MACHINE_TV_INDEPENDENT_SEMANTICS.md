@@ -25,5 +25,8 @@ Explicitly excluded state items:
 - correctness of the CPU, assembler, disassembler, LLVM or Z3 itself.
 
 The pilot lives in `mumei-emit-llvm/src/machine_tv_cpu_differential.rs` as
-`addq_register_form_matches_independent_reference_semantics`. An unsupported
-instruction or an unmodeled flag is excluded rather than counted as proved.
+`addq_register_form_matches_independent_reference_semantics`. Although the proof
+itself is symbolic Z3 reasoning, the test currently shares the CPU-differential
+probe harness and therefore compiles only on x86-64 hosts. On another host it is
+not executed and must not be reported as proved. An unsupported instruction or
+an unmodeled flag is excluded rather than counted as proved.
