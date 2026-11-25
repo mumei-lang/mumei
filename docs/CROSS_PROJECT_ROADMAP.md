@@ -1809,8 +1809,10 @@ unsupported; `select` admits in the Go interprocedural frontier
 
 Agent's C07 fragment now admits `var_declaration`: one name per
 `var_spec` with at most one value, scalar bindings only, and `var x T`
-binding the dep-free zero value. Multi-name specs, non-scalar bindings,
-`const` and grouped `var (...)` stay declared gaps. See the
+binding the dep-free zero value. That initial slice kept multi-name
+specs, non-scalar bindings, `const` and grouped `var (...)` as declared
+gaps; later slices expanded those boundaries — grouped vars are mirrored
+in the dedicated section below. See the
 [Agent var declarations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-var-declarations-in-bodies).
 
 ### Wave 3 effect-free control statements in scalar summaries
