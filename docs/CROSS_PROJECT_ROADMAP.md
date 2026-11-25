@@ -6296,6 +6296,21 @@ selection/exclusion regressions only — not adapter execution, output meaning,
 Evidence truth or grade promotion. C13 remains ongoing as later
 planner/native/translation milestones land.
 
+### C13 planner adapter-settings regression gate (mumei-demo #205)
+
+[mumei-demo#205](https://github.com/mumei-lang/mumei-demo/pull/205) extends
+the optional `verify_plan` scenario from selection/exclusion into consumable
+adapter configuration. A schema-valid explicit route must record the exact
+Boolean, bounded-integer and closed-choice values with their decoded types and
+pinned `mumei.adapter-configuration/v1` fingerprint, while raw policy overrides
+stay out of the serialized policy. Out-of-schema and sensitive-channel settings
+must reject before routing, fallback or a partial plan; both output streams are
+scanned for plan fragments and the fake sentinel value. The fixtures and outputs
+are inside the input-hash plus no-execution/no-secret boundary gate. These are
+selection/configuration/exclusion regressions only — not adapter execution,
+output meaning, Evidence truth or grade promotion. C13 remains ongoing as later
+planner/native/translation milestones land.
+
 ### Manifest-declared attempt memory bound (mumei-agent #993)
 
 [mumei-agent#993](https://github.com/mumei-lang/mumei-agent/pull/993)
