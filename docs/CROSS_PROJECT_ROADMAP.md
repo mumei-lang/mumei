@@ -6200,9 +6200,11 @@ promotion; C11 remains partial.
 [mumei-agent#1347](https://github.com/mumei-lang/mumei-agent/pull/1347)
 makes every Core representation/requirement handoff refuse an
 `AttemptOutput` whose capture is declared incomplete before any Core
-process or pipe I/O. A truncated adapter stdout can therefore never be
-mistaken for the whole evidence document merely because its captured prefix
-is well formed. Recorded checks become `failed`, scheduling keeps the
+process or pipe I/O. The capture-completeness bit remains a host
+declaration, not detection of every truncation; when that declaration is
+present, a captured prefix cannot be mistaken for the whole evidence
+document merely because it is well formed. Recorded checks become `failed`,
+scheduling keeps the
 host-declared exit-code selection separate, `evidence_acceptance` is not
 accepted, and a stale promotable triple is not left behind. Complete
 captures are unchanged. This is transport integrity only — not output
