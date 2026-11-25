@@ -254,6 +254,10 @@ pub(crate) fn run(command: EvidenceCommand) {
                 .and_then(|options| verify_source(Path::new(&input), json, options, &mut output)),
             "Source evidence check failed",
         ),
+        EvidenceCommand::CheckReadonlySlice { input } => (
+            check_readonly_slice(Path::new(&input), &mut output),
+            "Read-only slice check failed",
+        ),
         EvidenceCommand::CheckObjectAcceptance {
             input,
             stdin,
@@ -304,6 +308,12 @@ pub(crate) fn run(command: EvidenceCommand) {
                 }
                 ("Semantic-contract sidecar acceptance failed", _) => {
                     "Semantic-contract sidecar acceptance rejected; no acceptance established"
+                }
+                ("Read-only slice check failed", 3) => {
+                    "Read-only slice check inconclusive or empty input domain; see JSON diagnostic"
+                }
+                ("Read-only slice check failed", _) => {
+                    "Read-only slice obligation refuted; see JSON diagnostic"
                 }
                 (_, 3) => {
                     "Source query inconclusive within bounded profile; no Evidence emitted"
@@ -975,6 +985,28 @@ fn verify_source(
         _ => "source outside restricted profile or cannot encode evidence",
     })?;
     write_source(outcome, json, output)
+}
+
+fn check_readonly_slice(path: &Path, output: &mut impl Write) -> Result<i32, &'static str> {
+    use semantic_contract::readonly_slice::{self, Status};
+
+    let bytes = super::input::read_regular(path, MAX_INPUT_BYTES as u64)?;
+    let source = String::from_utf8(bytes).map_err(|_| "source is not UTF-8")?;
+    let diagnostic = readonly_slice::check(&source).map_err(|error| match error {
+        readonly_slice::Error::Parse => "source or expression failed checked parsing",
+        readonly_slice::Error::Unsupported(reason) => reason,
+        readonly_slice::Error::Encoding => "cannot encode the source model",
+    })?;
+    serde_json::to_writer_pretty(&mut *output, &diagnostic)
+        .map_err(|_| "cannot write read-only slice diagnostic")?;
+    output
+        .write_all(b"\n")
+        .map_err(|_| "cannot finish read-only slice diagnostic")?;
+    Ok(match diagnostic.status {
+        Status::EstablishedWithinProfile => 0,
+        Status::Refuted => 1,
+        Status::EmptyInputDomain | Status::Inconclusive => 3,
+    })
 }
 
 fn write_source(

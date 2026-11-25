@@ -668,15 +668,47 @@ cargo test -p mumei-core semantic_contract --lib
 cargo test --test test_semantic_contract
 ```
 
-### Proposed read-only region and slice profile (design only)
+### Read-only region and slice profile
 
-[C03 #787](https://github.com/mumei-lang/mumei/issues/787) extends the
-contract design, not the set of executable profiles. The proposed
-`mumei.readonly-i64-region-slice/v1` name is a design identifier: there is
-no producer, decoder, solver route or target that accepts it today. This
-is a separate profile, not a widening or reinterpretation of the scalar
-comparison or composite profiles. The evidence schema's free-form profile
-field is a label, not a capability registry.
+[C03 #787](https://github.com/mumei-lang/mumei/issues/787) defines
+`mumei.readonly-i64-region-slice/v1`, a separate source-model profile,
+not a widening of the scalar comparison or composite profiles. Its first
+route is opt-in and uses Z3 only. There is no Lean or executable lowering,
+artifact sidecar, or C02 Evidence acceptance route for this profile.
+
+#### First source-model slice
+
+```text
+mumei evidence check-readonly-slice <SOURCE>
+```
+
+The command admits one atom with explicit `requires`, `ensures` and
+`body`, at least one shared `ref name: [i64]` input, optional owned
+`i64` scalar inputs, and an explicit `i64` result. Its scalar fragment
+has comparisons, short-circuit Boolean operators and conditionals;
+it admits `len(a)` and `a[i]` only on admitted input views. Arithmetic,
+whole-view values, locals, subviews, mutable parameters and other calls
+are rejected. Empty slices are valid inputs but cannot be indexed.
+
+The encoder reuses the signed BV64 comparison, short-circuit guard and
+array bounds encodings. The cell function is shared by all formals and
+indexed by symbolic region and mathematical absolute offset; it does not
+use the local-array out-of-bounds zero fallback. Each query is separate:
+`requires_bounds` uses only the well-formed entry views, `input_domain`
+checks that those views and the precondition are jointly satisfiable,
+`body_bounds` and `ensures_bounds` check the guarded loads under the
+precondition, and `postcondition` checks the stated result. Each bounds
+query reports the result for its whole source clause. It is not permissible
+to assume a failed bounds goal in order to prove the postcondition.
+
+The JSON diagnostic pins source, specification and implementation identities
+and records binders with atom-level provenance, assumptions and each executed
+query. Exit 0 means established within this model; exit 1 with a diagnostic
+means a SAT countermodel to a named obligation; exit 1 without a diagnostic
+rejects unsupported or invalid input; exit 3 means empty input domain or Z3
+inconclusive. The diagnostic is neither reusable Evidence nor an artifact
+sidecar; it leaves Lean/LLVM unsupported and correspondence unchecked. No
+default verifier, certificate, audit key, Seal Grade or Lean gate is changed.
 
 #### Baseline in the current pipeline
 
@@ -686,7 +718,7 @@ field is a label, not a capability registry.
 | C03 source obligations | [Core's extractor/encoder](../mumei-core/src/semantic_contract.rs) uses bounded local-array models (`array_read` models fallback to zero) and, under `CompositeV26`, read-only owned `[i64]` formals with signed in-bounds obligations and `array_param_len_nonnegative`. `CompositeV29` can also describe read-only array results as model pairs. Neither the length/store pair nor a local store ID asserts native pointer validity, lifetime or initialization. The scalar comparison profile still rejects these constructs. |
 | Lean and LLVM | [Translator IR metadata](../mumei-core/src/verification/types.rs) records binders and provenance; that metadata is not a memory lowering. The [LLVM emitter](../mumei-emit-llvm/src/codegen/expr_emit.rs) and [LLVM validation pilot](../mumei-emit-llvm/src/translation_validation.rs) already have restricted array paths for v26. A checked index on the existing `{ i64, ptr }` representation cannot on its own establish that the pointer is live, aligned or backed by initialized cells. |
 
-#### Admitted fragment and semantics
+#### Design for the broader fragment
 
 Start with a single atom returning a scalar, using the comparison profile's
 explicit scalar semantics plus read-only `[i64]` inputs, `len`, indexed
@@ -742,13 +774,13 @@ admitted input domain and precondition are satisfiable to flag vacuity. Keep
 guards, failed bounds, undischarged assumptions and postcondition failures
 distinct; do not assert a failed goal into the model as an assumption.
 
-- **Z3 candidate:** Use opaque region IDs, an extent per region, and one
+- **Z3 model:** Use opaque region IDs, an extent per region, and one
   logical store indexed by region and nonnegative mathematical offset.
   Encode signed scalar values
   as BV64 with signed comparisons; convert source indices and lengths
   exactly to the integer offset domain. Under the original assumptions
   and guard, query the negation of each definedness goal and of the
-  postcondition. A total SMT array's value outside the view is never a source
+  postcondition. A total SMT store's value outside the view is never a source
   value. SAT is a countermodel to that goal; unknown or timeout is not a proof.
 - **Lean candidate:** Interpret the same region table as immutable finite
   sequences of 64-bit values, with the same signed interpretation at the
@@ -803,11 +835,11 @@ unchecked, keep it unchecked.
   Source-only acceptance must remain source-only.
 
 Existing audit keys, certificate serialization, Seal Grades and Lean
-trust/freshness decisions are unchanged. Before enabling any route, require
-a trace from the checked source access to its exact backend goal, a positive
-overlap/subview case, negative out-of-bounds/unsupported cases, and independent
-checks for any advertised executable correspondence. Finite observations are
-regressions, not substitutes for those checks.
+trust/freshness decisions are unchanged. The initial source trace groups
+accesses by clause. Finer access-to-goal traces, subview regressions and a
+Lean lowering are follow-ups. Enabling an executable route also requires
+independent checks for the advertised executable correspondence. Finite
+observations are regressions, not substitutes for those checks.
 
 ## 6. Replaceable planner and verifier plugins (C04/C11)
 
