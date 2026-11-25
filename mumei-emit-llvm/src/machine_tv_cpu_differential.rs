@@ -945,8 +945,9 @@ fn addq_register_form_matches_independent_reference_semantics() {
         "flag value differs from the independent addq reference"
     );
 
-    let full = left.zero_ext(1).bvadd(&right.zero_ext(1));
-    let expected_carry = full.extract(64, 64)._eq(&BV::from_u64(&context, 1, 1));
+    // Independent reference: unsigned addition carried exactly when the
+    // wrapped result is below the original destination operand.
+    let expected_carry = expected.bvult(left);
     let solver = Solver::new(&context);
     solver.assert(&carry._eq(&expected_carry).not());
     assert_eq!(
