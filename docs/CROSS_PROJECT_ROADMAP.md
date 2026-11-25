@@ -6210,6 +6210,26 @@ accepted, and a stale promotable triple is not left behind. Complete
 captures are unchanged. This is transport integrity only — not output
 meaning, Evidence truth or grade promotion; C11 remains partial.
 
+### C11 plugin contract acceptance completion (mumei-agent #1348)
+
+[mumei-agent#1348](https://github.com/mumei-lang/mumei-agent/pull/1348)
+pins the issue-level C11 acceptance matrix in
+`tests/test_c11_plugin_contract_acceptance.py`: declarative adapter
+registration/replacement/selection/disable/configuration, version and
+execution-location policy, budgets, explicit fallback, missing or
+incompatible tools, invalid settings, timeouts, malformed, partial or
+conflicting outputs, forbidden secret/invocation/egress channels, and the
+boundary that scheduling never claims Evidence acceptance or grade
+promotion. Partial output may still carry a host-declared exit-code
+`selected` dispatch outcome, but it fails closed before Core I/O and cannot
+become Evidence acceptance or promotion. This completes the C11 plugin
+contract as a verification-native orchestration contract; it does not adopt
+or endorse an external verifier, make backend self-reports proof, make
+Semantic IR universal, hide lossy transformations, or run Z3 and external
+verifiers unconditionally in parallel. External adoption still requires
+separate maintenance, license/distribution/commercial, CI,
+toolchain-compatibility and cost review.
+
 ### Manifest-declared attempt memory bound (mumei-agent #993)
 
 [mumei-agent#993](https://github.com/mumei-lang/mumei-agent/pull/993)
