@@ -6333,6 +6333,24 @@ measurement and regression control only — not proof truth, Evidence acceptance
 or grade promotion. C13 remains ongoing as later planner/native/translation
 milestones land.
 
+### C13 mutation control outcome taxonomy (mumei-demo #207)
+
+[mumei-demo#207](https://github.com/mumei-lang/mumei-demo/pull/207) applies the
+same measurement separation to the mutation-control negative lane. Surviving
+mutants are reported as potential false acceptance, while invalid mutant
+outcomes are counted independently as unsupported input/capability, residual
+inconclusive outcome, environment failure or budget exhaustion. Baseline
+fixed-port outcomes are counted separately; a non-proven baseline yields no
+mutation score and is no longer misreported as a port with no mutable token.
+New runs retain wall seconds and declared timeout budget for baseline and
+mutant verifier calls, with measured-versus-expected coverage explicit for
+historical or partially refreshed rows. The regression-gate summary carries
+the same invalid-outcome breakdown. Mutation generation, report rendering and
+runner orchestration remain outside verifier time. This is measurement and
+regression control only — not proof truth, Evidence acceptance or grade
+promotion. C13 remains ongoing as later planner/native/translation milestones
+land.
+
 ### Manifest-declared attempt memory bound (mumei-agent #993)
 
 [mumei-agent#993](https://github.com/mumei-lang/mumei-agent/pull/993)
