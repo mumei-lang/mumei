@@ -6440,6 +6440,36 @@ fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
 }
 
 #[test]
+fn accept_object_fingerprint_binds_multifile_record_source_digest() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_multifile(root.path());
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], "mumei.native-multifile-bundle/v1");
+    let source_sha256 = record["source"]["source_sha256"].as_str().unwrap();
+    assert_ne!(
+        source_sha256,
+        native_bundle::sha256(&fs::read(&source).unwrap())
+    );
+
+    let output = accept_object(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(descriptor["accepted"], true);
+    let scope = "native_bundle_object_translation_correspondence";
+    assert_eq!(descriptor["scope"], scope);
+    let canonical_pins = format!(
+        r#"{{"build_id":"{id}","canonical_argv_hash":{},"emit_scope":"{scope}","llvm_sha256":{},"object_sha256":{},"source_sha256":"{source_sha256}"}}"#,
+        record["link_build"]["canonical_arguments_sha256"],
+        record["files"]["llvm_ir"]["sha256"],
+        record["files"]["object"]["sha256"],
+    );
+    assert_eq!(
+        descriptor["evidence_fingerprint"],
+        native_bundle::sha256(canonical_pins.as_bytes())
+    );
+}
+
+#[test]
 fn accept_object_accepts_loop_bundle_with_object_link() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build_source(root.path(), WHILE_PROBE);
