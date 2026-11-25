@@ -126,6 +126,23 @@ guarantees and deferred WASM are unchanged; no external verifier is adopted.
 The [Agent settings contract](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-typed-configuration-follow-up)
 owns local API details.
 
+### Wave 2 consumable adapter-settings policy
+
+Agent's `verify-plan` and `verify-schedule` policy documents now accept the
+same host-declared `adapter_settings` contract as the in-memory planner API:
+a closed list of `[adapter_id, [[name, value], ...]]` entries. Malformed
+entries, unknown or unregistered adapters, duplicate settings, sensitive or
+invocation channels and values outside the adapter's declared schema fail
+before routing or fallback. Raw overrides are not echoed in the serialized
+policy, CLI output or a partial plan; the sensitive-channel regression checks
+both output streams and the absent output file.
+
+Settings remain planning metadata only. They are not passed to child argv,
+stdin or environment, and they do not authorize execution, transport secrets,
+change Evidence meaning/acceptance or promote grades. The
+[Agent policy contract](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-consumable-adapter-settings-policy)
+owns local API details under this implementation order.
+
 ### Wave 2 bounded source-input preparation
 
 Agent's opt-in C04/C11 planner can constrain an explicit input-format declaration.
