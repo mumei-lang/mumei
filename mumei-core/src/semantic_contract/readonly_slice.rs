@@ -206,9 +206,7 @@ fn parse_slice_expression(input: &str) -> Result<Expr, Error> {
             Token::Eq | Token::Neq | Token::Gt | Token::Lt | Token::Ge | Token::Le
                 if paren_depth > 0 =>
             {
-                return Err(Error::Unsupported(
-                    "parenthesized comparisons used as comparison operands",
-                ));
+                return Err(Error::Unsupported("parenthesized comparisons"));
             }
             _ => (),
         }
