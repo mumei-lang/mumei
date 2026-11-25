@@ -6317,6 +6317,22 @@ selection/configuration/exclusion regressions only — not adapter execution,
 output meaning, Evidence truth or grade promotion. C13 remains ongoing as later
 planner/native/translation milestones land.
 
+### C13 contract benchmark outcome taxonomy (mumei-demo #206)
+
+[mumei-demo#206](https://github.com/mumei-lang/mumei-demo/pull/206) separates
+contract-benchmark outcomes that previously shared one inconclusive bucket.
+False acceptance, false positive, unsupported input/generated output/capability,
+residual inconclusive outcome, environment failure and budget exhaustion are
+counted independently per checked variant. New verifier attempts record wall
+seconds and the declared timeout budget, including vacuity controls; provider
+usage remains separate model time and cost. Reports show measured versus
+expected verifier-call coverage so old rows and partial `--only` refreshes do
+not look fully instrumented. Certificate emission/rechecks, case orchestration
+and provider calls remain outside the verifier-time measurement. This is
+measurement and regression control only — not proof truth, Evidence acceptance
+or grade promotion. C13 remains ongoing as later planner/native/translation
+milestones land.
+
 ### Manifest-declared attempt memory bound (mumei-agent #993)
 
 [mumei-agent#993](https://github.com/mumei-lang/mumei-agent/pull/993)
