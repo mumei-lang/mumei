@@ -2629,6 +2629,19 @@ link correspondence is uncheckable, it uses
 `native_bundle_object_translation_correspondence_without_object_link` and
 leaves `object_link_correspondence` not performed.
 
+The descriptor's `evidence_fingerprint` is the lowercase, unprefixed SHA-256
+hex digest of a compact UTF-8 JSON object with exactly these keys, in lexical
+order: `build_id`, `canonical_argv_hash`, `emit_scope`, `llvm_sha256`,
+`object_sha256`, `source_sha256`. All values are strings. Use the trusted
+build ID, the rechecked record's `link_build.canonical_arguments_sha256`, the
+emitted `scope` (including the suffix on the no-link path), and the SHA-256
+digests of the reproduced LLVM IR, reproduced object and rechecked source,
+respectively. For a multifile bundle, use the digest of the canonical merged
+source (`source.source_sha256` in the record), not of the root file alone.
+An independently derived matching pin binds the descriptor to the same attempt
+inputs; it does not authenticate the descriptor or its producer.
+`descriptor_authenticity` remains in `checks_not_performed`.
+
 This is not reusable Evidence or a certificate and does not promote a grade.
 The register convention is assumed, not validated; CRT and loader behavior,
 producer authenticity, historical execution, optimizer semantics, ABI/runtime

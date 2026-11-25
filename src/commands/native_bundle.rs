@@ -943,12 +943,12 @@ pub(crate) fn run(command: NativeBundleCommand) {
                         // reproduction and every correspondence item
                         // checked — the machine-TV gate alone must not
                         // carry `accepted` (Step 2).
-                        if !data.canonical_argv_compared {
+                        let Some(canonical_argv_hash) = data.canonical_argv_hash.as_deref() else {
                             drop(data);
                             report_object_acceptance_inconclusive(
                                 "Canonical link argument vector not reproduced",
                             );
-                        }
+                        };
                         let record = data
                             .object_translation
                             .clone()
@@ -970,6 +970,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                                     &data,
                                     &evaluation,
                                     &expected_build_id,
+                                    canonical_argv_hash,
                                     json,
                                     &record,
                                     &correspondence,
@@ -3055,6 +3056,7 @@ struct ArtifactRecheckResult {
     result: ArtifactRecheck,
     family: RecordFamily,
     canonical_argv_compared: bool,
+    canonical_argv_hash: Option<String>,
     record_profile: Option<String>,
     pin_envelope: &'static str,
     expected_exit_status: Option<u32>,
@@ -3076,7 +3078,7 @@ struct ObjectSymbolSurface {
 struct ObjectRecheckData {
     stage: tempfile::TempDir,
     family: RecordFamily,
-    canonical_argv_compared: bool,
+    canonical_argv_hash: Option<String>,
     admission: RefinedAdmission,
     ir_surface: tv::IrFunctionSurface,
     object_surface: ObjectSymbolSurface,
@@ -4017,7 +4019,7 @@ fn recheck_object_pipeline(
     let ArtifactRecheckResult {
         result,
         family,
-        canonical_argv_compared,
+        canonical_argv_hash,
         record_profile,
         stage,
         source_text,
@@ -4104,7 +4106,7 @@ fn recheck_object_pipeline(
         ObjectRecheckData {
             stage,
             family,
-            canonical_argv_compared,
+            canonical_argv_hash,
             admission,
             ir_surface,
             object_surface,
@@ -6557,7 +6559,7 @@ fn object_translation_json(
             .map(|item| check_item_result(item))
             .collect::<Vec<_>>(),
         data.object_link_correspondence,
-        data.canonical_argv_compared,
+        data.canonical_argv_hash.is_some(),
     );
     serde_json::json!({
         "status": status,
@@ -6756,7 +6758,11 @@ fn object_machine_tv_acceptance_checks(
     checks_performed.extend(coverage.0.iter().copied());
     checks_performed.push("object_source_machine_code_correspondence");
 
-    let mut checks_not_performed = vec!["producer_authenticity", "historical_execution"];
+    let mut checks_not_performed = vec![
+        "producer_authenticity",
+        "descriptor_authenticity",
+        "historical_execution",
+    ];
     if !canonical_argv_compared {
         checks_not_performed.push("canonical_link_argument_vector_reproduction");
     }
@@ -6799,20 +6805,54 @@ fn report_object_acceptance_inconclusive(message: &str) -> ! {
     std::process::exit(3);
 }
 
+fn object_evidence_fingerprint(
+    build_id: &str,
+    source_sha256: &str,
+    llvm_sha256: &str,
+    object_sha256: &str,
+    canonical_argv_hash: &str,
+    emit_scope: &str,
+) -> Result<String, BundleError> {
+    let pins = BTreeMap::from([
+        ("build_id", build_id),
+        ("source_sha256", source_sha256),
+        ("llvm_sha256", llvm_sha256),
+        ("object_sha256", object_sha256),
+        ("canonical_argv_hash", canonical_argv_hash),
+        ("emit_scope", emit_scope),
+    ]);
+    let bytes = serde_json::to_vec(&pins)
+        .map_err(|_| BundleError("cannot encode native object acceptance pins"))?;
+    Ok(sha256(&bytes))
+}
+
 fn write_object_machine_tv_acceptance(
     data: &ObjectRecheckData,
     evaluation: &MachineTvEvaluation,
     expected_build_id: &str,
+    canonical_argv_hash: &str,
     json: bool,
     record: &ObjectTranslationRecord,
     correspondence: &serde_json::Value,
 ) -> Result<(), BundleError> {
     let scope = object_machine_tv_acceptance_scope(data.object_link_correspondence);
     if json {
-        use sha2::{Digest, Sha256};
+        let source = data.source_text.as_deref().ok_or(BundleError(
+            "missing rechecked source for native object acceptance",
+        ))?;
+        let llvm_sha256 = sha256(&data.llvm_bytes);
+        let object_sha256 = sha256(&data.object_bytes);
+        let evidence_fingerprint = object_evidence_fingerprint(
+            expected_build_id,
+            &sha256(source.as_bytes()),
+            &llvm_sha256,
+            &object_sha256,
+            canonical_argv_hash,
+            scope,
+        )?;
         let (checks_performed, checks_not_performed) = object_machine_tv_acceptance_checks(
             data.family,
-            data.canonical_argv_compared,
+            true,
             data.object_link_correspondence,
             evaluation.entry_wrapper_applicable
                 && evaluation.outcomes.get("main") == Some(&FunctionOutcome::Equivalent),
@@ -6826,8 +6866,9 @@ fn write_object_machine_tv_acceptance(
             "checks_performed": checks_performed,
             "checks_not_performed": checks_not_performed,
             "build_id": expected_build_id,
-            "llvm_sha256": format!("{:x}", Sha256::digest(&data.llvm_bytes)),
-            "object_sha256": format!("{:x}", Sha256::digest(&data.object_bytes)),
+            "llvm_sha256": llvm_sha256,
+            "object_sha256": object_sha256,
+            "evidence_fingerprint": evidence_fingerprint,
             "register_convention_assumed": machine_tv_register_convention_assumed_with_frame_memory(
                 evaluation.counts.equivalent_f64_leaf_count,
                 evaluation.counts.equivalent_composite_aggregate_count,
@@ -6886,14 +6927,14 @@ fn write_object_machine_tv_acceptance(
             "object-entry wrapper semantics, "
         };
         println!(
-            "Acceptance scope excludes producer authenticity, historical execution, {wrapper_exclusion}register-convention validation, optimizer/ABI/runtime/OS observations, grade promotion, and Lean checks; scope: {scope}."
+            "Acceptance scope excludes producer and descriptor authenticity, historical execution, {wrapper_exclusion}register-convention validation, optimizer/ABI/runtime/OS observations, grade promotion, and Lean checks; scope: {scope}."
         );
         // Same residual-domain count as the JSON descriptor's
         // checks_not_performed — producer authenticity, register
         // convention and the other fixed domains included.
         let (_, unchecked_domains) = object_machine_tv_acceptance_checks(
             data.family,
-            data.canonical_argv_compared,
+            true,
             data.object_link_correspondence,
             wrapper_equivalent,
             &evaluation.coverage,
@@ -6922,6 +6963,7 @@ impl ArtifactRecheckResult {
             result: ArtifactRecheck::Different,
             family,
             canonical_argv_compared: false,
+            canonical_argv_hash: None,
             record_profile: None,
             pin_envelope: "unrecorded",
             expected_exit_status: None,
@@ -6937,6 +6979,7 @@ impl ArtifactRecheckResult {
             result: ArtifactRecheck::Inconclusive,
             family,
             canonical_argv_compared: false,
+            canonical_argv_hash: None,
             record_profile: None,
             pin_envelope: "unrecorded",
             expected_exit_status: None,
@@ -7066,6 +7109,7 @@ fn recheck_artifact(
         expected_stderr_sha256: pins_comparable
             .then(|| link_build.expected_stderr_sha256.clone())
             .flatten(),
+        canonical_argv_hash: link_build.canonical_arguments_sha256,
         stage: Some(stage),
         source_text,
     })
@@ -7369,7 +7413,7 @@ entry:
         let make_data = |llvm_bytes: Vec<u8>| ObjectRecheckData {
             stage: tempfile::tempdir().unwrap(),
             family: RecordFamily::Single,
-            canonical_argv_compared: false,
+            canonical_argv_hash: None,
             admission: RefinedAdmission::Reject,
             ir_surface: tv::IrFunctionSurface {
                 defined: BTreeSet::new(),
@@ -7463,7 +7507,7 @@ entry:
         let data = ObjectRecheckData {
             stage: tempfile::tempdir().unwrap(),
             family: RecordFamily::Single,
-            canonical_argv_compared: false,
+            canonical_argv_hash: None,
             admission: RefinedAdmission::Reject,
             ir_surface: tv::IrFunctionSurface {
                 defined: BTreeSet::new(),
@@ -7515,6 +7559,25 @@ entry:
                 machine_tv_entry_wrapper_checks(true, Some(outcome)),
                 (Vec::new(), vec!["machine_code_entry_wrapper_tv"])
             );
+        }
+    }
+
+    #[test]
+    fn object_evidence_fingerprint_binds_each_canonical_input() {
+        let pins = ["build", "source", "llvm", "object", "argv", "scope"];
+        let fingerprint = |[build, source, llvm, object, argv, scope]: [&str; 6]| {
+            object_evidence_fingerprint(build, source, llvm, object, argv, scope).unwrap()
+        };
+        let expected = sha256(
+            br#"{"build_id":"build","canonical_argv_hash":"argv","emit_scope":"scope","llvm_sha256":"llvm","object_sha256":"object","source_sha256":"source"}"#,
+        );
+        let original = fingerprint(pins);
+        assert_eq!(original, expected);
+        assert_eq!(fingerprint(pins), original);
+        for index in 0..pins.len() {
+            let mut changed = pins;
+            changed[index] = "different";
+            assert_ne!(fingerprint(changed), original, "unchanged pin {index}");
         }
     }
 

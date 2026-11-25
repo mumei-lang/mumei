@@ -6348,6 +6348,19 @@ fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
         descriptor["object_sha256"],
         native_bundle::sha256(&fs::read(bundle.join(BundleFile::Object.file_name())).unwrap())
     );
+    let record = module_record(&bundle);
+    let canonical_pins = format!(
+        r#"{{"build_id":"{id}","canonical_argv_hash":{},"emit_scope":{},"llvm_sha256":{},"object_sha256":{},"source_sha256":"{}"}}"#,
+        record["link_build"]["canonical_arguments_sha256"],
+        descriptor["scope"],
+        descriptor["llvm_sha256"],
+        descriptor["object_sha256"],
+        native_bundle::sha256(&fs::read(&source).unwrap()),
+    );
+    assert_eq!(
+        descriptor["evidence_fingerprint"],
+        native_bundle::sha256(canonical_pins.as_bytes())
+    );
     assert_eq!(
         descriptor["register_convention_assumed"],
         "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax"
@@ -6391,6 +6404,9 @@ fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
         .iter()
         .any(|check| check == "pinned_member_merge_rederivation"));
     let not_performed = descriptor["checks_not_performed"].as_array().unwrap();
+    assert!(not_performed
+        .iter()
+        .any(|check| check == "descriptor_authenticity"));
     assert!(!not_performed
         .iter()
         .any(|check| check == "object_entry_wrapper_semantics"));
@@ -6421,6 +6437,36 @@ fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
     let rejected = accept_object(&source, &bundle, &wrong_id, true);
     assert_eq!(rejected.status.code(), Some(1));
     assert!(rejected.stdout.is_empty());
+}
+
+#[test]
+fn accept_object_fingerprint_binds_multifile_record_source_digest() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_multifile(root.path());
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], "mumei.native-multifile-bundle/v1");
+    let source_sha256 = record["source"]["source_sha256"].as_str().unwrap();
+    assert_ne!(
+        source_sha256,
+        native_bundle::sha256(&fs::read(&source).unwrap())
+    );
+
+    let output = accept_object(&source, &bundle, &id, true);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(descriptor["accepted"], true);
+    let scope = "native_bundle_object_translation_correspondence";
+    assert_eq!(descriptor["scope"], scope);
+    let canonical_pins = format!(
+        r#"{{"build_id":"{id}","canonical_argv_hash":{},"emit_scope":"{scope}","llvm_sha256":{},"object_sha256":{},"source_sha256":"{source_sha256}"}}"#,
+        record["link_build"]["canonical_arguments_sha256"],
+        record["files"]["llvm_ir"]["sha256"],
+        record["files"]["object"]["sha256"],
+    );
+    assert_eq!(
+        descriptor["evidence_fingerprint"],
+        native_bundle::sha256(canonical_pins.as_bytes())
+    );
 }
 
 #[test]

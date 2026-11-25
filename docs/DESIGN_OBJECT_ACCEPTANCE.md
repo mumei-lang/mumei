@@ -198,17 +198,15 @@ correspondence profile で立証可能な範囲で対応している」。
   既存の hard gate 名（`object_symbol_correspondence` 等）と
   `object_source_machine_code_correspondence` は従来通り含める。
 - **checks_not_performed**: 従来通り
-  producer_authenticity/historical_execution/
+  producer_authenticity/descriptor_authenticity/historical_execution/
   register_convention_validation/optimizer_semantics/
   abi_runtime_semantics/os_*_observation/runtime_observation_semantics/
   grade_promotion/lean_kernel_checks に加え、object-translation 受理
   固有で skip された項目（`_without_object_link` の場合の
   `object_link_correspondence`）を明記。
-- **binding**: `build_id`・`llvm_sha256`・`object_sha256`・
-  （link ありのとき executable_sha256）に加えて、受理の主体である
-  correspondence の `evidence_fingerprint` 相当の pin —— 受理時点の
-  `correspondence` 全体の安定ハッシュを bind して後段が改竄検知
-  できる形（候補、決定点 f 参照）。
+- **binding**: `evidence_fingerprint` は `build_id`・`source_sha256`・
+  `llvm_sha256`・`object_sha256`・`canonical_argv_hash`・`emit_scope` を
+  含む canonical JSON の SHA-256（決定点 f 参照）。
 - **agent 対応づけ**: Core は `object_translation_correspondence` と
   いう agent-owned 名を emit しない（既存の方針を継続）。
   agent `native-object-accept` は新 scope と項目名列挙を消費し、
@@ -280,12 +278,10 @@ correspondence profile で立証可能な範囲で対応している」。
 - **(e) agent-owned 名の emit**: 推奨は継続して emit しない。
   `native-object-accept` が項目名集合から自分の
   `object_translation_correspondence` 名に写像する設計にする。
-- **(f) evidence_fingerprint binding**: 推奨は受理対象の
-  `correspondence` 全体の安定ハッシュを descriptor に bind。
-  agent が受理後に証跡改竄を検知できる最小の再検査を可能にする。
-  （schema 追加フィールド — agent schema の allowlist 更新が必要。
-  最小差分にしたければ build_id + sha256 だけでも消費可能だが、
-  fingerprint 追加を推奨。）
+- **(f) evidence_fingerprint binding**: #1445 では `correspondence`
+  全体ではなく、受理時の入力 pin を descriptor に bind する。
+  attempt binding 用であり、descriptor 自体の真正性は検証しない。
+  canonical JSON の詳細は [VERIFICATION_NATIVE.md](VERIFICATION_NATIVE.md#object-stage-machine-code-acceptance-c10-option-b) 参照。
 - **(g) skipped subset の扱い**: 推奨は受理判定には無関係（
   `llvm_ir_object_equivalence` 項目が checked であれば skipped
   関数がいても受理）。ただし `solver_unknown` が1件でもあれば
