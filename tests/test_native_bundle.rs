@@ -8,7 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::Path,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 
 const GOOD: &str = "atom main() -> i64 requires: true; ensures: result == 7; body: { 7 };";
@@ -6449,8 +6449,9 @@ fn accept_object_signs_exact_descriptor_bytes_after_pinned_checks() {
     let key = root.path().join("key.hex");
     let signature_path = root.path().join("descriptor.sig.json");
     fs::write(&key, FAKE_KEY).unwrap();
-    let signed_acceptance = |pin: &str, format_args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_mumei"))
+    let signed_command = |pin: &str, format_args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));
+        command
             .args(["native-bundle", "accept-object"])
             .arg(&bundle)
             .arg(&source)
@@ -6458,10 +6459,11 @@ fn accept_object_signs_exact_descriptor_bytes_after_pinned_checks() {
             .arg(&key)
             .args(["--producer-key-id", "test-producer", "--signature-output"])
             .arg(&signature_path)
-            .args(format_args)
-            .output()
-            .unwrap()
+            .args(format_args);
+        command
     };
+    let signed_acceptance =
+        |pin: &str, format_args: &[&str]| signed_command(pin, format_args).output().unwrap();
     let unsigned = accept_object(&source, &bundle, &id, true);
     assert_success(&unsigned);
     let signed = signed_acceptance(&id, &["--json"]);
@@ -6522,6 +6524,21 @@ fn accept_object_signs_exact_descriptor_bytes_after_pinned_checks() {
         assert!(!error.contains(INVALID_KEY));
     };
     assert_rejected(signed_acceptance(&id, &["--json"]), 1);
+    assert_eq!(fs::read(&signature_path).unwrap(), envelope_bytes);
+    fs::remove_file(&signature_path).unwrap();
+    let full = fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let failed_write = signed_command(&id, &["--json"])
+        .stdout(Stdio::from(full))
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&failed_write.stderr)
+        .contains("cannot write native object acceptance descriptor"));
+    assert_rejected(failed_write, 1);
+    assert!(!signature_path.exists());
+    assert_success(&signed_acceptance(&id, &["--json"]));
     assert_eq!(fs::read(&signature_path).unwrap(), envelope_bytes);
     fs::remove_file(&signature_path).unwrap();
     assert_rejected(signed_acceptance(&id, &[]), 2);

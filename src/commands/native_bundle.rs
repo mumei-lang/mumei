@@ -6940,7 +6940,8 @@ fn write_object_machine_tv_acceptance(
         let mut bytes = serde_json::to_vec_pretty(&descriptor)
             .map_err(|_| BundleError("cannot encode native object acceptance descriptor"))?;
         bytes.push(b'\n');
-        if let Some(signature_output) = &output.signature_output {
+        let signature_output = output.signature_output.as_deref().map(Path::new);
+        if let Some(signature_output) = signature_output {
             let (Some(key_file), Some(producer_key_id)) =
                 (&output.key_file, &output.producer_key_id)
             else {
@@ -6950,15 +6951,30 @@ fn write_object_machine_tv_acceptance(
             };
             write_object_descriptor_signature(
                 &bytes,
-                Path::new(signature_output),
+                signature_output,
                 Path::new(key_file),
                 producer_key_id,
             )?;
         }
-        std::io::stdout()
-            .lock()
+        let mut stdout = std::io::stdout().lock();
+        if stdout
             .write_all(&bytes)
-            .map_err(|_| BundleError("cannot write native object acceptance descriptor"))
+            .and_then(|()| stdout.flush())
+            .is_err()
+        {
+            if signature_output.is_some_and(|path| {
+                fs::remove_file(path)
+                    .is_err_and(|error| error.kind() != std::io::ErrorKind::NotFound)
+            }) {
+                return Err(BundleError(
+                    "cannot write native object acceptance descriptor or remove its signature",
+                ));
+            }
+            return Err(BundleError(
+                "cannot write native object acceptance descriptor",
+            ));
+        }
+        Ok(())
     } else {
         let wrapper_equivalent = evaluation.entry_wrapper_applicable
             && evaluation.outcomes.get("main") == Some(&FunctionOutcome::Equivalent);
