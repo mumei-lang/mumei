@@ -7902,3 +7902,231 @@ atom main() -> i64 requires: true; ensures: result == 0; body: 0;
     assert_success(&recheck(&source, &bundle, &id));
     assert_success(&recheck_llvm(&source, &bundle, &id));
 }
+
+fn subdir(root: &Path, name: &str) -> std::path::PathBuf {
+    let path = root.join(name);
+    fs::create_dir(&path).unwrap();
+    path
+}
+
+fn save_object_acceptance(
+    root: &Path,
+    source: &Path,
+    bundle: &Path,
+    id: &str,
+) -> std::path::PathBuf {
+    let output = accept_object(source, bundle, id, true);
+    assert_success(&output);
+    let path = root.join("object-acceptance.json");
+    fs::write(&path, output.stdout).unwrap();
+    path
+}
+
+fn recheck_object_acceptance(source: &Path, bundle: &Path, id: &str, descriptor: &Path) -> Output {
+    cli(&[
+        "native-bundle",
+        "recheck-object-acceptance",
+        bundle.to_str().unwrap(),
+        source.to_str().unwrap(),
+        descriptor.to_str().unwrap(),
+        "--expected-build-id",
+        id,
+    ])
+}
+
+fn assert_rejected(output: &Output, reason: &str) {
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(reason), "{stderr}");
+}
+
+#[test]
+fn recheck_object_acceptance_accepts_fresh_descriptor_without_authenticity() {
+    let root = tempfile::tempdir().unwrap();
+    for (name, (source, bundle, id)) in [
+        (
+            "module",
+            build_source(&subdir(root.path(), "module"), MODULE),
+        ),
+        (
+            "multifile",
+            build_multifile(&subdir(root.path(), "multifile")),
+        ),
+    ] {
+        let saved = save_object_acceptance(source.parent().unwrap(), &source, &bundle, &id);
+        let output = recheck_object_acceptance(&source, &bundle, &id, &saved);
+        assert_success(&output);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("Saved native object acceptance descriptor consistent with a fresh object acceptance"),
+            "{name}: {stdout}"
+        );
+        assert!(stdout.contains("Scope: native_bundle_object_translation_correspondence\n"));
+        assert!(stdout.contains(
+            "Descriptor authenticity, producer authenticity and historical execution: not checked."
+        ));
+        assert!(!stdout.contains("artifact_verified"));
+    }
+}
+
+#[test]
+fn recheck_object_acceptance_rejects_unbound_or_tampered_descriptors() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(&subdir(root.path(), "module"), MODULE);
+    let saved = save_object_acceptance(root.path(), &source, &bundle, &id);
+    let descriptor: serde_json::Value = serde_json::from_slice(&fs::read(&saved).unwrap()).unwrap();
+    let tampered = root.path().join("tampered.json");
+    let recheck_with = |value: &serde_json::Value| {
+        fs::write(&tampered, serde_json::to_vec_pretty(value).unwrap()).unwrap();
+        recheck_object_acceptance(&source, &bundle, &id, &tampered)
+    };
+
+    let mut forged = descriptor.clone();
+    forged["evidence_fingerprint"] = native_bundle::sha256(b"other attempt").into();
+    assert_rejected(
+        &recheck_with(&forged),
+        "not bound to the fresh attempt inputs",
+    );
+
+    for (pointer, value) in [
+        ("/object_sha256", serde_json::json!("0".repeat(64))),
+        ("/checks_not_performed", serde_json::json!([])),
+        ("/functions", serde_json::json!({})),
+        ("/register_convention_assumed", serde_json::json!(null)),
+    ] {
+        let mut edited = descriptor.clone();
+        *edited.pointer_mut(pointer).unwrap() = value;
+        assert_rejected(
+            &recheck_with(&edited),
+            "differs from the fresh object acceptance",
+        );
+    }
+    let mut extended = descriptor.clone();
+    extended["descriptor_authenticity"] = "checked".into();
+    assert_rejected(
+        &recheck_with(&extended),
+        "differs from the fresh object acceptance",
+    );
+    let mut truncated = descriptor.clone();
+    truncated
+        .as_object_mut()
+        .unwrap()
+        .remove("source_machine_tv");
+    assert_rejected(
+        &recheck_with(&truncated),
+        "differs from the fresh object acceptance",
+    );
+
+    // A descriptor from another attempt is stale for this bundle even when
+    // every field is internally consistent.
+    let (other_source, other_bundle, other_id) =
+        build_source(&subdir(root.path(), "other"), WHILE_PROBE);
+    let stale = save_object_acceptance(
+        other_source.parent().unwrap(),
+        &other_source,
+        &other_bundle,
+        &other_id,
+    );
+    assert_rejected(
+        &recheck_object_acceptance(&source, &bundle, &id, &stale),
+        "not bound to the fresh attempt inputs",
+    );
+
+    assert_rejected(
+        &recheck_object_acceptance(&source, &bundle, &other_id, &saved),
+        "",
+    );
+    assert_rejected(
+        &recheck_object_acceptance(&source, &bundle, "not-a-digest", &saved),
+        "invalid expected build ID",
+    );
+}
+
+#[test]
+fn recheck_object_acceptance_rejects_malformed_or_foreign_descriptors() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(&subdir(root.path(), "module"), MODULE);
+    let saved = save_object_acceptance(root.path(), &source, &bundle, &id);
+    let text = fs::read_to_string(&saved).unwrap();
+    let descriptor: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let candidate = root.path().join("candidate.json");
+    let recheck_bytes = |bytes: &[u8]| {
+        fs::write(&candidate, bytes).unwrap();
+        recheck_object_acceptance(&source, &bundle, &id, &candidate)
+    };
+    let malformed = "malformed native object acceptance descriptor";
+
+    let duplicated = text.replacen(
+        "\"accepted\": true,",
+        "\"accepted\": false,\n  \"accepted\": true,",
+        1,
+    );
+    assert_ne!(duplicated, text);
+    assert_rejected(&recheck_bytes(duplicated.as_bytes()), malformed);
+    assert_rejected(
+        &recheck_bytes(&text.as_bytes()[..text.len() / 2]),
+        malformed,
+    );
+    assert_rejected(&recheck_bytes(b""), malformed);
+    for (key, value) in [
+        ("accepted", serde_json::json!(false)),
+        ("acceptance", serde_json::json!("not_evaluated")),
+        (
+            "schema_version",
+            serde_json::json!("mumei.native-consumer-evidence/v1"),
+        ),
+        (
+            "scope",
+            serde_json::json!("native_bundle_identity_source_llvm_and_saved_evidence_consistency"),
+        ),
+        ("evidence_fingerprint", serde_json::json!("not-a-digest")),
+    ] {
+        let mut edited = descriptor.clone();
+        edited[key] = value;
+        assert_rejected(
+            &recheck_bytes(&serde_json::to_vec(&edited).unwrap()),
+            malformed,
+        );
+    }
+
+    // A saved accept-evidence descriptor shares the schema but not the scope.
+    let evidence = save_evidence(root.path(), &source, &bundle, &id);
+    let accept_evidence = accept_command(&source, &bundle, &id, &evidence, true)
+        .output()
+        .unwrap();
+    assert_success(&accept_evidence);
+    assert_rejected(&recheck_bytes(&accept_evidence.stdout), malformed);
+    assert_rejected(&recheck_bytes(&fs::read(&evidence).unwrap()), malformed);
+
+    let link = root.path().join("link.json");
+    std::os::unix::fs::symlink(&saved, &link).unwrap();
+    let output = recheck_object_acceptance(&source, &bundle, &id, &link);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let oversized = vec![b' '; 1024 * 1024 + 1];
+    let output = recheck_bytes(&oversized);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn recheck_object_acceptance_rejects_tampered_pinned_inputs() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(&subdir(root.path(), "module"), MODULE);
+    let saved = save_object_acceptance(root.path(), &source, &bundle, &id);
+    let original = fs::read(&source).unwrap();
+    fs::write(&source, MODULE.replace("helper(5)", "helper(4)")).unwrap();
+    let output = recheck_object_acceptance(&source, &bundle, &id, &saved);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    fs::write(&source, original).unwrap();
+    let object = bundle.join(BundleFile::Object.file_name());
+    let mut bytes = fs::read(&object).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    fs::write(&object, bytes).unwrap();
+    let output = recheck_object_acceptance(&source, &bundle, &id, &saved);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+}

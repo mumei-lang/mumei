@@ -2654,6 +2654,46 @@ Core deliberately does not emit the agent-owned
 `object_source_machine_code_correspondence` check to its
 `object_translation_correspondence` check.
 
+### Saved object acceptance replay
+
+`mumei native-bundle recheck-object-acceptance <bundle> <source> <descriptor> --expected-build-id <trusted-id>`
+is the consumer side of `accept-object`. It checks a saved descriptor against a
+**fresh object acceptance** of the same pinned inputs, never against the saved
+`accepted: true` alone. For example:
+
+```sh
+mumei native-bundle accept-object bundle source.mm --expected-build-id <trusted-id> --json > object-acceptance.json
+mumei native-bundle recheck-object-acceptance bundle source.mm object-acceptance.json --expected-build-id <trusted-id>
+```
+
+The expected build ID must come from a separately trusted channel, never from
+the descriptor. The descriptor is read once as a regular, non-symlink file of
+at most 1 MiB. Malformed or non-UTF-8 JSON and duplicate keys at any object
+level are rejected. So is any envelope other than an evaluated, accepted
+`mumei.native-evidence-acceptance/v1` descriptor with one of the two object
+scopes and a lowercase SHA-256 `evidence_fingerprint`. That includes saved
+`accept-evidence` descriptors and saved Evidence reports. Descriptor strings
+never select tools or files to open.
+
+The command then reruns the full `accept-object` pipeline and gates. Different
+artifacts or machine code exit 1. An inconclusive fresh acceptance exits 3 and
+establishes no consistency result. When the fresh acceptance succeeds, the
+consumer recomputes `evidence_fingerprint` as specified above. A saved
+fingerprint that differs is rejected as not bound to the fresh attempt inputs,
+which covers a descriptor from another bundle or source. With the fingerprint
+bound, the saved descriptor must equal the fresh descriptor field for field. A
+missing, added or edited field anywhere is rejected, including in
+`checks_performed`, `checks_not_performed`, `functions` and the object
+translation record. Success prints the scope and exits 0. Nothing is written to
+stdout on rejection.
+
+A match means only that the saved descriptor is what a fresh `accept-object`
+emits for these pinned inputs. It does not check descriptor or producer
+authenticity or historical execution, and it accepts no reusable Evidence,
+certificate or grade. Every claim outside the `accept-object` scope stays
+outside it here, including register convention, CRT/loader, ABI/runtime and OS
+semantics.
+
 ### Pinned executable exit-status recheck
 
 `mumei native-bundle recheck-exit-status` is the execution slice of the
