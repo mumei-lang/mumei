@@ -6467,6 +6467,64 @@ fn accept_object_fingerprint_binds_multifile_record_source_digest() {
         descriptor["evidence_fingerprint"],
         native_bundle::sha256(canonical_pins.as_bytes())
     );
+
+    // Promote the real object-route acceptance descriptor into Common Evidence v1
+    // and verify the projected record through `mumei evidence check`.
+    let mut promote = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args([
+            "evidence",
+            "check-object-acceptance",
+            "--stdin",
+            "--emit-evidence",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    promote
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&output.stdout)
+        .unwrap();
+    let promoted = promote.wait_with_output().unwrap();
+    assert_success(&promoted);
+
+    let evidence: serde_json::Value = serde_json::from_slice(&promoted.stdout).unwrap();
+    assert_eq!(evidence["schema_version"], "mumei.verification-evidence/v1");
+    assert_eq!(evidence["subject"]["kind"], "native_artifact");
+    assert_eq!(evidence["subject"]["sha256"], descriptor["object_sha256"]);
+    assert_eq!(
+        evidence["specification"]["sha256"],
+        descriptor["llvm_sha256"]
+    );
+    assert_eq!(
+        evidence["provenance"]["configuration_fingerprint"],
+        descriptor["evidence_fingerprint"]
+    );
+    assert_eq!(evidence["method"], "bounded_model_checking");
+    assert_eq!(evidence["scope"]["kind"], "bounded");
+    assert_eq!(evidence["semantics"]["integer_model"], "wrapping_i64");
+
+    let mut check = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args(["evidence", "check", "--stdin", "--json"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    check
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&promoted.stdout)
+        .unwrap();
+    let checked = check.wait_with_output().unwrap();
+    assert_success(&checked);
+    let check_json: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert_eq!(check_json["representation"], "valid");
 }
 
 #[test]

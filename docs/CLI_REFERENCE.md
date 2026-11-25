@@ -27,6 +27,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei evidence accept-list` | 16 | Normalize one declared requirement against a bounded Evidence list envelope — per-record verdicts plus an aggregate; no tool execution or proof acceptance |
 | `mumei evidence check-list` | 3 | Validate a bounded Evidence list envelope's representation — every record individually, not their truth or consistency |
 | `mumei evidence check-consistency` | 3 | Check a bounded Evidence list envelope's cross-record identity-pin agreement, not pin correctness or truth |
+| `mumei evidence check-object-acceptance` | 3 | Validate a native object-route acceptance descriptor and optionally project it into Common Evidence v1 |
 | `mumei native-bundle` | 0 | Build/check a restricted native identity bundle (not artifact semantic proof) |
 | `mumei native-bundle accept-evidence` | 2 | Evaluate a saved native consumer Evidence report against fresh pinned source/LLVM checks into a bounded acceptance descriptor |
 | `mumei native-bundle accept-artifact` | 2 | Evaluate pinned artifact reproduction under the recorded toolchain into a bounded acceptance descriptor |
@@ -515,6 +516,30 @@ Usage: mumei evidence check-consistency [OPTIONS] [INPUT]
 | `--stdin` | false | — | Read one common Evidence list envelope from standard input (at most 65,536 bytes); never infer stdin from a missing file |
 | `--json` | false | — | Print a static structural-consistency diagnostic, not accepted Evidence or a certificate |
 | `--expected-adapter <EXPECTED_ADAPTER>` | — | — | Require every record's declared producer adapter id; declared identity only, not producer authenticity |
+
+## `mumei evidence check-object-acceptance`
+
+Validate a native object-route acceptance descriptor and optionally project it into Common Evidence v1
+
+Usage:
+
+```text
+Usage: mumei evidence check-object-acceptance [OPTIONS] [INPUT]
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `INPUT` | No | Regular mumei.native-evidence-acceptance/v1 object-route JSON file (at most 262,144 bytes) |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--stdin` | false | — | Read one object-route acceptance descriptor from standard input (at most 262,144 bytes) |
+| `--json` | false | — | Emit a static representation diagnostic JSON (not a recheck or acceptance receipt) |
+| `--emit-evidence` | false | — | Project the validated descriptor into a bounded mumei.verification-evidence/v1 record (no recheck or grade promotion) |
 
 ## `mumei native-bundle`
 

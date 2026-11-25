@@ -4439,21 +4439,10 @@ fn machine_tv_acceptance_decision(
 }
 
 /// Correspondence items the object-translation acceptance requires
-/// `checked` (DESIGN_OBJECT_ACCEPTANCE.md §4-2): the full surface of
-/// the `object_translation.correspondence` aggregation — the edge gate
-/// items plus the supplementary correspondences.
-const OBJECT_TRANSLATION_ACCEPTANCE_ITEMS: [&str; 10] = [
-    "function_coverage",
-    "function_count",
-    "llvm_ir_object_equivalence",
-    "relocation_targets",
-    "relocation_bounds",
-    "relocation_resolved_values",
-    "relocation_applied_values",
-    "hir_llvm_model_correspondence",
-    "object_data_correspondence",
-    "object_symbol_attribute_correspondence",
-];
+/// `checked` (DESIGN_OBJECT_ACCEPTANCE.md §4-2): shared single source of truth
+/// with `mumei_core::object_acceptance`.
+const OBJECT_TRANSLATION_ACCEPTANCE_ITEMS: [&str; 10] =
+    mumei_core::object_acceptance::REQUIRED_CORRESPONDENCE_ITEMS;
 
 /// Object-translation acceptance decision over the
 /// `object_translation.correspondence.checks` item list
@@ -6722,9 +6711,9 @@ fn object_machine_tv_source_atom_count(outcomes: &BTreeMap<String, FunctionOutco
 
 fn object_machine_tv_acceptance_scope(object_link_correspondence: bool) -> &'static str {
     if object_link_correspondence {
-        "native_bundle_object_translation_correspondence"
+        mumei_core::object_acceptance::SCOPE_WITH_OBJECT_LINK
     } else {
-        "native_bundle_object_translation_correspondence_without_object_link"
+        mumei_core::object_acceptance::SCOPE_WITHOUT_OBJECT_LINK
     }
 }
 
