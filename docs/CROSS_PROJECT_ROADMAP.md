@@ -1999,15 +1999,6 @@ repetitions stay outside the fragment. See the
 and the
 [grouped const slice](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-grouped-const-declarations-and-implicit-repetition).
 
-Grouped `var ( ... )` declarations now flatten every `var_spec` through
-the same scalar binding contract as individual declarations: explicit
-values bind pairwise against the pre-state, zero-value forms are
-dep-free, multi-name specs follow the existing declaration rules, `_`
-discards, and empty `var ()` is a no-op. Compact valid forms without a
-final separator remain parser gaps; non-scalar names, arity mismatches
-and const-style implicit repetition stay outside the var fragment. See
-the
-[Agent grouped var declarations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-grouped-var-declarations).
 
 ### Wave 3 remaining scalar binary operators
 
