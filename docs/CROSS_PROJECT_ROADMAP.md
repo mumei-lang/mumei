@@ -6388,6 +6388,22 @@ regression control only — not proof truth, Evidence acceptance or grade
 promotion. C13 remains ongoing as later planner/native/translation milestones
 land.
 
+### C13 machine-TV outcome taxonomy (mumei-demo #209)
+
+[mumei-demo#209](https://github.com/mumei-lang/mumei-demo/pull/209) applies the
+same separation to the source-to-machine native lane. Acceptance of a refuted
+buggy port is counted as false acceptance; fresh source rejection of a proven
+fixed port is counted as a false positive; LLVM/object mismatches are counted
+as translation mismatches rather than source-level false positives.
+Unsupported profile outcomes, residual inconclusive outcomes, environment
+failures and budget exhaustion are counted independently. Source Z3 checks and
+the vacuity control keep wall time and declared timeout budget separate from
+native build, acceptance and diagnostic recheck commands, with
+measured-versus-expected coverage explicit for older or partial rows. This is
+measurement and regression control only — not proof truth, Evidence acceptance
+or grade promotion. C13 remains ongoing as later planner/native/translation
+milestones land.
+
 ### Manifest-declared attempt memory bound (mumei-agent #993)
 
 [mumei-agent#993](https://github.com/mumei-lang/mumei-agent/pull/993)
