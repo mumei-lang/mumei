@@ -533,6 +533,22 @@ fn validate_consistency(
     {
         return Err(RepresentationError::InconsistentDescriptor);
     }
+    let source_to_machine = &object_translation.transformations[2];
+    if source_to_machine.from != "source_atom"
+        || source_to_machine.to != "machine_code"
+        || source_to_machine.validation != "checked_source_machine_tv_within_profile"
+        || source_to_machine.result.is_some()
+    {
+        return Err(RepresentationError::InconsistentDescriptor);
+    }
+    let hir_to_llvm = &object_translation.transformations[3];
+    if hir_to_llvm.from != "hir"
+        || hir_to_llvm.to != "llvm_ir"
+        || hir_to_llvm.validation != "checked_hir_llvm_model_correspondence"
+        || hir_to_llvm.result.as_deref() != Some("checked_correspondence")
+    {
+        return Err(RepresentationError::InconsistentDescriptor);
+    }
 
     Ok(())
 }
@@ -1118,6 +1134,25 @@ mod tests {
         let bytes = serde_json::to_vec(&value).unwrap();
         assert_eq!(
             decode(&bytes),
+            Err(RepresentationError::InconsistentDescriptor)
+        );
+    }
+
+    #[test]
+    fn rejects_contradictory_source_machine_and_hir_llvm_edges() {
+        let mut bad_source = fixture_value();
+        bad_source["object_translation"]["transformations"][2]["validation"] =
+            json!(UNCHECKED_OBJECT_LINK_STATUS);
+        assert_eq!(
+            decode(&serde_json::to_vec(&bad_source).unwrap()),
+            Err(RepresentationError::InconsistentDescriptor)
+        );
+
+        let mut bad_hir = fixture_value();
+        bad_hir["object_translation"]["transformations"][3]["result"] =
+            json!(UNCHECKED_OBJECT_LINK_STATUS);
+        assert_eq!(
+            decode(&serde_json::to_vec(&bad_hir).unwrap()),
             Err(RepresentationError::InconsistentDescriptor)
         );
     }
