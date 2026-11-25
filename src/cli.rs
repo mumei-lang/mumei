@@ -826,7 +826,7 @@ pub(crate) enum NativeBundleCommand {
         #[arg(long)]
         expected_build_id: String,
     },
-    /// Replay a saved accept-object descriptor against a fresh object acceptance of the pinned inputs, without descriptor authenticity
+    /// Replay a saved accept-object descriptor against a fresh object acceptance, optionally pinning its detached producer signature
     RecheckObjectAcceptance {
         bundle: String,
         source: String,
@@ -834,6 +834,8 @@ pub(crate) enum NativeBundleCommand {
         /// SHA-256 of native-bundle.json obtained through a separately trusted channel, not the descriptor
         #[arg(long)]
         expected_build_id: String,
+        #[command(flatten)]
+        signature: Box<SignatureArgs>,
     },
     /// Recheck the C03 source and pinned native LLVM body/wrapper snapshot, not object or binary semantics
     RecheckLlvm {

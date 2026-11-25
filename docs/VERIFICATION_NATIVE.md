@@ -2853,12 +2853,26 @@ stdout on rejection. Flat two-field `{double,i64}` and `{i64,double}` return
 pairs, which C09 admits through `xmm0` and `rax`, replay the same way. A saved
 descriptor for one field order is rejected as unbound against the other.
 
+The consumer can additionally pin a detached producer signature with the same
+`--signature` / `--producer-key` chain flags used by Evidence acceptance. The
+signature subject is the SHA-256 digest of the **exact saved descriptor bytes**,
+not the descriptor's attempt-input `evidence_fingerprint`; even an insignificant
+byte edit breaks the binding before the fresh acceptance runs. A malformed
+envelope, wrong public key, failed key-label pin or failed explicitly supplied
+freshness/registry/revocation gate rejects the replay. Omitting `--signature`
+keeps the legacy consistency-only behavior. These gates check only the supplied
+cryptographic chain: key labels and declared times remain claims unless the
+caller pins and anchors them separately, and real-world producer identity,
+historical execution, register convention, CRT/loader, ABI/runtime and OS
+semantics remain outside the result.
+
 A match means only that the saved descriptor is what a fresh `accept-object`
-emits for these pinned inputs. It does not check descriptor or producer
-authenticity or historical execution, and it accepts no reusable Evidence,
-certificate or grade. Every claim outside the `accept-object` scope stays
-outside it here, including register convention, CRT/loader, ABI/runtime and OS
-semantics.
+emits for these pinned inputs. Without a valid supplied signature chain it does
+not check descriptor or producer authenticity; with one it checks only that
+byte binding and the explicitly supplied key-label/freshness/registry/revocation
+gates. It never checks historical execution, and it accepts no reusable
+Evidence, certificate or grade. Every claim outside the `accept-object` scope
+stays outside it here.
 
 ### Pinned executable exit-status recheck
 

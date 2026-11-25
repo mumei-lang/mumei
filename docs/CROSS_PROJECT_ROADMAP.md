@@ -1533,6 +1533,15 @@ attempt fingerprint, authenticity status, and acceptance policy unchanged.
 This is partial C08, not C02 Evidence promotion or C10 consumer trust policy;
 the canonical dependency order is unchanged.
 
+The paired C10 consumer replay now accepts the same detached signature chain:
+`native-bundle recheck-object-acceptance` hashes the exact saved descriptor
+bytes, verifies the pinned Ed25519 binding before re-running fresh acceptance,
+and applies only the key-label/freshness/registry/revocation gates explicitly
+supplied by the caller. Omitting the signature preserves consistency-only
+replay. This is a partial C08×C10 byte-binding and consumer-policy slice, not
+real-world producer identity, historical execution, dependency closure,
+reusable Evidence, grade promotion or final-artifact assurance.
+
 ### Wave 3 fixed-point assignment facts over the explicit Go CFG
 
 Agent's `control_flow.assignment_facts(body, graph)` runs the first
