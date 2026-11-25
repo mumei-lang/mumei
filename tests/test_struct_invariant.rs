@@ -97,6 +97,24 @@ fn bitwise_invariant_selects_bitvector_semantics() {
     );
 }
 
+#[test]
+fn parenthesized_comparison_invariant_keeps_grouping_semantics() {
+    let out = run_verify(
+        &fixture("test_struct_invariant_parenthesized.mm"),
+        "parenthesized",
+    );
+    assert!(
+        out.status.success(),
+        "parenthesized invariant must not be re-normalized as a flat chain
+stdout:
+{}
+stderr:
+{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// Commas inside an invariant (call arguments) do not split it into fields.
 #[test]
 fn invariant_with_call_arguments_verifies() {

@@ -3860,6 +3860,7 @@ fn predicate_pattern_binds_operand(pattern: &crate::parser::ast::Pattern, operan
 
 fn predicate_contains_shadowing_binder(expr: &Expr, operand: &str) -> bool {
     match expr {
+        Expr::Paren(inner) => predicate_contains_shadowing_binder(inner, operand),
         Expr::Number(_)
         | Expr::Float(_)
         | Expr::StringLit(_)
@@ -4074,6 +4075,7 @@ fn collect_refinement_free_identifiers(
     }
 
     match expr {
+        Expr::Paren(inner) => collect_refinement_free_identifiers(inner, bound, enum_names, out),
         Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::AtomRef { .. } => {}
         Expr::Variable(name) => add_identifier(name, bound, out),
         Expr::ArrayLit(elements) => {
@@ -4295,6 +4297,7 @@ pub(crate) fn expr_to_z3<'a>(
 
     let ctx = vc.ctx;
     match expr {
+        Expr::Paren(inner) => expr_to_z3(vc, inner, env, solver_opt),
         Expr::Number(n) => Ok(Int::from_i64(ctx, *n).into()),
         Expr::Float(f) => {
             if vc.ieee754_f64 {

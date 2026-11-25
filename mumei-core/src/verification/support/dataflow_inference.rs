@@ -191,6 +191,7 @@ fn trace_eval_expr(
     }
 
     match expr {
+        Expr::Paren(inner) => trace_eval_expr(inner, env, module_env, depth),
         Expr::Number(value) => Some(TraceValue::Int(*value)),
         Expr::Float(_) => None,
         Expr::StringLit(value) => Some(TraceValue::String(value.clone())),

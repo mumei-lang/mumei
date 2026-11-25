@@ -430,6 +430,7 @@ fn collect_stmt(stmt: &Stmt, site: &mut usize, mutants: &mut Vec<SiteMutant>) {
 
 fn collect_expr(expr: &Expr, site: &mut usize, mutants: &mut Vec<SiteMutant>) {
     match expr {
+        Expr::Paren(inner) => collect_expr(inner, site, mutants),
         Expr::Number(value) => {
             let current = *site;
             *site += 1;
@@ -602,6 +603,7 @@ fn mutate_expr(
         return;
     }
     match expr {
+        Expr::Paren(inner) => mutate_expr(inner, target, kind, site, changed),
         Expr::Number(value) => {
             let current = *site;
             *site += 1;

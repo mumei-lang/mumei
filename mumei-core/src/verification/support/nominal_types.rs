@@ -376,6 +376,7 @@ impl<'a> NominalChecker<'a> {
 
     fn expr(&mut self, expr: &Expr, span: &Span) -> MumeiResult<()> {
         match expr {
+            Expr::Paren(inner) => self.expr(inner, span),
             Expr::Number(_)
             | Expr::Float(_)
             | Expr::StringLit(_)

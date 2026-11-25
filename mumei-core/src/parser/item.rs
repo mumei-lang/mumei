@@ -1037,6 +1037,7 @@ fn collect_predicate_binders(expr: &Expr, bound: &mut HashSet<String>) {
     }
 
     match expr {
+        Expr::Paren(inner) => collect_predicate_binders(inner, bound),
         Expr::Number(_)
         | Expr::Float(_)
         | Expr::StringLit(_)

@@ -6020,6 +6020,7 @@ pub fn contains_while_stmt(stmt: &Stmt) -> bool {
 
 fn contains_while_expr(expr: &Expr) -> bool {
     match expr {
+        Expr::Paren(inner) => contains_while_expr(inner),
         Expr::Number(_)
         | Expr::Float(_)
         | Expr::StringLit(_)
@@ -10597,6 +10598,7 @@ pub struct ModuleAtomObligations<'ctx> {
 
 fn contains_callback_call(expr: &Expr, name: &str) -> bool {
     match expr {
+        Expr::Paren(inner) => contains_callback_call(inner, name),
         Expr::CallRef { callee, args } => {
             matches!(callee.as_ref(), Expr::Variable(callee_name) if callee_name == name)
                 || contains_callback_call(callee, name)

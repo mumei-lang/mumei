@@ -132,6 +132,7 @@ fn expr_has_relational(expr: &Expr) -> bool {
         Expr::BinaryOp(left, op, right) => {
             is_relational_op(op) || expr_has_relational(left) || expr_has_relational(right)
         }
+        Expr::Paren(inner) => expr_has_relational(inner),
         Expr::Block(stmt) => stmt_has_relational(stmt),
         Expr::IfThenElse {
             cond,
@@ -252,6 +253,7 @@ pub(crate) fn nested_comparison_chain_operand(expr: &Expr) -> bool {
         Expr::BinaryOp(left, _, right) => {
             nested_comparison_chain_operand(left) || nested_comparison_chain_operand(right)
         }
+        Expr::Paren(inner) => nested_comparison_chain_operand(inner),
         Expr::Block(stmt) => stmt_has_nested_comparison_operand(stmt),
         Expr::IfThenElse {
             cond,
@@ -373,21 +375,6 @@ fn normalize_expr(expr: Expr) -> Expr {
                 let right = normalize_expr(operands.remove(0));
                 return Expr::BinaryOp(Box::new(left), ops.remove(0), Box::new(right));
             }
-            if operands
-                .iter()
-                .skip(1)
-                .take(operands.len().saturating_sub(2))
-                .any(expr_has_relational)
-            {
-                let Expr::BinaryOp(left, op, right) = raw else {
-                    unreachable!("relational chain root is a binary operator");
-                };
-                return Expr::BinaryOp(
-                    Box::new(normalize_expr(*left)),
-                    op,
-                    Box::new(normalize_expr(*right)),
-                );
-            }
             let mut comparisons = Vec::with_capacity(ops.len());
             for i in 0..ops.len() {
                 comparisons.push(Expr::BinaryOp(
@@ -408,6 +395,7 @@ fn normalize_expr(expr: Expr) -> Expr {
             op,
             Box::new(normalize_expr(*right)),
         ),
+        Expr::Paren(inner) => normalize_expr(*inner),
         Expr::Call(name, args) => Expr::Call(name, args.into_iter().map(normalize_expr).collect()),
         Expr::ArrayAccess(name, index) => Expr::ArrayAccess(name, Box::new(normalize_expr(*index))),
         Expr::StructInit { type_name, fields } => Expr::StructInit {
@@ -805,7 +793,16 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
             ctx.advance();
             let expr = parse_expr(ctx, 0);
             ctx.expect(Token::RParen);
-            expr
+            if ctx.track_parens()
+                && matches!(
+                    &expr,
+                    Expr::BinaryOp(_, op, _) if is_relational_op(op)
+                )
+            {
+                Expr::Paren(Box::new(expr))
+            } else {
+                expr
+            }
         }
 
         Token::LBracket => {
@@ -1198,6 +1195,7 @@ pub(crate) fn stmt_assigns_var(stmt: &Stmt, var: &str) -> bool {
 
 fn expr_assigns_var(expr: &Expr, var: &str) -> bool {
     match expr {
+        Expr::Paren(inner) => expr_assigns_var(inner, var),
         Expr::ArrayLit(items) => items.iter().any(|expr| expr_assigns_var(expr, var)),
         Expr::ArrayAccess(_, index) => expr_assigns_var(index, var),
         Expr::BinaryOp(left, _, right) => {

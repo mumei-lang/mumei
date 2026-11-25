@@ -1,12 +1,13 @@
 ### Unreleased: preserve explicit comparison grouping
 
-- A comparison inside parentheses is no longer flattened into an outer
-  comparison chain, because the AST does not retain the grouping. Such an
-  expression keeps its explicit left-associative parse instead of being
-  rewritten into a different proposition. Comparison chains written flat keep
-  their existing normalization. Nested comparisons in duplicated middle chain
-  operands are rejected by fail-closed parsing rather than exponentially
-  expanded.
+- Expression parsing now retains explicit parenthesis boundaries while
+  normalizing comparison chains. `(a == b) == c` keeps its boolean-operand
+  meaning, while independent flat chains elsewhere in the same expression are
+  still normalized locally. Nested comparisons in duplicated middle chain
+  operands are rejected before expansion by fail-closed parsing, and ordinary
+  contract lowering treats that rejection as an unverified clause rather than
+  proving a different left-associative proposition. `VERIFIER_POLICY_VERSION`
+  is bumped 43 → 44 so cached verdicts are re-derived.
 
 ### Unreleased: reject calls with later-argument array mutations
 
