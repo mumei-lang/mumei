@@ -6354,6 +6354,25 @@ regression control only — not proof truth, Evidence acceptance or grade
 promotion. C13 remains ongoing as later planner/native/translation milestones
 land.
 
+### C13 regression gate outcome taxonomy (mumei-demo #208)
+
+[mumei-demo#208](https://github.com/mumei-lang/mumei-demo/pull/208) applies the
+same measurement separation to changes under a pinned contract. Regressions
+let through remain the false-acceptance surface and good changes blocked
+remain the false-positive surface, while unresolved regression and keep-fix
+outcomes are counted independently as unsupported input/generated
+output/capability, residual inconclusive outcome, environment failure or
+budget exhaustion. Subtype medians are explicitly independent of the total
+unresolved-count median. Model time is the sum of usage-recorded provider
+responses, excluding retry backoff and failed provider attempts, and stays
+separate from verifier wall time and declared timeout budget. The report
+shows measured-versus-expected verifier-call coverage for historical or
+partially refreshed rows. Certificate emission/rechecks, gate orchestration
+and report rendering remain outside verifier time. This is measurement and
+regression control only — not proof truth, Evidence acceptance or grade
+promotion. C13 remains ongoing as later planner/native/translation milestones
+land.
+
 ### Manifest-declared attempt memory bound (mumei-agent #993)
 
 [mumei-agent#993](https://github.com/mumei-lang/mumei-agent/pull/993)
