@@ -17,6 +17,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei evidence accept-sidecar` | 17 | Evaluate a semantic-contract sidecar's hash binding and fresh source obligations into a bounded acceptance descriptor |
 | `mumei evidence accept-source` | 17 | Evaluate representation plus fresh same-profile source consistency into a bounded acceptance descriptor |
 | `mumei evidence verify-source` | 4 | Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance |
+| `mumei evidence check-readonly-slice` | 0 | Check read-only i64 slice source obligations with Z3; emits a JSON diagnostic, not Evidence or LLVM |
 | `mumei evidence sign` | 5 | Detachably sign a bounded record's raw bytes with a declared ed25519 key into a producer-signature envelope; binds the declared key id only |
 | `mumei evidence keygen` | 1 | Generate a fresh ed25519 producer keypair; writes the 64-char hex secret to a new file and prints only the public key |
 | `mumei evidence check` | 3 | Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity |
@@ -261,6 +262,23 @@ Usage: mumei evidence verify-source [OPTIONS] <INPUT>
 | `--solver-timeout <SOLVER_TIMEOUT>` | 10000 | — | Solver timeout in milliseconds (1..=10000); no project/ambient policy loaded |
 | `--solver-resource-limit <SOLVER_RESOURCE_LIMIT>` | 1000000 | — | Solver resource units (1..=1000000); zero/unlimited is rejected |
 | `--produced-at <PRODUCED_AT>` | — | — | Declared RFC 3339 timestamp stamped on the emitted record; never read from the system clock |
+
+## `mumei evidence check-readonly-slice`
+
+Check read-only i64 slice source obligations with Z3; emits a JSON diagnostic, not Evidence or LLVM
+
+Usage:
+
+```text
+Usage: mumei evidence check-readonly-slice <INPUT>
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `INPUT` | Yes | One regular source file (at most 65,536 bytes) containing one shared-slice atom |
+
 
 ## `mumei evidence sign`
 

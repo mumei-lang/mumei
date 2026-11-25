@@ -1,3 +1,18 @@
+### Unreleased: preserve explicit comparison grouping
+
+- Expression parsing now retains explicit parenthesis boundaries while
+  normalizing comparison chains. `(a == b) == c` keeps its boolean-operand
+  meaning, while independent flat chains elsewhere in the same expression are
+  still normalized locally. Nested comparisons in duplicated middle chain
+  operands are rejected before expansion by fail-closed parsing, and ordinary
+  contract lowering treats that rejection as an unverified clause rather than
+  proving a different left-associative proposition. Quantifier bounds and
+  conditions use the same checked parsing instead of accepting nested
+  middle-chain shapes rejected elsewhere; one trailing argument separator
+  comma remains valid, and reconstructed call-site preconditions use the
+  same closed parser. `VERIFIER_POLICY_VERSION`
+  is bumped 43 → 44 so cached verdicts are re-derived.
+
 ### Unreleased: reject calls with later-argument array mutations
 
 - Calls are rejected when evaluation of a later argument may mutate an array

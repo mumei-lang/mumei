@@ -131,6 +131,7 @@ impl<'a> PerformCollector<'a> {
     /// and the condition / scrutinee contributes nothing.
     fn carried_by(&self, expr: &'a Expr) -> BTreeSet<&'a str> {
         match expr {
+            Expr::Paren(inner) => self.carried_by(inner),
             Expr::Variable(name) => self.derived.get(name.as_str()).cloned().unwrap_or_default(),
             Expr::ArrayAccess(name, idx) => {
                 let mut out = self.derived.get(name.as_str()).cloned().unwrap_or_default();
@@ -314,6 +315,7 @@ impl<'a> PerformCollector<'a> {
 
     fn expr(&mut self, expr: &'a Expr) {
         match expr {
+            Expr::Paren(inner) => self.expr(inner),
             Expr::Perform {
                 effect,
                 operation,

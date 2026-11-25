@@ -199,6 +199,9 @@ pub enum Expr {
     ArrayLit(Vec<Expr>),
     ArrayAccess(String, Box<Expr>),
     BinaryOp(Box<Expr>, Op, Box<Expr>),
+    /// Parser-internal explicit grouping marker. Expression parsing strips it
+    /// while normalizing comparison chains; it is not a runtime expression.
+    Paren(Box<Expr>),
     Block(Box<Stmt>),
     IfThenElse {
         cond: Box<Expr>,
@@ -270,6 +273,7 @@ impl Expr {
             Expr::ArrayLit(elements) => elements.iter().any(|e| e.binds_name(name)),
             Expr::ArrayAccess(_, index) => index.binds_name(name),
             Expr::BinaryOp(left, _, right) => left.binds_name(name) || right.binds_name(name),
+            Expr::Paren(inner) => inner.binds_name(name),
             Expr::Block(stmt) => stmt.binds_name(name),
             Expr::IfThenElse {
                 cond,
@@ -321,6 +325,7 @@ impl Expr {
                 left.written_fields(base, out);
                 right.written_fields(base, out);
             }
+            Expr::Paren(inner) => inner.written_fields(base, out),
             Expr::Block(stmt) => stmt.written_fields(base, out),
             Expr::IfThenElse {
                 cond,
@@ -385,6 +390,7 @@ impl Expr {
             Expr::ArrayLit(elements) => elements.iter().any(|e| e.rebinds_name(name)),
             Expr::ArrayAccess(_, index) => index.rebinds_name(name),
             Expr::BinaryOp(left, _, right) => left.rebinds_name(name) || right.rebinds_name(name),
+            Expr::Paren(inner) => inner.rebinds_name(name),
             Expr::Block(stmt) => stmt.rebinds_name(name),
             Expr::IfThenElse {
                 cond,
@@ -663,6 +669,7 @@ fn collect_expr_array_store_targets(
             collect_expr_array_store_targets(left, base, may_repeat, targets);
             collect_expr_array_store_targets(right, base, may_repeat, targets);
         }
+        Expr::Paren(inner) => collect_expr_array_store_targets(inner, base, may_repeat, targets),
         Expr::Block(stmt) => {
             collect_stmt_array_store_targets(stmt, base, may_repeat, targets);
         }

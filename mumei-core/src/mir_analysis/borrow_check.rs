@@ -44,6 +44,7 @@ fn known_atom<'a>(module_env: &'a ModuleEnv, name: &str) -> Option<&'a crate::pa
 pub fn find_dynamic_borrowing_atom_ref(stmt: &Stmt, module_env: &ModuleEnv) -> Option<String> {
     fn walk_expr(node: &Expr, module_env: &ModuleEnv) -> Option<String> {
         match node {
+            Expr::Paren(inner) => walk_expr(inner, module_env),
             Expr::AtomRef { name } => known_atom(module_env, name)
                 .filter(|atom| atom_has_borrowing_params(atom))
                 .map(|_| name.clone()),

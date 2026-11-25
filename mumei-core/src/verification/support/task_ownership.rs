@@ -158,6 +158,7 @@ impl<'a> UsageCollector<'a> {
 
     fn expr(&mut self, expr: &Expr) {
         match expr {
+            Expr::Paren(inner) => self.expr(inner),
             Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::AtomRef { .. } => {}
             Expr::Variable(v) => self.record_read(v),
             Expr::ArrayLit(elements) => {

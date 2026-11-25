@@ -1037,6 +1037,7 @@ fn collect_predicate_binders(expr: &Expr, bound: &mut HashSet<String>) {
     }
 
     match expr {
+        Expr::Paren(inner) => collect_predicate_binders(inner, bound),
         Expr::Number(_)
         | Expr::Float(_)
         | Expr::StringLit(_)
@@ -2858,12 +2859,19 @@ fn extract_quantifiers(requires: &str) -> Vec<Quantifier> {
         }
         parts.push(&inner[last..]);
         if parts.len() >= 4 {
+            let condition = parts[3].trim();
+            // A single trailing comma before the quantifier's closing paren
+            // is an argument-list separator, not part of the condition.
+            let condition = condition
+                .strip_suffix(',')
+                .map(str::trim_end)
+                .unwrap_or(condition);
             quantifiers.push(Quantifier {
                 q_type,
                 var: parts[0].trim().to_string(),
                 start: parts[1].trim().to_string(),
                 end: parts[2].trim().to_string(),
-                condition: parts[3].trim().to_string(),
+                condition: condition.to_string(),
             });
         }
     }

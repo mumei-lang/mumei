@@ -534,6 +534,11 @@ pub(crate) enum EvidenceCommand {
         #[arg(long)]
         produced_at: Option<String>,
     },
+    /// Check read-only i64 slice source obligations with Z3; emits a JSON diagnostic, not Evidence or LLVM
+    CheckReadonlySlice {
+        /// One regular source file (at most 65,536 bytes) containing one shared-slice atom
+        input: String,
+    },
     /// Detachably sign a bounded record's raw bytes with a declared ed25519 key into a producer-signature envelope; binds the declared key id only
     Sign {
         /// Regular file (at most 4 MiB (4,194,304 bytes)) whose raw bytes become the signed subject; never parsed or canonicalized
