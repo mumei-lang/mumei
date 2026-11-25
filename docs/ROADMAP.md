@@ -2828,6 +2828,13 @@ contract to its certificate obligation, Lean goal and LLVM definition, and
 checks that unsupported specification clauses fail closed. Transformation
 relations are exposed per edge, while formal source-to-LLVM correspondence
 remains open; this is regression coverage only and C03 remains open.
+
+Roadmap item 9 ([#1448](https://github.com/mumei-lang/mumei/issues/1448),
+[C03 #787](https://github.com/mumei-lang/mumei/issues/787)) delivers the
+[read-only region and slice profile design](VERIFICATION_NATIVE.md#proposed-read-only-region-and-slice-profile-design-only).
+This is partial delivery of C03: the design does not enable the profile,
+memory lowerings or executable correspondence checks.
+
 Refined predicates over `u64` bases compare unsigned; documented v10 literal
 wrapping (`0 - 1` is `u64::MAX` in a `u64` context) is unchanged, and general
 width-aware literal spelling above `i64::MAX` remains open.
@@ -3199,6 +3206,19 @@ function is proved preserved. Direct and poll callees remain assumed to
 preserve these registers, so in-module composition requires each source callee
 to be independently proved; the external-callee assumption is listed as
 `machine_code_callee_saved_preservation_assumed_for_external_callees`.
+
+The C10 consumer side of `accept-object` adds `native-bundle
+recheck-object-acceptance <bundle> <source> <descriptor>`. It reads a saved
+descriptor with bounded, duplicate-key-free decoding and validates its object
+acceptance envelope. It then reruns `accept-object` on the pinned inputs and
+recomputes `evidence_fingerprint`. A saved descriptor for other attempt inputs
+is rejected as unbound, and one that differs in any field is rejected as
+tampered. Malformed, foreign or non-accepted descriptors are rejected before
+the pipeline runs, and an inconclusive fresh acceptance exits 3. This is a
+partial C10 slice, not C10 completion. Descriptor and producer authenticity,
+historical execution, and dependency or toolchain closure stay unchecked. So
+do register-convention, ABI/runtime/OS and final-artifact assurance. See the
+[replay contract](VERIFICATION_NATIVE.md#saved-object-acceptance-replay).
 
 The next C10 Option B slice re-derives module and multifile machine-TV source
 models under the profile pinned by the record, matching the LLVM recheck;

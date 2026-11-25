@@ -4122,6 +4122,16 @@ exit 3. This does not validate the register convention, CRT/loader semantics,
 OS exit-status semantics, ABI/runtime behavior, authenticity or historical
 execution.
 
+Core's `mumei native-bundle recheck-object-acceptance` is the consumer side of
+that descriptor. It rejects malformed, duplicate-key, foreign or non-accepted
+saved descriptors, then reruns `accept-object` on the pinned inputs. It
+recomputes `evidence_fingerprint` and requires the saved descriptor to equal
+the fresh one field for field. A stale descriptor from other attempt inputs is
+rejected as unbound, and a tampered field is rejected as different. This is
+partial C10 delivery, not C10 completion. Descriptor and producer
+authenticity, historical execution, dependency or toolchain closure, and
+register-convention, ABI/runtime/OS or final-artifact assurance remain open.
+
 The future mumei-agent `native-object-accept` route maps the Core check
 `object_source_machine_code_correspondence` to its agent-owned
 `object_translation_correspondence` vocabulary. The Core descriptor does not
@@ -8620,6 +8630,7 @@ capability model は Stage 1 のみが opt-in 拡張として上積みされて�
 - ✅ **追補（2026-11-24, 82）— 追補（81）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: native-bundle — accept-object の emit scope を `native_bundle_object_translation_correspondence[_without_object_link]` に切替（[mumei#1439](https://github.com/mumei-lang/mumei/pull/1439)。DESIGN_OBJECT_ACCEPTANCE §6 Step 3 — agent#1323 が新旧両 scope を受理済みのため移行。e2e で正常受理・unchecked→inconclusive・inconsistent→reject・canonical_argv 欠損→inconclusive を pin、`_without_object_link` scope は単体テスト（fresh ELF fixture から uncheckable 経路に到達不能）。agent-owned `object_translation_correspondence` 非 emit は項目レベルの断言に更新。旧 scope 値は語彙として維持・emit 経路は新値のみ。監査 item 4 の非 deferred 全段階が完了、残は Step 4（subset 拡張、deferred 凍結中）のみ）。mumei-agent: 新規なし。mumei-demo: 新規シナリオなし。いずれも各 PR の境界のまま。
 - ✅ **追補（2026-11-24, 83）— 追補（82）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: translation-validation — hir leaf エンコーダの composite call site モデル化（[mumei#1441](https://github.com/mumei-lang/mumei/pull/1441)。#1437/#1439 の acceptance ゲートが表面化した過剰弾きリグレッションの修正 — leaf エンコーダが全 call をスカラー `mumei_call_<name>_<arity>` として符号化し IR 側の per-field 分解と不一致となり composite aggregate 形状で `hir_llvm_model_correspondence` が inconsistent を返していた。`HirCallLeafSig`（パラメータ・戻り値の宣言型、`env.resolve_base_type` で refined alias→機械基底型解決）をモジュールの atom 署名から構築し leaf エンコーダに伝搬。composite 引数は IR の `call_operands` と同じ leaf slot へ flatten、composite result は `mumei_call_field:{name}:{arity}:{idx}` per-field で `HirLeafValue::Aggregate` に束縛。`specialized_struct_map` が callee 署名由来の generic instantiation も特殊化。subset 外の宣言型は fail-closed（unchecked）、enum 型 call site は従来 inconsistent 誤判定だったものを正直に unchecked（inconclusive, exit 3）に修正。admission 境界（uniform i64 scalar + 全 i64 record）は不変 — Step 4 凍結範囲に非ず。agent 側 `test_real_core_accepts_native_object` の 2 fixture が e2e で accept(0) を確認）。mumei-agent: 新規なし。mumei-demo: 新規シナリオなし。いずれも各 PR の境界のまま。
 - ✅ **追補（2026-11-24, 84）— 追補（83）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: 新規なし。mumei-agent: evidence acceptance — 保存 carrier fold が object-route 記述子レコードを受理（[agent#1324](https://github.com/mumei-lang/mumei-agent/pull/1324)。`accept-object` が全記述子に emit する `object_translation`/`source_machine_tv` レコードを `_NATIVE_ACCEPTANCE_EXTRA_FIELDS` に不透明 dict として追加 — 未受理のままだと新世代の `mumei.native-evidence-acceptance/v1` 保存記述子が closed shape で弾かれていた。stored fold は表現レベル維持、object schema は `evidence_fingerprint` ピン非 emit のため `attempt_bound` は引き続き false、`producer_signature` は source schema のみ — DESIGN_OBJECT_TV_CONSUMPTION.md §4 の推奨対応どおり。実 emit 形状のゴールデン fixture で受理 + 試行未紐付けを e2e pin。AUDIT_BACKLOG_2026-11-21.md の item 4 を両側完了で着地済みに記録）。mumei-demo: 新規シナリオなし。いずれも各 PR の境界のまま。
+- ✅ **追補（2026-11-25, 85）— 追補（84）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: C10 — 保存済み `accept-object` 記述子の consumer 側 recheck（[#790](https://github.com/mumei-lang/mumei/issues/790)。`native-bundle recheck-object-acceptance <bundle> <source> <descriptor>` が記述子を 1 MiB 上限・非 symlink・重複キー拒否で読み、object scope の受理済み `mumei.native-evidence-acceptance/v1` 以外を pipeline 前に拒否。fresh な `accept-object` を再実行して `evidence_fingerprint`（#1445）を再計算し、不一致は試行未紐付け・フィールド単位の差分は改ざんとして reject、fresh 側 inconclusive は exit 3。C10 の部分スライスで完了ではない — 記述子・producer 真正性、historical execution、依存・toolchain closure、register 規約・ABI/runtime/OS・最終 artifact の保証は未検査のまま）。mumei-agent: 新規なし。mumei-demo: 新規シナリオなし。いずれも各 PR の境界のまま。
 
 **関連ファイル**:
 - `docs/CAPABILITY_MODEL_STUDY.md` — 調査成果物（4 項目の分析、opt-in 判定、段階分割案）

@@ -26,6 +26,7 @@ use std::{
 };
 
 mod evidence;
+mod object_acceptance;
 
 enum LlvmRecheck {
     Rechecked(Box<evidence::NativeConsumerEvidence>),
@@ -919,116 +920,30 @@ pub(crate) fn run(command: NativeBundleCommand) {
             source,
             expected_build_id,
             output,
-        } => match recheck_object_pipeline(
+        } => match evaluate_object_acceptance(
             Path::new(&bundle),
             Path::new(&source),
             &expected_build_id,
-            true,
         ) {
             Err(error) => Err(error),
-            Ok(ObjectRecheckPipeline::Different(message)) => Err(BundleError(message)),
-            Ok(ObjectRecheckPipeline::Inconclusive(message)) => {
-                report_object_acceptance_inconclusive(message);
+            Ok(ObjectAcceptance::Inconclusive(message)) => {
+                report_object_acceptance_inconclusive(&message);
             }
-            Ok(ObjectRecheckPipeline::Rechecked(data)) => {
-                let evaluation = match evaluate_machine_tv(&data) {
-                    Ok(evaluation) => evaluation,
-                    Err(message) => {
-                        drop(data);
-                        report_object_acceptance_inconclusive(message);
-                    }
-                };
-                match machine_tv_acceptance_decision(
-                    &evaluation.outcomes,
-                    evaluation.entry_wrapper_applicable,
-                ) {
-                    ObjectMachineTvAcceptanceDecision::Accepted => {
-                        // DESIGN_OBJECT_ACCEPTANCE.md §4: acceptance
-                        // additionally requires the canonical argv
-                        // reproduction and every correspondence item
-                        // checked — the machine-TV gate alone must not
-                        // carry `accepted` (Step 2).
-                        let Some(canonical_argv_hash) = data.canonical_argv_hash.as_deref() else {
-                            drop(data);
-                            report_object_acceptance_inconclusive(
-                                "Canonical link argument vector not reproduced",
-                            );
-                        };
-                        let record = data
-                            .object_translation
-                            .clone()
-                            .unwrap_or_else(|| {
-                                object_translation_parse(
-                                    &data.object_bytes,
-                                    &data.executable_bytes,
-                                )
-                            });
-                        let correspondence =
-                            object_translation_correspondence_json(&data, &record);
-                        let empty: Vec<serde_json::Value> = Vec::new();
-                        let checks = correspondence["checks"]
-                            .as_array()
-                            .unwrap_or(&empty);
-                        match object_translation_acceptance_decision(checks) {
-                            ObjectMachineTvAcceptanceDecision::Accepted => {
-                                write_object_machine_tv_acceptance(
-                                    &data,
-                                    &evaluation,
-                                    &expected_build_id,
-                                    canonical_argv_hash,
-                                    &output,
-                                    &record,
-                                    &correspondence,
-                                )
-                            }
-                            ObjectMachineTvAcceptanceDecision::Different => {
-                                let divergent: Vec<&str> = checks
-                                    .iter()
-                                    .filter(|check| {
-                                        check["result"].as_str()
-                                            == Some("inconsistent")
-                                    })
-                                    .filter_map(|check| check["item"].as_str())
-                                    .collect();
-                                Err(BundleError(Box::leak(
-                                    format!(
-                                        "object translation correspondence inconsistent with the pinned LLVM IR ({})",
-                                        divergent.join(", ")
-                                    )
-                                    .into_boxed_str(),
-                                )))
-                            }
-                            ObjectMachineTvAcceptanceDecision::Inconclusive => {
-                                drop(data);
-                                let undecided: Vec<&str> = checks
-                                    .iter()
-                                    .filter(|check| {
-                                        check["result"].as_str()
-                                            != Some("checked")
-                                    })
-                                    .filter_map(|check| check["item"].as_str())
-                                    .collect();
-                                report_object_acceptance_inconclusive(
-                                    &format!(
-                                        "Object translation correspondence not fully checked ({})",
-                                        undecided.join(", ")
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                    ObjectMachineTvAcceptanceDecision::Different => Err(BundleError(
-                        "reproduced object machine code differs from the verified source",
-                    )),
-                    ObjectMachineTvAcceptanceDecision::Inconclusive => {
-                        drop(data);
-                        report_object_acceptance_inconclusive(
-                            "Machine-code TV inconclusive; not every source-atom function was proved equivalent",
-                        );
-                    }
-                }
+            Ok(ObjectAcceptance::Accepted(accepted)) => {
+                write_object_machine_tv_acceptance(&accepted, &expected_build_id, &output)
             }
         },
+        NativeBundleCommand::RecheckObjectAcceptance {
+            bundle,
+            source,
+            descriptor,
+            expected_build_id,
+        } => recheck_object_acceptance(
+            Path::new(&bundle),
+            Path::new(&source),
+            Path::new(&descriptor),
+            &expected_build_id,
+        ),
         NativeBundleCommand::RecheckExitStatus { bundle, source, expected_build_id } => {
             match recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id) {
                 Err(error) => Err(error),
@@ -6805,6 +6720,148 @@ fn object_machine_tv_acceptance_checks(
     (unique_performed, unique_not_performed)
 }
 
+struct AcceptedObject {
+    data: ObjectRecheckData,
+    evaluation: MachineTvEvaluation,
+    record: ObjectTranslationRecord,
+    correspondence: serde_json::Value,
+    canonical_argv_hash: String,
+}
+
+enum ObjectAcceptance {
+    Accepted(Box<AcceptedObject>),
+    Inconclusive(String),
+}
+
+/// The `accept-object` decision: the artifact, object-correspondence and
+/// machine-TV pipeline, then every acceptance gate of
+/// DESIGN_OBJECT_ACCEPTANCE.md §4. Differences are errors; anything
+/// undecided is `Inconclusive` and never yields a descriptor.
+fn evaluate_object_acceptance(
+    bundle: &Path,
+    source: &Path,
+    expected_build_id: &str,
+) -> Result<ObjectAcceptance, BundleError> {
+    let data = match recheck_object_pipeline(bundle, source, expected_build_id, true)? {
+        ObjectRecheckPipeline::Different(message) => return Err(BundleError(message)),
+        ObjectRecheckPipeline::Inconclusive(message) => {
+            return Ok(ObjectAcceptance::Inconclusive(message.to_owned()))
+        }
+        ObjectRecheckPipeline::Rechecked(data) => *data,
+    };
+    let evaluation = match evaluate_machine_tv(&data) {
+        Ok(evaluation) => evaluation,
+        Err(message) => return Ok(ObjectAcceptance::Inconclusive(message.to_owned())),
+    };
+    match machine_tv_acceptance_decision(&evaluation.outcomes, evaluation.entry_wrapper_applicable)
+    {
+        ObjectMachineTvAcceptanceDecision::Accepted => {}
+        ObjectMachineTvAcceptanceDecision::Different => {
+            return Err(BundleError(
+                "reproduced object machine code differs from the verified source",
+            ))
+        }
+        ObjectMachineTvAcceptanceDecision::Inconclusive => {
+            return Ok(ObjectAcceptance::Inconclusive(
+                "Machine-code TV inconclusive; not every source-atom function was proved equivalent"
+                    .to_owned(),
+            ))
+        }
+    }
+    // DESIGN_OBJECT_ACCEPTANCE.md §4: acceptance additionally requires the
+    // canonical argv reproduction and every correspondence item checked —
+    // the machine-TV gate alone must not carry `accepted` (Step 2).
+    let Some(canonical_argv_hash) = data.canonical_argv_hash.clone() else {
+        return Ok(ObjectAcceptance::Inconclusive(
+            "Canonical link argument vector not reproduced".to_owned(),
+        ));
+    };
+    let record = data
+        .object_translation
+        .clone()
+        .unwrap_or_else(|| object_translation_parse(&data.object_bytes, &data.executable_bytes));
+    let correspondence = object_translation_correspondence_json(&data, &record);
+    let empty: Vec<serde_json::Value> = Vec::new();
+    let checks = correspondence["checks"].as_array().unwrap_or(&empty);
+    let items_where = |keep: fn(Option<&str>) -> bool| {
+        checks
+            .iter()
+            .filter(|check| keep(check["result"].as_str()))
+            .filter_map(|check| check["item"].as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match object_translation_acceptance_decision(checks) {
+        ObjectMachineTvAcceptanceDecision::Accepted => {}
+        ObjectMachineTvAcceptanceDecision::Different => {
+            return Err(BundleError(Box::leak(
+                format!(
+                    "object translation correspondence inconsistent with the pinned LLVM IR ({})",
+                    items_where(|result| result == Some("inconsistent"))
+                )
+                .into_boxed_str(),
+            )))
+        }
+        ObjectMachineTvAcceptanceDecision::Inconclusive => {
+            return Ok(ObjectAcceptance::Inconclusive(format!(
+                "Object translation correspondence not fully checked ({})",
+                items_where(|result| result != Some("checked"))
+            )))
+        }
+    }
+    Ok(ObjectAcceptance::Accepted(Box::new(AcceptedObject {
+        data,
+        evaluation,
+        record,
+        correspondence,
+        canonical_argv_hash,
+    })))
+}
+
+/// Consumer-side replay of a saved `accept-object --json` descriptor: the
+/// descriptor is compared with a fresh acceptance of the same pinned inputs,
+/// never trusted for its own claims. The fingerprint is checked first so a
+/// descriptor for other attempt inputs is reported as unbound rather than
+/// as a field-level difference.
+fn recheck_object_acceptance(
+    bundle: &Path,
+    source: &Path,
+    descriptor: &Path,
+    expected_build_id: &str,
+) -> Result<(), BundleError> {
+    if !is_digest(expected_build_id) {
+        return Err(BundleError("invalid expected build ID"));
+    }
+    let saved = object_acceptance::decode(&read_regular(descriptor, MAX_EVIDENCE_BYTES)?)?;
+    let accepted = match evaluate_object_acceptance(bundle, source, expected_build_id)? {
+        ObjectAcceptance::Accepted(accepted) => accepted,
+        ObjectAcceptance::Inconclusive(message) => {
+            eprintln!(
+                "{}; no object acceptance consistency result established.",
+                message.trim_end_matches('.')
+            );
+            std::process::exit(3);
+        }
+    };
+    let fresh = object_machine_tv_acceptance_descriptor(&accepted, expected_build_id)?;
+    drop(accepted);
+    if saved["evidence_fingerprint"] != fresh["evidence_fingerprint"] {
+        return Err(BundleError(
+            "saved object acceptance descriptor is not bound to the fresh attempt inputs",
+        ));
+    }
+    if saved != fresh {
+        return Err(BundleError(
+            "saved object acceptance descriptor differs from the fresh object acceptance",
+        ));
+    }
+    println!(
+        "Saved native object acceptance descriptor consistent with a fresh object acceptance of the pinned inputs.\nScope: {}\nDescriptor authenticity, producer authenticity and historical execution: not checked.",
+        fresh["scope"].as_str().unwrap_or_default()
+    );
+    Ok(())
+}
+
 fn report_object_acceptance_inconclusive(message: &str) -> ! {
     eprintln!("{}; object not accepted.", message.trim_end_matches('.'));
     std::process::exit(3);
@@ -6864,82 +6921,100 @@ fn stage_object_descriptor_signature(
     Ok(staged)
 }
 
-fn write_object_machine_tv_acceptance(
-    data: &ObjectRecheckData,
-    evaluation: &MachineTvEvaluation,
+fn object_machine_tv_acceptance_descriptor(
+    accepted: &AcceptedObject,
     expected_build_id: &str,
-    canonical_argv_hash: &str,
+) -> Result<serde_json::Value, BundleError> {
+    let AcceptedObject {
+        data,
+        evaluation,
+        record,
+        correspondence,
+        canonical_argv_hash,
+    } = accepted;
+    let scope = object_machine_tv_acceptance_scope(data.object_link_correspondence);
+    let source = data.source_text.as_deref().ok_or(BundleError(
+        "missing rechecked source for native object acceptance",
+    ))?;
+    let llvm_sha256 = sha256(&data.llvm_bytes);
+    let object_sha256 = sha256(&data.object_bytes);
+    let evidence_fingerprint = object_evidence_fingerprint(
+        expected_build_id,
+        &sha256(source.as_bytes()),
+        &llvm_sha256,
+        &object_sha256,
+        canonical_argv_hash,
+        scope,
+    )?;
+    let (checks_performed, checks_not_performed) = object_machine_tv_acceptance_checks(
+        data.family,
+        true,
+        data.object_link_correspondence,
+        evaluation.entry_wrapper_applicable
+            && evaluation.outcomes.get("main") == Some(&FunctionOutcome::Equivalent),
+        &evaluation.coverage,
+    );
+    let descriptor = serde_json::json!({
+        "schema_version": "mumei.native-evidence-acceptance/v1",
+        "acceptance": "evaluated",
+        "accepted": true,
+        "scope": scope,
+        "checks_performed": checks_performed,
+        "checks_not_performed": checks_not_performed,
+        "build_id": expected_build_id,
+        "llvm_sha256": llvm_sha256,
+        "object_sha256": object_sha256,
+        "evidence_fingerprint": evidence_fingerprint,
+        "register_convention_assumed": machine_tv_register_convention_assumed_with_frame_memory(
+            evaluation.counts.equivalent_f64_leaf_count,
+            evaluation.counts.equivalent_composite_aggregate_count,
+            evaluation.counts.equivalent_f64_composite_aggregate_count,
+            evaluation
+                .counts
+                .equivalent_wide_composite_aggregate_convention_count,
+            evaluation.counts.equivalent_wide_scalar_count,
+            evaluation.counts.equivalent_red_zone_frame_memory_count,
+            evaluation.counts.equivalent_allocated_frame_memory_count,
+        ),
+        "input_domain": &evaluation.input_domain,
+        "functions": &evaluation.functions,
+        "object_translation": object_translation_json(
+            data,
+            if machine_tv_acceptance_decision(
+                &evaluation.outcomes,
+                evaluation.entry_wrapper_applicable,
+            ) == ObjectMachineTvAcceptanceDecision::Accepted
+            {
+                "checked_source_machine_tv_within_profile"
+            } else {
+                "unchecked_not_translation_validated"
+            },
+            record,
+            correspondence,
+        ),
+        "source_machine_tv": source_machine_tv_within_profile_json(
+            evaluation,
+            &checks_not_performed,
+            data.object_link_correspondence,
+        ),
+    });
+    Ok(descriptor)
+}
+
+fn write_object_machine_tv_acceptance(
+    accepted: &AcceptedObject,
+    expected_build_id: &str,
     output: &ObjectDescriptorOutputArgs,
-    record: &ObjectTranslationRecord,
-    correspondence: &serde_json::Value,
 ) -> Result<(), BundleError> {
+    let AcceptedObject {
+        data,
+        evaluation,
+        correspondence,
+        ..
+    } = accepted;
     let scope = object_machine_tv_acceptance_scope(data.object_link_correspondence);
     if output.json {
-        let source = data.source_text.as_deref().ok_or(BundleError(
-            "missing rechecked source for native object acceptance",
-        ))?;
-        let llvm_sha256 = sha256(&data.llvm_bytes);
-        let object_sha256 = sha256(&data.object_bytes);
-        let evidence_fingerprint = object_evidence_fingerprint(
-            expected_build_id,
-            &sha256(source.as_bytes()),
-            &llvm_sha256,
-            &object_sha256,
-            canonical_argv_hash,
-            scope,
-        )?;
-        let (checks_performed, checks_not_performed) = object_machine_tv_acceptance_checks(
-            data.family,
-            true,
-            data.object_link_correspondence,
-            evaluation.entry_wrapper_applicable
-                && evaluation.outcomes.get("main") == Some(&FunctionOutcome::Equivalent),
-            &evaluation.coverage,
-        );
-        let descriptor = serde_json::json!({
-            "schema_version": "mumei.native-evidence-acceptance/v1",
-            "acceptance": "evaluated",
-            "accepted": true,
-            "scope": scope,
-            "checks_performed": checks_performed,
-            "checks_not_performed": checks_not_performed,
-            "build_id": expected_build_id,
-            "llvm_sha256": llvm_sha256,
-            "object_sha256": object_sha256,
-            "evidence_fingerprint": evidence_fingerprint,
-            "register_convention_assumed": machine_tv_register_convention_assumed_with_frame_memory(
-                evaluation.counts.equivalent_f64_leaf_count,
-                evaluation.counts.equivalent_composite_aggregate_count,
-                evaluation.counts.equivalent_f64_composite_aggregate_count,
-                evaluation
-                    .counts
-                    .equivalent_wide_composite_aggregate_convention_count,
-                evaluation.counts.equivalent_wide_scalar_count,
-                evaluation.counts.equivalent_red_zone_frame_memory_count,
-                evaluation.counts.equivalent_allocated_frame_memory_count,
-            ),
-            "input_domain": &evaluation.input_domain,
-            "functions": &evaluation.functions,
-            "object_translation": object_translation_json(
-                data,
-                if machine_tv_acceptance_decision(
-                    &evaluation.outcomes,
-                    evaluation.entry_wrapper_applicable,
-                ) == ObjectMachineTvAcceptanceDecision::Accepted
-                {
-                    "checked_source_machine_tv_within_profile"
-                } else {
-                    "unchecked_not_translation_validated"
-                },
-                record,
-                correspondence,
-            ),
-            "source_machine_tv": source_machine_tv_within_profile_json(
-                evaluation,
-                &checks_not_performed,
-                data.object_link_correspondence,
-            ),
-        });
+        let descriptor = object_machine_tv_acceptance_descriptor(accepted, expected_build_id)?;
         let mut bytes = serde_json::to_vec_pretty(&descriptor)
             .map_err(|_| BundleError("cannot encode native object acceptance descriptor"))?;
         bytes.push(b'\n');
