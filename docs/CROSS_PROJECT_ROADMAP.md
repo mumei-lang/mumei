@@ -126,6 +126,23 @@ guarantees and deferred WASM are unchanged; no external verifier is adopted.
 The [Agent settings contract](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-typed-configuration-follow-up)
 owns local API details.
 
+### Wave 2 consumable adapter-settings policy
+
+Agent's `verify-plan` and `verify-schedule` policy documents now accept the
+same host-declared `adapter_settings` contract as the in-memory planner API:
+a closed list of `[adapter_id, [[name, value], ...]]` entries. Malformed
+entries, unknown or unregistered adapters, duplicate settings, sensitive or
+invocation channels and values outside the adapter's declared schema fail
+before routing or fallback. Raw overrides are not echoed in the serialized
+policy, CLI output or a partial plan; the sensitive-channel regression checks
+both output streams and the absent output file.
+
+Settings remain planning metadata only. They are not passed to child argv,
+stdin or environment, and they do not authorize execution, transport secrets,
+change Evidence meaning/acceptance or promote grades. The
+[Agent policy contract](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-consumable-adapter-settings-policy)
+owns local API details under this implementation order.
+
 ### Wave 2 bounded source-input preparation
 
 Agent's opt-in C04/C11 planner can constrain an explicit input-format declaration.
@@ -6262,6 +6279,22 @@ incomplete output, distinguishing rejection before Core I/O from a Core-side
 rejection. This is a C13 confusion regression only — not adapter adoption,
 output meaning, Evidence truth or grade promotion. C13 remains ongoing as
 later planner/native/translation milestones land.
+
+### C13 planner selection-policy regression gate (mumei-demo #204)
+
+[mumei-demo#204](https://github.com/mumei-lang/mumei-demo/pull/204) extends
+the optional `verify_plan` scenario and integration CI with host-declared
+planner-policy regressions. An explicit lower-priority adapter must record
+`selected_explicit` rather than being confused with the priority route; a
+missing explicit adapter with fallback denied must leave `selected` null and
+block the automatic route; and a pinned tool-version mismatch must exclude
+the affected adapter. The scenario checks plan shape keys explicitly, uses
+checks that still fail under `PYTHONOPTIMIZE`, injects only a fake sentinel
+into each new planning invocation, and binds the new fixtures/outputs into
+the input-hash plus no-execution/no-secret boundary gate. These are C13
+selection/exclusion regressions only — not adapter execution, output meaning,
+Evidence truth or grade promotion. C13 remains ongoing as later
+planner/native/translation milestones land.
 
 ### Manifest-declared attempt memory bound (mumei-agent #993)
 
