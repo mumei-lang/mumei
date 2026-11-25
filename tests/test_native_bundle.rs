@@ -8130,3 +8130,26 @@ fn recheck_object_acceptance_rejects_tampered_pinned_inputs() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
 }
+
+#[test]
+fn recheck_object_acceptance_inconclusive_fresh_acceptance_establishes_no_result() {
+    let root = tempfile::tempdir().unwrap();
+    let (accepted_source, accepted_bundle, accepted_id) =
+        build_source(&subdir(root.path(), "accepted"), MODULE);
+    let saved = save_object_acceptance(
+        root.path(),
+        &accepted_source,
+        &accepted_bundle,
+        &accepted_id,
+    );
+    let (source, bundle, id) = build_source(
+        &subdir(root.path(), "division"),
+        "atom quotient_seven(x: i64) -> i64 requires: true; ensures: true; body: { x / 7 };\n\
+atom main() -> i64 requires: true; ensures: true; body: { quotient_seven(3) };",
+    );
+    let output = recheck_object_acceptance(&source, &bundle, &id, &saved);
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("no object acceptance consistency result established"));
+}
