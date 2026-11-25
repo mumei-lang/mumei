@@ -2864,6 +2864,14 @@ System dependency closure, wider programs/targets/runtime/ABI, attestation,
 C02 integration and full C08/C10 consumer policies remain open. Existing
 build/run, Claim Book, grades and Lean gates are unchanged.
 
+The next C08 slice adds
+[opt-in detached signing of object acceptance descriptors](VERIFICATION_NATIVE.md#detached-object-descriptor-signing-partial-c08).
+`native-bundle accept-object` can sign the exact JSON descriptor bytes only
+after the existing acceptance gates pass. The descriptor and attempt
+fingerprint are unchanged. This is partial C08: key trust, producer and
+descriptor authenticity, historical execution, consumer trust policy, and
+common Evidence promotion are not evaluated by signing.
+
 The first C09 pilot adds opt-in source-body/LLVM-SSA equivalence checking via
 the existing Z3 bitvector library for C03's i64 comparison/conditional fragment.
 It fixes LLVM 17, Linux/x86_64 and target/layout, screens memory-free acyclic

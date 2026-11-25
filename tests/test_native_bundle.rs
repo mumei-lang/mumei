@@ -1,13 +1,14 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use mumei_core::native_bundle::{self, BundleFile, RECORD_FILE};
+use mumei_core::producer_signature;
 use mumei_core::semantic_contract::{extract_pure_i64_module_contracts, RefinedAdmission};
 use object::{Object, ObjectSection, ObjectSymbol, SymbolKind};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::Path,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 
 const GOOD: &str = "atom main() -> i64 requires: true; ensures: result == 7; body: { 7 };";
@@ -6433,6 +6434,139 @@ fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
     let rejected = accept_object(&source, &bundle, &wrong_id, true);
     assert_eq!(rejected.status.code(), Some(1));
     assert!(rejected.stdout.is_empty());
+}
+
+#[test]
+fn accept_object_signs_exact_descriptor_bytes_after_pinned_checks() {
+    const FAKE_KEY: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const INVALID_KEY: &str = "FAKE_PRIVATE_KEY_SENTINEL";
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), MODULE);
+    let key = root.path().join("key.hex");
+    let signature_path = root.path().join("descriptor.sig.json");
+    fs::write(&key, FAKE_KEY).unwrap();
+    let signed_command = |pin: &str, format_args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));
+        command
+            .args(["native-bundle", "accept-object"])
+            .arg(&bundle)
+            .arg(&source)
+            .args(["--expected-build-id", pin, "--key-file"])
+            .arg(&key)
+            .args(["--producer-key-id", "test-producer", "--signature-output"])
+            .arg(&signature_path)
+            .args(format_args);
+        command
+    };
+    let signed_acceptance =
+        |pin: &str, format_args: &[&str]| signed_command(pin, format_args).output().unwrap();
+    let unsigned = accept_object(&source, &bundle, &id, true);
+    assert_success(&unsigned);
+    let signed = signed_acceptance(&id, &["--json"]);
+    assert_success(&signed);
+    assert_eq!(signed.stdout, unsigned.stdout);
+    assert!(signed.stdout.ends_with(b"\n"));
+    assert!(signed.stderr.is_empty());
+    let envelope_bytes = fs::read(&signature_path).unwrap();
+    for bytes in [&signed.stdout, &signed.stderr, &envelope_bytes] {
+        assert!(!String::from_utf8_lossy(bytes).contains(FAKE_KEY));
+    }
+    let envelope: serde_json::Value = serde_json::from_slice(&envelope_bytes).unwrap();
+    assert!(producer_signature::envelope_match(&envelope));
+    assert_eq!(envelope["producer_key_id"], "test-producer");
+    let signature = envelope["signature"].as_str().unwrap();
+    let public_key = producer_signature::decode_secret_key_bytes(FAKE_KEY.as_bytes().to_vec())
+        .unwrap()
+        .verifying_key()
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let digest = producer_signature::subject_digest(&signed.stdout);
+    assert_eq!(envelope["subject_digest"], digest);
+    assert!(producer_signature::signature_valid(
+        &public_key,
+        signature,
+        digest.as_bytes()
+    ));
+    let mut changed: serde_json::Value = serde_json::from_slice(&signed.stdout).unwrap();
+    for check in [
+        "producer_authenticity",
+        "descriptor_authenticity",
+        "historical_execution",
+    ] {
+        assert!(changed["checks_not_performed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == check));
+    }
+    changed["accepted"] = serde_json::json!(false);
+    let mut changed = serde_json::to_vec_pretty(&changed).unwrap();
+    changed.push(b'\n');
+    for bytes in [&changed[..], &signed.stdout[..signed.stdout.len() - 1]] {
+        assert!(!producer_signature::signature_valid(
+            &public_key,
+            signature,
+            producer_signature::subject_digest(bytes).as_bytes()
+        ));
+    }
+
+    let assert_rejected = |output: Output, exit| {
+        assert_eq!(output.status.code(), Some(exit));
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!error.contains(FAKE_KEY));
+        assert!(!error.contains(INVALID_KEY));
+    };
+    fs::write(&signature_path, b"existing signature").unwrap();
+    let no_overwrite = signed_acceptance(&id, &["--json"]);
+    assert!(String::from_utf8_lossy(&no_overwrite.stderr)
+        .contains("cannot publish native object descriptor signature"));
+    assert_rejected(no_overwrite, 1);
+    assert_eq!(fs::read(&signature_path).unwrap(), b"existing signature");
+    fs::remove_file(&signature_path).unwrap();
+    let entries = || {
+        fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>()
+    };
+    let before = entries();
+    let full = fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let failed_write = signed_command(&id, &["--json"])
+        .stdout(Stdio::from(full))
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&failed_write.stderr)
+        .contains("cannot write native object acceptance descriptor"));
+    assert_rejected(failed_write, 1);
+    assert!(!signature_path.exists());
+    assert_eq!(entries(), before);
+    assert_success(&signed_acceptance(&id, &["--json"]));
+    assert_eq!(fs::read(&signature_path).unwrap(), envelope_bytes);
+    fs::remove_file(&signature_path).unwrap();
+    assert_rejected(signed_acceptance(&id, &[]), 2);
+    assert!(!signature_path.exists());
+    fs::write(&key, INVALID_KEY).unwrap();
+    assert_rejected(signed_acceptance(&id, &["--json"]), 1);
+    assert!(!signature_path.exists());
+    fs::write(&key, FAKE_KEY).unwrap();
+    let object_path = bundle.join(BundleFile::Object.file_name());
+    let object_bytes = fs::read(&object_path).unwrap();
+    fs::remove_file(&object_path).unwrap();
+    assert_rejected(signed_acceptance(&id, &["--json"]), 1);
+    assert!(!signature_path.exists());
+    fs::write(&object_path, b"replaced object").unwrap();
+    assert_rejected(signed_acceptance(&id, &["--json"]), 1);
+    assert!(!signature_path.exists());
+    fs::write(&object_path, object_bytes).unwrap();
+    fs::write(&source, format!("{MODULE}\n")).unwrap();
+    assert_rejected(signed_acceptance(&id, &["--json"]), 1);
+    assert!(!signature_path.exists());
 }
 
 #[test]

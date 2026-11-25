@@ -766,6 +766,22 @@ pub(crate) struct SignatureArgs {
     pub(crate) min_revocation_version: Option<u64>,
 }
 
+#[derive(clap::Args)]
+pub(crate) struct ObjectDescriptorOutputArgs {
+    /// Emit a static acceptance descriptor, not reusable Evidence or a certificate
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// Regular file containing the hex-encoded ed25519 signing key, never printed
+    #[arg(long, requires = "signature_output")]
+    pub(crate) key_file: Option<String>,
+    /// Declared producer key label, not signed or authenticated
+    #[arg(long, requires = "signature_output")]
+    pub(crate) producer_key_id: Option<String>,
+    /// Write a detached signature envelope for the exact JSON output without replacing a file
+    #[arg(long, requires_all = ["json", "key_file", "producer_key_id"])]
+    pub(crate) signature_output: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub(crate) enum NativeBundleCommand {
     /// Evaluate a saved native consumer Evidence report against fresh pinned source/LLVM checks into a bounded acceptance descriptor
@@ -798,9 +814,8 @@ pub(crate) enum NativeBundleCommand {
         /// SHA-256 of native-bundle.json obtained through a separately trusted channel
         #[arg(long)]
         expected_build_id: String,
-        /// Emit a static acceptance descriptor, not reusable Evidence or a certificate
-        #[arg(long)]
-        json: bool,
+        #[command(flatten)]
+        output: ObjectDescriptorOutputArgs,
     },
     /// Replay a saved native consumer Evidence report against fresh pinned source/LLVM checks, without proof acceptance
     RecheckEvidence {

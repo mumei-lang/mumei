@@ -886,23 +886,7 @@ fn sign(
         (None, true) => super::input::read_stdin(producer_signature::MAX_SUBJECT_BYTES)?,
         _ => return Err("choose exactly one evidence input"),
     };
-    let key_bytes = super::input::read_regular(key_file, 64)?;
-    let key = producer_signature::decode_secret_key_bytes(key_bytes)
-        .map_err(|_| "invalid producer key material")?;
-    let envelope =
-        producer_signature::sign(&record, &key, producer_key_id, produced_at).map_err(|error| {
-            match error {
-                producer_signature::SignError::InvalidProducerKeyId => {
-                    "producer key id must not be empty"
-                }
-                producer_signature::SignError::InvalidKeyMaterial => {
-                    "invalid producer key material"
-                }
-                producer_signature::SignError::InvalidProducedAt => {
-                    "--produced-at must be an RFC 3339 timestamp"
-                }
-            }
-        })?;
+    let envelope = sign_record(&record, key_file, producer_key_id, produced_at)?;
     debug_assert_eq!(envelope.schema_version, PRODUCER_SIGNATURE_SCHEMA);
     let bytes = if json {
         let mut bytes = serde_json::to_vec_pretty(&envelope)
@@ -922,6 +906,28 @@ no key or producer authenticity, freshness, revocation, claim truth or acceptanc
     output
         .write_all(&bytes)
         .map_err(|_| "cannot write producer signature envelope")
+}
+
+pub(super) fn sign_record(
+    record: &[u8],
+    key_file: &Path,
+    producer_key_id: &str,
+    produced_at: Option<&str>,
+) -> Result<producer_signature::Envelope, &'static str> {
+    let key_bytes = super::input::read_regular(key_file, 64)?;
+    let key = producer_signature::decode_secret_key_bytes(key_bytes)
+        .map_err(|_| "invalid producer key material")?;
+    producer_signature::sign(record, &key, producer_key_id, produced_at).map_err(
+        |error| match error {
+            producer_signature::SignError::InvalidProducerKeyId => {
+                "producer key id must not be empty"
+            }
+            producer_signature::SignError::InvalidKeyMaterial => "invalid producer key material",
+            producer_signature::SignError::InvalidProducedAt => {
+                "--produced-at must be an RFC 3339 timestamp"
+            }
+        },
+    )
 }
 
 fn keygen(secret_file: &Path, output: &mut impl Write) -> Result<(), &'static str> {

@@ -1526,6 +1526,13 @@ promoting hash consistency to authenticity, translation validation or an
 metadata and wider ABI/runtime semantics remain unverified. This is partial
 C08 and a narrow C10 identity-check foundation, not completion of either item.
 
+The later [C08 object descriptor signing slice](VERIFICATION_NATIVE.md#detached-object-descriptor-signing-partial-c08)
+lets the producer emit a detached Ed25519 envelope over the exact object
+acceptance descriptor bytes after pinned checks succeed. It leaves the
+attempt fingerprint, authenticity status, and acceptance policy unchanged.
+This is partial C08, not C02 Evidence promotion or C10 consumer trust policy;
+the canonical dependency order is unchanged.
+
 ### Wave 3 fixed-point assignment facts over the explicit Go CFG
 
 Agent's `control_flow.assignment_facts(body, graph)` runs the first
