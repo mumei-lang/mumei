@@ -6183,9 +6183,10 @@ declared feed means a closed pipe (deterministic EOF).
 
 [mumei-agent#1346](https://github.com/mumei-lang/mumei-agent/pull/1346)
 extends `verify-schedule`'s host argv map with the closed object shape
-`{"argv": [...], "stdin": "source"}`. Only the exact `source` declaration
+`{"argv": [...], "stdin": "source"}`; the object may also omit `stdin`,
+which behaves like the legacy argv array. Only the exact `source` declaration
 pipes the source bytes already bound into the schedule to that attempt's
-stdin; legacy argv arrays still mean no host feed. The host declaration
+stdin; legacy argv arrays and stdin-less objects mean no host feed. The host declaration
 takes precedence over manifest `attempt_stdin`, source bytes never enter
 diagnostics or schedule output, and a source larger than the runner's
 bounded feed makes that adapter fail closed as `not_dispatched` so
