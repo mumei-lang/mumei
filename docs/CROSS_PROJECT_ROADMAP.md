@@ -6263,6 +6263,22 @@ rejection. This is a C13 confusion regression only — not adapter adoption,
 output meaning, Evidence truth or grade promotion. C13 remains ongoing as
 later planner/native/translation milestones land.
 
+### C13 planner selection-policy regression gate (mumei-demo #204)
+
+[mumei-demo#204](https://github.com/mumei-lang/mumei-demo/pull/204) extends
+the optional `verify_plan` scenario and integration CI with host-declared
+planner-policy regressions. An explicit lower-priority adapter must record
+`selected_explicit` rather than being confused with the priority route; a
+missing explicit adapter with fallback denied must leave `selected` null and
+block the automatic route; and a pinned tool-version mismatch must exclude
+the affected adapter. The scenario checks plan shape keys explicitly, uses
+checks that still fail under `PYTHONOPTIMIZE`, injects only a fake sentinel
+into each new planning invocation, and binds the new fixtures/outputs into
+the input-hash plus no-execution/no-secret boundary gate. These are C13
+selection/exclusion regressions only — not adapter execution, output meaning,
+Evidence truth or grade promotion. C13 remains ongoing as later
+planner/native/translation milestones land.
+
 ### Manifest-declared attempt memory bound (mumei-agent #993)
 
 [mumei-agent#993](https://github.com/mumei-lang/mumei-agent/pull/993)
