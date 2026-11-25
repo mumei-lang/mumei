@@ -1991,11 +1991,14 @@ stay declared gaps, and this is dependency analysis, not constant
 evaluation. Grouped `const ( ... )` declarations admit the same scalar
 fragment, including Go's implicit no-value repetition: repetition is
 parameter-independent because constants cannot read variables, not
-because `iota` or the repeated value is evaluated. Grouped `var` and
-non-scalar implicit repetitions stay outside the fragment. See the
+because `iota` or the repeated value is evaluated. Empty `const ()` is
+a no-op, while the compact valid form without a final separator remains
+a tree-sitter parse gap and fails closed. Non-scalar implicit
+repetitions stay outside the fragment. See the
 [Agent scalar const declarations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-scalar-const-declarations-and-reads)
 and the
 [grouped const slice](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-grouped-const-declarations-and-implicit-repetition).
+
 
 ### Wave 3 remaining scalar binary operators
 
