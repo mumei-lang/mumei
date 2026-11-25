@@ -6404,6 +6404,21 @@ measurement and regression control only — not proof truth, Evidence acceptance
 or grade promotion. C13 remains ongoing as later planner/native/translation
 milestones land.
 
+### C13 native replay outcome taxonomy (mumei-demo #210)
+
+[mumei-demo#210](https://github.com/mumei-lang/mumei-demo/pull/210) applies the
+same separation to native replay evidence. Unresolved reference-port,
+LLM-witness reference-port and LLM-port verdicts are counted independently as
+unsupported input/capability, residual inconclusive outcome, environment
+failure or budget exhaustion. Port verification wall time and declared timeout
+budget stay separate from native driver execution, replay input preparation and
+report rendering. Verifier calls rejected before execution do not create
+expected measurement calls, while historical rows expose measured-versus-
+expected coverage instead of looking fully instrumented. This is measurement
+and regression control only — not proof truth, Evidence acceptance or grade
+promotion. C13 remains ongoing as later planner/native/translation milestones
+land.
+
 ### Manifest-declared attempt memory bound (mumei-agent #993)
 
 [mumei-agent#993](https://github.com/mumei-lang/mumei-agent/pull/993)
