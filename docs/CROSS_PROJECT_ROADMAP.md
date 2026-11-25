@@ -6255,7 +6255,8 @@ large-output adapter regression. The adapter emits more than the agent's
 `mumei.verification-evidence/v1` document. The scenario therefore fails if a
 truncated prefix can be passed to Core as a complete document: scheduling may
 retain the host-declared exit-code `selected` dispatch outcome, but
-`evidence_check` must be `failed` and `evidence_acceptance` must be false. A
+`evidence_check` must be `failed` and `evidence_acceptance.accepted` must
+be false. A
 probe-validated recording wrapper must record no Core invocation for the
 incomplete output, distinguishing rejection before Core I/O from a Core-side
 rejection. This is a C13 confusion regression only — not adapter adoption,
