@@ -6891,7 +6891,7 @@ fn recheck_object_acceptance(
         if let Some(acceptance) = signature_acceptance.as_ref() {
             checks_performed.push("producer_signature_binding");
             if acceptance.max_age_checked {
-                checks_not_performed.retain(|check| *check != "record_freshness");
+                checks_performed.push("producer_signature_envelope_freshness");
             }
             if acceptance.full_authenticity_chain {
                 checks_not_performed.retain(|check| *check != "producer_authenticity");

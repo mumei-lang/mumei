@@ -8260,8 +8260,12 @@ fn recheck_object_acceptance_checks_exact_descriptor_signature_when_supplied() {
         serde_json::json!(true)
     );
     let not_performed = document["checks_not_performed"].as_array().unwrap();
-    assert!(!not_performed.contains(&serde_json::json!("record_freshness")));
+    assert!(not_performed.contains(&serde_json::json!("record_freshness")));
     assert!(not_performed.contains(&serde_json::json!("producer_authenticity")));
+    assert!(document["checks_performed"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("producer_signature_envelope_freshness")));
     assert!(!String::from_utf8_lossy(&json_output.stdout).contains(FAKE_KEY));
     assert!(!String::from_utf8_lossy(&json_output.stderr).contains(FAKE_KEY));
 
