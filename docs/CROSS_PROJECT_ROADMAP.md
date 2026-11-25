@@ -1809,8 +1809,10 @@ unsupported; `select` admits in the Go interprocedural frontier
 
 Agent's C07 fragment now admits `var_declaration`: one name per
 `var_spec` with at most one value, scalar bindings only, and `var x T`
-binding the dep-free zero value. Multi-name specs, non-scalar bindings,
-`const` and grouped `var (...)` stay declared gaps. See the
+binding the dep-free zero value. That initial slice kept multi-name
+specs, non-scalar bindings, `const` and grouped `var (...)` as declared
+gaps; later slices expanded those boundaries — grouped vars are mirrored
+in the dedicated section below. See the
 [Agent var declarations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-var-declarations-in-bodies).
 
 ### Wave 3 effect-free control statements in scalar summaries
@@ -1998,6 +2000,19 @@ repetitions stay outside the fragment. See the
 [Agent scalar const declarations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-scalar-const-declarations-and-reads)
 and the
 [grouped const slice](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-grouped-const-declarations-and-implicit-repetition).
+
+### Wave 3 grouped var declarations
+
+Agent's scalar fragment now flattens grouped `var ( ... )` declarations
+through the same binding contract as individual vars: explicit values
+bind pairwise against the pre-state, zero-value forms are dep-free,
+multi-name specs follow the existing declaration rules, `_` discards,
+and empty `var ()` groups are no-ops. Supported channel, function-value,
+pointer and composite shapes keep their individual-var semantics; the
+compact valid form without a final separator remains a tree-sitter parse
+gap and fails closed. This is dependency analysis, not proof, evidence
+or audit verdict integration. See the
+[Agent grouped var slice](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-grouped-var-declarations).
 
 
 ### Wave 3 remaining scalar binary operators
