@@ -1,7 +1,12 @@
-use crate::{cli::NativeBundleCommand, codegen::MUMEI_RUNTIME_C, linker};
+use crate::{
+    cli::{NativeBundleCommand, ObjectDescriptorOutputArgs},
+    codegen::MUMEI_RUNTIME_C,
+    linker,
+};
 use mumei_core::semantic_contract::RefinedAdmission;
 use mumei_core::{
-    hir, native_bundle::*, parser, proof_cert, resolver, semantic_contract, verification,
+    hir, native_bundle::*, parser, producer_signature, proof_cert, resolver, semantic_contract,
+    verification,
 };
 use mumei_emit_llvm::{
     machine_tv::{self, FunctionOutcome},
@@ -913,7 +918,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
             bundle,
             source,
             expected_build_id,
-            json,
+            output,
         } => match recheck_object_pipeline(
             Path::new(&bundle),
             Path::new(&source),
@@ -971,7 +976,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                                     &evaluation,
                                     &expected_build_id,
                                     canonical_argv_hash,
-                                    json,
+                                    &output,
                                     &record,
                                     &correspondence,
                                 )
@@ -6826,17 +6831,47 @@ fn object_evidence_fingerprint(
     Ok(sha256(&bytes))
 }
 
+fn write_object_descriptor_signature(
+    descriptor: &[u8],
+    path: &Path,
+    key_file: &Path,
+    producer_key_id: &str,
+) -> Result<(), BundleError> {
+    if descriptor.len() as u64 > producer_signature::MAX_SUBJECT_BYTES {
+        return Err(BundleError(
+            "native object descriptor exceeds the signing limit",
+        ));
+    }
+    let envelope = super::evidence::sign_record(descriptor, key_file, producer_key_id, None)
+        .map_err(BundleError)?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut staged = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|_| BundleError("cannot stage native object descriptor signature"))?;
+    serde_json::to_writer_pretty(&mut staged, &envelope)
+        .map_err(|_| BundleError("cannot write native object descriptor signature"))?;
+    staged
+        .write_all(b"\n")
+        .map_err(|_| BundleError("cannot write native object descriptor signature"))?;
+    staged
+        .persist_noclobber(path)
+        .map_err(|_| BundleError("cannot publish native object descriptor signature"))?;
+    Ok(())
+}
+
 fn write_object_machine_tv_acceptance(
     data: &ObjectRecheckData,
     evaluation: &MachineTvEvaluation,
     expected_build_id: &str,
     canonical_argv_hash: &str,
-    json: bool,
+    output: &ObjectDescriptorOutputArgs,
     record: &ObjectTranslationRecord,
     correspondence: &serde_json::Value,
 ) -> Result<(), BundleError> {
     let scope = object_machine_tv_acceptance_scope(data.object_link_correspondence);
-    if json {
+    if output.json {
         let source = data.source_text.as_deref().ok_or(BundleError(
             "missing rechecked source for native object acceptance",
         ))?;
@@ -6905,6 +6940,21 @@ fn write_object_machine_tv_acceptance(
         let mut bytes = serde_json::to_vec_pretty(&descriptor)
             .map_err(|_| BundleError("cannot encode native object acceptance descriptor"))?;
         bytes.push(b'\n');
+        if let Some(signature_output) = &output.signature_output {
+            let (Some(key_file), Some(producer_key_id)) =
+                (&output.key_file, &output.producer_key_id)
+            else {
+                return Err(BundleError(
+                    "descriptor signing requires a key file and producer key id",
+                ));
+            };
+            write_object_descriptor_signature(
+                &bytes,
+                Path::new(signature_output),
+                Path::new(key_file),
+                producer_key_id,
+            )?;
+        }
         std::io::stdout()
             .lock()
             .write_all(&bytes)

@@ -2654,6 +2654,27 @@ Core deliberately does not emit the agent-owned
 `object_source_machine_code_correspondence` check to its
 `object_translation_correspondence` check.
 
+#### Detached object descriptor signing (partial C08)
+
+Pass `--json --key-file KEY --producer-key-id LABEL --signature-output SIG`
+to `native-bundle accept-object` to emit an optional detached
+[`mumei.producer-signature/v1` envelope](#detached-producer-signature-envelope).
+Only a successful pinned acceptance reaches signing. The Ed25519 signature
+covers the SHA-256 digest of the exact descriptor bytes written to stdout,
+including the trailing newline, for descriptors up to 4 MiB. Save stdout
+as-is: reformatting the JSON invalidates the binding. The signature is
+published separately without replacing an existing file; consume it only
+after the command succeeds and you have both outputs.
+
+Verification recomputes the digest from the saved descriptor and verifies the
+signature over the lowercase hex digest using an independently pinned public
+key. The key label is unsigned. Neither signing nor verifying the byte binding
+establishes identity or authority of the producer, freshness, or historical
+execution. The descriptor and its attempt fingerprint are unchanged, including
+`producer_authenticity` and `descriptor_authenticity` remaining not performed.
+This adds neither consumer trust policy nor common Evidence, grade promotion,
+or an `artifact_verified` claim.
+
 ### Pinned executable exit-status recheck
 
 `mumei native-bundle recheck-exit-status` is the execution slice of the
