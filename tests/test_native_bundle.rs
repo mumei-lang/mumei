@@ -4633,11 +4633,9 @@ fn module_bundle_with_f64_leaves_builds_as_v15_and_rechecks() {
     assert_success(&check(&source, &bundle, &id));
     assert_success(&recheck(&source, &bundle, &id));
     assert_success(&recheck_llvm(&source, &bundle, &id));
-    // Step 3f: scalar `f64` signatures join the direct LLVM-IR
-    // comparison — `pick` selects between two `double` leaves
-    // bit-exactly and records `equivalent`, while `wrap`'s
-    // mixed-leaf aggregate result and `unwrap`'s composite
-    // parameter stay outside the subset with their reason recorded.
+    // The direct LLVM-IR comparison admits `pick`'s scalar `f64`
+    // result and `wrap`'s flat mixed result. `unwrap`'s composite
+    // parameter stays outside the subset.
     let machine_tv = recheck_machine_tv(&source, &bundle, &id, true);
     assert_success(&machine_tv);
     let machine_tv: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
@@ -4650,17 +4648,15 @@ fn module_bundle_with_f64_leaves_builds_as_v15_and_rechecks() {
         .unwrap();
     assert_eq!(equivalence["result"], "checked");
     let detail = equivalence["detail"].as_str().unwrap();
-    for function in ["pick", "main"] {
-        assert!(
-            detail.contains(&format!("{function}: equivalent")),
-            "{detail}"
-        );
-    }
-    for function in ["wrap", "unwrap"] {
-        assert!(
-            detail.contains(&format!("{function}: unsupported_signature")),
-            "{detail}"
-        );
+    let (_, outcomes) = detail.split_once(" (").unwrap();
+    let outcomes: Vec<_> = outcomes.strip_suffix(')').unwrap().split(", ").collect();
+    for expected in [
+        "pick: equivalent",
+        "__mumei_user_main: equivalent",
+        "wrap: equivalent",
+        "unwrap: unsupported_signature",
+    ] {
+        assert!(outcomes.contains(&expected), "{detail}");
     }
     // A v15 record re-pinned as v14 is refused: v14 keeps f64 leaves
     // out of the vocabulary.
