@@ -141,6 +141,18 @@ fn admit(source: &str) -> Result<ParsedAtom, Error> {
     if tokens.iter().any(|t| matches!(t.token, Token::FloatLit(_))) {
         return Err(Error::Unsupported("floating-point literals"));
     }
+    if tokens
+        .iter()
+        .any(|t| matches!(t.token, Token::Forall | Token::Exists))
+    {
+        return Err(Error::Unsupported("quantifiers"));
+    }
+    if tokens
+        .iter()
+        .any(|t| matches!(t.token, Token::Dot | Token::ColonColon))
+    {
+        return Err(Error::Unsupported("field access and qualified calls"));
+    }
     if !source_shape(&tokens) {
         return Err(Error::Unsupported(
             "expected one typed atom with explicit requires, ensures and body clauses",
@@ -173,13 +185,35 @@ fn admit(source: &str) -> Result<ParsedAtom, Error> {
     {
         return Err(Error::Unsupported("expected shared ref [i64] inputs and an explicit i64 result; only owned i64 scalar inputs are also supported"));
     }
-    let requires = parse_expression_checked(&atom.requires).map_err(|_| Error::Parse)?;
-    let ensures = parse_expression_checked(&atom.ensures).map_err(|_| Error::Parse)?;
-    let body = parse_expression_checked(&atom.body_expr).map_err(|_| Error::Parse)?;
+    let requires = parse_slice_expression(&atom.requires)?;
+    let ensures = parse_slice_expression(&atom.ensures)?;
+    let body = parse_slice_expression(&atom.body_expr)?;
     for expr in [&requires, &ensures, &body] {
         admit_expr(expr)?;
     }
     Ok((atom, requires, ensures, body))
+}
+
+fn parse_slice_expression(input: &str) -> Result<Expr, Error> {
+    let tokens = crate::parser::lexer::Lexer::new(input)
+        .tokenize_checked()
+        .map_err(|_| Error::Parse)?;
+    let mut paren_depth = 0usize;
+    for token in &tokens {
+        match token.token {
+            Token::LParen => paren_depth += 1,
+            Token::RParen => paren_depth = paren_depth.saturating_sub(1),
+            Token::Eq | Token::Neq | Token::Gt | Token::Lt | Token::Ge | Token::Le
+                if paren_depth > 0 =>
+            {
+                return Err(Error::Unsupported(
+                    "parenthesized comparisons used as comparison operands",
+                ));
+            }
+            _ => (),
+        }
+    }
+    parse_expression_checked(input).map_err(|_| Error::Parse)
 }
 
 fn balanced_delimiters(tokens: &[SpannedToken]) -> bool {

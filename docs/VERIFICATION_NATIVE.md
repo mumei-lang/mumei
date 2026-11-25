@@ -682,13 +682,17 @@ artifact sidecar, or C02 Evidence acceptance route for this profile.
 mumei evidence check-readonly-slice <SOURCE>
 ```
 
-The command admits one atom with explicit `requires`, `ensures` and
-`body`, at least one shared `ref name: [i64]` input, optional owned
-`i64` scalar inputs, and an explicit `i64` result. Its scalar fragment
-has comparisons, short-circuit Boolean operators and conditionals;
-it admits `len(a)` and `a[i]` only on admitted input views. Arithmetic,
-whole-view values, locals, subviews, mutable parameters and other calls
-are rejected. Empty slices are valid inputs but cannot be indexed.
+The command admits exactly one atom with exactly one explicit `requires`,
+exactly one explicit `ensures` and one explicit `body` clause, at least one
+shared `ref name: [i64]` input, optional owned `i64` scalar inputs, and an
+explicit `i64` result. Input is limited to 65,536 bytes and 256 lexer tokens;
+either limit fails closed. Its scalar fragment has comparisons, short-circuit
+Boolean operators and conditionals; it admits `len(a)` and `a[i]` only on
+admitted input views. Arithmetic, whole-view values, locals, subviews, mutable
+parameters, quantifiers, field access, qualified calls and other calls are
+rejected. A comparison inside parentheses is also rejected as a parser-resource
+boundary; write comparison chains flat or split them with Boolean operators.
+Empty slices are valid inputs but cannot be indexed.
 
 The encoder reuses the signed BV64 comparison, short-circuit guard and
 array bounds encodings. The cell function is shared by all formals and

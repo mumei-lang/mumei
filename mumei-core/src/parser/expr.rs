@@ -94,6 +94,75 @@ fn collect_relational_chain(
     operands.push(expr.clone());
 }
 
+fn normalize_stmt(stmt: Stmt) -> Stmt {
+    match stmt {
+        Stmt::Let { var, value, span } => Stmt::Let {
+            var,
+            value: Box::new(normalize_expr(*value)),
+            span,
+        },
+        Stmt::Assign { var, value, span } => Stmt::Assign {
+            var,
+            value: Box::new(normalize_expr(*value)),
+            span,
+        },
+        Stmt::ArrayStore {
+            array,
+            index,
+            field_path,
+            value,
+            span,
+        } => Stmt::ArrayStore {
+            array,
+            index: Box::new(normalize_expr(*index)),
+            field_path,
+            value: Box::new(normalize_expr(*value)),
+            span,
+        },
+        Stmt::Block(stmts, span) => {
+            Stmt::Block(stmts.into_iter().map(normalize_stmt).collect(), span)
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            span,
+        } => Stmt::While {
+            cond: Box::new(normalize_expr(*cond)),
+            invariant: Box::new(normalize_expr(*invariant)),
+            decreases: decreases.map(|expr| Box::new(normalize_expr(*expr))),
+            body: Box::new(normalize_stmt(*body)),
+            span,
+        },
+        Stmt::Acquire {
+            resource,
+            body,
+            span,
+        } => Stmt::Acquire {
+            resource,
+            body: Box::new(normalize_stmt(*body)),
+            span,
+        },
+        Stmt::Task { body, group, span } => Stmt::Task {
+            body: Box::new(normalize_stmt(*body)),
+            group,
+            span,
+        },
+        Stmt::TaskGroup {
+            children,
+            join_semantics,
+            span,
+        } => Stmt::TaskGroup {
+            children: children.into_iter().map(normalize_stmt).collect(),
+            join_semantics,
+            span,
+        },
+        Stmt::Cancel { target, span } => Stmt::Cancel { target, span },
+        Stmt::Expr(expr, span) => Stmt::Expr(normalize_expr(expr), span),
+    }
+}
+
 fn normalize_expr(expr: Expr) -> Expr {
     match expr {
         Expr::BinaryOp(left, op, right) if is_relational_op(&op) => {
@@ -144,7 +213,7 @@ fn normalize_expr(expr: Expr) -> Expr {
                 .map(|arm| MatchArm {
                     pattern: arm.pattern,
                     guard: arm.guard.map(|guard| Box::new(normalize_expr(*guard))),
-                    body: arm.body,
+                    body: Box::new(normalize_stmt(*arm.body)),
                 })
                 .collect(),
         },
@@ -154,10 +223,10 @@ fn normalize_expr(expr: Expr) -> Expr {
             else_branch,
         } => Expr::IfThenElse {
             cond: Box::new(normalize_expr(*cond)),
-            then_branch,
-            else_branch,
+            then_branch: Box::new(normalize_stmt(*then_branch)),
+            else_branch: Box::new(normalize_stmt(*else_branch)),
         },
-        Expr::Block(stmt) => Expr::Block(stmt),
+        Expr::Block(stmt) => Expr::Block(Box::new(normalize_stmt(*stmt))),
         Expr::CallRef { callee, args } => Expr::CallRef {
             callee: Box::new(normalize_expr(*callee)),
             args: args.into_iter().map(normalize_expr).collect(),
@@ -181,7 +250,9 @@ fn normalize_expr(expr: Expr) -> Expr {
         Expr::Await { expr } => Expr::Await {
             expr: Box::new(normalize_expr(*expr)),
         },
-        Expr::Async { body } => Expr::Async { body },
+        Expr::Async { body } => Expr::Async {
+            body: Box::new(normalize_stmt(*body)),
+        },
         Expr::Lambda {
             params,
             return_type,
@@ -189,7 +260,7 @@ fn normalize_expr(expr: Expr) -> Expr {
         } => Expr::Lambda {
             params,
             return_type,
-            body,
+            body: Box::new(normalize_stmt(*body)),
         },
         other => other,
     }

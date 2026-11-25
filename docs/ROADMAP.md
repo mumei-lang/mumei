@@ -2841,9 +2841,13 @@ remains open; this is regression coverage only and C03 remains open.
 Roadmap item 9 ([#1448](https://github.com/mumei-lang/mumei/issues/1448),
 [C03 #787](https://github.com/mumei-lang/mumei/issues/787)) delivers the
 [read-only region and slice profile design](VERIFICATION_NATIVE.md#read-only-region-and-slice-profile)
-and an opt-in Z3 source-model slice for shared `ref [i64]` inputs.
-C03 remains open: subviews, Lean memory lowering, and executable memory
-correspondence are not implemented by this slice.
+and an opt-in Z3 source-model slice for shared `ref [i64]` inputs. The slice
+is deliberately narrower than the design target: exactly one atom and exactly
+one requires/ensures/body clause pair, at most 65,536 bytes and 256 lexer
+tokens, no quantifiers or field/qualified access, and no comparisons nested in
+parentheses. C03 remains open: subviews, Lean memory lowering, executable
+memory correspondence and these admission widenings are not implemented by
+this slice.
 
 Refined predicates over `u64` bases compare unsigned; documented v10 literal
 wrapping (`0 - 1` is `u64::MAX` in a `u64` context) is unchanged, and general

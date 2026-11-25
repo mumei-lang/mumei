@@ -122,6 +122,13 @@ fn rejects_unsupported_syntax_without_a_diagnostic_record() {
         GET.replace("{ a[i] }", "{ a[i] } stray"),
         GET.replace(", i:", ",, i:"),
         GET.replace("ensures: result == a[i];", ""),
+        GET.replace("requires: i >= 0 && i < len(a);", "requires: forall(i);"),
+        GET.replace(
+            "requires: i >= 0 && i < len(a);",
+            "requires: i < (0 < len(a)) < 2;",
+        ),
+        GET.replace("body: { a[i] }", "body: { a[i]. }"),
+        GET.replace("body: { a[i] }", "body: { a[i].foo }"),
     ] {
         let output = check(&source);
         assert_eq!(output.status.code(), Some(1), "{source}");
@@ -131,4 +138,19 @@ fn rejects_unsupported_syntax_without_a_diagnostic_record() {
             "{source}"
         );
     }
+}
+
+#[test]
+fn braced_and_unbraced_conditionals_normalize_comparison_chains_the_same_way() {
+    let unbraced = "atom pick(ref a: [i64], i: i64) -> i64
+requires: 0 <= i && i < len(a);
+ensures: result == 1;
+body: if 0 <= i < len(a) { 1 } else { 0 }";
+    let braced = unbraced
+        .replace("body: if", "body: { if")
+        .replace("else { 0 }", "else { 0 } }");
+    assert_eq!(
+        diagnostic(unbraced, 0)["status"],
+        diagnostic(&braced, 0)["status"]
+    );
 }
