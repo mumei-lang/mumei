@@ -223,7 +223,7 @@ fn lift_case<'ctx>(
     input: Snapshot,
     local: bool,
     context: &'ctx Context,
-) -> Result<Probe<'ctx>, FunctionOutcome> {
+) -> Result<(Probe<'ctx>, LiftedPath<'ctx>), FunctionOutcome> {
     let end = instructions.len() - 1;
     let mut probe = Probe {
         input,
@@ -233,7 +233,7 @@ fn lift_case<'ctx>(
         final_state: None,
         local: None,
     };
-    lift_inner(
+    let mut lifted = lift_inner(
         instructions,
         instructions.len() as u64,
         model,
@@ -241,12 +241,15 @@ fn lift_case<'ctx>(
         context,
         Some(&mut probe),
     )?;
-    Ok(probe)
+    assert_eq!(lifted.paths.len(), 1, "fixture input is concrete");
+    Ok((probe, lifted.paths.pop().unwrap()))
 }
 
 fn compare(
     probe: Probe<'_>,
+    path: LiftedPath<'_>,
     actual: Snapshot,
+    actual_return: u64,
     flags: Flags,
     local: bool,
     context: &Context,
@@ -291,10 +294,16 @@ fn compare(
             ));
         }
     }
-    if state.rsp_offset != actual.rsp_delta {
+    if !matches!(path.return_values.as_slice(), [result] if value(result) == Some(actual_return)) {
+        let modeled: Vec<_> = path.return_values.iter().map(value).collect();
         return Err(format!(
-            "RSP delta: model {}, CPU {}",
-            state.rsp_offset, actual.rsp_delta
+            "completed return: model {modeled:#x?}, CPU {actual_return:#x}"
+        ));
+    }
+    if path.final_rsp_offset != actual.rsp_delta {
+        return Err(format!(
+            "completed RSP delta: model {}, CPU {}",
+            path.final_rsp_offset, actual.rsp_delta
         ));
     }
     if probe.input.incoming != actual.incoming {
@@ -323,19 +332,21 @@ struct Suite<'ctx> {
 
 impl<'ctx> Suite<'ctx> {
     fn new(context: &'ctx Context, spill_type: &str) -> Self {
-        let (parameters, admission) = match spill_type {
+        let (parameters, admission, body) = match spill_type {
             "i64" => (
                 "a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64",
                 RefinedAdmission::Reject,
+                "0",
             ),
             "f64" => (
                 "a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64, i: f64",
                 RefinedAdmission::CompositeV23,
+                "a",
             ),
             _ => unreachable!(),
         };
         let source = format!(
-            "atom fixture({parameters}) -> i64 requires: true; ensures: true; body: {{ 0 }};"
+            "atom fixture({parameters}) -> {spill_type} requires: true; ensures: true; body: {{ {body} }};"
         );
         let model = encode_pure_i64_module(&source, context, true, admission)
             .unwrap()
@@ -358,12 +369,28 @@ impl<'ctx> Suite<'ctx> {
         run_cpu: impl Fn(&Snapshot) -> Snapshot,
     ) {
         let instructions = instructions(code);
+        let returns_f64 = model_result_is_double(&self.model);
         let mut failures = 0;
         for input in inputs {
             let actual = run_cpu(input);
+            let actual_return = if returns_f64 {
+                actual.xmm[0][0]
+            } else {
+                actual.gpr[0]
+            };
             let result = lift_case(&self.model, &instructions, *input, local, self.context)
                 .map_err(|error| format!("model rejected fixture: {error:?}"))
-                .and_then(|probe| compare(probe, actual, flags, local, self.context));
+                .and_then(|(probe, path)| {
+                    compare(
+                        probe,
+                        path,
+                        actual,
+                        actual_return,
+                        flags,
+                        local,
+                        self.context,
+                    )
+                });
             if let Err(error) = result {
                 if failures < 2 {
                     self.mismatches
@@ -579,6 +606,11 @@ fn stack_memory() {
     stack_roundtrip!("reg/mem", "pushq %rsi", "movq %rax, (%rsp)");
     stack_roundtrip!("imm/mem", "pushq %rsi", "movq $-1, (%rsp)");
     stack_roundtrip!("local mem/reg", "pushq %rsi", "movq (%rsp), %rax");
+    check_retq(&mut suite, &inputs);
+    suite.finish();
+}
+
+fn check_retq(suite: &mut Suite<'_>, inputs: &[Snapshot]) {
     // The CPU uses a local call only to supply a real return address.
     // Machine-TV's call abstraction models source calls, not this trampoline.
     suite.check(
@@ -586,10 +618,9 @@ fn stack_memory() {
         &[],
         Flags::All,
         false,
-        &inputs,
+        inputs,
         |input| cpu!(input; "callq 2f", "jmp 3f", "2:", "retq", "3:"),
     );
-    suite.finish();
 }
 
 fn float_inputs() -> Vec<Snapshot> {
@@ -653,6 +684,7 @@ fn scalar_sse() {
         &inputs,
         |input| cpu!(input; "pushq %rsi", "movsd %xmm0, (%rsp)", "popq %rdx"),
     );
+    check_retq(&mut suite, &inputs);
     suite.finish();
 }
 
