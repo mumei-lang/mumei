@@ -1999,6 +1999,19 @@ repetitions stay outside the fragment. See the
 and the
 [grouped const slice](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-grouped-const-declarations-and-implicit-repetition).
 
+### Wave 3 grouped var declarations
+
+Agent's scalar fragment now flattens grouped `var ( ... )` declarations
+through the same binding contract as individual vars: explicit values
+bind pairwise against the pre-state, zero-value forms are dep-free,
+multi-name specs follow the existing declaration rules, `_` discards,
+and empty `var ()` groups are no-ops. Supported channel, function-value,
+pointer and composite shapes keep their individual-var semantics; the
+compact valid form without a final separator remains a tree-sitter parse
+gap and fails closed. This is dependency analysis, not proof, evidence
+or audit verdict integration. See the
+[Agent grouped var slice](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-grouped-var-declarations).
+
 
 ### Wave 3 remaining scalar binary operators
 
