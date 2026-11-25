@@ -6208,7 +6208,8 @@ scheduling keeps the
 host-declared exit-code selection separate, `evidence_acceptance` is not
 accepted, and a stale promotable triple is not left behind. Complete
 captures are unchanged. This is transport integrity only — not output
-meaning, Evidence truth or grade promotion; C11 remains partial.
+meaning, Evidence truth or grade promotion; the C11 contract remained
+partial before the acceptance-completion slice below.
 
 ### C11 plugin contract acceptance completion (mumei-agent #1348)
 
@@ -6229,6 +6230,12 @@ Semantic IR universal, hide lossy transformations, or run Z3 and external
 verifiers unconditionally in parallel. External adoption still requires
 separate maintenance, license/distribution/commercial, CI,
 toolchain-compatibility and cost review.
+
+The sections below remain chronological implementation notes. Statements
+there that C11 "stays partial" describe the state when those earlier slices
+landed, not the current plugin-contract status after #1348; Core-owned
+Evidence meaning/acceptance and grade promotion remain outside the completed
+orchestration contract.
 
 ### Manifest-declared attempt memory bound (mumei-agent #993)
 
