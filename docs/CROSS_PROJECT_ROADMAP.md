@@ -4120,7 +4120,10 @@ that descriptor. It rejects malformed, duplicate-key, foreign or non-accepted
 saved descriptors, then reruns `accept-object` on the pinned inputs. It
 recomputes `evidence_fingerprint` and requires the saved descriptor to equal
 the fresh one field for field. A stale descriptor from other attempt inputs is
-rejected as unbound, and a tampered field is rejected as different. This is
+rejected as unbound, and a tampered field is rejected as different. The
+agent's `native-object-acceptance-recheck` route and MCP tool
+(mumei-agent#1344) run it as a declared attempt. Flat `{f64,i64}` and
+`{i64,f64}` return pairs admitted by C09 (#1470) replay the same way. This is
 partial C10 delivery, not C10 completion. Descriptor and producer
 authenticity, historical execution, dependency or toolchain closure, and
 register-convention, ABI/runtime/OS or final-artifact assurance remain open.

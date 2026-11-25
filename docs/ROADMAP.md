@@ -3224,8 +3224,10 @@ acceptance envelope. It then reruns `accept-object` on the pinned inputs and
 recomputes `evidence_fingerprint`. A saved descriptor for other attempt inputs
 is rejected as unbound, and one that differs in any field is rejected as
 tampered. Malformed, foreign or non-accepted descriptors are rejected before
-the pipeline runs, and an inconclusive fresh acceptance exits 3. This is a
-partial C10 slice, not C10 completion. Descriptor and producer authenticity,
+the pipeline runs, and an inconclusive fresh acceptance exits 3. After C09
+(#1470), flat `{f64,i64}` and `{i64,f64}` return pairs replay as consistent,
+and a tampered `functions` outcome or the other field order's descriptor is
+rejected. This is a partial C10 slice, not C10 completion. Descriptor and producer authenticity,
 historical execution, and dependency or toolchain closure stay unchecked. So
 do register-convention, ABI/runtime/OS and final-artifact assurance. See the
 [replay contract](VERIFICATION_NATIVE.md#saved-object-acceptance-replay).

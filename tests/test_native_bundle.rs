@@ -8207,3 +8207,54 @@ atom main() -> i64 requires: true; ensures: true; body: { quotient_seven(3) };",
     assert!(String::from_utf8_lossy(&output.stderr)
         .contains("no object acceptance consistency result established"));
 }
+
+#[test]
+fn recheck_object_acceptance_replays_mixed_register_return_pairs() {
+    let root = tempfile::tempdir().unwrap();
+    let mut saved = Vec::new();
+    for (name, text) in [
+        (
+            "f64-i64",
+            "struct B { v: f64, t: i64 }\n\
+atom wrap(x: f64, t: i64) -> B requires: t >= 0; ensures: result.t == t; body: { B{v: x, t: t} };\n\
+atom main() -> i64 requires: true; ensures: result == 1; body: { 1 };",
+        ),
+        (
+            "i64-f64",
+            "struct B { t: i64, v: f64 }\n\
+atom wrap(t: i64, x: f64) -> B requires: t >= 0; ensures: result.t == t; body: { B{t: t, v: x} };\n\
+atom main() -> i64 requires: true; ensures: result == 1; body: { 1 };",
+        ),
+    ] {
+        let (source, bundle, id) = build_source(&subdir(root.path(), name), text);
+        let descriptor = save_object_acceptance(source.parent().unwrap(), &source, &bundle, &id);
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&descriptor).unwrap()).unwrap();
+        assert_eq!(
+            value["functions"]["wrap"]["outcome"], "equivalent_within_profile",
+            "{name}: {value}"
+        );
+        assert_success(&recheck_object_acceptance(
+            &source,
+            &bundle,
+            &id,
+            &descriptor,
+        ));
+
+        let mut tampered = value.clone();
+        tampered["functions"]["wrap"]["outcome"] = "outside_profile".into();
+        let tampered_path = source.parent().unwrap().join("tampered.json");
+        fs::write(&tampered_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        assert_rejected(
+            &recheck_object_acceptance(&source, &bundle, &id, &tampered_path),
+            "saved object acceptance descriptor differs from the fresh object acceptance",
+        );
+        saved.push((source, bundle, id, descriptor));
+    }
+    let (_, _, _, f64_first) = &saved[0];
+    let (source, bundle, id, _) = &saved[1];
+    assert_rejected(
+        &recheck_object_acceptance(source, bundle, id, f64_first),
+        "saved object acceptance descriptor is not bound to the fresh attempt inputs",
+    );
+}
