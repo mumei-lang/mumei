@@ -2826,7 +2826,9 @@ bound, the saved descriptor must equal the fresh descriptor field for field. A
 missing, added or edited field anywhere is rejected, including in
 `checks_performed`, `checks_not_performed`, `functions` and the object
 translation record. Success prints the scope and exits 0. Nothing is written to
-stdout on rejection.
+stdout on rejection. Flat two-field `{double,i64}` and `{i64,double}` return
+pairs, which C09 admits through `xmm0` and `rax`, replay the same way. A saved
+descriptor for one field order is rejected as unbound against the other.
 
 A match means only that the saved descriptor is what a fresh `accept-object`
 emits for these pinned inputs. It does not check descriptor or producer
