@@ -6179,6 +6179,22 @@ the byte payload piped to the attempt process's standard input through
 without it. Scheduled attempts never inherit the parent's stdin: no
 declared feed means a closed pipe (deterministic EOF).
 
+### Host-declared source stdin preparation (mumei-agent #1346)
+
+[mumei-agent#1346](https://github.com/mumei-lang/mumei-agent/pull/1346)
+extends `verify-schedule`'s host argv map with the closed object shape
+`{"argv": [...], "stdin": "source"}`; the object may also omit `stdin`,
+which behaves like the legacy argv array. Only the exact `source` declaration
+pipes the source bytes already bound into the schedule to that attempt's
+stdin; legacy argv arrays and stdin-less objects mean no host feed. The host declaration
+takes precedence over manifest `attempt_stdin`, source bytes never enter
+diagnostics or schedule output, and a source larger than the runner's
+bounded feed makes that adapter fail closed as `not_dispatched` so
+permitted fallback can continue. Without any declared feed the child still
+receives a closed pipe, never inherited parent stdin. This is input
+preparation only, not Evidence acceptance, output meaning or grade
+promotion; C11 remains partial.
+
 ### Manifest-declared attempt memory bound (mumei-agent #993)
 
 [mumei-agent#993](https://github.com/mumei-lang/mumei-agent/pull/993)
