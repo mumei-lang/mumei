@@ -328,37 +328,50 @@ fn compare(
     Ok(())
 }
 
+enum ReturnClass {
+    I64,
+    F64,
+}
+
 struct Suite<'ctx> {
     context: &'ctx Context,
     model: PureI64Body<'ctx>,
+    return_class: ReturnClass,
     mismatches: Vec<String>,
 }
 
 impl<'ctx> Suite<'ctx> {
-    fn new(context: &'ctx Context, spill_type: &str) -> Self {
-        let (parameters, admission, body) = match spill_type {
-            "i64" => (
+    fn new(context: &'ctx Context, return_class: ReturnClass) -> Self {
+        let (return_type, parameters, admission, body) = match return_class {
+            ReturnClass::I64 => (
+                "i64",
                 "a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64",
                 RefinedAdmission::Reject,
                 "0",
             ),
-            "f64" => (
+            ReturnClass::F64 => (
+                "f64",
                 "a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64, i: f64",
                 RefinedAdmission::CompositeV23,
                 "a",
             ),
-            _ => unreachable!(),
         };
         let source = format!(
-            "atom fixture({parameters}) -> {spill_type} requires: true; ensures: true; body: {{ {body} }};"
+            "atom fixture({parameters}) -> {return_type} requires: true; ensures: true; body: {{ {body} }};"
         );
         let model = encode_pure_i64_module(&source, context, true, admission)
             .unwrap()
             .pop()
             .unwrap();
+        assert_eq!(
+            model_result_is_double(&model),
+            matches!(return_class, ReturnClass::F64),
+            "model misclassified the fixture's declared {return_type} return"
+        );
         Self {
             context,
             model,
+            return_class,
             mismatches: Vec::new(),
         }
     }
@@ -373,14 +386,12 @@ impl<'ctx> Suite<'ctx> {
         run_cpu: impl Fn(&Snapshot) -> Snapshot,
     ) {
         let instructions = instructions(code);
-        let returns_f64 = model_result_is_double(&self.model);
         let mut failures = 0;
         for input in inputs {
             let actual = run_cpu(input);
-            let actual_return = if returns_f64 {
-                actual.xmm[0][0]
-            } else {
-                actual.gpr[0]
+            let actual_return = match self.return_class {
+                ReturnClass::I64 => actual.gpr[0],
+                ReturnClass::F64 => actual.xmm[0][0],
             };
             let result = lift_case(&self.model, &instructions, *input, local, self.context)
                 .map_err(|error| format!("model rejected fixture: {error:?}"))
@@ -480,7 +491,7 @@ fn concrete_inputs() -> Vec<Snapshot> {
 #[test]
 fn integer() {
     let context = Context::new(&Config::new());
-    let mut suite = Suite::new(&context, "i64");
+    let mut suite = Suite::new(&context, ReturnClass::I64);
     let inputs = concrete_inputs();
     macro_rules! binary {
         ($flags:expr, $source:literal, $dest:literal; $($mnemonic:literal),+) => {
@@ -576,7 +587,7 @@ fn integer() {
 #[test]
 fn stack_memory() {
     let context = Context::new(&Config::new());
-    let mut suite = Suite::new(&context, "i64");
+    let mut suite = Suite::new(&context, ReturnClass::I64);
     let inputs = concrete_inputs();
     macro_rules! load_op {
         ($($mnemonic:literal),+) => {
@@ -666,7 +677,7 @@ fn float_inputs() -> Vec<Snapshot> {
 #[test]
 fn scalar_sse() {
     let context = Context::new(&Config::new());
-    let mut suite = Suite::new(&context, "f64");
+    let mut suite = Suite::new(&context, ReturnClass::F64);
     let inputs = float_inputs();
     macro_rules! sse {
         ($flags:expr; $($mnemonic:literal),+) => {
@@ -695,8 +706,8 @@ fn scalar_sse() {
 #[test]
 fn conditions() {
     let context = Context::new(&Config::new());
-    let mut integers = Suite::new(&context, "i64");
-    let mut floats = Suite::new(&context, "f64");
+    let mut integers = Suite::new(&context, ReturnClass::I64);
+    let mut floats = Suite::new(&context, ReturnClass::F64);
     let integer_inputs = concrete_inputs();
     let float_inputs = float_inputs();
     macro_rules! both_forms {
@@ -752,7 +763,7 @@ fn conditions() {
 #[test]
 fn division() {
     let context = Context::new(&Config::new());
-    let mut suite = Suite::new(&context, "i64");
+    let mut suite = Suite::new(&context, ReturnClass::I64);
     let inputs = concrete_inputs();
     let unsigned = |narrow: bool| {
         inputs
