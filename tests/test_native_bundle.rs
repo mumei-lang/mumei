@@ -1,13 +1,14 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use mumei_core::native_bundle::{self, BundleFile, RECORD_FILE};
+use mumei_core::producer_signature;
 use mumei_core::semantic_contract::{extract_pure_i64_module_contracts, RefinedAdmission};
 use object::{Object, ObjectSection, ObjectSymbol, SymbolKind};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::Path,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 
 const GOOD: &str = "atom main() -> i64 requires: true; ensures: result == 7; body: { 7 };";
@@ -4633,11 +4634,9 @@ fn module_bundle_with_f64_leaves_builds_as_v15_and_rechecks() {
     assert_success(&check(&source, &bundle, &id));
     assert_success(&recheck(&source, &bundle, &id));
     assert_success(&recheck_llvm(&source, &bundle, &id));
-    // Step 3f: scalar `f64` signatures join the direct LLVM-IR
-    // comparison — `pick` selects between two `double` leaves
-    // bit-exactly and records `equivalent`, while `wrap`'s
-    // mixed-leaf aggregate result and `unwrap`'s composite
-    // parameter stay outside the subset with their reason recorded.
+    // The direct LLVM-IR comparison admits `pick`'s scalar `f64`
+    // result and `wrap`'s flat mixed result. `unwrap`'s composite
+    // parameter stays outside the subset.
     let machine_tv = recheck_machine_tv(&source, &bundle, &id, true);
     assert_success(&machine_tv);
     let machine_tv: serde_json::Value = serde_json::from_slice(&machine_tv.stdout).unwrap();
@@ -4650,17 +4649,15 @@ fn module_bundle_with_f64_leaves_builds_as_v15_and_rechecks() {
         .unwrap();
     assert_eq!(equivalence["result"], "checked");
     let detail = equivalence["detail"].as_str().unwrap();
-    for function in ["pick", "main"] {
-        assert!(
-            detail.contains(&format!("{function}: equivalent")),
-            "{detail}"
-        );
-    }
-    for function in ["wrap", "unwrap"] {
-        assert!(
-            detail.contains(&format!("{function}: unsupported_signature")),
-            "{detail}"
-        );
+    let (_, outcomes) = detail.split_once(" (").unwrap();
+    let outcomes: Vec<_> = outcomes.strip_suffix(')').unwrap().split(", ").collect();
+    for expected in [
+        "pick: equivalent",
+        "__mumei_user_main: equivalent",
+        "wrap: equivalent",
+        "unwrap: unsupported_signature",
+    ] {
+        assert!(outcomes.contains(&expected), "{detail}");
     }
     // A v15 record re-pinned as v14 is refused: v14 keeps f64 leaves
     // out of the vocabulary.
@@ -6440,6 +6437,139 @@ fn accept_object_emits_bounded_descriptor_and_text_for_module_bundle() {
 }
 
 #[test]
+fn accept_object_signs_exact_descriptor_bytes_after_pinned_checks() {
+    const FAKE_KEY: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const INVALID_KEY: &str = "FAKE_PRIVATE_KEY_SENTINEL";
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), MODULE);
+    let key = root.path().join("key.hex");
+    let signature_path = root.path().join("descriptor.sig.json");
+    fs::write(&key, FAKE_KEY).unwrap();
+    let signed_command = |pin: &str, format_args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));
+        command
+            .args(["native-bundle", "accept-object"])
+            .arg(&bundle)
+            .arg(&source)
+            .args(["--expected-build-id", pin, "--key-file"])
+            .arg(&key)
+            .args(["--producer-key-id", "test-producer", "--signature-output"])
+            .arg(&signature_path)
+            .args(format_args);
+        command
+    };
+    let signed_acceptance =
+        |pin: &str, format_args: &[&str]| signed_command(pin, format_args).output().unwrap();
+    let unsigned = accept_object(&source, &bundle, &id, true);
+    assert_success(&unsigned);
+    let signed = signed_acceptance(&id, &["--json"]);
+    assert_success(&signed);
+    assert_eq!(signed.stdout, unsigned.stdout);
+    assert!(signed.stdout.ends_with(b"\n"));
+    assert!(signed.stderr.is_empty());
+    let envelope_bytes = fs::read(&signature_path).unwrap();
+    for bytes in [&signed.stdout, &signed.stderr, &envelope_bytes] {
+        assert!(!String::from_utf8_lossy(bytes).contains(FAKE_KEY));
+    }
+    let envelope: serde_json::Value = serde_json::from_slice(&envelope_bytes).unwrap();
+    assert!(producer_signature::envelope_match(&envelope));
+    assert_eq!(envelope["producer_key_id"], "test-producer");
+    let signature = envelope["signature"].as_str().unwrap();
+    let public_key = producer_signature::decode_secret_key_bytes(FAKE_KEY.as_bytes().to_vec())
+        .unwrap()
+        .verifying_key()
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let digest = producer_signature::subject_digest(&signed.stdout);
+    assert_eq!(envelope["subject_digest"], digest);
+    assert!(producer_signature::signature_valid(
+        &public_key,
+        signature,
+        digest.as_bytes()
+    ));
+    let mut changed: serde_json::Value = serde_json::from_slice(&signed.stdout).unwrap();
+    for check in [
+        "producer_authenticity",
+        "descriptor_authenticity",
+        "historical_execution",
+    ] {
+        assert!(changed["checks_not_performed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == check));
+    }
+    changed["accepted"] = serde_json::json!(false);
+    let mut changed = serde_json::to_vec_pretty(&changed).unwrap();
+    changed.push(b'\n');
+    for bytes in [&changed[..], &signed.stdout[..signed.stdout.len() - 1]] {
+        assert!(!producer_signature::signature_valid(
+            &public_key,
+            signature,
+            producer_signature::subject_digest(bytes).as_bytes()
+        ));
+    }
+
+    let assert_rejected = |output: Output, exit| {
+        assert_eq!(output.status.code(), Some(exit));
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!error.contains(FAKE_KEY));
+        assert!(!error.contains(INVALID_KEY));
+    };
+    fs::write(&signature_path, b"existing signature").unwrap();
+    let no_overwrite = signed_acceptance(&id, &["--json"]);
+    assert!(String::from_utf8_lossy(&no_overwrite.stderr)
+        .contains("cannot publish native object descriptor signature"));
+    assert_rejected(no_overwrite, 1);
+    assert_eq!(fs::read(&signature_path).unwrap(), b"existing signature");
+    fs::remove_file(&signature_path).unwrap();
+    let entries = || {
+        fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>()
+    };
+    let before = entries();
+    let full = fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let failed_write = signed_command(&id, &["--json"])
+        .stdout(Stdio::from(full))
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&failed_write.stderr)
+        .contains("cannot write native object acceptance descriptor"));
+    assert_rejected(failed_write, 1);
+    assert!(!signature_path.exists());
+    assert_eq!(entries(), before);
+    assert_success(&signed_acceptance(&id, &["--json"]));
+    assert_eq!(fs::read(&signature_path).unwrap(), envelope_bytes);
+    fs::remove_file(&signature_path).unwrap();
+    assert_rejected(signed_acceptance(&id, &[]), 2);
+    assert!(!signature_path.exists());
+    fs::write(&key, INVALID_KEY).unwrap();
+    assert_rejected(signed_acceptance(&id, &["--json"]), 1);
+    assert!(!signature_path.exists());
+    fs::write(&key, FAKE_KEY).unwrap();
+    let object_path = bundle.join(BundleFile::Object.file_name());
+    let object_bytes = fs::read(&object_path).unwrap();
+    fs::remove_file(&object_path).unwrap();
+    assert_rejected(signed_acceptance(&id, &["--json"]), 1);
+    assert!(!signature_path.exists());
+    fs::write(&object_path, b"replaced object").unwrap();
+    assert_rejected(signed_acceptance(&id, &["--json"]), 1);
+    assert!(!signature_path.exists());
+    fs::write(&object_path, object_bytes).unwrap();
+    fs::write(&source, format!("{MODULE}\n")).unwrap();
+    assert_rejected(signed_acceptance(&id, &["--json"]), 1);
+    assert!(!signature_path.exists());
+}
+
+#[test]
 fn accept_object_fingerprint_binds_multifile_record_source_digest() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build_multifile(root.path());
@@ -8029,6 +8159,140 @@ fn recheck_object_acceptance_accepts_fresh_descriptor_without_authenticity() {
 }
 
 #[test]
+fn recheck_object_acceptance_checks_exact_descriptor_signature_when_supplied() {
+    const FAKE_KEY: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const OTHER_KEY: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    let public_key = |secret: &str| {
+        producer_signature::decode_secret_key_bytes(secret.as_bytes().to_vec())
+            .unwrap()
+            .verifying_key()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(&subdir(root.path(), "module"), MODULE);
+    let key = root.path().join("producer.key");
+    let signature = root.path().join("descriptor.sig.json");
+    let descriptor = root.path().join("descriptor.json");
+    fs::write(&key, FAKE_KEY).unwrap();
+    let accepted = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args(["native-bundle", "accept-object"])
+        .arg(&bundle)
+        .arg(&source)
+        .args(["--expected-build-id", &id, "--json", "--key-file"])
+        .arg(&key)
+        .args(["--producer-key-id", "object-producer", "--signature-output"])
+        .arg(&signature)
+        .args(["--produced-at", "2026-01-02T03:04:05Z"])
+        .output()
+        .unwrap();
+    assert_success(&accepted);
+    assert!(!String::from_utf8_lossy(&accepted.stdout).contains(FAKE_KEY));
+    assert!(!String::from_utf8_lossy(&accepted.stderr).contains(FAKE_KEY));
+    fs::write(&descriptor, &accepted.stdout).unwrap();
+    let producer_key = public_key(FAKE_KEY);
+    let other_producer_key = public_key(OTHER_KEY);
+
+    let recheck = |extra: &[String]| {
+        let mut args = vec![
+            "native-bundle".to_owned(),
+            "recheck-object-acceptance".to_owned(),
+            bundle.to_string_lossy().into_owned(),
+            source.to_string_lossy().into_owned(),
+            descriptor.to_string_lossy().into_owned(),
+            "--expected-build-id".to_owned(),
+            id.clone(),
+        ];
+        args.extend(extra.iter().cloned());
+        let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        cli(&refs)
+    };
+    let signature_args = || {
+        vec![
+            "--signature".to_owned(),
+            signature.to_string_lossy().into_owned(),
+            "--producer-key".to_owned(),
+            producer_key.clone(),
+            "--expected-producer-key".to_owned(),
+            "object-producer".to_owned(),
+            "--reference-time".to_owned(),
+            "2026-01-02T03:04:10Z".to_owned(),
+            "--max-age-seconds".to_owned(),
+            "5".to_owned(),
+        ]
+    };
+
+    let output = recheck(&signature_args());
+    assert_success(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Producer signature binding: checked for the exact saved descriptor bytes")
+    );
+    assert!(stdout.contains(
+        "optional key-label, freshness, revocation and registry gates only as explicitly supplied"
+    ));
+    assert!(!stdout.contains("artifact_verified"));
+    assert!(!stdout.contains(FAKE_KEY));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(FAKE_KEY));
+
+    let mut too_strict_args = signature_args();
+    let max_age_index = too_strict_args.len() - 1;
+    too_strict_args[max_age_index] = "4".to_owned();
+    assert_rejected(
+        &recheck(&too_strict_args),
+        "producer signature binding failed",
+    );
+
+    let missing_bundle = root.path().join("missing-bundle");
+    let mut ordered_args = vec![
+        "native-bundle".to_owned(),
+        "recheck-object-acceptance".to_owned(),
+        missing_bundle.to_string_lossy().into_owned(),
+        source.to_string_lossy().into_owned(),
+        descriptor.to_string_lossy().into_owned(),
+        "--expected-build-id".to_owned(),
+        id.clone(),
+    ];
+    let mut wrong_key_ordered_args = signature_args();
+    wrong_key_ordered_args[3] = other_producer_key.clone();
+    ordered_args.extend(wrong_key_ordered_args);
+    let ordered_refs = ordered_args.iter().map(String::as_str).collect::<Vec<_>>();
+    assert_rejected(&cli(&ordered_refs), "producer signature binding failed");
+
+    let mut wrong_key_args = signature_args();
+    wrong_key_args[3] = other_producer_key;
+    assert_rejected(
+        &recheck(&wrong_key_args),
+        "producer signature binding failed",
+    );
+
+    let mut wrong_label_args = signature_args();
+    wrong_label_args[5] = "other-producer".to_owned();
+    assert_rejected(
+        &recheck(&wrong_label_args),
+        "producer signature binding failed",
+    );
+
+    let original = fs::read(&descriptor).unwrap();
+    fs::write(&descriptor, [&original[..], b" "].concat()).unwrap();
+    assert_rejected(
+        &recheck(&signature_args()),
+        "producer signature binding failed",
+    );
+    fs::write(&descriptor, original).unwrap();
+
+    let envelope_bytes = fs::read(&signature).unwrap();
+    fs::write(&signature, b"{}").unwrap();
+    assert_rejected(
+        &recheck(&signature_args()),
+        "producer signature binding failed",
+    );
+    fs::write(&signature, envelope_bytes).unwrap();
+}
+
+#[test]
 fn recheck_object_acceptance_rejects_unbound_or_tampered_descriptors() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build_source(&subdir(root.path(), "module"), MODULE);
@@ -8210,4 +8474,55 @@ atom main() -> i64 requires: true; ensures: true; body: { quotient_seven(3) };",
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr)
         .contains("no object acceptance consistency result established"));
+}
+
+#[test]
+fn recheck_object_acceptance_replays_mixed_register_return_pairs() {
+    let root = tempfile::tempdir().unwrap();
+    let mut saved = Vec::new();
+    for (name, text) in [
+        (
+            "f64-i64",
+            "struct B { v: f64, t: i64 }\n\
+atom wrap(x: f64, t: i64) -> B requires: t >= 0; ensures: result.t == t; body: { B{v: x, t: t} };\n\
+atom main() -> i64 requires: true; ensures: result == 1; body: { 1 };",
+        ),
+        (
+            "i64-f64",
+            "struct B { t: i64, v: f64 }\n\
+atom wrap(t: i64, x: f64) -> B requires: t >= 0; ensures: result.t == t; body: { B{t: t, v: x} };\n\
+atom main() -> i64 requires: true; ensures: result == 1; body: { 1 };",
+        ),
+    ] {
+        let (source, bundle, id) = build_source(&subdir(root.path(), name), text);
+        let descriptor = save_object_acceptance(source.parent().unwrap(), &source, &bundle, &id);
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&descriptor).unwrap()).unwrap();
+        assert_eq!(
+            value["functions"]["wrap"]["outcome"], "equivalent_within_profile",
+            "{name}: {value}"
+        );
+        assert_success(&recheck_object_acceptance(
+            &source,
+            &bundle,
+            &id,
+            &descriptor,
+        ));
+
+        let mut tampered = value.clone();
+        tampered["functions"]["wrap"]["outcome"] = "outside_profile".into();
+        let tampered_path = source.parent().unwrap().join("tampered.json");
+        fs::write(&tampered_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        assert_rejected(
+            &recheck_object_acceptance(&source, &bundle, &id, &tampered_path),
+            "saved object acceptance descriptor differs from the fresh object acceptance",
+        );
+        saved.push((source, bundle, id, descriptor));
+    }
+    let (_, _, _, f64_first) = &saved[0];
+    let (source, bundle, id, _) = &saved[1];
+    assert_rejected(
+        &recheck_object_acceptance(source, bundle, id, f64_first),
+        "saved object acceptance descriptor is not bound to the fresh attempt inputs",
+    );
 }

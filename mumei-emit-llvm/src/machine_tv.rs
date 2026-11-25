@@ -268,9 +268,9 @@ pub enum IrObjectEquivalence {
 /// IR ↔ object comparison's subset (design memo §7 Step 3
 /// slices): scalar parameters (one 64-bit leaf, integer or f64
 /// bit-pattern), scalar or all-integer aggregate results
-/// (register-resident or `sret` memory-class), scalar-i64 call
-/// sites, bounded memory — no array params, doubles inside
-/// aggregates, FP arithmetic, or loops.
+/// (register-resident or `sret` memory-class), flat mixed
+/// `i64`/`double` register pairs, scalar-i64 call sites, and
+/// bounded memory — no array params, FP arithmetic, or loops.
 /// Admission is semantic, not only inspection: a signature inside this
 /// subset makes `evaluate_machine_tv` compare the lifted machine code
 /// against the IR encoding instead of the source model, and the
@@ -290,20 +290,16 @@ pub fn ir_object_signature_liftable(model: &PureI64Body) -> bool {
         // register-resident budget (rax/rdx/rcx) directly, and beyond
         // it through `sret` — the callee stores leaf `i` at byte
         // offset `8 * i` through the hidden result pointer, which the
-        // lifter already records in `sret_stores`. An f64 or SSE leaf
-        // stays outside — the leaf check below is what keeps a
-        // mixed-class sret shape out too.
+        // lifter already records in `sret_stores`.
         && model.result_shape.is_none_or(|count| {
             count <= INTEGER_RESULT_REGISTERS.len()
                 || sret_result_leaf_count(model) == Some(count)
         })
-        // Every declared aggregate result leaf an integer leaf: an
-        // f64 leaf (`[true]`) inside a struct result is outside, and
-        // a 128-bit aggregate field stays indistinguishable here —
+        // A 128-bit aggregate field stays indistinguishable here —
         // `{i128}` and `{i64, i64}` both flatten to two `[false]`
-        // slots — so the encode-side `aggregate_all_i64_leaves` gate
-        // fails both closed anyway. A scalar result admits either
-        // leaf kind: an f64 leaf compares its IEEE-754 bit pattern
+        // slots — so the encode side checks exact field types and
+        // enforces flatness for mixed register pairs. A scalar result
+        // admits either leaf kind: f64 compares its IEEE-754 bit pattern
         // (pass-through/select only — FP arithmetic stays gated out
         // by `f64_arithmetic: false` on the encode call), and an
         // i128 result (`[false, false]` on a `None` shape, only
@@ -313,7 +309,11 @@ pub fn ir_object_signature_liftable(model: &PureI64Body) -> bool {
         // genuinely void atom is already excluded by the source
         // signature check upstream.
         && match model.result_shape {
-            Some(_) => model.result_leaf_doubles.iter().all(|leaf| !*leaf),
+            Some(count) => {
+                model.result_leaf_doubles.iter().all(|leaf| !*leaf)
+                    || (count == 2
+                        && matches!(model.result_leaf_doubles.as_slice(), [false, true] | [true, false]))
+            }
             None => true,
         }
         && model.result_leaf_doubles.len() <= result_leaf_count
@@ -381,9 +381,10 @@ fn scalar_i64_call_site(site: &CallSite) -> bool {
 /// arithmetic is gated out by `f64_arithmetic: false` on the encode
 /// call; plus scalar `i128`/`u128` on wide-scalar modules, compared
 /// as one 128-bit `rdx:rax` edge) and all-`i64` aggregate results
-/// (register-resident or `sret` memory-class): aggregate f64
-/// leaves, composite or wider-than-128 inputs, non-scalar call
-/// sites, and loops return `NotLiftable`. For
+/// (register-resident or `sret` memory-class), plus flat mixed
+/// `i64`/`double` register pairs: other aggregate f64 results,
+/// composite or wider-than-128 inputs, non-scalar call sites,
+/// and loops return `NotLiftable`. For
 /// every lifted path the machine return must equal the IR return of
 /// some covering edge whose definedness obligations hold and whose
 /// call-argument obligations all hold; an uncovered path, a diverging
@@ -509,7 +510,8 @@ pub fn check_function_with_frame_memory<'ctx>(
 /// 3a). Scoped to 64-bit scalar signatures (plus scalar `i128`/`u128`
 /// on wide-scalar modules, compared as one 128-bit `rdx:rax` edge)
 /// and all-`i64` aggregate results (register-resident or `sret`
-/// memory-class): any other shape reports `OutsideProfile`.
+/// memory-class), plus flat mixed `i64`/`double` register pairs:
+/// any other shape reports `OutsideProfile`.
 pub fn check_function_with_frame_memory_against_ir<'ctx>(
     bytes: &[u8],
     address: u64,
@@ -6838,6 +6840,207 @@ entry:
                 }
             );
         }
+    }
+
+    #[test]
+    fn ir_object_equivalence_compares_flat_mixed_register_pairs() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        for (fields, ir_type, int_index, double_index) in [
+            ("x: i64, y: f64", "{ i64, double }", 0, 1),
+            ("y: f64, x: i64", "{ double, i64 }", 1, 0),
+        ] {
+            let source = format!(
+                "struct P {{ {fields} }}\n\
+                 atom make(x: i64, y: f64, z: f64) -> P requires: true; ensures: true; body: {{ P {{ x: x, y: y }} }};"
+            );
+            let model = source_model_named_with_admission(
+                &source,
+                "make",
+                &context,
+                RefinedAdmission::CompositeV23,
+            );
+            assert!(ir_object_signature_liftable(&model));
+            let ir = |double| {
+                format!(
+                    r#"target triple = "x86_64-unknown-linux-gnu"
+define {ir_type} @make(i64 %x, double %y, double %z) {{
+  %first = insertvalue {ir_type} undef, i64 %x, {int_index}
+  %result = insertvalue {ir_type} %first, double {double}, {double_index}
+  ret {ir_type} %result
+}}
+"#
+                )
+            };
+            let matching_ir = ir("%y");
+            let (ir_returns, ir_definedness) = unsafe {
+                crate::translation_validation::encode_ir_function_for_comparison(
+                    matching_ir.as_bytes(),
+                    "make",
+                    &model,
+                    false,
+                    &context,
+                )
+            }
+            .unwrap();
+            for (lowering, expected, expected_with_frame) in [
+                (
+                    matching_ir,
+                    IrObjectEquivalence::Equivalent,
+                    FunctionOutcome::Equivalent,
+                ),
+                (
+                    ir("%z"),
+                    IrObjectEquivalence::Different,
+                    FunctionOutcome::Different,
+                ),
+            ] {
+                let (address, bytes, targets) = compiled_function_with_targets(&lowering, "make");
+                assert_eq!(
+                    check_function_against_ir(
+                        &bytes,
+                        address,
+                        &model,
+                        &ir_returns,
+                        &ir_definedness,
+                        &targets,
+                        &context,
+                    ),
+                    expected,
+                    "{ir_type}",
+                );
+                assert_eq!(
+                    check_function_with_frame_memory_against_ir(
+                        &bytes,
+                        address,
+                        &model,
+                        &ir_returns,
+                        &ir_definedness,
+                        &targets,
+                        &context,
+                    )
+                    .0,
+                    expected_with_frame,
+                    "{ir_type}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ir_object_equivalence_compares_mixed_register_pair_nan_payloads() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model_named_with_admission(
+            "struct P { x: i64, y: f64 }\n\
+             atom make(x: i64, y: f64) -> P requires: true; ensures: true; body: { P { x: x, y: y } };",
+            "make",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let bytes = [
+            0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8,
+            0x7f, // movabsq $0x7FF8000000000000, %rax
+            0x66, 0x48, 0x0f, 0x6e, 0xc0, // movq %rax, %xmm0
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0xc3, // retq
+        ];
+        let targets = BTreeMap::new();
+        for (nan, expected, expected_with_frame) in [
+            (
+                "0x7FF8000000000000",
+                IrObjectEquivalence::Equivalent,
+                FunctionOutcome::Equivalent,
+            ),
+            (
+                "0x7FF8000000000001",
+                IrObjectEquivalence::Different,
+                FunctionOutcome::Different,
+            ),
+        ] {
+            let ir = format!(
+                r#"target triple = "x86_64-unknown-linux-gnu"
+define {{ i64, double }} @make(i64 %x, double %y) {{
+  %first = insertvalue {{ i64, double }} undef, i64 %x, 0
+  %result = insertvalue {{ i64, double }} %first, double {nan}, 1
+  ret {{ i64, double }} %result
+}}
+"#
+            );
+            let (ir_returns, ir_definedness) = unsafe {
+                crate::translation_validation::encode_ir_function_for_comparison(
+                    ir.as_bytes(),
+                    "make",
+                    &model,
+                    false,
+                    &context,
+                )
+            }
+            .unwrap();
+            assert_eq!(
+                check_function_against_ir(
+                    &bytes,
+                    0,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &targets,
+                    &context,
+                ),
+                expected,
+                "{nan}",
+            );
+            assert_eq!(
+                check_function_with_frame_memory_against_ir(
+                    &bytes,
+                    0,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &targets,
+                    &context,
+                )
+                .0,
+                expected_with_frame,
+                "{nan}",
+            );
+        }
+    }
+
+    #[test]
+    fn ir_object_equivalence_rejects_nested_mixed_register_pair() {
+        let context = Context::new(&Config::new());
+        let model = source_model_named_with_admission(
+            "struct P { x: i64, y: f64 }\n\
+             atom make(x: i64, y: f64) -> P requires: true; ensures: true; body: { P { x: x, y: y } };",
+            "make",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(ir_object_signature_liftable(&model));
+        let nested_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { { i64 }, double } @make(i64 %x, double %y) {
+  %inner = insertvalue { i64 } undef, i64 %x, 0
+  %first = insertvalue { { i64 }, double } undef, { i64 } %inner, 0
+  %result = insertvalue { { i64 }, double } %first, double %y, 1
+  ret { { i64 }, double } %result
+}
+"#;
+        let error = unsafe {
+            crate::translation_validation::encode_ir_function_for_comparison(
+                nested_ir.as_bytes(),
+                "make",
+                &model,
+                false,
+                &context,
+            )
+        }
+        .unwrap_err();
+        assert_eq!(error.0, "LLVM return outside comparison subset");
     }
 
     #[test]

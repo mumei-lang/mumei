@@ -3,7 +3,8 @@
 ステータス: Step 1（skipped 分解 + `checks_not_performed` 非 `.text` 明示、#1421）、
 Step 2（辺 `result`/`validation` 配線、#1423）、Step 3（`object_data_correspondence`
 項目、#1429）、Step 3'（`object_symbol_attribute_correspondence` 項目、本差分）
-実装済み。Step 4（subset 拡張）は未着手。`docs/DESIGN_OBJECT_TRANSLATION_CORRESPONDENCE.md`
+実装済み。Step 4（subset 拡張）は mixed register pair のみ着手（#789）。
+`docs/DESIGN_OBJECT_TRANSLATION_CORRESPONDENCE.md`
 の §4 条件 4(a) — 「machine-TV の比較対象を LLVM IR 再導出モデルに切り替える」
 本筋路線 — が Step 3a–3f スライス（#1382–#1398）として既に着地済みのため、
 本メモは残りの昇格条件と語彙・欠落領域を棚卸しする。
@@ -160,8 +161,17 @@ producer が何を検証済みか・何が欠けているか・昇格の段階�
   実体は対象外、導出不能 linkage・同名多重定義・シンボル不在は
   `underivable`/`conflicting`/`missing` として `unchecked` に倒す。
   `.text` 辺の昇格ゲートは変更しない（Step 3 と同じく別 item）。
-- **Step 4（subset 拡張・deferred 依存）**: cyclic CFG / loop beyond bound 等
-  deferred セットの扱いが決まり次第、liftable 範囲を追従拡大。
+- **Step 4（#789、部分解凍）**: Linux x86-64 の flat な LLVM 戻り値
+  `{ i64, double }` / `{ double, i64 }` のみ追加する。既存の INTEGER/SSE
+  リフトを再利用し、`rax` と `xmm0` を LLVM のフィールド順で連結して
+  ビット単位で照合する。比較は対象の LLVM IR と object の関数本体の間に限り、
+  optimizer の履歴・linker・runtime・実行ファイルの正しさは主張しない。
+  nested mixed 結果、mixed `sret`、集約引数、非 scalar-i64 call は今回対象外。
+  x87 sret はリフト未対応、MXCSR/NaN の演算意味論はモデル外、i128 mul
+  limbs と `srem i128` recheck はそれぞれ異なる比較辺でソルバ未決着のため
+  凍結を継続する。cyclic CFG / loop beyond bound も、既存の有限展開が
+  ループ帰納法を代用しないため凍結を継続する。#1446 の Lean/Sail 命令照合は
+  別段階であり、受理条件・verdict・grade は変更しない。
 
 ## 7. 決定点（推奨対応つき）
 

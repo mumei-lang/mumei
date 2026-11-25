@@ -1,7 +1,12 @@
-use crate::{cli::NativeBundleCommand, codegen::MUMEI_RUNTIME_C, linker};
+use crate::{
+    cli::{NativeBundleCommand, ObjectDescriptorOutputArgs},
+    codegen::MUMEI_RUNTIME_C,
+    linker,
+};
 use mumei_core::semantic_contract::RefinedAdmission;
 use mumei_core::{
-    hir, native_bundle::*, parser, proof_cert, resolver, semantic_contract, verification,
+    hir, native_bundle::*, parser, producer_signature, proof_cert, resolver, semantic_contract,
+    verification,
 };
 use mumei_emit_llvm::{
     machine_tv::{self, FunctionOutcome},
@@ -914,7 +919,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
             bundle,
             source,
             expected_build_id,
-            json,
+            output,
         } => match evaluate_object_acceptance(
             Path::new(&bundle),
             Path::new(&source),
@@ -925,7 +930,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                 report_object_acceptance_inconclusive(&message);
             }
             Ok(ObjectAcceptance::Accepted(accepted)) => {
-                write_object_machine_tv_acceptance(&accepted, &expected_build_id, json)
+                write_object_machine_tv_acceptance(&accepted, &expected_build_id, &output)
             }
         },
         NativeBundleCommand::RecheckObjectAcceptance {
@@ -933,11 +938,13 @@ pub(crate) fn run(command: NativeBundleCommand) {
             source,
             descriptor,
             expected_build_id,
+            signature,
         } => recheck_object_acceptance(
             Path::new(&bundle),
             Path::new(&source),
             Path::new(&descriptor),
             &expected_build_id,
+            &signature,
         ),
         NativeBundleCommand::RecheckExitStatus { bundle, source, expected_build_id } => {
             match recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id) {
@@ -6812,11 +6819,27 @@ fn recheck_object_acceptance(
     source: &Path,
     descriptor: &Path,
     expected_build_id: &str,
+    signature: &crate::cli::SignatureArgs,
 ) -> Result<(), BundleError> {
     if !is_digest(expected_build_id) {
         return Err(BundleError("invalid expected build ID"));
     }
-    let saved = object_acceptance::decode(&read_regular(descriptor, MAX_EVIDENCE_BYTES)?)?;
+    let saved_bytes = read_regular(descriptor, MAX_EVIDENCE_BYTES)?;
+    let saved = object_acceptance::decode(&saved_bytes)?;
+    let signature_acceptance = super::evidence::load_signature_acceptance(
+        super::evidence::signature_options(signature),
+        &producer_signature::subject_digest(&saved_bytes),
+        None,
+    )
+    .map_err(BundleError)?;
+    if signature_acceptance
+        .as_ref()
+        .is_some_and(|acceptance| !acceptance.binding.failed_fields().is_empty())
+    {
+        return Err(BundleError(
+            "saved object acceptance descriptor producer signature binding failed",
+        ));
+    }
     let accepted = match evaluate_object_acceptance(bundle, source, expected_build_id)? {
         ObjectAcceptance::Accepted(accepted) => accepted,
         ObjectAcceptance::Inconclusive(message) => {
@@ -6839,10 +6862,17 @@ fn recheck_object_acceptance(
             "saved object acceptance descriptor differs from the fresh object acceptance",
         ));
     }
-    println!(
-        "Saved native object acceptance descriptor consistent with a fresh object acceptance of the pinned inputs.\nScope: {}\nDescriptor authenticity, producer authenticity and historical execution: not checked.",
-        fresh["scope"].as_str().unwrap_or_default()
-    );
+    if signature_acceptance.is_some() {
+        println!(
+            "Saved native object acceptance descriptor consistent with a fresh object acceptance of the pinned inputs.\nScope: {}\nProducer signature binding: checked for the exact saved descriptor bytes; optional key-label, freshness, revocation and registry gates only as explicitly supplied.\nDescriptor authenticity beyond that binding, real-world producer identity, historical execution, register convention, ABI/runtime and OS semantics: not checked.",
+            fresh["scope"].as_str().unwrap_or_default()
+        );
+    } else {
+        println!(
+            "Saved native object acceptance descriptor consistent with a fresh object acceptance of the pinned inputs.\nScope: {}\nDescriptor authenticity, producer authenticity and historical execution: not checked.",
+            fresh["scope"].as_str().unwrap_or_default()
+        );
+    }
     Ok(())
 }
 
@@ -6870,6 +6900,40 @@ fn object_evidence_fingerprint(
     let bytes = serde_json::to_vec(&pins)
         .map_err(|_| BundleError("cannot encode native object acceptance pins"))?;
     Ok(sha256(&bytes))
+}
+
+const OBJECT_DESCRIPTOR_SIGNATURE_PUBLISH_ERROR: BundleError =
+    BundleError("cannot publish native object descriptor signature");
+
+fn stage_object_descriptor_signature(
+    descriptor: &[u8],
+    path: &Path,
+    key_file: &Path,
+    producer_key_id: &str,
+    produced_at: Option<&str>,
+) -> Result<tempfile::NamedTempFile, BundleError> {
+    if fs::symlink_metadata(path).is_ok() {
+        return Err(OBJECT_DESCRIPTOR_SIGNATURE_PUBLISH_ERROR);
+    }
+    if descriptor.len() as u64 > producer_signature::MAX_SUBJECT_BYTES {
+        return Err(BundleError(
+            "native object descriptor exceeds the signing limit",
+        ));
+    }
+    let envelope = super::evidence::sign_record(descriptor, key_file, producer_key_id, produced_at)
+        .map_err(BundleError)?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut staged = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|_| BundleError("cannot stage native object descriptor signature"))?;
+    serde_json::to_writer_pretty(&mut staged, &envelope)
+        .map_err(|_| BundleError("cannot write native object descriptor signature"))?;
+    staged
+        .write_all(b"\n")
+        .map_err(|_| BundleError("cannot write native object descriptor signature"))?;
+    Ok(staged)
 }
 
 fn object_machine_tv_acceptance_descriptor(
@@ -6955,7 +7019,7 @@ fn object_machine_tv_acceptance_descriptor(
 fn write_object_machine_tv_acceptance(
     accepted: &AcceptedObject,
     expected_build_id: &str,
-    json: bool,
+    output: &ObjectDescriptorOutputArgs,
 ) -> Result<(), BundleError> {
     let AcceptedObject {
         data,
@@ -6964,15 +7028,42 @@ fn write_object_machine_tv_acceptance(
         ..
     } = accepted;
     let scope = object_machine_tv_acceptance_scope(data.object_link_correspondence);
-    if json {
+    if output.json {
         let descriptor = object_machine_tv_acceptance_descriptor(accepted, expected_build_id)?;
         let mut bytes = serde_json::to_vec_pretty(&descriptor)
             .map_err(|_| BundleError("cannot encode native object acceptance descriptor"))?;
         bytes.push(b'\n');
-        std::io::stdout()
-            .lock()
+        let staged_signature = if let Some(signature_output) = &output.signature_output {
+            let (Some(key_file), Some(producer_key_id)) =
+                (&output.key_file, &output.producer_key_id)
+            else {
+                return Err(BundleError(
+                    "descriptor signing requires a key file and producer key id",
+                ));
+            };
+            let path = Path::new(signature_output);
+            let staged = stage_object_descriptor_signature(
+                &bytes,
+                path,
+                Path::new(key_file),
+                producer_key_id,
+                output.produced_at.as_deref(),
+            )?;
+            Some((staged, path))
+        } else {
+            None
+        };
+        let mut stdout = std::io::stdout().lock();
+        stdout
             .write_all(&bytes)
-            .map_err(|_| BundleError("cannot write native object acceptance descriptor"))
+            .and_then(|()| stdout.flush())
+            .map_err(|_| BundleError("cannot write native object acceptance descriptor"))?;
+        if let Some((staged, path)) = staged_signature {
+            staged
+                .persist_noclobber(path)
+                .map_err(|_| OBJECT_DESCRIPTOR_SIGNATURE_PUBLISH_ERROR)?;
+        }
+        Ok(())
     } else {
         let wrapper_equivalent = evaluation.entry_wrapper_applicable
             && evaluation.outcomes.get("main") == Some(&FunctionOutcome::Equivalent);

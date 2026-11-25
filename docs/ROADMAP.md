@@ -2869,6 +2869,14 @@ System dependency closure, wider programs/targets/runtime/ABI, attestation,
 C02 integration and full C08/C10 consumer policies remain open. Existing
 build/run, Claim Book, grades and Lean gates are unchanged.
 
+The next C08 slice adds
+[opt-in detached signing of object acceptance descriptors](VERIFICATION_NATIVE.md#detached-object-descriptor-signing-partial-c08).
+`native-bundle accept-object` can sign the exact JSON descriptor bytes only
+after the existing acceptance gates pass. The descriptor and attempt
+fingerprint are unchanged. This is partial C08: key trust, producer and
+descriptor authenticity, historical execution, consumer trust policy, and
+common Evidence promotion are not evaluated by signing.
+
 The first C09 pilot adds opt-in source-body/LLVM-SSA equivalence checking via
 the existing Z3 bitvector library for C03's i64 comparison/conditional fragment.
 It fixes LLVM 17, Linux/x86_64 and target/layout, screens memory-free acyclic
@@ -2957,6 +2965,15 @@ This is partial C09: no postcondition proof, pipeline-history attestation,
 later optimizer/backend/linker/runtime/binary correctness, native-bundle
 acceptance, new evidence route or grade. C08 hash checks remain identity-only;
 broader C09 semantics and C02/C10 consumer integration remain open.
+
+**C09 Step 4 addendum ([#789](https://github.com/mumei-lang/mumei/issues/789), partial):**
+the direct LLVM IR → Linux x86-64 object-code check now compares flat
+`{ i64, double }` and `{ double, i64 }` results bit-for-bit in `rax` and
+`xmm0`. This does not widen the source → LLVM profile or change object
+acceptance. Nested mixed results, mixed `sret`, FP arithmetic and comparisons,
+and the existing deferred set stay outside this slice. See
+[the decision record](DESIGN_LLVM_OBJECT_CORRESPONDENCE.md) and
+[roadmap item 8](https://github.com/mumei-lang/mumei/issues/1448).
 
 The first C10 Stage A consumer adds opt-in `native-bundle recheck-source`:
 existing C08 pinned identity/status checks plus a fresh, bounded C03 source
@@ -3220,11 +3237,23 @@ acceptance envelope. It then reruns `accept-object` on the pinned inputs and
 recomputes `evidence_fingerprint`. A saved descriptor for other attempt inputs
 is rejected as unbound, and one that differs in any field is rejected as
 tampered. Malformed, foreign or non-accepted descriptors are rejected before
-the pipeline runs, and an inconclusive fresh acceptance exits 3. This is a
-partial C10 slice, not C10 completion. Descriptor and producer authenticity,
+the pipeline runs, and an inconclusive fresh acceptance exits 3. After C09
+(#1470), flat `{f64,i64}` and `{i64,f64}` return pairs replay as consistent,
+and a tampered `functions` outcome or the other field order's descriptor is
+rejected. This is a partial C10 slice, not C10 completion. Descriptor and producer authenticity,
 historical execution, and dependency or toolchain closure stay unchecked. So
 do register-convention, ABI/runtime/OS and final-artifact assurance. See the
 [replay contract](VERIFICATION_NATIVE.md#saved-object-acceptance-replay).
+
+The consumer replay can now also pin the detached C08 producer signature over
+the exact saved descriptor bytes. The signature subject is the raw-byte SHA-256,
+not the attempt-input `evidence_fingerprint`; malformed envelopes, wrong keys,
+key-label mismatches and failed explicitly supplied freshness/registry/
+revocation gates reject before the fresh acceptance. Omitting `--signature`
+keeps consistency-only replay. This is still partial C08×C10: it binds bytes to
+a pinned key chain but does not establish real-world producer identity,
+historical execution, dependency/toolchain closure, ABI/runtime/OS semantics,
+final-artifact correctness, reusable Evidence or `artifact_verified`.
 
 The next C10 Option B slice re-derives module and multifile machine-TV source
 models under the profile pinned by the record, matching the LLVM recheck;

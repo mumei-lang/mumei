@@ -37,7 +37,8 @@ agent 側に `native-object-accept` ルート（`object_source_machine_code_corr
     の受理 — それぞれ別 producer / 別メモ
   - verdict / grade / checks-list promotion（keep-off 方針のまま）
   - producer authenticity / historical execution の主張
-  - Step 4（liftable subset の拡大）— deferred 依存で凍結中
+  - Step 4（liftable subset の拡大）— #789 の mixed register pair のみ
+    部分解凍、受理条件の拡張は保留
 
 ## 2. 現状の棚卸し（再利用可能な機構）
 
@@ -247,8 +248,20 @@ correspondence profile で立証可能な範囲で対応している」。
   scope は単体テストで pin —— fresh ELF の fixture から
   `object_link_corresponds` の uncheckable 経路は到達不能なため。
   旧 scope 値は語彙として維持、emit 経路は新値のみ。）
-- **Step 4（deferred）**: liftable subset が広がったら受理条件の
-  項目追加を再評価。
+- **Step 4（#789、部分解凍）**: LLVM IR ↔ object の直接比較に flat な
+  `{ i64, double }` / `{ double, i64 }` の register 結果を追加し、
+  `rax`/`xmm0` のビットパターンを比較する。入れ子の mixed 結果や mixed
+  `sret`、FP 演算／比較、既存の deferred セットは対象外のまま。
+  `evaluate_machine_tv` もこの結果形状で IR をエンコードできた場合は
+  IR の戻り値を比較対象とする。従来の source-model 比較は両値が NaN なら
+  payload の違いを区別しないが、IR 比較は payload を含めて一致を要求する。
+  そのため IR と object の NaN payload だけが異なる場合も `Different` となり、
+  `accept-object` は受理しない。これは FP 演算を含まない IR のビット保存を
+  要求するもので、MXCSR や FP 演算時の NaN payload の検証は主張しない。
+  IR をエンコードできない場合の source-model 比較への fallback は従来通り。
+  受理ゲートの構成、項目名・verdict・grade は変更しない。解凍しない項目の理由は
+  [LLVM IR → object の設計メモ §6](DESIGN_LLVM_OBJECT_CORRESPONDENCE.md#6-段階案)
+  を参照。
 
 ## 7. 決定点（推奨対応つき）
 

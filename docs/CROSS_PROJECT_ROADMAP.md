@@ -1526,6 +1526,22 @@ promoting hash consistency to authenticity, translation validation or an
 metadata and wider ABI/runtime semantics remain unverified. This is partial
 C08 and a narrow C10 identity-check foundation, not completion of either item.
 
+The later [C08 object descriptor signing slice](VERIFICATION_NATIVE.md#detached-object-descriptor-signing-partial-c08)
+lets the producer emit a detached Ed25519 envelope over the exact object
+acceptance descriptor bytes after pinned checks succeed. It leaves the
+attempt fingerprint, authenticity status, and acceptance policy unchanged.
+This is partial C08, not C02 Evidence promotion or C10 consumer trust policy;
+the canonical dependency order is unchanged.
+
+The paired C10 consumer replay now accepts the same detached signature chain:
+`native-bundle recheck-object-acceptance` hashes the exact saved descriptor
+bytes, verifies the pinned Ed25519 binding before re-running fresh acceptance,
+and applies only the key-label/freshness/registry/revocation gates explicitly
+supplied by the caller. Omitting the signature preserves consistency-only
+replay. This is a partial C08×C10 byte-binding and consumer-policy slice, not
+real-world producer identity, historical execution, dependency closure,
+reusable Evidence, grade promotion or final-artifact assurance.
+
 ### Wave 3 fixed-point assignment facts over the explicit Go CFG
 
 Agent's `control_flow.assignment_facts(body, graph)` runs the first
@@ -4120,7 +4136,10 @@ that descriptor. It rejects malformed, duplicate-key, foreign or non-accepted
 saved descriptors, then reruns `accept-object` on the pinned inputs. It
 recomputes `evidence_fingerprint` and requires the saved descriptor to equal
 the fresh one field for field. A stale descriptor from other attempt inputs is
-rejected as unbound, and a tampered field is rejected as different. This is
+rejected as unbound, and a tampered field is rejected as different. The
+agent's `native-object-acceptance-recheck` route and MCP tool
+(mumei-agent#1344) run it as a declared attempt. Flat `{f64,i64}` and
+`{i64,f64}` return pairs admitted by C09 (#1470) replay the same way. This is
 partial C10 delivery, not C10 completion. Descriptor and producer
 authenticity, historical execution, dependency or toolchain closure, and
 register-convention, ABI/runtime/OS or final-artifact assurance remain open.
@@ -6168,6 +6187,81 @@ the byte payload piped to the attempt process's standard input through
 `allow_manifest_attempt_stdin: true`, so declared input is inert
 without it. Scheduled attempts never inherit the parent's stdin: no
 declared feed means a closed pipe (deterministic EOF).
+
+### Host-declared source stdin preparation (mumei-agent #1346)
+
+[mumei-agent#1346](https://github.com/mumei-lang/mumei-agent/pull/1346)
+extends `verify-schedule`'s host argv map with the closed object shape
+`{"argv": [...], "stdin": "source"}`; the object may also omit `stdin`,
+which behaves like the legacy argv array. Only the exact `source` declaration
+pipes the source bytes already bound into the schedule to that attempt's
+stdin; legacy argv arrays and stdin-less objects mean no host feed. The host declaration
+takes precedence over manifest `attempt_stdin`, source bytes never enter
+diagnostics or schedule output, and a source larger than the runner's
+bounded feed makes that adapter fail closed as `not_dispatched` so
+permitted fallback can continue. Without any declared feed the child still
+receives a closed pipe, never inherited parent stdin. This is input
+preparation only, not Evidence acceptance, output meaning or grade
+promotion; C11 remains partial.
+
+### Incomplete adapter output fail-closed handoff (mumei-agent #1347)
+
+[mumei-agent#1347](https://github.com/mumei-lang/mumei-agent/pull/1347)
+makes every Core representation/requirement handoff refuse an
+`AttemptOutput` whose capture is declared incomplete before any Core
+process or pipe I/O. The capture-completeness bit remains a host
+declaration, not detection of every truncation; when that declaration is
+present, a captured prefix cannot be mistaken for the whole evidence
+document merely because it is well formed. Recorded checks become `failed`,
+scheduling keeps the
+host-declared exit-code selection separate, `evidence_acceptance` is not
+accepted, and a stale promotable triple is not left behind. Complete
+captures are unchanged. This is transport integrity only — not output
+meaning, Evidence truth or grade promotion; the C11 contract remained
+partial before the acceptance-completion slice below.
+
+### C11 plugin contract acceptance completion (mumei-agent #1348)
+
+[mumei-agent#1348](https://github.com/mumei-lang/mumei-agent/pull/1348)
+pins the issue-level C11 acceptance matrix in
+`tests/test_c11_plugin_contract_acceptance.py`: declarative adapter
+registration/replacement/selection/disable/configuration, version and
+execution-location policy, budgets, explicit fallback, missing or
+incompatible tools, invalid settings, timeouts, malformed, partial or
+conflicting outputs, forbidden secret/invocation/egress channels, and the
+boundary that scheduling never claims Evidence acceptance or grade
+promotion. Partial output may still carry a host-declared exit-code
+`selected` dispatch outcome, but it fails closed before Core I/O and cannot
+become Evidence acceptance or promotion. This completes the C11 plugin
+contract as a verification-native orchestration contract; it does not adopt
+or endorse an external verifier, make backend self-reports proof, make
+Semantic IR universal, hide lossy transformations, or run Z3 and external
+verifiers unconditionally in parallel. External adoption still requires
+separate maintenance, license/distribution/commercial, CI,
+toolchain-compatibility and cost review.
+
+The sections below remain chronological implementation notes. Statements
+there that C11 "stays partial" describe the state when those earlier slices
+landed, not the current plugin-contract status after #1348; Core-owned
+Evidence meaning/acceptance and grade promotion remain outside the completed
+orchestration contract.
+
+### C13 incomplete-output regression gate (mumei-demo #203)
+
+[mumei-demo#203](https://github.com/mumei-lang/mumei-demo/pull/203) extends
+the optional `evidence_check_schedule` scenario and integration CI with a
+large-output adapter regression. The adapter emits more than the agent's
+64 KiB capture bound, while the first exactly 64 KiB are a valid padded
+`mumei.verification-evidence/v1` document. The scenario therefore fails if a
+truncated prefix can be passed to Core as a complete document: scheduling may
+retain the host-declared exit-code `selected` dispatch outcome, but
+`evidence_check` must be `failed` and `evidence_acceptance.accepted` must
+be false. A
+probe-validated recording wrapper must record no Core invocation for the
+incomplete output, distinguishing rejection before Core I/O from a Core-side
+rejection. This is a C13 confusion regression only — not adapter adoption,
+output meaning, Evidence truth or grade promotion. C13 remains ongoing as
+later planner/native/translation milestones land.
 
 ### Manifest-declared attempt memory bound (mumei-agent #993)
 
@@ -8624,6 +8718,8 @@ capability model は Stage 1 のみが opt-in 拡張として上積みされて�
 - ✅ **追補（2026-11-24, 83）— 追補（82）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: translation-validation — hir leaf エンコーダの composite call site モデル化（[mumei#1441](https://github.com/mumei-lang/mumei/pull/1441)。#1437/#1439 の acceptance ゲートが表面化した過剰弾きリグレッションの修正 — leaf エンコーダが全 call をスカラー `mumei_call_<name>_<arity>` として符号化し IR 側の per-field 分解と不一致となり composite aggregate 形状で `hir_llvm_model_correspondence` が inconsistent を返していた。`HirCallLeafSig`（パラメータ・戻り値の宣言型、`env.resolve_base_type` で refined alias→機械基底型解決）をモジュールの atom 署名から構築し leaf エンコーダに伝搬。composite 引数は IR の `call_operands` と同じ leaf slot へ flatten、composite result は `mumei_call_field:{name}:{arity}:{idx}` per-field で `HirLeafValue::Aggregate` に束縛。`specialized_struct_map` が callee 署名由来の generic instantiation も特殊化。subset 外の宣言型は fail-closed（unchecked）、enum 型 call site は従来 inconsistent 誤判定だったものを正直に unchecked（inconclusive, exit 3）に修正。admission 境界（uniform i64 scalar + 全 i64 record）は不変 — Step 4 凍結範囲に非ず。agent 側 `test_real_core_accepts_native_object` の 2 fixture が e2e で accept(0) を確認）。mumei-agent: 新規なし。mumei-demo: 新規シナリオなし。いずれも各 PR の境界のまま。
 - ✅ **追補（2026-11-24, 84）— 追補（83）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: 新規なし。mumei-agent: evidence acceptance — 保存 carrier fold が object-route 記述子レコードを受理（[agent#1324](https://github.com/mumei-lang/mumei-agent/pull/1324)。`accept-object` が全記述子に emit する `object_translation`/`source_machine_tv` レコードを `_NATIVE_ACCEPTANCE_EXTRA_FIELDS` に不透明 dict として追加 — 未受理のままだと新世代の `mumei.native-evidence-acceptance/v1` 保存記述子が closed shape で弾かれていた。stored fold は表現レベル維持、object schema は `evidence_fingerprint` ピン非 emit のため `attempt_bound` は引き続き false、`producer_signature` は source schema のみ — DESIGN_OBJECT_TV_CONSUMPTION.md §4 の推奨対応どおり。実 emit 形状のゴールデン fixture で受理 + 試行未紐付けを e2e pin。AUDIT_BACKLOG_2026-11-21.md の item 4 を両側完了で着地済みに記録）。mumei-demo: 新規シナリオなし。いずれも各 PR の境界のまま。
 - ✅ **追補（2026-11-25, 85）— 追補（84）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: C10 — 保存済み `accept-object` 記述子の consumer 側 recheck（[#790](https://github.com/mumei-lang/mumei/issues/790)。`native-bundle recheck-object-acceptance <bundle> <source> <descriptor>` が記述子を 1 MiB 上限・非 symlink・重複キー拒否で読み、object scope の受理済み `mumei.native-evidence-acceptance/v1` 以外を pipeline 前に拒否。fresh な `accept-object` を再実行して `evidence_fingerprint`（#1445）を再計算し、不一致は試行未紐付け・フィールド単位の差分は改ざんとして reject、fresh 側 inconclusive は exit 3。C10 の部分スライスで完了ではない — 記述子・producer 真正性、historical execution、依存・toolchain closure、register 規約・ABI/runtime/OS・最終 artifact の保証は未検査のまま）。mumei-agent: 新規なし。mumei-demo: 新規シナリオなし。いずれも各 PR の境界のまま。
+
+- ✅ **追補（2026-11-25, C09 Step 4）— [#789](https://github.com/mumei-lang/mumei/issues/789) の部分解凍**: mumei Core: Linux x86-64 で flat な `{ i64, double }` / `{ double, i64 }` を LLVM IR → object の直接比較に追加（`rax`/`xmm0` のビット比較）。その他の deferred 領域、受理条件、verdict・grade は変更しない。[#1448 の項目 8](https://github.com/mumei-lang/mumei/issues/1448) の範囲内で、順序は変更しない。mumei-agent / mumei-demo: 新規なし。
 
 **関連ファイル**:
 - `docs/CAPABILITY_MODEL_STUDY.md` — 調査成果物（4 項目の分析、opt-in 判定、段階分割案）

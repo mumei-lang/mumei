@@ -175,7 +175,15 @@ fn produced_at_joins_the_envelope_only_when_stamped() {
 #[test]
 fn non_rfc3339_produced_at_is_rejected() {
     let key = decode_secret_key(SECRET).unwrap();
-    for bad in ["yesterday", "2026-01-01", "2026-01-01T00:00:00"] {
+    for bad in [
+        "yesterday",
+        "2026-01-01",
+        "2026-01-01T00:00:00",
+        "2026-02-30T00:00:00Z",
+        "2025-02-29T00:00:00Z",
+        "2026-04-31T00:00:00Z",
+        "2016-12-31T23:59:60Z",
+    ] {
         assert_eq!(
             sign(b"{}", &key, "producer-a", Some(bad)).unwrap_err(),
             SignError::InvalidProducedAt

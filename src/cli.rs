@@ -556,7 +556,7 @@ pub(crate) enum EvidenceCommand {
         /// Caller-declared producer key label the consumer pins separately; never derived from the key bytes
         #[arg(long)]
         producer_key_id: String,
-        /// Optional declared production timestamp stamped into the envelope (RFC 3339); unsigned like the key id — freshness is a consumer-side check
+        /// Optional declared production timestamp stamped into the envelope (RFC 3339, excluding leap seconds); unsigned like the key id — freshness is a consumer-side check
         #[arg(long)]
         produced_at: Option<String>,
     },
@@ -771,6 +771,25 @@ pub(crate) struct SignatureArgs {
     pub(crate) min_revocation_version: Option<u64>,
 }
 
+#[derive(clap::Args)]
+pub(crate) struct ObjectDescriptorOutputArgs {
+    /// Emit a static acceptance descriptor, not reusable Evidence or a certificate
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// Regular file containing the hex-encoded ed25519 signing key, never printed
+    #[arg(long, requires = "signature_output")]
+    pub(crate) key_file: Option<String>,
+    /// Declared producer key label, not signed or authenticated
+    #[arg(long, requires = "signature_output")]
+    pub(crate) producer_key_id: Option<String>,
+    /// Optional declared production timestamp stamped into the signature envelope (RFC 3339, excluding leap seconds); unsigned like the key id
+    #[arg(long, requires = "signature_output")]
+    pub(crate) produced_at: Option<String>,
+    /// Write a detached signature envelope for the exact JSON output without replacing a file
+    #[arg(long, requires_all = ["json", "key_file", "producer_key_id"])]
+    pub(crate) signature_output: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub(crate) enum NativeBundleCommand {
     /// Evaluate a saved native consumer Evidence report against fresh pinned source/LLVM checks into a bounded acceptance descriptor
@@ -803,9 +822,8 @@ pub(crate) enum NativeBundleCommand {
         /// SHA-256 of native-bundle.json obtained through a separately trusted channel
         #[arg(long)]
         expected_build_id: String,
-        /// Emit a static acceptance descriptor, not reusable Evidence or a certificate
-        #[arg(long)]
-        json: bool,
+        #[command(flatten)]
+        output: ObjectDescriptorOutputArgs,
     },
     /// Replay a saved native consumer Evidence report against fresh pinned source/LLVM checks, without proof acceptance
     RecheckEvidence {
@@ -816,7 +834,7 @@ pub(crate) enum NativeBundleCommand {
         #[arg(long)]
         expected_build_id: String,
     },
-    /// Replay a saved accept-object descriptor against a fresh object acceptance of the pinned inputs, without descriptor authenticity
+    /// Replay a saved accept-object descriptor against a fresh object acceptance, optionally pinning its detached producer signature
     RecheckObjectAcceptance {
         bundle: String,
         source: String,
@@ -824,6 +842,8 @@ pub(crate) enum NativeBundleCommand {
         /// SHA-256 of native-bundle.json obtained through a separately trusted channel, not the descriptor
         #[arg(long)]
         expected_build_id: String,
+        #[command(flatten)]
+        signature: Box<SignatureArgs>,
     },
     /// Recheck the C03 source and pinned native LLVM body/wrapper snapshot, not object or binary semantics
     RecheckLlvm {
