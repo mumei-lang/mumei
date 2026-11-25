@@ -80,6 +80,7 @@ def test_unknown_top_level_field_is_rejected() -> None:
         (lambda d: d["source_machine_tv"].__setitem__("status", "unchecked_not_translation_validated"),),
         (lambda d: d["source_machine_tv"].__setitem__("object_link_correspondence", "unchecked_not_translation_validated"),),
         (lambda d: d["source_machine_tv"]["non_equivalent_functions"].append({"name": "f", "outcome": "different", "reason": "not_a_source_atom"}),),
+        (lambda d: d["object_translation"]["correspondence"]["checks"][0].__setitem__("item", "unrelated_check"),),
     ],
 )
 def test_invalid_representations_are_rejected(mutator) -> None:

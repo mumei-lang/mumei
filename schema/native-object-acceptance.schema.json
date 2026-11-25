@@ -257,7 +257,19 @@
             "checks": {
               "type": "array",
               "minItems": 10,
-              "items": { "$ref": "#/$defs/correspondence_check" }
+              "items": { "$ref": "#/$defs/correspondence_check" },
+              "allOf": [
+                { "contains": { "properties": { "item": { "const": "function_coverage" } }, "required": ["item"] } },
+                { "contains": { "properties": { "item": { "const": "function_count" } }, "required": ["item"] } },
+                { "contains": { "properties": { "item": { "const": "llvm_ir_object_equivalence" } }, "required": ["item"] } },
+                { "contains": { "properties": { "item": { "const": "relocation_targets" } }, "required": ["item"] } },
+                { "contains": { "properties": { "item": { "const": "relocation_bounds" } }, "required": ["item"] } },
+                { "contains": { "properties": { "item": { "const": "relocation_resolved_values" } }, "required": ["item"] } },
+                { "contains": { "properties": { "item": { "const": "relocation_applied_values" } }, "required": ["item"] } },
+                { "contains": { "properties": { "item": { "const": "hir_llvm_model_correspondence" } }, "required": ["item"] } },
+                { "contains": { "properties": { "item": { "const": "object_data_correspondence" } }, "required": ["item"] } },
+                { "contains": { "properties": { "item": { "const": "object_symbol_attribute_correspondence" } }, "required": ["item"] } }
+              ]
             }
           }
         }
