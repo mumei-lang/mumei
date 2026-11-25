@@ -1994,8 +1994,13 @@ evaluation. Grouped `const ( ... )` declarations admit the same scalar
 fragment, including Go's implicit no-value repetition: repetition is
 parameter-independent because constants cannot read variables, not
 because `iota` or the repeated value is evaluated. Empty `const ()` is
-a no-op, while the compact valid form without a final separator remains
-a tree-sitter parse gap and fails closed. Non-scalar implicit
+a no-op. Compact valid forms without a final separator are admitted
+through narrow tree-sitter recovery: original byte offsets are kept,
+comment text never supplies the terminator, nested compact groups inside
+function literals are validated without shifting offsets, recognized
+zero-width final-spec `ERROR` wrappers are flattened, and the
+semicolon-patched parse must otherwise be clean. Unrelated parse errors
+still fail closed. Non-scalar implicit
 repetitions stay outside the fragment. See the
 [Agent scalar const declarations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-scalar-const-declarations-and-reads)
 and the
@@ -2007,10 +2012,17 @@ Agent's scalar fragment now flattens grouped `var ( ... )` declarations
 through the same binding contract as individual vars: explicit values
 bind pairwise against the pre-state, zero-value forms are dep-free,
 multi-name specs follow the existing declaration rules, `_` discards,
-and empty `var ()` groups are no-ops. Supported channel, function-value,
-pointer and composite shapes keep their individual-var semantics; the
-compact valid form without a final separator remains a tree-sitter parse
-gap and fails closed. This is dependency analysis, not proof, evidence
+and empty `var ()` groups are no-ops. Each grouped spec is a separate
+declaration in source order, while names within one multi-name spec enter
+scope only after that spec's initializer list. Supported channel,
+function-value, pointer and composite shapes keep their individual-var
+semantics. Compact valid forms without a final separator use the same
+narrow tree-sitter recovery as grouped consts: original byte offsets are
+kept, comment text never supplies the terminator, nested compact groups
+inside function literals are validated without shifting offsets,
+recognized zero-width final-spec `ERROR` wrappers are flattened, and the
+semicolon-patched parse must otherwise be clean. Unrelated parse errors
+still fail closed. This is dependency analysis, not proof, evidence
 or audit verdict integration. See the
 [Agent grouped var slice](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-grouped-var-declarations).
 
