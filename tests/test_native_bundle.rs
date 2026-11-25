@@ -8263,6 +8263,8 @@ fn recheck_object_acceptance_checks_exact_descriptor_signature_when_supplied() {
             .output()
             .unwrap();
         assert_success(&signed);
+        assert!(!String::from_utf8_lossy(&signed.stdout).contains(OTHER_KEY));
+        assert!(!String::from_utf8_lossy(&signed.stderr).contains(OTHER_KEY));
         fs::write(output_path, signed.stdout).unwrap();
     };
     let registry_signature = root.path().join("registry.sig.json");
