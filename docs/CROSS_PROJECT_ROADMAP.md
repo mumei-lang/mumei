@@ -6431,6 +6431,22 @@ and regression control only — not proof truth, Evidence acceptance or grade
 promotion. C13 remains ongoing as later planner/native/translation milestones
 land.
 
+### C13 port-divergence outcome taxonomy (mumei-demo #211)
+
+[mumei-demo#211](https://github.com/mumei-lang/mumei-demo/pull/211) applies the
+same separation to the translation diagnostic that replays reference
+counterexamples on accepted buggy LLM ports. Diverged, still-refuting and
+inconclusive rows remain distinct; unresolved reference-port and LLM-port
+verdicts are counted independently as unsupported input/generated output or
+capability, residual inconclusive outcome, environment failure or budget
+exhaustion. Reference verdicts are measured once per case/input because they
+are reused, while LLM ports are measured per accepted row/input. Missing or
+invalid generated bodies and pre-verifier input failures do not create
+expected verifier-call measurement slots. Verifier startup failure is an
+environment failure, and benchmark certificate-writing paths fail closed
+before unlinking recorded certificates. This is measurement and regression
+control only — not proof truth, Evidence acceptance or grade promotion.
+
 ### Manifest-declared attempt memory bound (mumei-agent #993)
 
 [mumei-agent#993](https://github.com/mumei-lang/mumei-agent/pull/993)
