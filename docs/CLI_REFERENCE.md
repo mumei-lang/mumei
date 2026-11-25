@@ -31,9 +31,9 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei native-bundle` | 0 | Build/check a restricted native identity bundle (not artifact semantic proof) |
 | `mumei native-bundle accept-evidence` | 2 | Evaluate a saved native consumer Evidence report against fresh pinned source/LLVM checks into a bounded acceptance descriptor |
 | `mumei native-bundle accept-artifact` | 2 | Evaluate pinned artifact reproduction under the recorded toolchain into a bounded acceptance descriptor |
-| `mumei native-bundle accept-object` | 5 | Evaluate reproduced object machine code against the verified source within the machine-code TV profile into a bounded acceptance descriptor |
+| `mumei native-bundle accept-object` | 6 | Evaluate reproduced object machine code against the verified source within the machine-code TV profile into a bounded acceptance descriptor |
 | `mumei native-bundle recheck-evidence` | 1 | Replay a saved native consumer Evidence report against fresh pinned source/LLVM checks, without proof acceptance |
-| `mumei native-bundle recheck-object-acceptance` | 1 | Replay a saved accept-object descriptor against a fresh object acceptance of the pinned inputs, without descriptor authenticity |
+| `mumei native-bundle recheck-object-acceptance` | 13 | Replay a saved accept-object descriptor against a fresh object acceptance, optionally pinning its detached producer signature |
 | `mumei native-bundle recheck-llvm` | 2 | Recheck the C03 source and pinned native LLVM body/wrapper snapshot, not object or binary semantics |
 | `mumei native-bundle recheck-source` | 1 | Check pinned snapshots and freshly recheck the C03 source postcondition, not LLVM or binary semantics |
 | `mumei native-bundle build` | 1 | Freshly verify and build a pure-i64 main on Linux/x86_64 with fixed settings |
@@ -286,7 +286,7 @@ Usage: mumei evidence sign [OPTIONS] --key-file <KEY_FILE> --producer-key-id <PR
 | `--json` | false | — | Emit the detached mumei.producer-signature/v1 envelope, not a verification or acceptance result |
 | `--key-file <KEY_FILE>` | — | — | Regular file holding exactly the 64-char lowercase-hex ed25519 secret key; the value is never printed |
 | `--producer-key-id <PRODUCER_KEY_ID>` | — | — | Caller-declared producer key label the consumer pins separately; never derived from the key bytes |
-| `--produced-at <PRODUCED_AT>` | — | — | Optional declared production timestamp stamped into the envelope (RFC 3339); unsigned like the key id — freshness is a consumer-side check |
+| `--produced-at <PRODUCED_AT>` | — | — | Optional declared production timestamp stamped into the envelope (RFC 3339, excluding leap seconds); unsigned like the key id — freshness is a consumer-side check |
 
 ## `mumei evidence keygen`
 
@@ -626,6 +626,7 @@ Usage: mumei native-bundle accept-object [OPTIONS] --expected-build-id <EXPECTED
 | `--json` | false | — | Emit a static acceptance descriptor, not reusable Evidence or a certificate |
 | `--key-file <KEY_FILE>` | — | — | Regular file containing the hex-encoded ed25519 signing key, never printed |
 | `--producer-key-id <PRODUCER_KEY_ID>` | — | — | Declared producer key label, not signed or authenticated |
+| `--produced-at <PRODUCED_AT>` | — | — | Optional declared production timestamp stamped into the signature envelope (RFC 3339, excluding leap seconds); unsigned like the key id |
 | `--signature-output <SIGNATURE_OUTPUT>` | — | — | Write a detached signature envelope for the exact JSON output without replacing a file |
 
 ## `mumei native-bundle recheck-evidence`
@@ -654,12 +655,12 @@ Usage: mumei native-bundle recheck-evidence --expected-build-id <EXPECTED_BUILD_
 
 ## `mumei native-bundle recheck-object-acceptance`
 
-Replay a saved accept-object descriptor against a fresh object acceptance of the pinned inputs, without descriptor authenticity
+Replay a saved accept-object descriptor against a fresh object acceptance, optionally pinning its detached producer signature
 
 Usage:
 
 ```text
-Usage: mumei native-bundle recheck-object-acceptance --expected-build-id <EXPECTED_BUILD_ID> <BUNDLE> <SOURCE> <DESCRIPTOR>
+Usage: mumei native-bundle recheck-object-acceptance [OPTIONS] --expected-build-id <EXPECTED_BUILD_ID> <BUNDLE> <SOURCE> <DESCRIPTOR>
 ```
 
 ### Positional arguments
@@ -675,6 +676,18 @@ Usage: mumei native-bundle recheck-object-acceptance --expected-build-id <EXPECT
 | Option | Default | Possible values | Description |
 |---|---|---|---|
 | `--expected-build-id <EXPECTED_BUILD_ID>` | — | — | SHA-256 of native-bundle.json obtained through a separately trusted channel, not the descriptor |
+| `--signature <SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 envelope file (at most 65,536 bytes) |
+| `--producer-key <PRODUCER_KEY>` | — | — | 64-char lowercase-hex ed25519 producer public key |
+| `--expected-producer-key <EXPECTED_PRODUCER_KEY>` | — | — | Pin the unsigned producer key id to the supplied key; required for registry/revocation checks |
+| `--reference-time <REFERENCE_TIME>` | — | — | Declared RFC 3339 reference time for freshness and registry checks |
+| `--max-age-seconds <MAX_AGE_SECONDS>` | — | — | Maximum envelope age in seconds |
+| `--key-registry <KEY_REGISTRY>` | — | — | Regular mumei.producer-key-registry/v1 file (at most 65,536 bytes); requires a pinned producer key id |
+| `--registry-signature <REGISTRY_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 registry signature file |
+| `--registry-key <REGISTRY_KEY>` | — | — | 64-char lowercase-hex ed25519 registry root public key |
+| `--revocation-list <REVOCATION_LIST>` | — | — | Regular mumei.key-revocation-list/v1 or /v2 file (at most 65,536 bytes); requires a pinned producer key id |
+| `--revocation-signature <REVOCATION_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 revocation-list signature file |
+| `--revocation-key <REVOCATION_KEY>` | — | — | 64-char lowercase-hex ed25519 revocation root public key |
+| `--min-revocation-version <MIN_REVOCATION_VERSION>` | — | — | Minimum acceptable v2 version; checks not_after and requires a root-signed list and reference time |
 
 ## `mumei native-bundle recheck-llvm`
 

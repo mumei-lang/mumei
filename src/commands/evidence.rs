@@ -1028,7 +1028,7 @@ fn declared_adapter_gate(
 }
 
 #[derive(Clone, Copy)]
-struct SignatureOptions<'a> {
+pub(super) struct SignatureOptions<'a> {
     signature: Option<&'a Path>,
     producer_key: Option<&'a str>,
     expected_producer_key: Option<&'a str>,
@@ -1043,7 +1043,7 @@ struct SignatureOptions<'a> {
     min_revocation_version: Option<u64>,
 }
 
-fn signature_options(args: &SignatureArgs) -> SignatureOptions<'_> {
+pub(super) fn signature_options(args: &SignatureArgs) -> SignatureOptions<'_> {
     SignatureOptions {
         signature: args.signature.as_deref().map(Path::new),
         producer_key: args.producer_key.as_deref(),
@@ -1060,10 +1060,10 @@ fn signature_options(args: &SignatureArgs) -> SignatureOptions<'_> {
     }
 }
 
-struct SignatureAcceptance {
-    binding: producer_signature::SignatureBinding,
-    max_age_checked: bool,
-    full_authenticity_chain: bool,
+pub(super) struct SignatureAcceptance {
+    pub(super) binding: producer_signature::SignatureBinding,
+    pub(super) max_age_checked: bool,
+    pub(super) full_authenticity_chain: bool,
 }
 
 fn narrowed_verdict(
@@ -1192,7 +1192,7 @@ fn read_signature_envelope(path: &Path) -> Result<serde_json::Value, &'static st
     Ok(envelope)
 }
 
-fn load_signature_acceptance(
+pub(super) fn load_signature_acceptance(
     options: SignatureOptions<'_>,
     evidence_fingerprint: &str,
     signed_produced_at: Option<Option<&str>>,

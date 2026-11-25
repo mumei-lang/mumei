@@ -2805,9 +2805,14 @@ covers the SHA-256 digest of the exact descriptor bytes written to stdout,
 including the trailing newline, for descriptors up to 4 MiB. Save stdout
 as-is: reformatting the JSON invalidates the binding. The signature is staged
 first and published without replacing an existing file, only after stdout is
-written and flushed. If publication fails, the command exits unsuccessfully
-even though stdout may contain the descriptor. Consume the signed result only
-after the command succeeds and you have both outputs.
+written and flushed. `--produced-at RFC3339` optionally stamps that declared
+timestamp into the envelope for a consumer-side freshness check. Leap seconds
+(`23:59:60`) are rejected because the freshness model uses civil-time
+nanosecond bounds rather than a leap-second table. Like the key label it is
+unsigned metadata, and omitting it means no envelope freshness can be
+established. If publication fails, the command exits unsuccessfully even
+though stdout may contain the descriptor. Consume the signed result only after
+the command succeeds and you have both outputs.
 
 Verification recomputes the digest from the saved descriptor and verifies the
 signature over the lowercase hex digest using an independently pinned public
@@ -2853,12 +2858,26 @@ stdout on rejection. Flat two-field `{double,i64}` and `{i64,double}` return
 pairs, which C09 admits through `xmm0` and `rax`, replay the same way. A saved
 descriptor for one field order is rejected as unbound against the other.
 
+The consumer can additionally pin a detached producer signature with the same
+`--signature` / `--producer-key` chain flags used by Evidence acceptance. The
+signature subject is the SHA-256 digest of the **exact saved descriptor bytes**,
+not the descriptor's attempt-input `evidence_fingerprint`; even an insignificant
+byte edit breaks the binding before the fresh acceptance runs. A malformed
+envelope, wrong public key, failed key-label pin or failed explicitly supplied
+freshness/registry/revocation gate rejects the replay. Omitting `--signature`
+keeps the legacy consistency-only behavior. These gates check only the supplied
+cryptographic chain: key labels and declared times remain claims unless the
+caller pins and anchors them separately, and real-world producer identity,
+historical execution, register convention, CRT/loader, ABI/runtime and OS
+semantics remain outside the result.
+
 A match means only that the saved descriptor is what a fresh `accept-object`
-emits for these pinned inputs. It does not check descriptor or producer
-authenticity or historical execution, and it accepts no reusable Evidence,
-certificate or grade. Every claim outside the `accept-object` scope stays
-outside it here, including register convention, CRT/loader, ABI/runtime and OS
-semantics.
+emits for these pinned inputs. Without a valid supplied signature chain it does
+not check descriptor or producer authenticity; with one it checks only that
+byte binding and the explicitly supplied key-label/freshness/registry/revocation
+gates. It never checks historical execution, and it accepts no reusable
+Evidence, certificate or grade. Every claim outside the `accept-object` scope
+stays outside it here.
 
 ### Pinned executable exit-status recheck
 

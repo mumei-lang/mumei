@@ -8159,6 +8159,140 @@ fn recheck_object_acceptance_accepts_fresh_descriptor_without_authenticity() {
 }
 
 #[test]
+fn recheck_object_acceptance_checks_exact_descriptor_signature_when_supplied() {
+    const FAKE_KEY: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const OTHER_KEY: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    let public_key = |secret: &str| {
+        producer_signature::decode_secret_key_bytes(secret.as_bytes().to_vec())
+            .unwrap()
+            .verifying_key()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(&subdir(root.path(), "module"), MODULE);
+    let key = root.path().join("producer.key");
+    let signature = root.path().join("descriptor.sig.json");
+    let descriptor = root.path().join("descriptor.json");
+    fs::write(&key, FAKE_KEY).unwrap();
+    let accepted = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args(["native-bundle", "accept-object"])
+        .arg(&bundle)
+        .arg(&source)
+        .args(["--expected-build-id", &id, "--json", "--key-file"])
+        .arg(&key)
+        .args(["--producer-key-id", "object-producer", "--signature-output"])
+        .arg(&signature)
+        .args(["--produced-at", "2026-01-02T03:04:05Z"])
+        .output()
+        .unwrap();
+    assert_success(&accepted);
+    assert!(!String::from_utf8_lossy(&accepted.stdout).contains(FAKE_KEY));
+    assert!(!String::from_utf8_lossy(&accepted.stderr).contains(FAKE_KEY));
+    fs::write(&descriptor, &accepted.stdout).unwrap();
+    let producer_key = public_key(FAKE_KEY);
+    let other_producer_key = public_key(OTHER_KEY);
+
+    let recheck = |extra: &[String]| {
+        let mut args = vec![
+            "native-bundle".to_owned(),
+            "recheck-object-acceptance".to_owned(),
+            bundle.to_string_lossy().into_owned(),
+            source.to_string_lossy().into_owned(),
+            descriptor.to_string_lossy().into_owned(),
+            "--expected-build-id".to_owned(),
+            id.clone(),
+        ];
+        args.extend(extra.iter().cloned());
+        let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        cli(&refs)
+    };
+    let signature_args = || {
+        vec![
+            "--signature".to_owned(),
+            signature.to_string_lossy().into_owned(),
+            "--producer-key".to_owned(),
+            producer_key.clone(),
+            "--expected-producer-key".to_owned(),
+            "object-producer".to_owned(),
+            "--reference-time".to_owned(),
+            "2026-01-02T03:04:10Z".to_owned(),
+            "--max-age-seconds".to_owned(),
+            "5".to_owned(),
+        ]
+    };
+
+    let output = recheck(&signature_args());
+    assert_success(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Producer signature binding: checked for the exact saved descriptor bytes")
+    );
+    assert!(stdout.contains(
+        "optional key-label, freshness, revocation and registry gates only as explicitly supplied"
+    ));
+    assert!(!stdout.contains("artifact_verified"));
+    assert!(!stdout.contains(FAKE_KEY));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(FAKE_KEY));
+
+    let mut too_strict_args = signature_args();
+    let max_age_index = too_strict_args.len() - 1;
+    too_strict_args[max_age_index] = "4".to_owned();
+    assert_rejected(
+        &recheck(&too_strict_args),
+        "producer signature binding failed",
+    );
+
+    let missing_bundle = root.path().join("missing-bundle");
+    let mut ordered_args = vec![
+        "native-bundle".to_owned(),
+        "recheck-object-acceptance".to_owned(),
+        missing_bundle.to_string_lossy().into_owned(),
+        source.to_string_lossy().into_owned(),
+        descriptor.to_string_lossy().into_owned(),
+        "--expected-build-id".to_owned(),
+        id.clone(),
+    ];
+    let mut wrong_key_ordered_args = signature_args();
+    wrong_key_ordered_args[3] = other_producer_key.clone();
+    ordered_args.extend(wrong_key_ordered_args);
+    let ordered_refs = ordered_args.iter().map(String::as_str).collect::<Vec<_>>();
+    assert_rejected(&cli(&ordered_refs), "producer signature binding failed");
+
+    let mut wrong_key_args = signature_args();
+    wrong_key_args[3] = other_producer_key;
+    assert_rejected(
+        &recheck(&wrong_key_args),
+        "producer signature binding failed",
+    );
+
+    let mut wrong_label_args = signature_args();
+    wrong_label_args[5] = "other-producer".to_owned();
+    assert_rejected(
+        &recheck(&wrong_label_args),
+        "producer signature binding failed",
+    );
+
+    let original = fs::read(&descriptor).unwrap();
+    fs::write(&descriptor, [&original[..], b" "].concat()).unwrap();
+    assert_rejected(
+        &recheck(&signature_args()),
+        "producer signature binding failed",
+    );
+    fs::write(&descriptor, original).unwrap();
+
+    let envelope_bytes = fs::read(&signature).unwrap();
+    fs::write(&signature, b"{}").unwrap();
+    assert_rejected(
+        &recheck(&signature_args()),
+        "producer signature binding failed",
+    );
+    fs::write(&signature, envelope_bytes).unwrap();
+}
+
+#[test]
 fn recheck_object_acceptance_rejects_unbound_or_tampered_descriptors() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build_source(&subdir(root.path(), "module"), MODULE);

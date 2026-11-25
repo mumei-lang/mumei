@@ -3240,6 +3240,16 @@ historical execution, and dependency or toolchain closure stay unchecked. So
 do register-convention, ABI/runtime/OS and final-artifact assurance. See the
 [replay contract](VERIFICATION_NATIVE.md#saved-object-acceptance-replay).
 
+The consumer replay can now also pin the detached C08 producer signature over
+the exact saved descriptor bytes. The signature subject is the raw-byte SHA-256,
+not the attempt-input `evidence_fingerprint`; malformed envelopes, wrong keys,
+key-label mismatches and failed explicitly supplied freshness/registry/
+revocation gates reject before the fresh acceptance. Omitting `--signature`
+keeps consistency-only replay. This is still partial C08×C10: it binds bytes to
+a pinned key chain but does not establish real-world producer identity,
+historical execution, dependency/toolchain closure, ABI/runtime/OS semantics,
+final-artifact correctness, reusable Evidence or `artifact_verified`.
+
 The next C10 Option B slice re-derives module and multifile machine-TV source
 models under the profile pinned by the record, matching the LLVM recheck;
 single-file rechecks keep `RefinedAdmission::Reject`. Refined scalar parameter
