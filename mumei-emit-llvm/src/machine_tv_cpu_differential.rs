@@ -608,6 +608,9 @@ fn float_inputs() -> Vec<Snapshot> {
         (1, 1),
         (f64::MAX.to_bits(), f64::MAX.to_bits()),
         (f64::INFINITY.to_bits(), f64::NEG_INFINITY.to_bits()),
+        (f64::INFINITY.to_bits(), f64::INFINITY.to_bits()),
+        (0, f64::INFINITY.to_bits()),
+        (1.0f64.to_bits(), (-0.0f64).to_bits()),
         (qnan, 1.0f64.to_bits()),
         (1.0f64.to_bits(), snan),
         (qnan, snan),
@@ -638,7 +641,7 @@ fn scalar_sse() {
             )+
         };
     }
-    sse!(Flags::All; "addsd", "movsd");
+    sse!(Flags::All; "addsd", "subsd", "mulsd", "divsd", "movsd");
     sse!(Flags::Float; "comisd", "ucomisd");
     form!(suite, &inputs, "xmm/reg", Flags::All, "movq %xmm1, %rax");
     form!(suite, &inputs, "reg/xmm", Flags::All, "movq %rax, %xmm1");
