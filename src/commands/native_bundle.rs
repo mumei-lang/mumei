@@ -6910,6 +6910,7 @@ fn stage_object_descriptor_signature(
     path: &Path,
     key_file: &Path,
     producer_key_id: &str,
+    produced_at: Option<&str>,
 ) -> Result<tempfile::NamedTempFile, BundleError> {
     if fs::symlink_metadata(path).is_ok() {
         return Err(OBJECT_DESCRIPTOR_SIGNATURE_PUBLISH_ERROR);
@@ -6919,7 +6920,7 @@ fn stage_object_descriptor_signature(
             "native object descriptor exceeds the signing limit",
         ));
     }
-    let envelope = super::evidence::sign_record(descriptor, key_file, producer_key_id, None)
+    let envelope = super::evidence::sign_record(descriptor, key_file, producer_key_id, produced_at)
         .map_err(BundleError)?;
     let parent = path
         .parent()
@@ -7046,6 +7047,7 @@ fn write_object_machine_tv_acceptance(
                 path,
                 Path::new(key_file),
                 producer_key_id,
+                output.produced_at.as_deref(),
             )?;
             Some((staged, path))
         } else {

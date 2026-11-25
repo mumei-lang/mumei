@@ -777,6 +777,9 @@ pub(crate) struct ObjectDescriptorOutputArgs {
     /// Declared producer key label, not signed or authenticated
     #[arg(long, requires = "signature_output")]
     pub(crate) producer_key_id: Option<String>,
+    /// Optional declared production timestamp stamped into the signature envelope (RFC 3339); unsigned like the key id
+    #[arg(long, requires = "signature_output")]
+    pub(crate) produced_at: Option<String>,
     /// Write a detached signature envelope for the exact JSON output without replacing a file
     #[arg(long, requires_all = ["json", "key_file", "producer_key_id"])]
     pub(crate) signature_output: Option<String>,

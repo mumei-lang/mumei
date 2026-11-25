@@ -31,7 +31,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei native-bundle` | 0 | Build/check a restricted native identity bundle (not artifact semantic proof) |
 | `mumei native-bundle accept-evidence` | 2 | Evaluate a saved native consumer Evidence report against fresh pinned source/LLVM checks into a bounded acceptance descriptor |
 | `mumei native-bundle accept-artifact` | 2 | Evaluate pinned artifact reproduction under the recorded toolchain into a bounded acceptance descriptor |
-| `mumei native-bundle accept-object` | 5 | Evaluate reproduced object machine code against the verified source within the machine-code TV profile into a bounded acceptance descriptor |
+| `mumei native-bundle accept-object` | 6 | Evaluate reproduced object machine code against the verified source within the machine-code TV profile into a bounded acceptance descriptor |
 | `mumei native-bundle recheck-evidence` | 1 | Replay a saved native consumer Evidence report against fresh pinned source/LLVM checks, without proof acceptance |
 | `mumei native-bundle recheck-object-acceptance` | 13 | Replay a saved accept-object descriptor against a fresh object acceptance, optionally pinning its detached producer signature |
 | `mumei native-bundle recheck-llvm` | 2 | Recheck the C03 source and pinned native LLVM body/wrapper snapshot, not object or binary semantics |
@@ -626,6 +626,7 @@ Usage: mumei native-bundle accept-object [OPTIONS] --expected-build-id <EXPECTED
 | `--json` | false | — | Emit a static acceptance descriptor, not reusable Evidence or a certificate |
 | `--key-file <KEY_FILE>` | — | — | Regular file containing the hex-encoded ed25519 signing key, never printed |
 | `--producer-key-id <PRODUCER_KEY_ID>` | — | — | Declared producer key label, not signed or authenticated |
+| `--produced-at <PRODUCED_AT>` | — | — | Optional declared production timestamp stamped into the signature envelope (RFC 3339); unsigned like the key id |
 | `--signature-output <SIGNATURE_OUTPUT>` | — | — | Write a detached signature envelope for the exact JSON output without replacing a file |
 
 ## `mumei native-bundle recheck-evidence`

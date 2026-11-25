@@ -8185,6 +8185,7 @@ fn recheck_object_acceptance_checks_exact_descriptor_signature_when_supplied() {
         .arg(&key)
         .args(["--producer-key-id", "object-producer", "--signature-output"])
         .arg(&signature)
+        .args(["--produced-at", "2026-01-02T03:04:05Z"])
         .output()
         .unwrap();
     assert_success(&accepted);
@@ -8214,6 +8215,10 @@ fn recheck_object_acceptance_checks_exact_descriptor_signature_when_supplied() {
             producer_key.clone(),
             "--expected-producer-key".to_owned(),
             "object-producer".to_owned(),
+            "--reference-time".to_owned(),
+            "2026-01-02T03:04:10Z".to_owned(),
+            "--max-age-seconds".to_owned(),
+            "5".to_owned(),
         ]
     };
 
@@ -8227,6 +8232,14 @@ fn recheck_object_acceptance_checks_exact_descriptor_signature_when_supplied() {
         "optional key-label, freshness, revocation and registry gates only as explicitly supplied"
     ));
     assert!(!stdout.contains("artifact_verified"));
+
+    let mut too_strict_args = signature_args();
+    let max_age_index = too_strict_args.len() - 1;
+    too_strict_args[max_age_index] = "4".to_owned();
+    assert_rejected(
+        &recheck(&too_strict_args),
+        "producer signature binding failed",
+    );
 
     let mut wrong_key_args = signature_args();
     wrong_key_args[3] = other_producer_key;
