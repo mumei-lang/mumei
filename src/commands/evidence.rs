@@ -4,6 +4,7 @@ use mumei_core::attempt_schedule;
 use mumei_core::evidence_acceptance::{self, Verdict};
 use mumei_core::evidence_check_acceptance;
 use mumei_core::native_bundle::{self, SourceRecheck};
+use mumei_core::object_acceptance;
 use mumei_core::producer_signature::{self, PRODUCER_SIGNATURE_SCHEMA};
 use mumei_core::semantic_contract::{self, RefinedAdmission, SEMANTIC_CONTRACT_VERSION};
 use mumei_core::source_evidence::{
@@ -252,6 +253,22 @@ pub(crate) fn run(command: EvidenceCommand) {
             source_options(&solver_timeout, &solver_resource_limit, produced_at)
                 .and_then(|options| verify_source(Path::new(&input), json, options, &mut output)),
             "Source evidence check failed",
+        ),
+        EvidenceCommand::CheckObjectAcceptance {
+            input,
+            stdin,
+            json,
+            emit_evidence,
+        } => (
+            check_object_acceptance(
+                input.as_deref().map(Path::new),
+                stdin,
+                json,
+                emit_evidence,
+                &mut output,
+            )
+            .map(|()| 0),
+            "Object acceptance check failed",
         ),
     };
     match result {
@@ -1997,6 +2014,78 @@ fn check_adapter(
     output
         .write_all(&diagnostic)
         .map_err(|_| "cannot write representation diagnostic")
+}
+
+fn check_object_acceptance(
+    input: Option<&Path>,
+    stdin: bool,
+    json: bool,
+    emit_evidence: bool,
+    output: &mut impl Write,
+) -> Result<(), &'static str> {
+    let bytes = match (input, stdin) {
+        (Some(path), false) => {
+            super::input::read_regular(path, object_acceptance::MAX_INPUT_BYTES as u64)?
+        }
+        (None, true) => super::input::read_stdin(object_acceptance::MAX_INPUT_BYTES as u64)?,
+        _ => return Err("choose exactly one object acceptance input"),
+    };
+    let descriptor = object_acceptance::decode(&bytes)
+        .map_err(|_| "invalid native object acceptance descriptor")?;
+    let payload = if emit_evidence {
+        let evidence = descriptor
+            .to_verification_evidence(env!("CARGO_PKG_VERSION"))
+            .map_err(|_| "cannot project object acceptance descriptor into Common Evidence v1")?;
+        let mut bytes = serde_json::to_vec_pretty(&evidence)
+            .map_err(|_| "cannot encode projected verification evidence")?;
+        bytes.push(b'\n');
+        if bytes.len() > MAX_INPUT_BYTES {
+            return Err("projected verification evidence exceeds Common Evidence v1 size limit");
+        }
+        bytes
+    } else if json {
+        let body = serde_json::json!({
+            "schema_version": "mumei.native-object-acceptance-check/v1",
+            "descriptor_schema_version": object_acceptance::SCHEMA_VERSION,
+            "representation": "valid",
+            "recheck": "not_performed",
+            "scope": descriptor.scope,
+            "build_id": descriptor.build_id,
+            "llvm_sha256": descriptor.llvm_sha256,
+            "object_sha256": descriptor.object_sha256,
+            "evidence_fingerprint": descriptor.evidence_fingerprint,
+            "object_link_correspondence": descriptor.source_machine_tv.object_link_correspondence,
+            "checked_correspondence_items": descriptor.object_translation.correspondence.checks.len(),
+            "checked_functions": descriptor.functions.len(),
+            "checks_performed": [
+                "representation_gate",
+                "object_acceptance_consistency",
+            ],
+            "checks_not_performed": [
+                "core_object_recheck_rerun",
+                "producer_authenticity",
+                "descriptor_authenticity",
+                "historical_execution",
+                "abi_runtime_semantics",
+                "grade_promotion",
+                "lean_kernel_checks",
+            ],
+        });
+        let mut bytes = serde_json::to_vec_pretty(&body)
+            .map_err(|_| "cannot encode object acceptance diagnostic")?;
+        bytes.push(b'\n');
+        bytes
+    } else {
+        format!(
+            "Native object acceptance descriptor representation valid (scope: {}, evidence_fingerprint: {}).\n\
+             Scope: representation and internal consistency only; Core recheck not rerun; no producer authenticity or grade promotion.\n",
+            descriptor.scope, descriptor.evidence_fingerprint
+        )
+        .into_bytes()
+    };
+    output
+        .write_all(&payload)
+        .map_err(|_| "cannot write object acceptance output")
 }
 
 fn check_attempt_acceptance(

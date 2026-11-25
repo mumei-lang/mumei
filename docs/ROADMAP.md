@@ -2801,6 +2801,15 @@ no producer or grade behavior changes, and C02 remains open. The `All
 verified:` line reports the re-check verdict, not the certificate's stored
 claim.
 
+C02 #786 now also promotes the native object-route acceptance descriptor
+(`mumei.native-evidence-acceptance/v1` emitted by `mumei native-bundle accept-object --json`)
+into the backend-neutral evidence contract via
+`schema/native-object-acceptance.schema.json`, `mumei_core::object_acceptance`,
+and `mumei evidence check-object-acceptance [--json | --emit-evidence]`.
+Validation and projection are representation-only: every unchecked domain
+stays in `exclusions`, no Core recheck is rerun, and proof grades, Claim Book
+semantics, and Lean gates remain unchanged.
+
 Opt-in detached-signature binding covers `mumei evidence accept` requirement
 routes, `accept-list` over raw list-envelope bytes, and `accept-source` over
 raw saved-record bytes. `produced_at_signed` reports that a producer signed the

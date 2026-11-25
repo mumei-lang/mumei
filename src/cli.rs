@@ -699,6 +699,21 @@ pub(crate) enum EvidenceCommand {
         #[arg(long)]
         expected_adapter: Option<String>,
     },
+    /// Validate a native object-route acceptance descriptor and optionally project it into Common Evidence v1
+    CheckObjectAcceptance {
+        /// Regular mumei.native-evidence-acceptance/v1 object-route JSON file (at most 262,144 bytes)
+        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        input: Option<String>,
+        /// Read one object-route acceptance descriptor from standard input (at most 262,144 bytes)
+        #[arg(long)]
+        stdin: bool,
+        /// Emit a static representation diagnostic JSON (not a recheck or acceptance receipt)
+        #[arg(long, conflicts_with = "emit_evidence")]
+        json: bool,
+        /// Project the validated descriptor into a bounded mumei.verification-evidence/v1 record (no recheck or grade promotion)
+        #[arg(long, conflicts_with = "json")]
+        emit_evidence: bool,
+    },
 }
 
 #[derive(clap::Args)]

@@ -3285,6 +3285,34 @@ exit-status, ABI/runtime or optimizer-semantics proof. Non-acceptance paths
 emit no stdout: difference or failure exits 1, an inconclusive fresh query
 exits 3.
 
+### Object-route acceptance descriptor contract and Common Evidence projection
+
+```sh
+mumei evidence check-object-acceptance <descriptor.json | --stdin> [--json | --emit-evidence]
+```
+
+The object-route `mumei.native-evidence-acceptance/v1` descriptor emitted by
+`mumei native-bundle accept-object --json` now has a closed JSON Schema
+(`schema/native-object-acceptance.schema.json`) and a strict Core decoder
+(`mumei_core::object_acceptance::decode`). It validates required fields,
+64-character lowercase SHA-256 digests (`build_id`, `llvm_sha256`,
+`object_sha256`, `evidence_fingerprint`), disjointness between
+`checks_performed` and `checks_not_performed`, Core-owned check names
+(rejecting agent-owned `object_translation_correspondence`), scope consistency
+with `source_machine_tv.object_link_correspondence` and transformation edges,
+and coverage of all ten required `object_translation.correspondence.checks`
+items.
+
+With `--emit-evidence`, Core projects a validated descriptor into a bounded
+`mumei.verification-evidence/v1` record (`method: "bounded_model_checking"`,
+`scope.kind: "bounded"`, `semantics.integer_model: "wrapping_i64"`,
+`provenance.configuration_fingerprint: evidence_fingerprint`) carrying every
+`checks_not_performed` entry in `exclusions` and the assumed register
+convention / input domain in `scope.bounds` and `assumptions`. This is
+representation validation and projection only: it does not rerun Core
+rechecks, authenticate the producer or descriptor, validate ABI/runtime/OS
+semantics, or promote a Seal Grade.
+
 ## 9. External verifier candidates, not adoption decisions
 
 Before any adoption check current maintenance, license/distribution/commercial
