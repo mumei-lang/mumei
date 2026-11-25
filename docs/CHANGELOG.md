@@ -1,3 +1,13 @@
+### Unreleased: preserve explicit comparison grouping
+
+- A comparison inside parentheses is no longer flattened into an outer
+  comparison chain, because the AST does not retain the grouping. Such an
+  expression keeps its explicit left-associative parse instead of being
+  rewritten into a different proposition. Comparison chains written flat keep
+  their existing normalization. Nested comparisons in duplicated middle chain
+  operands are rejected by fail-closed parsing rather than exponentially
+  expanded.
+
 ### Unreleased: reject calls with later-argument array mutations
 
 - Calls are rejected when evaluation of a later argument may mutate an array

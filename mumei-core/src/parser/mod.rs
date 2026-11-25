@@ -180,6 +180,57 @@ impl ParseContext {
     }
 }
 
+fn is_comparison_token(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::Eq | Token::Neq | Token::Gt | Token::Lt | Token::Ge | Token::Le
+    )
+}
+
+/// Parentheses are not represented in the AST, so chain normalization cannot
+/// distinguish `a == b == c` from `(a == b) == c` after parsing. Detect a
+/// parenthesized comparison used directly as a comparison operand before the
+/// AST is rewritten; callers keep the explicit left-associative parse instead.
+fn parenthesized_comparison_operand(tokens: &[SpannedToken]) -> bool {
+    let mut matching = vec![None; tokens.len()];
+    let mut stack = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        match token.token {
+            Token::LParen => stack.push(index),
+            Token::RParen => {
+                if let Some(open) = stack.pop() {
+                    matching[open] = Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    tokens.iter().enumerate().any(|(index, token)| {
+        if token.token != Token::LParen {
+            return false;
+        }
+        let Some(close) = matching[index] else {
+            return false;
+        };
+        if !tokens[index + 1..close]
+            .iter()
+            .any(|inner| is_comparison_token(&inner.token))
+        {
+            return false;
+        }
+        let previous_is_call_callee =
+            index > 0 && matches!(tokens[index - 1].token, Token::Ident(_));
+        if previous_is_call_callee {
+            return false;
+        }
+        let previous_comparison = index > 0 && is_comparison_token(&tokens[index - 1].token);
+        let next_comparison =
+            close + 1 < tokens.len() && is_comparison_token(&tokens[close + 1].token);
+        previous_comparison || next_comparison
+    })
+}
+
 // =============================================================================
 // Public API — same signatures as the old parser.rs
 // =============================================================================
@@ -200,8 +251,14 @@ pub fn parse_module_checked(source: &str) -> Result<Vec<Item>, Vec<String>> {
 pub fn parse_expression(input: &str) -> Expr {
     let mut lexer = lexer::Lexer::new(input);
     let tokens = lexer.tokenize();
+    let skip_chain_normalization = parenthesized_comparison_operand(&tokens);
     let mut ctx = ParseContext::new(tokens);
-    expr::normalize_comparison_chains(expr::parse_expr(&mut ctx, 0))
+    let parsed = expr::parse_expr(&mut ctx, 0);
+    if skip_chain_normalization {
+        parsed
+    } else {
+        expr::normalize_comparison_chains(parsed)
+    }
 }
 
 /// Parse a body expression (blocks and statements).
@@ -220,13 +277,18 @@ pub fn parse_body_expr(input: &str) -> Stmt {
 pub fn parse_expression_checked(input: &str) -> Result<Expr, Vec<String>> {
     let mut lexer = lexer::Lexer::new(input);
     let tokens = lexer.tokenize_checked()?;
+    let skip_chain_normalization = parenthesized_comparison_operand(&tokens);
     let mut ctx = ParseContext::new(tokens);
     let parsed = expr::parse_expr(&mut ctx, 0);
     let mut failures = ctx.expect_failures().to_vec();
     if expr::nested_comparison_chain_operand(&parsed) {
         failures.push("nested comparison inside a comparison-chain operand".to_owned());
     }
-    let expr = expr::normalize_comparison_chains(parsed);
+    let expr = if skip_chain_normalization {
+        parsed
+    } else {
+        expr::normalize_comparison_chains(parsed)
+    };
     if ctx.peek() != &Token::Eof {
         failures.push(format!(
             "unexpected trailing input starting at token `{:?}`",
@@ -1901,11 +1963,28 @@ atom transfer(x: i64)
     }
 
     #[test]
+    fn parenthesized_comparison_operand_is_not_chain_normalized() {
+        match parse_expression("(false == false) == false") {
+            Expr::BinaryOp(left, Op::Eq, right) => {
+                assert!(matches!(*left, Expr::BinaryOp(_, Op::Eq, _)));
+                assert!(matches!(*right, Expr::Variable(ref name) if name == "false"));
+            }
+            other => panic!("expected left-associative equality, got {:?}", other),
+        }
+        assert!(matches!(
+            parse_expression("a == b == c"),
+            Expr::BinaryOp(_, Op::And, _)
+        ));
+    }
+
+    #[test]
     fn checked_parse_rejects_nested_comparison_chain_operands() {
         assert!(parse_expression_checked("a == b < c == d").is_err());
         assert!(parse_expression_checked("a < (b < c) < d").is_err());
         assert!(parse_expression_checked("x == a < b").is_ok());
+        assert!(parse_expression_checked("x < y == a == b").is_ok());
         assert!(parse_expression_checked("0 <= i < len(a)").is_ok());
+        assert!(parse_expression_checked("(false == false) == false").is_ok());
     }
 
     #[test]

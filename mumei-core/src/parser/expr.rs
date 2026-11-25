@@ -227,7 +227,13 @@ pub(crate) fn nested_comparison_chain_operand(expr: &Expr) -> bool {
             let mut operands = Vec::new();
             let mut op_count = 0usize;
             collect_relational_chain_refs(expr, equality, &mut operands, &mut op_count);
-            if op_count > 1 && operands.iter().any(|operand| expr_has_relational(operand)) {
+            if op_count > 1
+                && operands
+                    .iter()
+                    .skip(1)
+                    .take(operands.len().saturating_sub(2))
+                    .any(|operand| expr_has_relational(operand))
+            {
                 return true;
             }
             return operands
@@ -366,6 +372,21 @@ fn normalize_expr(expr: Expr) -> Expr {
                 let left = normalize_expr(operands.remove(0));
                 let right = normalize_expr(operands.remove(0));
                 return Expr::BinaryOp(Box::new(left), ops.remove(0), Box::new(right));
+            }
+            if operands
+                .iter()
+                .skip(1)
+                .take(operands.len().saturating_sub(2))
+                .any(expr_has_relational)
+            {
+                let Expr::BinaryOp(left, op, right) = raw else {
+                    unreachable!("relational chain root is a binary operator");
+                };
+                return Expr::BinaryOp(
+                    Box::new(normalize_expr(*left)),
+                    op,
+                    Box::new(normalize_expr(*right)),
+                );
             }
             let mut comparisons = Vec::with_capacity(ops.len());
             for i in 0..ops.len() {
