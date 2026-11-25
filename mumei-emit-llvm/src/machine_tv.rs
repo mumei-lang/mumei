@@ -1407,12 +1407,35 @@ struct SretCallBuffer<'ctx> {
 
 const MAX_COMPLETED_PATHS: usize = 64;
 
+#[cfg(all(test, target_arch = "x86_64"))]
+#[path = "machine_tv_cpu_differential.rs"]
+mod cpu_differential;
+
 fn lift<'ctx>(
     instructions: &[Instruction],
     function_size: u64,
     model: &PureI64Body<'ctx>,
     call_targets: &BTreeMap<u64, CallTarget>,
     context: &'ctx Context,
+) -> Result<LiftedFunction<'ctx>, FunctionOutcome> {
+    lift_inner(
+        instructions,
+        function_size,
+        model,
+        call_targets,
+        context,
+        #[cfg(all(test, target_arch = "x86_64"))]
+        None,
+    )
+}
+
+fn lift_inner<'ctx>(
+    instructions: &[Instruction],
+    function_size: u64,
+    model: &PureI64Body<'ctx>,
+    call_targets: &BTreeMap<u64, CallTarget>,
+    context: &'ctx Context,
+    #[cfg(all(test, target_arch = "x86_64"))] mut probe: Option<&mut cpu_differential::Probe<'ctx>>,
 ) -> Result<LiftedFunction<'ctx>, FunctionOutcome> {
     let branch_targets = resolve_branch_targets(instructions, function_size, call_targets)?;
     let function_has_calls = instructions.iter().any(|instruction| {
@@ -1444,6 +1467,14 @@ fn lift<'ctx>(
     let xmm_registers = (0..16)
         .map(|_| BV::fresh_const(context, "machine_initial_xmm_register", 128))
         .collect::<Vec<_>>();
+    #[cfg(all(test, target_arch = "x86_64"))]
+    let (registers, xmm_registers) = {
+        let (mut registers, mut xmm_registers) = (registers, xmm_registers);
+        if let Some(probe) = probe.as_deref() {
+            probe.seed_registers(&mut registers, &mut xmm_registers, context);
+        }
+        (registers, xmm_registers)
+    };
     let callee_saved_initial = CALLEE_SAVED_REGISTERS
         .iter()
         .map(|register_index| registers[*register_index].clone())
@@ -1490,6 +1521,10 @@ fn lift<'ctx>(
             input_index += 1;
         }
     }
+    #[cfg(all(test, target_arch = "x86_64"))]
+    if let Some(probe) = probe.as_deref() {
+        probe.seed_stack_arguments(&stack_argument_leaves, &mut arguments, context);
+    }
     let mut pending = vec![MachineState {
         instruction_index: 0,
         instruction_visits: vec![0; instructions.len()],
@@ -1524,6 +1559,10 @@ fn lift<'ctx>(
             let Some(instruction) = instructions.get(index) else {
                 return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
             };
+            #[cfg(all(test, target_arch = "x86_64"))]
+            if let Some(probe) = probe.as_deref_mut() {
+                probe.observe(index, &state);
+            }
             if state.instruction_visits[index] > LOOP_BOUND {
                 match path_feasibility_status(model, &state.path_conditions, &arguments, context) {
                     SatResult::Unsat => break,
