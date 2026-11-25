@@ -6246,6 +6246,22 @@ landed, not the current plugin-contract status after #1348; Core-owned
 Evidence meaning/acceptance and grade promotion remain outside the completed
 orchestration contract.
 
+### C13 incomplete-output regression gate (mumei-demo #203)
+
+[mumei-demo#203](https://github.com/mumei-lang/mumei-demo/pull/203) extends
+the optional `evidence_check_schedule` scenario and integration CI with a
+large-output adapter regression. The adapter emits more than the agent's
+64 KiB capture bound, while the first exactly 64 KiB are a valid padded
+`mumei.verification-evidence/v1` document. The scenario therefore fails if a
+truncated prefix can be passed to Core as a complete document: scheduling may
+retain the host-declared exit-code `selected` dispatch outcome, but
+`evidence_check` must be `failed` and `evidence_acceptance` must be false. A
+probe-validated recording wrapper must record no Core invocation for the
+incomplete output, distinguishing rejection before Core I/O from a Core-side
+rejection. This is a C13 confusion regression only — not adapter adoption,
+output meaning, Evidence truth or grade promotion. C13 remains ongoing as
+later planner/native/translation milestones land.
+
 ### Manifest-declared attempt memory bound (mumei-agent #993)
 
 [mumei-agent#993](https://github.com/mumei-lang/mumei-agent/pull/993)
