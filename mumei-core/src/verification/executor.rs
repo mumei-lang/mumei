@@ -1866,10 +1866,18 @@ fn verify_inner_impl(
         // condition and index expressions are lowered (name-based lookup).
         let i = Int::fresh_const(&ctx, q.var.as_str());
         // Parse start as an expression (supports identifiers, arithmetic, e.g. "n - 1")
+        let parse_quantifier_expr = |raw: &str, label: &str| -> MumeiResult<Expr> {
+            crate::parser::parse_expression_checked(raw).map_err(|failures| {
+                MumeiError::verification_at(
+                    format!("unsupported {} '{}': {}", label, raw, failures.join("; ")),
+                    atom.span.clone(),
+                )
+            })
+        };
         let start = if let Ok(val) = q.start.parse::<i64>() {
             Int::from_i64(&ctx, val)
         } else {
-            let ast = parse_expression(&q.start);
+            let ast = parse_quantifier_expr(&q.start, "quantifier start")?;
             as_int_like(
                 &crate::verification::translator::z3_types::with_array_shared_markers_restored(
                     &mut env,
@@ -1882,7 +1890,7 @@ fn verify_inner_impl(
             Int::from_i64(&ctx, val)
         } else {
             // Parse end as expression to support `n - 1` etc.
-            let ast = parse_expression(&q.end);
+            let ast = parse_quantifier_expr(&q.end, "quantifier end")?;
             as_int_like(
                 &crate::verification::translator::z3_types::with_array_shared_markers_restored(
                     &mut env,
@@ -1894,7 +1902,7 @@ fn verify_inner_impl(
 
         let range_cond = Bool::and(&ctx, &[&i.ge(&start), &i.lt(&end)]);
         let old_bound_val = env.insert(q.var.clone(), i.clone().into());
-        let expr_ast = parse_expression(&q.condition);
+        let expr_ast = parse_quantifier_expr(&q.condition, "quantifier condition")?;
         vc.quantifier_binders
             .borrow_mut()
             .push((q.var.clone(), i.clone().into()));

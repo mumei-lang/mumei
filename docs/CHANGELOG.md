@@ -6,7 +6,9 @@
   still normalized locally. Nested comparisons in duplicated middle chain
   operands are rejected before expansion by fail-closed parsing, and ordinary
   contract lowering treats that rejection as an unverified clause rather than
-  proving a different left-associative proposition. `VERIFIER_POLICY_VERSION`
+  proving a different left-associative proposition. Quantifier bounds and
+  conditions use the same checked parsing instead of accepting nested
+  middle-chain shapes rejected elsewhere. `VERIFIER_POLICY_VERSION`
   is bumped 43 → 44 so cached verdicts are re-derived.
 
 ### Unreleased: reject calls with later-argument array mutations

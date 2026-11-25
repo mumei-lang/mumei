@@ -588,3 +588,66 @@ body: arr[0];
     assert_verified(&output, &payload);
     std::fs::remove_dir_all(dir).ok();
 }
+
+// C1: comparison-chain normalization applies inside a quantifier body.
+// The parenthesized equality is a boolean operand, while the independent
+// flat ordering chain is normalized locally.
+#[test]
+fn quantifier_condition_normalizes_comparison_chains_with_parentheses() {
+    let (dir, output, payload) = verify_json(
+        "quantified_chain",
+        r#"
+atom quantified_chain(arr: [i64], n: i64) -> i64
+requires: n >= 1 && len(arr) >= n && forall(i, 0, n, (arr[i] == arr[i]) == true && 0 <= arr[i] < 10);
+ensures: result >= 0 && result < 10;
+body: arr[0];
+"#,
+    );
+    assert_verified(&output, &payload);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+// C2: a nested comparison in a duplicated middle-chain operand follows the
+// same fail-closed policy as an ordinary contract clause. It must not be
+// silently reinterpreted as a different left-associative proposition.
+#[test]
+fn quantifier_condition_rejects_nested_comparison_chain_operand() {
+    let (dir, output, _payload) = verify_json(
+        "quantified_nested_chain",
+        r#"
+atom quantified_nested_chain(arr: [i64], n: i64, x: i64, y: i64) -> i64
+requires: n >= 1 && len(arr) >= n && forall(i, 0, n, arr[i] == x < y == arr[i]);
+ensures: result >= 0;
+body: arr[0];
+"#,
+    );
+    let text = output_text(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(
+        text.contains("nested comparison inside a comparison-chain operand"),
+        "expected fail-closed nested-chain diagnostic:\n{text}"
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
+
+// C3: checked parsing also applies to quantifier bounds, so trailing input
+// is not silently dropped into a weaker range expression.
+#[test]
+fn quantifier_end_rejects_trailing_input() {
+    let (dir, output, _payload) = verify_json(
+        "quantified_bad_end",
+        r#"
+atom quantified_bad_end(arr: [i64], n: i64) -> i64
+requires: n >= 1 && len(arr) >= n && forall(i, 0, n - 1 trailing, arr[i] >= 0);
+ensures: result >= 0;
+body: arr[0];
+"#,
+    );
+    let text = output_text(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(
+        text.contains("unexpected trailing input"),
+        "expected fail-closed trailing-input diagnostic:\n{text}"
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
