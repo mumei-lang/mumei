@@ -709,11 +709,14 @@ or reject it. Start without calls, loops, stores or region-valued results.
   cell `start + i`. Empty views are allowed but cannot be dereferenced.
   Offset arithmetic is mathematical, bounded by the parent, and must not
   be implemented as silently wrapping source or target address arithmetic.
-- **Aliasing.** Inputs may overlap. A single immutable store per region
-  means the same region and absolute element offset imply the same value.
-  Do not assume separate formals are disjoint; likewise, equal cell values
-  do not imply aliasing. Do not expose pointer comparison or pointer identity
-  as a source operation.
+- **Aliasing.** Give each formal view a symbolic region ID, start and length.
+  Lowering leaves region equality between formals unconstrained: the proof
+  must cover every caller choice allowed by the contract, including equal
+  regions with overlapping offsets and distinct regions. A backend must not
+  fix formals to equal or distinct regions. A single immutable store per
+  region ensures that the same region and absolute offset give the same
+  value; equal cell values do not imply aliasing. Do not expose pointer
+  comparison or pointer identity as a source operation.
 - **Null and initialization.** The model has no null, dangling or
   uninitialized references. An executable boundary must establish that the
   view is backed by the declared live allocation and has the required
@@ -767,6 +770,9 @@ Reject unresolved region identity or access semantics, unsupported element
 types, nullable or raw pointers, casts and pointer/integer round trips,
 arbitrary address arithmetic, uninitialized cells, mutable borrows/stores,
 allocation/free, escaping views, FFI and concurrent/volatile/atomic access.
+Region identity is unresolved when a view cannot be traced to a formal's
+symbolic region, directly or through checked subviews (for example, a local
+with no traced origin, a return value or an unsupported operation).
 A future mutable profile would need explicit exclusive permissions, store
 versions and frame obligations; no availability or fallback to it is implied.
 Distinguish unsupported source or lowering from a violated obligation and
