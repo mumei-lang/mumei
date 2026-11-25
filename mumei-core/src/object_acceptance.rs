@@ -343,7 +343,7 @@ impl ObjectAcceptanceDescriptor {
                 id: format!("native-bundle:{}:llvm-ir", self.build_id),
                 sha256: self.llvm_sha256.clone(),
             },
-            obligation_id: self.scope.clone(),
+            obligation_id: format!("native-bundle:{}:{}", self.build_id, self.scope),
             semantics: Semantics {
                 profile: self.scope.clone(),
                 integer_model: "wrapping_i64".to_owned(),
@@ -911,9 +911,34 @@ mod tests {
             .exclusions
             .iter()
             .any(|item| item == "grade_promotion"));
+        assert_eq!(
+            evidence.obligation_id,
+            format!("native-bundle:{}:{}", descriptor.build_id, descriptor.scope)
+        );
         // Round-trip through Common Evidence v1 strict decoder.
         let encoded = serde_json::to_vec(&evidence).expect("serialize evidence");
         verification_evidence::decode(&encoded).expect("evidence must decode strictly");
+    }
+
+    #[test]
+    fn independent_builds_with_same_scope_have_no_consistency_conflict() {
+        let a = decode(FIXTURE_BYTES)
+            .unwrap()
+            .to_verification_evidence("0.4.0-test")
+            .unwrap();
+        let mut other = fixture_value();
+        other["build_id"] =
+            json!("1111111111111111111111111111111111111111111111111111111111111111");
+        other["object_sha256"] =
+            json!("2222222222222222222222222222222222222222222222222222222222222222");
+        other["object_translation"]["transformations"][0]["output_identity"] =
+            json!("2222222222222222222222222222222222222222222222222222222222222222");
+        let b = decode(&serde_json::to_vec(&other).unwrap())
+            .unwrap()
+            .to_verification_evidence("0.4.0-test")
+            .unwrap();
+        let report = verification_evidence::consistency_check(&[a, b]);
+        assert!(report.consistent, "independent builds must not conflict");
     }
 
     #[test]
