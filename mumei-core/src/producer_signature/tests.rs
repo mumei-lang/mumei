@@ -182,6 +182,7 @@ fn non_rfc3339_produced_at_is_rejected() {
         "2026-02-30T00:00:00Z",
         "2025-02-29T00:00:00Z",
         "2026-04-31T00:00:00Z",
+        "2016-12-31T23:59:60Z",
     ] {
         assert_eq!(
             sign(b"{}", &key, "producer-a", Some(bad)).unwrap_err(),

@@ -551,7 +551,7 @@ pub(crate) enum EvidenceCommand {
         /// Caller-declared producer key label the consumer pins separately; never derived from the key bytes
         #[arg(long)]
         producer_key_id: String,
-        /// Optional declared production timestamp stamped into the envelope (RFC 3339); unsigned like the key id — freshness is a consumer-side check
+        /// Optional declared production timestamp stamped into the envelope (RFC 3339, excluding leap seconds); unsigned like the key id — freshness is a consumer-side check
         #[arg(long)]
         produced_at: Option<String>,
     },
@@ -777,7 +777,7 @@ pub(crate) struct ObjectDescriptorOutputArgs {
     /// Declared producer key label, not signed or authenticated
     #[arg(long, requires = "signature_output")]
     pub(crate) producer_key_id: Option<String>,
-    /// Optional declared production timestamp stamped into the signature envelope (RFC 3339); unsigned like the key id
+    /// Optional declared production timestamp stamped into the signature envelope (RFC 3339, excluding leap seconds); unsigned like the key id
     #[arg(long, requires = "signature_output")]
     pub(crate) produced_at: Option<String>,
     /// Write a detached signature envelope for the exact JSON output without replacing a file

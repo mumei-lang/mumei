@@ -286,7 +286,7 @@ Usage: mumei evidence sign [OPTIONS] --key-file <KEY_FILE> --producer-key-id <PR
 | `--json` | false | — | Emit the detached mumei.producer-signature/v1 envelope, not a verification or acceptance result |
 | `--key-file <KEY_FILE>` | — | — | Regular file holding exactly the 64-char lowercase-hex ed25519 secret key; the value is never printed |
 | `--producer-key-id <PRODUCER_KEY_ID>` | — | — | Caller-declared producer key label the consumer pins separately; never derived from the key bytes |
-| `--produced-at <PRODUCED_AT>` | — | — | Optional declared production timestamp stamped into the envelope (RFC 3339); unsigned like the key id — freshness is a consumer-side check |
+| `--produced-at <PRODUCED_AT>` | — | — | Optional declared production timestamp stamped into the envelope (RFC 3339, excluding leap seconds); unsigned like the key id — freshness is a consumer-side check |
 
 ## `mumei evidence keygen`
 
@@ -626,7 +626,7 @@ Usage: mumei native-bundle accept-object [OPTIONS] --expected-build-id <EXPECTED
 | `--json` | false | — | Emit a static acceptance descriptor, not reusable Evidence or a certificate |
 | `--key-file <KEY_FILE>` | — | — | Regular file containing the hex-encoded ed25519 signing key, never printed |
 | `--producer-key-id <PRODUCER_KEY_ID>` | — | — | Declared producer key label, not signed or authenticated |
-| `--produced-at <PRODUCED_AT>` | — | — | Optional declared production timestamp stamped into the signature envelope (RFC 3339); unsigned like the key id |
+| `--produced-at <PRODUCED_AT>` | — | — | Optional declared production timestamp stamped into the signature envelope (RFC 3339, excluding leap seconds); unsigned like the key id |
 | `--signature-output <SIGNATURE_OUTPUT>` | — | — | Write a detached signature envelope for the exact JSON output without replacing a file |
 
 ## `mumei native-bundle recheck-evidence`
