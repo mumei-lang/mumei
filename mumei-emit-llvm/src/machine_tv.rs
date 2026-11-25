@@ -6930,6 +6930,88 @@ define {ir_type} @make(i64 %x, double %y, double %z) {{
     }
 
     #[test]
+    fn ir_object_equivalence_compares_mixed_register_pair_nan_payloads() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model_named_with_admission(
+            "struct P { x: i64, y: f64 }\n\
+             atom make(x: i64, y: f64) -> P requires: true; ensures: true; body: { P { x: x, y: y } };",
+            "make",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let bytes = [
+            0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8,
+            0x7f, // movabsq $0x7FF8000000000000, %rax
+            0x66, 0x48, 0x0f, 0x6e, 0xc0, // movq %rax, %xmm0
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0xc3, // retq
+        ];
+        let targets = BTreeMap::new();
+        for (nan, expected, expected_with_frame) in [
+            (
+                "0x7FF8000000000000",
+                IrObjectEquivalence::Equivalent,
+                FunctionOutcome::Equivalent,
+            ),
+            (
+                "0x7FF8000000000001",
+                IrObjectEquivalence::Different,
+                FunctionOutcome::Different,
+            ),
+        ] {
+            let ir = format!(
+                r#"target triple = "x86_64-unknown-linux-gnu"
+define {{ i64, double }} @make(i64 %x, double %y) {{
+  %first = insertvalue {{ i64, double }} undef, i64 %x, 0
+  %result = insertvalue {{ i64, double }} %first, double {nan}, 1
+  ret {{ i64, double }} %result
+}}
+"#
+            );
+            let (ir_returns, ir_definedness) = unsafe {
+                crate::translation_validation::encode_ir_function_for_comparison(
+                    ir.as_bytes(),
+                    "make",
+                    &model,
+                    false,
+                    &context,
+                )
+            }
+            .unwrap();
+            assert_eq!(
+                check_function_against_ir(
+                    &bytes,
+                    0,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &targets,
+                    &context,
+                ),
+                expected,
+                "{nan}",
+            );
+            assert_eq!(
+                check_function_with_frame_memory_against_ir(
+                    &bytes,
+                    0,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &targets,
+                    &context,
+                )
+                .0,
+                expected_with_frame,
+                "{nan}",
+            );
+        }
+    }
+
+    #[test]
     fn ir_object_equivalence_rejects_nested_mixed_register_pair() {
         let context = Context::new(&Config::new());
         let model = source_model_named_with_admission(
