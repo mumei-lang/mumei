@@ -2953,6 +2953,15 @@ later optimizer/backend/linker/runtime/binary correctness, native-bundle
 acceptance, new evidence route or grade. C08 hash checks remain identity-only;
 broader C09 semantics and C02/C10 consumer integration remain open.
 
+**C09 Step 4 addendum ([#789](https://github.com/mumei-lang/mumei/issues/789), partial):**
+the direct LLVM IR → Linux x86-64 object-code check now compares flat
+`{ i64, double }` and `{ double, i64 }` results bit-for-bit in `rax` and
+`xmm0`. This does not widen the source → LLVM profile or change object
+acceptance. Nested mixed results, mixed `sret`, FP arithmetic and comparisons,
+and the existing deferred set stay outside this slice. See
+[the decision record](DESIGN_LLVM_OBJECT_CORRESPONDENCE.md) and
+[roadmap item 8](https://github.com/mumei-lang/mumei/issues/1448).
+
 The first C10 Stage A consumer adds opt-in `native-bundle recheck-source`:
 existing C08 pinned identity/status checks plus a fresh, bounded C03 source
 postcondition query using fixed Z3 settings, without project configuration,
