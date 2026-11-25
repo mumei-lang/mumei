@@ -6523,9 +6523,20 @@ fn accept_object_signs_exact_descriptor_bytes_after_pinned_checks() {
         assert!(!error.contains(FAKE_KEY));
         assert!(!error.contains(INVALID_KEY));
     };
-    assert_rejected(signed_acceptance(&id, &["--json"]), 1);
-    assert_eq!(fs::read(&signature_path).unwrap(), envelope_bytes);
+    fs::write(&signature_path, b"existing signature").unwrap();
+    let no_overwrite = signed_acceptance(&id, &["--json"]);
+    assert!(String::from_utf8_lossy(&no_overwrite.stderr)
+        .contains("cannot publish native object descriptor signature"));
+    assert_rejected(no_overwrite, 1);
+    assert_eq!(fs::read(&signature_path).unwrap(), b"existing signature");
     fs::remove_file(&signature_path).unwrap();
+    let entries = || {
+        fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>()
+    };
+    let before = entries();
     let full = fs::OpenOptions::new()
         .write(true)
         .open("/dev/full")
@@ -6538,6 +6549,7 @@ fn accept_object_signs_exact_descriptor_bytes_after_pinned_checks() {
         .contains("cannot write native object acceptance descriptor"));
     assert_rejected(failed_write, 1);
     assert!(!signature_path.exists());
+    assert_eq!(entries(), before);
     assert_success(&signed_acceptance(&id, &["--json"]));
     assert_eq!(fs::read(&signature_path).unwrap(), envelope_bytes);
     fs::remove_file(&signature_path).unwrap();

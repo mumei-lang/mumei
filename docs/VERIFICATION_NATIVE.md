@@ -2662,8 +2662,10 @@ to `native-bundle accept-object` to emit an optional detached
 Only a successful pinned acceptance reaches signing. The Ed25519 signature
 covers the SHA-256 digest of the exact descriptor bytes written to stdout,
 including the trailing newline, for descriptors up to 4 MiB. Save stdout
-as-is: reformatting the JSON invalidates the binding. The signature is
-published separately without replacing an existing file; consume it only
+as-is: reformatting the JSON invalidates the binding. The signature is staged
+first and published without replacing an existing file, only after stdout is
+written and flushed. If publication fails, the command exits unsuccessfully
+even though stdout may contain the descriptor. Consume the signed result only
 after the command succeeds and you have both outputs.
 
 Verification recomputes the digest from the saved descriptor and verifies the

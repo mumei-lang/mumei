@@ -6831,12 +6831,18 @@ fn object_evidence_fingerprint(
     Ok(sha256(&bytes))
 }
 
-fn write_object_descriptor_signature(
+const OBJECT_DESCRIPTOR_SIGNATURE_PUBLISH_ERROR: BundleError =
+    BundleError("cannot publish native object descriptor signature");
+
+fn stage_object_descriptor_signature(
     descriptor: &[u8],
     path: &Path,
     key_file: &Path,
     producer_key_id: &str,
-) -> Result<(), BundleError> {
+) -> Result<tempfile::NamedTempFile, BundleError> {
+    if fs::symlink_metadata(path).is_ok() {
+        return Err(OBJECT_DESCRIPTOR_SIGNATURE_PUBLISH_ERROR);
+    }
     if descriptor.len() as u64 > producer_signature::MAX_SUBJECT_BYTES {
         return Err(BundleError(
             "native object descriptor exceeds the signing limit",
@@ -6855,10 +6861,7 @@ fn write_object_descriptor_signature(
     staged
         .write_all(b"\n")
         .map_err(|_| BundleError("cannot write native object descriptor signature"))?;
-    staged
-        .persist_noclobber(path)
-        .map_err(|_| BundleError("cannot publish native object descriptor signature"))?;
-    Ok(())
+    Ok(staged)
 }
 
 fn write_object_machine_tv_acceptance(
@@ -6940,8 +6943,7 @@ fn write_object_machine_tv_acceptance(
         let mut bytes = serde_json::to_vec_pretty(&descriptor)
             .map_err(|_| BundleError("cannot encode native object acceptance descriptor"))?;
         bytes.push(b'\n');
-        let signature_output = output.signature_output.as_deref().map(Path::new);
-        if let Some(signature_output) = signature_output {
+        let staged_signature = if let Some(signature_output) = &output.signature_output {
             let (Some(key_file), Some(producer_key_id)) =
                 (&output.key_file, &output.producer_key_id)
             else {
@@ -6949,30 +6951,26 @@ fn write_object_machine_tv_acceptance(
                     "descriptor signing requires a key file and producer key id",
                 ));
             };
-            write_object_descriptor_signature(
+            let path = Path::new(signature_output);
+            let staged = stage_object_descriptor_signature(
                 &bytes,
-                signature_output,
+                path,
                 Path::new(key_file),
                 producer_key_id,
             )?;
-        }
+            Some((staged, path))
+        } else {
+            None
+        };
         let mut stdout = std::io::stdout().lock();
-        if stdout
+        stdout
             .write_all(&bytes)
             .and_then(|()| stdout.flush())
-            .is_err()
-        {
-            if signature_output.is_some_and(|path| {
-                fs::remove_file(path)
-                    .is_err_and(|error| error.kind() != std::io::ErrorKind::NotFound)
-            }) {
-                return Err(BundleError(
-                    "cannot write native object acceptance descriptor or remove its signature",
-                ));
-            }
-            return Err(BundleError(
-                "cannot write native object acceptance descriptor",
-            ));
+            .map_err(|_| BundleError("cannot write native object acceptance descriptor"))?;
+        if let Some((staged, path)) = staged_signature {
+            staged
+                .persist_noclobber(path)
+                .map_err(|_| OBJECT_DESCRIPTOR_SIGNATURE_PUBLISH_ERROR)?;
         }
         Ok(())
     } else {
