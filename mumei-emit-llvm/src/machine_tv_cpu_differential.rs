@@ -82,7 +82,7 @@ impl<'ctx> Probe<'ctx> {
 // returning to Rust. The snippets are compile-time strings, and the only
 // memory they use is the private stack area and the two Snapshot pointers.
 macro_rules! cpu {
-    ($input:expr; $($line:expr),* $(,)?) => {{
+    ($input:expr; $($line:expr),* $(; capture_then $pop:literal)? $(,)?) => {{
         let input: &Snapshot = $input;
         let mut output = Snapshot::default();
         // SAFETY: both pointers are live, all clobbers are declared, and the
@@ -108,8 +108,12 @@ macro_rules! cpu {
                 "pushfq",
                 "popq %r10",
                 "movq %r10, {flags_before}({output})",
+                "movq $0, %r10",
                 $($line,)*
-                "movq -8(%r11), %r10",
+                $(
+                    "movq (%rsp), %r10",
+                    $pop,
+                )?
                 "movq %r10, {local}({output})",
                 "pushfq",
                 "popq %r10",
@@ -596,7 +600,7 @@ fn stack_memory() {
     macro_rules! stack_roundtrip {
         ($shape:literal, $($asm:literal),+ $(,)?) => {
             suite.check($shape, &[$($asm),+, "popq %rdx"], Flags::All, true, &inputs,
-                |input| cpu!(input; $($asm),+, "popq %rdx"));
+                |input| cpu!(input; $($asm),+; capture_then "popq %rdx"));
         };
     }
     stack_roundtrip!("reg", "pushq %rsi");
@@ -682,7 +686,7 @@ fn scalar_sse() {
         Flags::All,
         true,
         &inputs,
-        |input| cpu!(input; "pushq %rsi", "movsd %xmm0, (%rsp)", "popq %rdx"),
+        |input| cpu!(input; "pushq %rsi", "movsd %xmm0, (%rsp)"; capture_then "popq %rdx"),
     );
     check_retq(&mut suite, &inputs);
     suite.finish();
