@@ -346,7 +346,11 @@ impl ObjectAcceptanceDescriptor {
             obligation_id: format!("native-bundle:{}:{}", self.build_id, self.scope),
             semantics: Semantics {
                 profile: self.scope.clone(),
-                integer_model: "wrapping_i64".to_owned(),
+                integer_model: if self.input_domain == "unconstrained_64_bit_bitvectors" {
+                    "wrapping_i64".to_owned()
+                } else {
+                    "not_applicable".to_owned()
+                },
                 target_triple: None,
             },
             method: "bounded_model_checking".to_owned(),
@@ -939,6 +943,22 @@ mod tests {
             .unwrap();
         let report = verification_evidence::consistency_check(&[a, b]);
         assert!(report.consistent, "independent builds must not conflict");
+    }
+
+    #[test]
+    fn non_64_bit_input_domain_maps_to_not_applicable_integer_model() {
+        let mut wide = fixture_value();
+        wide["input_domain"] = json!("unconstrained_128_bit_bitvectors");
+        let evidence = decode(&serde_json::to_vec(&wide).unwrap())
+            .unwrap()
+            .to_verification_evidence("0.4.0-test")
+            .unwrap();
+        assert_eq!(evidence.semantics.integer_model, "not_applicable");
+        assert!(evidence
+            .scope
+            .bounds
+            .iter()
+            .any(|b| b == "input_domain:unconstrained_128_bit_bitvectors"));
     }
 
     #[test]
