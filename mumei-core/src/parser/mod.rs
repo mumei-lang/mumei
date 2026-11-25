@@ -1535,6 +1535,28 @@ atom m(n: i64)
     }
 
     #[test]
+    fn test_forall_constraints_strip_one_trailing_argument_comma() {
+        let source = r#"
+atom m(n: i64)
+    requires: forall(i, 0, n, i >= 0,);
+    ensures: result >= 0;
+    body: 0;
+"#;
+        let atom = parse_module(source)
+            .into_iter()
+            .find_map(|item| {
+                if let Item::Atom(atom) = item {
+                    Some(atom)
+                } else {
+                    None
+                }
+            })
+            .expect("one atom");
+        assert_eq!(atom.forall_constraints.len(), 1);
+        assert_eq!(atom.forall_constraints[0].condition, "i >= 0");
+    }
+
+    #[test]
     fn test_forall_constraints_skip_nested_quantifiers() {
         // `forall` inside an `exists` condition is part of that exists —
         // hoisting it to a top-level conjunct would free `i` and

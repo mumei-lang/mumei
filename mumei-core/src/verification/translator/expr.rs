@@ -900,6 +900,17 @@ impl Drop for UnfoldSinkGuard<'_, '_> {
     }
 }
 
+fn parse_closed_contract_expression(raw: &str, description: &str) -> MumeiResult<Expr> {
+    crate::parser::parse_expression_checked(raw).map_err(|failures| {
+        MumeiError::verification(format!(
+            "{} '{}' is not a closed expression: {}",
+            description,
+            raw,
+            failures.join("; ")
+        ))
+    })
+}
+
 fn constant_call_antecedent<'a>(
     vc: &VCtx<'a>,
     atom: &Atom,
@@ -911,7 +922,7 @@ fn constant_call_antecedent<'a>(
     if requires.trim() == "true" {
         terms.push(Bool::from_bool(vc.ctx, true));
     } else {
-        let req_ast = parse_expression(&requires);
+        let req_ast = crate::parser::parse_expression_checked(&requires).ok()?;
         let mut req_env = call_env.clone();
         let req_value = super::z3_types::with_array_shared_markers_restored(&mut req_env, |env| {
             expr_to_z3_with_domain_obligations(vc, &req_ast, env, None)
@@ -1383,7 +1394,7 @@ fn congruent_ensures_antecedent<'a>(
     let req = if caller_requires.trim() == "true" {
         Bool::from_bool(ctx, true)
     } else {
-        let req_ast = parse_expression(caller_requires);
+        let req_ast = parse_closed_contract_expression(caller_requires, "callee precondition")?;
         super::z3_types::with_array_shared_markers_restored(call_env, |env| {
             expr_to_z3_with_domain_obligations(vc, &req_ast, env, None)
         })?
@@ -4966,7 +4977,10 @@ pub(crate) fn expr_to_z3<'a>(
                         if caller_requires.trim() != "true" && !recursive_instance {
                             let _contract_guard = vc.enter_contract_instantiation(&callee);
                             if let Some(solver) = solver_opt {
-                                let req_ast = parse_expression(&caller_requires);
+                                let req_ast = parse_closed_contract_expression(
+                                    &caller_requires,
+                                    "callee precondition",
+                                )?;
                                 let req_z3 = super::z3_types::with_array_shared_markers_restored(
                                     &mut call_env,
                                     |env| {
@@ -7979,7 +7993,10 @@ pub(crate) fn expr_to_z3<'a>(
                         crate::verification::caller_requires_obligation(&callee_atom);
                     if caller_requires.trim() != "true" && !recursive_instance {
                         let _contract_guard = vc.enter_contract_instantiation(&callee_atom);
-                        let req_ast = parse_expression(&caller_requires);
+                        let req_ast = parse_closed_contract_expression(
+                            &caller_requires,
+                            "callee precondition",
+                        )?;
                         let req_z3 = super::z3_types::with_array_shared_markers_restored(
                             &mut call_env,
                             |env| expr_to_z3_with_domain_obligations(vc, &req_ast, env, None),

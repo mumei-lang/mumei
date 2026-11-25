@@ -651,3 +651,74 @@ body: arr[0];
     );
     std::fs::remove_dir_all(dir).ok();
 }
+
+// C4: one trailing comma in the quantifier argument list is a separator,
+// not part of the condition expression.
+#[test]
+fn quantifier_condition_accepts_one_trailing_argument_comma() {
+    let (dir, output, payload) = verify_json(
+        "quantified_trailing_comma",
+        r#"
+atom quantified_trailing_comma(arr: [i64], n: i64) -> i64
+requires: n >= 1 && len(arr) >= n && forall(i, 0, n, arr[i] >= 0,);
+ensures: result >= 0;
+body: arr[0];
+"#,
+    );
+    assert_verified(&output, &payload);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+// C5: even for a trusted callee, a direct caller must not reinterpret a
+// nested middle-chain comparison through the reconstructed precondition.
+#[test]
+fn direct_call_rejects_nested_chain_in_reconstructed_quantified_precondition() {
+    let (dir, output, _payload) = verify_json(
+        "direct_nested_quantified",
+        r#"
+trusted atom nested_quantified_req(arr: [i64], n: i64, x: i64, y: i64) -> i64
+requires: forall(i, 0, n, arr[i] == x < y == arr[i]);
+ensures: result == 0;
+body: 0;
+
+atom direct_nested_quantified(arr: [i64], n: i64, x: i64, y: i64) -> i64
+requires: n >= 1 && len(arr) >= n;
+ensures: result == 0;
+body: nested_quantified_req(arr, n, x, y);
+"#,
+    );
+    let text = output_text(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(
+        text.contains("nested comparison inside a comparison-chain operand"),
+        "expected fail-closed nested-chain diagnostic:\n{text}"
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
+
+// C6: `call(atom_ref(...))` follows the same checked-precondition policy as
+// a direct call.
+#[test]
+fn atom_ref_call_rejects_nested_chain_in_reconstructed_quantified_precondition() {
+    let (dir, output, _payload) = verify_json(
+        "ref_nested_quantified",
+        r#"
+trusted atom nested_quantified_req(arr: [i64], n: i64, x: i64, y: i64) -> i64
+requires: forall(i, 0, n, arr[i] == x < y == arr[i]);
+ensures: result == 0;
+body: 0;
+
+atom ref_nested_quantified(arr: [i64], n: i64, x: i64, y: i64) -> i64
+requires: n >= 1 && len(arr) >= n;
+ensures: result == 0;
+body: call(atom_ref(nested_quantified_req), arr, n, x, y);
+"#,
+    );
+    let text = output_text(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(
+        text.contains("nested comparison inside a comparison-chain operand"),
+        "expected fail-closed nested-chain diagnostic:\n{text}"
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
