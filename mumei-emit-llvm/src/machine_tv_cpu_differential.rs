@@ -2,7 +2,7 @@ use super::*;
 use core::arch::asm;
 use mumei_core::semantic_contract::{encode_pure_i64_module, RefinedAdmission};
 use std::mem::offset_of;
-use z3::Config;
+use z3::{Config, SatResult, Solver};
 
 const GPRS: [usize; 6] = [0, 1, 2, 6, 7, 8]; // rax, rcx, rdx, rsi, rdi, r8
 const CF: u64 = 1 << 0;
@@ -26,6 +26,7 @@ struct Snapshot {
 
 pub(super) struct Probe<'ctx> {
     input: Snapshot,
+    symbolic_registers: Option<Vec<BV<'ctx>>>,
     end: usize,
     local_at: Option<usize>,
     flags_before: Option<FlagState<'ctx>>,
@@ -40,11 +41,38 @@ impl<'ctx> Probe<'ctx> {
         xmm: &mut [BV<'ctx>],
         context: &'ctx Context,
     ) {
+        if let Some(symbolic) = &self.symbolic_registers {
+            for (register, value) in registers.iter_mut().zip(symbolic) {
+                *register = value.clone();
+            }
+            return;
+        }
         for (index, value) in GPRS.into_iter().zip(self.input.gpr) {
             registers[index] = BV::from_u64(context, value, 64);
         }
         for (register, [low, high]) in xmm.iter_mut().zip(self.input.xmm) {
             *register = BV::from_u64(context, high, 64).concat(&BV::from_u64(context, low, 64));
+        }
+    }
+
+    fn symbolic(end: usize, context: &'ctx Context) -> Self {
+        let symbolic_registers = (0..16)
+            .map(|index| {
+                BV::fresh_const(
+                    context,
+                    &format!("independent_initial_register_{index}"),
+                    64,
+                )
+            })
+            .collect();
+        Self {
+            input: Snapshot::default(),
+            symbolic_registers: Some(symbolic_registers),
+            end,
+            local_at: None,
+            flags_before: None,
+            final_state: None,
+            local: None,
         }
     }
 
@@ -231,6 +259,7 @@ fn lift_case<'ctx>(
     let end = instructions.len() - 1;
     let mut probe = Probe {
         input,
+        symbolic_registers: None,
         end,
         local_at: local.then_some(end - 1),
         flags_before: None,
@@ -856,4 +885,88 @@ fn division() {
         }
     }
     suite.finish();
+}
+
+/// Formal pilot for one instruction against a separately written reference
+/// transition. Unlike the CPU differential tests above, this quantifies over
+/// every 64-bit input bit-vector in Z3 instead of sampling a CPU run.
+///
+/// Reference scope for `addq %rsi, %rdi`: the 64-bit destination result, CF
+/// and OF. AF, PF, memory effects, control flow, instruction bytes and all
+/// other registers/flags are outside this pilot and are not treated as proved.
+#[test]
+fn addq_register_form_matches_independent_reference_semantics() {
+    let context = Context::new(&Config::new());
+    let suite = Suite::new(&context, ReturnClass::I64);
+    let instructions = instructions(&["addq %rsi, %rdi"]);
+    let end = instructions.len() - 1;
+    let mut probe = Probe::symbolic(end, &context);
+    let mut lifted = lift_inner(
+        &instructions,
+        instructions.len() as u64,
+        &suite.model,
+        &BTreeMap::new(),
+        &context,
+        Some(&mut probe),
+    )
+    .expect("the narrow addq pilot stays inside the lifter profile");
+    assert_eq!(lifted.paths.len(), 1);
+    let path = lifted.paths.pop().unwrap();
+    assert!(path.path_conditions.is_empty());
+    let state = probe.final_state.expect("addq reaches retq");
+    let initial = probe.symbolic_registers.expect("symbolic pilot seeds");
+    let left = &initial[7]; // rdi
+    let right = &initial[6]; // rsi
+    let expected = left.bvadd(right);
+
+    let solver = Solver::new(&context);
+    solver.assert(&state.registers[7]._eq(&expected).not());
+    assert_eq!(
+        solver.check(),
+        SatResult::Unsat,
+        "destination result differs from the independent addq reference"
+    );
+
+    let FlagState::Arithmetic {
+        value,
+        carry,
+        overflow,
+        width: 64,
+    } = &state.flags
+    else {
+        panic!("addq did not produce arithmetic flags");
+    };
+
+    let solver = Solver::new(&context);
+    solver.assert(&value._eq(&expected).not());
+    assert_eq!(
+        solver.check(),
+        SatResult::Unsat,
+        "flag value differs from the independent addq reference"
+    );
+
+    let full = left.zero_ext(1).bvadd(&right.zero_ext(1));
+    let expected_carry = full.extract(64, 64)._eq(&BV::from_u64(&context, 1, 1));
+    let solver = Solver::new(&context);
+    solver.assert(&carry._eq(&expected_carry).not());
+    assert_eq!(
+        solver.check(),
+        SatResult::Unsat,
+        "CF differs from the independent addq reference"
+    );
+
+    let one = BV::from_u64(&context, 1, 1);
+    let left_sign = left.extract(63, 63)._eq(&one);
+    let right_sign = right.extract(63, 63)._eq(&one);
+    let result_sign = expected.extract(63, 63)._eq(&one);
+    let same_sign = left_sign._eq(&right_sign);
+    let result_sign_changed = result_sign._eq(&left_sign).not();
+    let expected_overflow = Bool::and(&context, &[&same_sign, &result_sign_changed]);
+    let solver = Solver::new(&context);
+    solver.assert(&overflow._eq(&expected_overflow).not());
+    assert_eq!(
+        solver.check(),
+        SatResult::Unsat,
+        "OF differs from the independent addq reference"
+    );
 }
