@@ -14942,6 +14942,33 @@ mod tests {
     }
 
     #[test]
+    fn scalar_and_composite_admission_do_not_enable_borrowed_slice_semantics() {
+        assert_eq!(extract(SOURCE).unwrap().profile, PURE_I64_PROFILE);
+
+        let owned = "atom f(arr: [i64]) -> i64 requires: true; ensures: result == 0; body: 0;";
+        assert!(matches!(
+            extract(owned),
+            Err(SemanticContractError::Unsupported(
+                "explicit owned scalar i64 signature required"
+            ))
+        ));
+        assert_eq!(
+            module_source_profile(owned, RefinedAdmission::CompositeV29).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V26
+        );
+
+        for mode in ["ref", "ref mut"] {
+            let borrowed = owned.replace("arr:", &format!("{mode} arr:"));
+            assert!(matches!(
+                module_source_profile(&borrowed, RefinedAdmission::CompositeV29),
+                Err(SemanticContractError::Unsupported(
+                    "explicit owned scalar i64 signature required"
+                ))
+            ));
+        }
+    }
+
+    #[test]
     fn transformation_relations_bind_bounded_and_widened_contract_identities() {
         let bounded = extract(SOURCE).unwrap();
         let widened = extract_pure_i64_contract(SOURCE, "clamp.mm", Some(TARGET), true).unwrap();
