@@ -34,7 +34,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei native-bundle accept-artifact` | 2 | Evaluate pinned artifact reproduction under the recorded toolchain into a bounded acceptance descriptor |
 | `mumei native-bundle accept-object` | 6 | Evaluate reproduced object machine code against the verified source within the machine-code TV profile into a bounded acceptance descriptor |
 | `mumei native-bundle recheck-evidence` | 1 | Replay a saved native consumer Evidence report against fresh pinned source/LLVM checks, without proof acceptance |
-| `mumei native-bundle recheck-object-acceptance` | 13 | Replay a saved accept-object descriptor against a fresh object acceptance, optionally pinning its detached producer signature |
+| `mumei native-bundle recheck-object-acceptance` | 14 | Replay a saved accept-object descriptor against a fresh object acceptance, optionally pinning its detached producer signature |
 | `mumei native-bundle recheck-llvm` | 2 | Recheck the C03 source and pinned native LLVM body/wrapper snapshot, not object or binary semantics |
 | `mumei native-bundle recheck-source` | 1 | Check pinned snapshots and freshly recheck the C03 source postcondition, not LLVM or binary semantics |
 | `mumei native-bundle build` | 1 | Freshly verify and build a pure-i64 main on Linux/x86_64 with fixed settings |
@@ -706,6 +706,7 @@ Usage: mumei native-bundle recheck-object-acceptance [OPTIONS] --expected-build-
 | `--revocation-signature <REVOCATION_SIGNATURE>` | — | — | Regular mumei.producer-signature/v1 revocation-list signature file |
 | `--revocation-key <REVOCATION_KEY>` | — | — | 64-char lowercase-hex ed25519 revocation root public key |
 | `--min-revocation-version <MIN_REVOCATION_VERSION>` | — | — | Minimum acceptable v2 version; checks not_after and requires a root-signed list and reference time |
+| `--json` | false | — | Emit a machine-readable mumei.native-object-acceptance-recheck/v1 descriptor instead of text |
 
 ## `mumei native-bundle recheck-llvm`
 
