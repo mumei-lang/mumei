@@ -2039,6 +2039,9 @@ fn check_object_acceptance(
         let mut bytes = serde_json::to_vec_pretty(&evidence)
             .map_err(|_| "cannot encode projected verification evidence")?;
         bytes.push(b'\n');
+        if bytes.len() > MAX_INPUT_BYTES {
+            return Err("projected verification evidence exceeds Common Evidence v1 size limit");
+        }
         bytes
     } else if json {
         let body = serde_json::json!({

@@ -155,4 +155,22 @@ fn check_object_acceptance_rejects_tampered_and_oversized_inputs() {
     );
     assert!(!res3.status.success());
     assert!(res3.stdout.is_empty());
+
+    // A valid descriptor under the 256 KiB descriptor cap whose projected
+    // Common Evidence v1 record exceeds 64 KiB must fail closed on --emit-evidence.
+    let mut huge_fields: Value = serde_json::from_str(FIXTURE).unwrap();
+    huge_fields["register_convention_assumed"] = json!("r".repeat(40_000));
+    let huge_bytes = serde_json::to_vec(&huge_fields).unwrap();
+    assert!(huge_bytes.len() <= MAX_INPUT_BYTES);
+    let res4 = run(
+        &[
+            "evidence",
+            "check-object-acceptance",
+            "--stdin",
+            "--emit-evidence",
+        ],
+        Some(&huge_bytes),
+    );
+    assert!(!res4.status.success());
+    assert!(res4.stdout.is_empty());
 }
