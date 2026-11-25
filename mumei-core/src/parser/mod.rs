@@ -221,8 +221,12 @@ pub fn parse_expression_checked(input: &str) -> Result<Expr, Vec<String>> {
     let mut lexer = lexer::Lexer::new(input);
     let tokens = lexer.tokenize_checked()?;
     let mut ctx = ParseContext::new(tokens);
-    let expr = expr::normalize_comparison_chains(expr::parse_expr(&mut ctx, 0));
+    let parsed = expr::parse_expr(&mut ctx, 0);
     let mut failures = ctx.expect_failures().to_vec();
+    if expr::nested_comparison_chain_operand(&parsed) {
+        failures.push("nested comparison inside a comparison-chain operand".to_owned());
+    }
+    let expr = expr::normalize_comparison_chains(parsed);
     if ctx.peek() != &Token::Eof {
         failures.push(format!(
             "unexpected trailing input starting at token `{:?}`",
@@ -1894,6 +1898,14 @@ atom transfer(x: i64)
             }
             other => panic!("Expected result == (0 <= x && x < n), got {:?}", other),
         }
+    }
+
+    #[test]
+    fn checked_parse_rejects_nested_comparison_chain_operands() {
+        assert!(parse_expression_checked("a == b < c == d").is_err());
+        assert!(parse_expression_checked("a < (b < c) < d").is_err());
+        assert!(parse_expression_checked("x == a < b").is_ok());
+        assert!(parse_expression_checked("0 <= i < len(a)").is_ok());
     }
 
     #[test]
