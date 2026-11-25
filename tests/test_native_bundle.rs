@@ -8189,6 +8189,8 @@ fn recheck_object_acceptance_checks_exact_descriptor_signature_when_supplied() {
         .output()
         .unwrap();
     assert_success(&accepted);
+    assert!(!String::from_utf8_lossy(&accepted.stdout).contains(FAKE_KEY));
+    assert!(!String::from_utf8_lossy(&accepted.stderr).contains(FAKE_KEY));
     fs::write(&descriptor, &accepted.stdout).unwrap();
     let producer_key = public_key(FAKE_KEY);
     let other_producer_key = public_key(OTHER_KEY);
@@ -8232,6 +8234,8 @@ fn recheck_object_acceptance_checks_exact_descriptor_signature_when_supplied() {
         "optional key-label, freshness, revocation and registry gates only as explicitly supplied"
     ));
     assert!(!stdout.contains("artifact_verified"));
+    assert!(!stdout.contains(FAKE_KEY));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(FAKE_KEY));
 
     let mut too_strict_args = signature_args();
     let max_age_index = too_strict_args.len() - 1;
@@ -8240,6 +8244,22 @@ fn recheck_object_acceptance_checks_exact_descriptor_signature_when_supplied() {
         &recheck(&too_strict_args),
         "producer signature binding failed",
     );
+
+    let missing_bundle = root.path().join("missing-bundle");
+    let mut ordered_args = vec![
+        "native-bundle".to_owned(),
+        "recheck-object-acceptance".to_owned(),
+        missing_bundle.to_string_lossy().into_owned(),
+        source.to_string_lossy().into_owned(),
+        descriptor.to_string_lossy().into_owned(),
+        "--expected-build-id".to_owned(),
+        id.clone(),
+    ];
+    let mut wrong_key_ordered_args = signature_args();
+    wrong_key_ordered_args[3] = other_producer_key.clone();
+    ordered_args.extend(wrong_key_ordered_args);
+    let ordered_refs = ordered_args.iter().map(String::as_str).collect::<Vec<_>>();
+    assert_rejected(&cli(&ordered_refs), "producer signature binding failed");
 
     let mut wrong_key_args = signature_args();
     wrong_key_args[3] = other_producer_key;
