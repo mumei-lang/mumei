@@ -252,8 +252,14 @@ correspondence profile で立証可能な範囲で対応している」。
   `{ i64, double }` / `{ double, i64 }` の register 結果を追加し、
   `rax`/`xmm0` のビットパターンを比較する。入れ子の mixed 結果や mixed
   `sret`、FP 演算／比較、既存の deferred セットは対象外のまま。
-  既存の `llvm_ir_object_equivalence` 項目の範囲だけが広がり、受理条件・
-  項目・verdict・grade の追加や緩和は行わない。解凍しない項目の理由は
+  `evaluate_machine_tv` もこの結果形状で IR をエンコードできた場合は
+  IR の戻り値を比較対象とする。従来の source-model 比較は両値が NaN なら
+  payload の違いを区別しないが、IR 比較は payload を含めて一致を要求する。
+  そのため IR と object の NaN payload だけが異なる場合も `Different` となり、
+  `accept-object` は受理しない。これは FP 演算を含まない IR のビット保存を
+  要求するもので、MXCSR や FP 演算時の NaN payload の検証は主張しない。
+  IR をエンコードできない場合の source-model 比較への fallback は従来通り。
+  受理ゲートの構成、項目名・verdict・grade は変更しない。解凍しない項目の理由は
   [LLVM IR → object の設計メモ §6](DESIGN_LLVM_OBJECT_CORRESPONDENCE.md#6-段階案)
   を参照。
 
