@@ -454,6 +454,15 @@ fn validate_consistency(
         }
     }
 
+    let unchecked_domains: BTreeSet<&str> = source_machine_tv
+        .unchecked_domains
+        .iter()
+        .map(String::as_str)
+        .collect();
+    if unchecked_domains != not_performed {
+        return Err(RepresentationError::InconsistentDescriptor);
+    }
+
     if has_object_link {
         if !performed.contains(OBJECT_LINK_CHECK_NAME)
             || source_machine_tv.object_link_correspondence != CHECKED_OBJECT_LINK_STATUS
@@ -1097,5 +1106,19 @@ mod tests {
         }]);
         let bytes = serde_json::to_vec(&value).unwrap();
         assert!(decode(&bytes).is_ok());
+    }
+
+    #[test]
+    fn rejects_unchecked_domains_disagreeing_with_checks_not_performed() {
+        let mut value = fixture_value();
+        value["source_machine_tv"]["unchecked_domains"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("extra_unchecked_domain"));
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert_eq!(
+            decode(&bytes),
+            Err(RepresentationError::InconsistentDescriptor)
+        );
     }
 }
