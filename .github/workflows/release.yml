@@ -185,7 +185,7 @@ jobs:
       - name: Cache LLVM 17 tools (Windows)
         if: runner.os == 'Windows'
         id: cache-llvm-win
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: C:\LLVM17
           key: llvm-17.0.6-win64-msvc-prebuilt-tools-v1
