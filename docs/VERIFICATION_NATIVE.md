@@ -877,9 +877,12 @@ Conflicting results must not be resolved by picking the successful one. First
 check that tools saw the same obligation, semantics, inputs and assumptions;
 preserve unresolved disagreement for investigation.
 
-Current status (2026-11-26): the Agent roadmap records the C04 planner scope
-and C11 plugin-contract scope as complete as verification-native planner and
-orchestration contracts. Completion does not adopt an external verifier, make
+Current status (2026-11-26): the Agent roadmap records the
+[C04 planner scope](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04-planner-acceptance-completion)
+and
+[C11 plugin-contract scope](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-plugin-contract-acceptance-completion)
+as complete as verification-native planner and orchestration contracts.
+Completion does not adopt an external verifier, make
 adapter self-reports proof, or create a default external-verifier route. The
 paragraphs below are chronological implementation slices: wording such as
 "next", "remain open" or "remain partial" describes the boundary at the time
