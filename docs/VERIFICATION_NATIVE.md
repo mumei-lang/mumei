@@ -877,6 +877,19 @@ Conflicting results must not be resolved by picking the successful one. First
 check that tools saw the same obligation, semantics, inputs and assumptions;
 preserve unresolved disagreement for investigation.
 
+Current status (2026-11-26): the Agent roadmap records the
+[C04 planner scope](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04-planner-acceptance-completion)
+and
+[C11 plugin-contract scope](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-plugin-contract-acceptance-completion)
+as complete as verification-native planner and orchestration contracts.
+Completion does not adopt an external verifier, make
+adapter self-reports proof, or create a default external-verifier route. The
+paragraphs below are chronological implementation slices: wording such as
+"next", "remain open" or "remain partial" describes the boundary at the time
+that slice landed, not a claim that the overall planner/plugin contract is
+still unimplemented. Independent verifier adoption, semantic correspondence,
+evidence acceptance and promotion policy remain separate later work.
+
 Agent's opt-in metadata planner has a first exact result-contract slice:
 `ResultContract` pairs one profile/method with scope, complete bound/assumption
 identifiers and explicit correspondence relation/status. A constrained request
