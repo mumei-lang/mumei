@@ -5,11 +5,12 @@
 use crate::ast::TypeRef;
 use crate::parser::{
     Atom, CapabilityDef, ClauseKind, ClauseLabel, ClauseMode, ClauseTrustMode, CoverClause, Effect,
-    EffectDef, EffectDefParam, EffectParam, EnumDef, EnumVariant, ExternBlock, ExternFn, ImplBlock,
-    ImplDef, ImportDecl, Item, Param, Quantifier, QuantifierType, RefinedType, ResourceDef,
-    ResourceField, ResourceMode, Span, StructDef, StructField, TraitDef, TraitMethod, TrustLevel,
-    TypeParamBound,
+    EffectDef, EffectDefParam, EffectParam, EnumDef, EnumVariant, Expr, ExternBlock, ExternFn,
+    ImplBlock, ImplDef, ImportDecl, Item, Param, Pattern, Quantifier, QuantifierType, RefinedType,
+    ResourceDef, ResourceField, ResourceMode, Span, Stmt, StructDef, StructField, TraitDef,
+    TraitMethod, TrustLevel, TypeParamBound,
 };
+use std::collections::HashSet;
 
 use super::expr::parse_expr;
 use super::token::{SpannedToken, Token};
@@ -362,6 +363,12 @@ fn split_variants(input: &str) -> Vec<String> {
 fn split_params(input: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut depth = 0;
+    // Angle brackets only appear in type-argument lists inside a
+    // parameter (`p: Duo<i64, bool>`) — parameter entries carry no
+    // expressions, so `<`/`>` never mean comparison here. The `>`
+    // decrement saturates at 0 so a `->` in a function type
+    // (`atom_ref(i64) -> i64`) cannot push the depth negative.
+    let mut angle_depth = 0i32;
     let mut current = String::new();
     for c in input.chars() {
         match c {
@@ -373,7 +380,17 @@ fn split_params(input: &str) -> Vec<String> {
                 depth -= 1;
                 current.push(c);
             }
-            ',' if depth == 0 => {
+            '<' => {
+                angle_depth += 1;
+                current.push(c);
+            }
+            '>' => {
+                if angle_depth > 0 {
+                    angle_depth -= 1;
+                }
+                current.push(c);
+            }
+            ',' if depth == 0 && angle_depth == 0 => {
                 let trimmed = current.trim().to_string();
                 if !trimmed.is_empty() {
                     result.push(trimmed);
@@ -548,10 +565,13 @@ fn struct_invariant_clause(clause: &str) -> Option<String> {
 
 /// Split a struct body on the commas that separate its clauses, leaving
 /// commas nested in `()`, `[]`, `{}` or string literals alone
-/// (`invariant: within(self.lo, self.hi)`). Angle brackets are not tracked
-/// because `<`/`>` are comparison operators inside invariants.
-fn split_struct_clauses(body: &str) -> Vec<&str> {
-    let mut clauses = Vec::new();
+/// (`invariant: within(self.lo, self.hi)`). Angle brackets cannot be
+/// tracked during the split because `<`/`>` are comparison operators
+/// inside invariants; instead a `name: Type` fragment whose type text is
+/// left with unbalanced `<`/`>` is rejoined with the following fragment
+/// (`inner: Duo<i64` + `bool>` → `inner: Duo<i64, bool>`).
+fn split_struct_clauses(body: &str) -> Vec<String> {
+    let mut fragments = Vec::new();
     let mut depth = 0i32;
     let mut in_string = false;
     let mut start = 0usize;
@@ -562,14 +582,101 @@ fn split_struct_clauses(body: &str) -> Vec<&str> {
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' => depth -= 1,
             ',' if depth <= 0 => {
-                clauses.push(&body[start..idx]);
+                fragments.push(&body[start..idx]);
                 start = idx + 1;
             }
             _ => {}
         }
     }
-    clauses.push(&body[start..]);
+    fragments.push(&body[start..]);
+
+    let mut clauses: Vec<String> = Vec::new();
+    let mut pending: Option<String> = None;
+    for fragment in fragments {
+        match pending.take() {
+            Some(mut acc) => {
+                acc.push(',');
+                acc.push_str(fragment);
+                if field_clause_angle_open(&acc) {
+                    pending = Some(acc);
+                } else {
+                    clauses.push(acc);
+                }
+            }
+            None => {
+                if field_clause_angle_open(fragment) {
+                    pending = Some(fragment.to_string());
+                } else {
+                    clauses.push(fragment.to_string());
+                }
+            }
+        }
+    }
+    if let Some(acc) = pending {
+        clauses.push(acc);
+    }
     clauses
+}
+
+/// Whether a clause is a `name: Type` field declaration whose type text
+/// still has an unclosed `<` — the fragment ended inside the type's
+/// argument list and must be joined with the next one. `invariant`
+/// clauses are expressions where `<`/`>` are comparisons and keep the
+/// previous split behavior.
+fn field_clause_angle_open(fragment: &str) -> bool {
+    let trimmed = fragment.trim_start();
+    if struct_invariant_clause(trimmed).is_some() {
+        return false;
+    }
+    let bytes = trimmed.as_bytes();
+    let mut ident_len = 0usize;
+    while ident_len < bytes.len()
+        && (bytes[ident_len].is_ascii_alphanumeric() || bytes[ident_len] == b'_')
+    {
+        ident_len += 1;
+    }
+    if ident_len == 0 {
+        return false;
+    }
+    if !trimmed[ident_len..].trim_start().starts_with(':') {
+        return false;
+    }
+    // Only the type text admits `<`/`>` as type-argument brackets; in a
+    // `where` constraint they are comparisons (`x: i64 where v < 10`).
+    // The type ends at the first `where` word outside string literals.
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut type_end = trimmed.len();
+    for i in 0..bytes.len() {
+        let b = bytes[i];
+        if in_string && escaped {
+            escaped = false;
+            continue;
+        }
+        match b {
+            b'"' => in_string = !in_string,
+            b'\\' if in_string => escaped = true,
+            b'w' if !in_string
+                && trimmed[i..].starts_with("where")
+                && (i == 0 || !is_ident(bytes[i - 1]))
+                && bytes.get(i + 5).is_none_or(|&b| !is_ident(b)) =>
+            {
+                type_end = i;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let mut depth = 0i32;
+    for c in trimmed[..type_end].chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth > 0
 }
 
 fn collect_until_semicolon(ctx: &mut ParseContext) -> String {
@@ -873,6 +980,140 @@ fn collect_body(ctx: &mut ParseContext) -> String {
 // Token-based module parser
 // =============================================================================
 
+fn collect_predicate_binders(expr: &Expr, bound: &mut HashSet<String>) {
+    fn collect_pattern_binders(pattern: &Pattern, bound: &mut HashSet<String>) {
+        match pattern {
+            Pattern::Variable(name) => {
+                bound.insert(name.clone());
+            }
+            Pattern::Variant { fields, .. } => {
+                for field in fields {
+                    collect_pattern_binders(field, bound);
+                }
+            }
+            Pattern::Wildcard | Pattern::Literal(_) => {}
+        }
+    }
+
+    fn collect_stmt_binders(stmt: &Stmt, bound: &mut HashSet<String>) {
+        match stmt {
+            Stmt::Let { var, value, .. } => {
+                bound.insert(var.clone());
+                collect_predicate_binders(value, bound);
+            }
+            Stmt::Assign { value, .. } => collect_predicate_binders(value, bound),
+            Stmt::ArrayStore { index, value, .. } => {
+                collect_predicate_binders(index, bound);
+                collect_predicate_binders(value, bound);
+            }
+            Stmt::Block(stmts, _)
+            | Stmt::TaskGroup {
+                children: stmts, ..
+            } => {
+                for stmt in stmts {
+                    collect_stmt_binders(stmt, bound);
+                }
+            }
+            Stmt::While {
+                cond,
+                invariant,
+                decreases,
+                body,
+                ..
+            } => {
+                collect_predicate_binders(cond, bound);
+                collect_predicate_binders(invariant, bound);
+                if let Some(decreases) = decreases {
+                    collect_predicate_binders(decreases, bound);
+                }
+                collect_stmt_binders(body, bound);
+            }
+            Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+                collect_stmt_binders(body, bound);
+            }
+            Stmt::Cancel { .. } => {}
+            Stmt::Expr(expr, _) => collect_predicate_binders(expr, bound),
+        }
+    }
+
+    match expr {
+        Expr::Paren(inner) => collect_predicate_binders(inner, bound),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => {}
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                collect_predicate_binders(element, bound);
+            }
+        }
+        Expr::ArrayAccess(_, index) | Expr::Await { expr: index } => {
+            collect_predicate_binders(index, bound);
+        }
+        Expr::BinaryOp(left, _, right) => {
+            collect_predicate_binders(left, bound);
+            collect_predicate_binders(right, bound);
+        }
+        Expr::Block(stmt) | Expr::Async { body: stmt } => collect_stmt_binders(stmt, bound),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_predicate_binders(cond, bound);
+            collect_stmt_binders(then_branch, bound);
+            collect_stmt_binders(else_branch, bound);
+        }
+        Expr::Call(name, args) => {
+            if matches!(name.as_str(), "forall" | "exists") && args.len() == 4 {
+                if let Some(Expr::Variable(var)) = args.first() {
+                    bound.insert(var.clone());
+                }
+            }
+            for arg in args {
+                collect_predicate_binders(arg, bound);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_predicate_binders(value, bound);
+            }
+        }
+        Expr::FieldAccess(inner, _) => collect_predicate_binders(inner, bound),
+        Expr::Match { target, arms } => {
+            collect_predicate_binders(target, bound);
+            for arm in arms {
+                collect_pattern_binders(&arm.pattern, bound);
+                if let Some(guard) = &arm.guard {
+                    collect_predicate_binders(guard, bound);
+                }
+                collect_stmt_binders(&arm.body, bound);
+            }
+        }
+        Expr::CallRef { callee, args } => {
+            collect_predicate_binders(callee, bound);
+            for arg in args {
+                collect_predicate_binders(arg, bound);
+            }
+        }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                collect_predicate_binders(arg, bound);
+            }
+        }
+        Expr::Lambda { params, body, .. } => {
+            bound.extend(params.iter().map(|param| param.name.clone()));
+            collect_stmt_binders(body, bound);
+        }
+        Expr::ChanSend { channel, value } => {
+            collect_predicate_binders(channel, bound);
+            collect_predicate_binders(value, bound);
+        }
+        Expr::ChanRecv { channel } => collect_predicate_binders(channel, bound),
+    }
+}
+
 pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
     let mut items = Vec::new();
 
@@ -928,8 +1169,32 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                 let (predicate_raw, operand) = if ctx.peek() == &Token::Where {
                     ctx.advance();
                     let predicate_raw = collect_until_semicolon(ctx);
-                    let tokens = super::lexer::legacy_tokenize(&predicate_raw);
-                    let operand = tokens.first().cloned().unwrap_or_else(|| "v".to_string());
+                    let tokens = super::lexer::Lexer::new(&predicate_raw).tokenize();
+                    let predicate_expr = crate::parser::parse_expression(&predicate_raw);
+                    let mut bound_names = HashSet::new();
+                    collect_predicate_binders(&predicate_expr, &mut bound_names);
+                    let operand = tokens
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, token)| {
+                            let Token::Ident(name) = &token.token else {
+                                return None;
+                            };
+                            if bound_names.contains(name)
+                                || matches!(
+                                    tokens.get(index.wrapping_sub(1)).map(|t| &t.token),
+                                    Some(Token::ColonColon)
+                                )
+                                || matches!(
+                                    tokens.get(index + 1).map(|t| &t.token),
+                                    Some(Token::LParen | Token::ColonColon)
+                                )
+                            {
+                                return None;
+                            }
+                            Some(name.clone())
+                        })
+                        .unwrap_or_else(|| "v".to_string());
                     (predicate_raw, operand)
                 } else {
                     ("true".to_string(), "v".to_string())
@@ -953,13 +1218,13 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                 let mut invariants: Vec<String> = Vec::new();
                 let fields: Vec<StructField> = split_struct_clauses(&fields_raw)
                     .into_iter()
-                    .map(|s| s.trim())
+                    .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                     .filter(|s| {
                         // `invariant` is a keyword, so a clause that starts with it
                         // can never be a field declaration. `invariant: <expr>`
                         // (or `invariant <expr>`) declares a cross-field invariant.
-                        match struct_invariant_clause(s) {
+                        match struct_invariant_clause(s.as_str()) {
                             Some(expr) => {
                                 invariants.push(expr);
                                 false
@@ -979,9 +1244,12 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                             .map(|t| t.trim().to_string())
                             .unwrap_or_else(|| "i64".to_string());
                         let type_ref = parse_type_ref(&type_name_str);
+                        // `type_name` is the normalized display name
+                        // (`Pair < i64 >` → `Pair<i64>`) so declared-name
+                        // lookups match the `type_ref`'s canonical form.
                         StructField {
                             name: parts[0].trim().to_string(),
-                            type_name: type_name_str,
+                            type_name: type_ref.display_name(),
                             type_ref,
                             constraint,
                         }
@@ -1025,9 +1293,23 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                                 })
                                 .filter(|f| !f.is_empty())
                                 .collect();
-                            let field_types: Vec<TypeRef> =
-                                fields.iter().map(|f| parse_type_ref(f)).collect();
-                            let is_recursive = fields.iter().any(|f| f == &name);
+                            // `fields` keeps a named field's verbatim
+                            // `name: type` text (it is the arity/display
+                            // surface), but `field_types` must hold only
+                            // the declared type — consumers resolve the
+                            // name as a type, so `b: bool` would
+                            // otherwise be read as an unknown type.
+                            let field_types: Vec<TypeRef> = fields
+                                .iter()
+                                .map(|f| {
+                                    let ty = f
+                                        .split_once(':')
+                                        .map(|(_, t)| t.trim())
+                                        .unwrap_or(f.as_str());
+                                    parse_type_ref(if ty == "Self" { name.as_str() } else { ty })
+                                })
+                                .collect();
+                            let is_recursive = field_types.iter().any(|t| t.name == name);
                             if is_recursive {
                                 any_recursive = true;
                             }
@@ -1800,7 +2082,10 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                 let type_ref = parse_type_ref(&type_name_str);
                 Param {
                     name: param_name.trim().to_string(),
-                    type_name: Some(type_name_str),
+                    // Normalized display name (`Pair < i64 >` →
+                    // `Pair<i64>`) so declared-name lookups match the
+                    // `type_ref`'s canonical form.
+                    type_name: Some(type_ref.display_name()),
                     type_ref: Some(type_ref),
                     consume,
                     is_ref,
@@ -1847,6 +2132,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
     let mut consumed_params: Vec<String> = Vec::new();
     let mut resources: Vec<String> = Vec::new();
     let mut max_unroll: Option<usize> = None;
+    let mut str_bound: Option<usize> = None;
     let mut spec_metadata: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut invariant: Option<String> = None;
@@ -1973,6 +2259,15 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                 }
                 ctx.expect(Token::Semicolon);
             }
+            Token::StrBound => {
+                ctx.advance();
+                ctx.expect(Token::Colon);
+                if let Token::IntLit(n) = ctx.peek().clone() {
+                    ctx.advance();
+                    str_bound = Some(n as usize);
+                }
+                ctx.expect(Token::Semicolon);
+            }
             Token::Invariant => {
                 ctx.advance();
                 ctx.expect(Token::Colon);
@@ -2068,7 +2363,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                     .map(|t| (t.line, t.col))
                     .unwrap_or((0, 0));
                 ctx.syntax_failure(format!(
-                    "unknown atom clause keyword '{tok}:' at {line}:{col} — expected requires/ensures/cover/body/invariant/effects/contract/consume/resources/semantics/max_unroll/effect_pre/effect_post"
+                    "unknown atom clause keyword '{tok}:' at {line}:{col} — expected requires/ensures/cover/body/invariant/effects/contract/consume/resources/semantics/max_unroll/str_bound/effect_pre/effect_post"
                 ));
                 ctx.advance();
             }
@@ -2113,6 +2408,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         is_async: false,
         trust_level: TrustLevel::Verified,
         max_unroll,
+        str_bound,
         invariant,
         effects,
         return_type,
@@ -2563,12 +2859,19 @@ fn extract_quantifiers(requires: &str) -> Vec<Quantifier> {
         }
         parts.push(&inner[last..]);
         if parts.len() >= 4 {
+            let condition = parts[3].trim();
+            // A single trailing comma before the quantifier's closing paren
+            // is an argument-list separator, not part of the condition.
+            let condition = condition
+                .strip_suffix(',')
+                .map(str::trim_end)
+                .unwrap_or(condition);
             quantifiers.push(Quantifier {
                 q_type,
                 var: parts[0].trim().to_string(),
                 start: parts[1].trim().to_string(),
                 end: parts[2].trim().to_string(),
-                condition: parts[3].trim().to_string(),
+                condition: condition.to_string(),
             });
         }
     }
@@ -2606,7 +2909,7 @@ pub fn parse_module_from_source(source: &str) -> Vec<Item> {
 /// silently reporting success.
 pub fn parse_module_from_source_checked(source: &str) -> Result<Vec<Item>, Vec<String>> {
     let mut lexer = super::lexer::Lexer::new(source);
-    let tokens = lexer.tokenize();
+    let tokens = lexer.tokenize_checked()?;
     let mut ctx = ParseContext::new(tokens);
     let items = parse_module_from_tokens(&mut ctx);
     let failures = ctx.expect_failures();

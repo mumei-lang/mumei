@@ -37,6 +37,7 @@ use std::path::Path;
 #[cfg(test)]
 pub(crate) use cache::compute_hash;
 pub(crate) use cache::compute_legacy_dependency_hashes;
+pub(crate) use cache::resource_dependency_hash;
 #[cfg(test)]
 pub(crate) use imports::{
     check_cert_for_atom, mark_dependency_atoms_with_cert, register_imported_items,
@@ -53,12 +54,14 @@ pub use cache::{
 pub use dependencies::{
     resolve_manifest_dependencies, resolve_manifest_dependencies_with_full_options,
     resolve_manifest_dependencies_with_full_options_and_persistence,
+    resolve_manifest_dependencies_with_full_options_persistence_and_source,
     resolve_manifest_dependencies_with_options,
 };
 pub use imports::{
     resolve_imports, resolve_imports_with_full_options,
-    resolve_imports_with_full_options_and_persistence, resolve_imports_with_options,
-    resolve_prelude, resolve_prelude_with_persistence, IMPORT_ALIAS_METADATA_KEY,
+    resolve_imports_with_full_options_and_persistence,
+    resolve_imports_with_full_options_persistence_and_source, resolve_imports_with_options,
+    resolve_path, resolve_prelude, resolve_prelude_with_persistence, IMPORT_ALIAS_METADATA_KEY,
     PRELUDE_METADATA_KEY,
 };
 pub use metrics::{emit_escalation_bundle, LeanEscalationMetrics};

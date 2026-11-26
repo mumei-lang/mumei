@@ -7,6 +7,11 @@ keywords: "mumei CLI, formal verification CLI, LLVM, Z3, mumei run"
 
 # Mumei CLI
 
+For the exhaustive generated command, positional-argument, option, default, and
+accepted-value list, see the [CLI Option Reference](CLI_REFERENCE.md). The
+[Environment Variable Reference](ENV_REFERENCE.md) covers the complete set of
+environment variables; this page remains the narrative guide.
+
 ## `mumei run`
 
 ```bash
@@ -50,6 +55,31 @@ kills, while unknown or otherwise unanalyzable mutants do not. No-op `Pow`
 mutations are skipped. This shares the site-mutant engine with
 [`mumei controls`](CONTROLS.md), which provides a fuller per-atom report.
 
+### Profiles
+
+`--profile strict` enables `--strict-imports`, `--strict-array-types`, and
+`--warn-fragment`. `--profile audit` enables those checks plus
+`--warn-untyped-arrays`, `--enable-vacuity-check`, and `--detect-loops`.
+
+| Profile | Enabled flags |
+|---|---|
+| `strict` | `--strict-imports`, `--strict-array-types`, `--warn-fragment` |
+| `audit` | All `strict` flags, `--warn-untyped-arrays`, `--enable-vacuity-check`, `--detect-loops` |
+
+An explicit `--profile` overrides `[verify].profile` in `mumei.toml`; otherwise
+the manifest profile is used. Explicit flags still apply, and a profile never
+turns a flag off. `--suggest-cegis` still requires an explicit
+`--detect-loops`, because clap's `requires` check only sees CLI flags.
+
+### Effective settings with `mumei config`
+
+`mumei config` reports the discovered `mumei.toml`, its verify profile, and
+registered environment variables. Use `--all` to include unset variables and
+`--json` for machine-readable output. Values of variables classified as
+sensitive in the registry are never printed, only whether they are set. URLs
+are shown without credentials, query, or fragment. The CLI `--profile` is
+per-invocation, so this command reports only the manifest profile.
+
 The local proof store is opt-in with `--proof-store` or `[proof] store = true`
 in `mumei.toml`. `MUMEI_PROOF_STORE` selects its directory; otherwise it uses
 `$HOME/.mumei/proof-store`. Setting the environment variable does not enable
@@ -59,7 +89,8 @@ Trusted atoms, Lean-verified results, escalation candidates, failures, and
 inconclusive results are never stored or reused.
 On Unix, store directories are created with mode `0700` and entry files with
 mode `0600`; existing group- or other-writable directories and entries are
-refused. Ownership checks are not implemented yet.
+refused. Store directories and entry files must be owned by the current
+effective user; stores owned by another user are ignored with a warning.
 
 ### `mumei proof-store`
 
@@ -122,24 +153,45 @@ and do not fail `--strict`.
 | `proven` | The source matches and the certificate records solver-proven evidence. |
 | `trusted` | The source matches and the certificate records a trusted atom; its body was not checked. |
 | `changed` | The source content hash differs from the certificate. |
+| `dependency_changed` | A resolved dependency contract or effect definition differs from the certificate. |
+| `dependency_unchecked` | One or more dependency hashes are absent or could not be resolved. |
 | `stale_translator` | Lean translator metadata does not match the current version. |
 | `unproven` | The source matches, but the certificate does not establish the contract. |
 | `axiom_rejected` | The Lean axiom audit rejected the certificate evidence. |
 | `missing` | The source contains no matching certificate entry. |
+
+Dependency freshness includes resolved effect definitions under
+`effect:<name>` keys, including definitions reached through `parent` and
+`includes`.
+
+The command exits 1 for a tampered certificate, `unproven`, `axiom_rejected`,
+or `missing`. With `--strict`, it also exits 1 for `changed`,
+`dependency_changed`, `dependency_unchecked`, or an absent
+`certificate_hash`. It exits 0 otherwise.
 
 ## `mumei claims`
 
 ```bash
 mumei claims <input.mm> [--cert <path>] [--format json|md|both]
   [--out-dir <directory>] [--controls] [--max-mutants <N>]
-  [--require-discriminating] [--require-grade <G0..G5>]
+  [--observations <harvest.json>]
+  [--require-discriminating] [--require-complete] [--require-grade <G0..G5>]
 ```
 
 `claims` writes a read-only Claim Book report. `--controls` attaches negative
 control results to claims; `--max-mutants` sets the per-atom cap (default 32)
 and requires `--controls`. `--require-discriminating` enables controls and
 fails with exit 1 if any claim is weak or inconclusive. It may be combined
-with `--require-grade`; reports are written before either gate is evaluated.
+with `--require-grade` and `--require-complete`; reports are written before any
+requested gate is evaluated. `--require-complete` requires non-empty claims and
+complete dependency coverage, independently of grades and controls. It exits 1
+on missing direct/transitive dependencies or ambiguous method-name resolution;
+without the flag, existing completeness reporting does not cause rejection.
+`--observations` accepts the `mumei.test-harvest/v1` JSON file used by
+`mumei observe` and attaches its verdict counts to Claim Book claims. Supporting
+observations can lift eligible G0 claims to G2; contradictions never lift a
+grade. Controls remain orthogonal to grades. Without `--observations`, its
+optional JSON and Markdown output is omitted.
 Controls do not affect grades or freshness. Without `--controls`, JSON and
 Markdown output are unchanged. Equivalent mutants beyond the generator's
 small syntactic filter can still survive and require human judgment; see

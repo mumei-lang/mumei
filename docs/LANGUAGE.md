@@ -16,6 +16,18 @@ type Nat = i64 where v >= 0;
 type Pos = f64 where v > 0.0;
 type NonZero = i64 where v != 0;
 ```
+How the predicates are enforced by `mumei verify`:
+- **assumed** on every refined parameter — a caller may only pass values
+  that satisfy the predicate, so the callee verifies with it as a hypothesis;
+- **checked at every call site** — `need(x: Neg)` rejects `need(5)` even when
+  `need` has no explicit `requires`;
+- **checked on `result`** — a refined `-> Pos` return type is an implicit
+  postcondition, so `body: { -5 }` fails without any `ensures`;
+- **composed along alias chains** — `type Small = Pos where v < 10` means
+  `v > 0 && v < 10`: every ancestor declaration's predicate applies, each
+  with its own operand bound to the same value;
+- **cycles are a type error** — `type A = B; type B = A;` is rejected rather
+  than treated as a constraint-free alias.
 ### Units of Measure
 A type alias may carry a unit-of-measure tag with `unit <Name>`. Units are a
 second axis orthogonal to refinements: they never change the value's runtime
@@ -127,6 +139,35 @@ atom area(s: Shape)
         }
     }
 ```
+Direct reads from uniquely owned named payloads are modeled precisely when
+the current path proves the owning variant. This includes enum-valued fields
+such as `b.e.port` and `o.c.port`, plus scalar leaves nested in named struct
+payloads such as `e.p.inner.x`. Without a proven tag, or for positional,
+ambiguous and unknown payload names, verification keeps the existing
+conservative behavior.
+
+Struct-valued payloads and nested struct fields can also be read as values:
+`let q = e.p; let i = e.p.inner; get_x(e.p)`. Each enum boundary must be
+solver-proven. These reads preserve the declared struct type and project their
+fields from the payload selectors; they are available in body-side verification
+with a solver, not in solverless `requires` or `ensures` translation. Reading
+an existing struct value does not re-assume or re-check its invariants.
+
+Deep writes may pass through enum-valued payloads and struct fields when each
+enum tag along the path is proven. Named struct payloads and their nested
+struct fields recheck refined types, `where` constraints and invariants while
+preserving sibling fields:
+
+```mumei
+e.p.inner.x = value
+o.c.port = value
+b.e.port = value
+```
+
+The enum payload or field slot must have exactly its declared LLVM type;
+union-widened slots are rejected. Positional payloads, scalar paths, arrays,
+recursive enum slots and ambiguous payload names remain unsupported. These
+writes are not admitted by composite translation validation.
 
 ---
 ## Atom Syntax

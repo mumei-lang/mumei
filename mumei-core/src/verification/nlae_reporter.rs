@@ -718,7 +718,9 @@ pub fn build_constraint_mappings_for_atom(
                 mappings.push(ConstraintMapping {
                     param_name: param.name.clone(),
                     type_name: Some(type_name_str.clone()),
-                    base_type: refined._base_type.clone(),
+                    // Report the leaf base, not the next link in a
+                    // declaration chain (which may itself be an alias).
+                    base_type: module_env.resolve_base_type(type_name_str),
                     predicate_raw: refined.predicate_raw.clone(),
                     span: refined.span.clone(),
                 });

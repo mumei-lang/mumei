@@ -26,7 +26,7 @@ use super::super::module_env::ModuleEnv;
 use super::super::types::{MumeiError, MumeiResult};
 use crate::lowering::chan_payload_type;
 use crate::mir::resolve_alias_base;
-use crate::parser::{Atom, Expr, JoinSemantics, Span, Stmt};
+use crate::parser::{Atom, Expr, JoinSemantics, Pattern, Span, Stmt};
 use std::collections::HashMap;
 
 /// Declared type name of each variable in scope (`None` = unknown).
@@ -49,6 +49,23 @@ impl<'a> NominalChecker<'a> {
         }
         self.module_env
             .structs
+            .keys()
+            .find(|fqn| {
+                fqn.rsplit("::").next() == Some(resolved.as_str())
+                    || fqn.rsplit('.').next() == Some(resolved.as_str())
+            })
+            .cloned()
+    }
+
+    /// Canonical enum key for a declared type name, mirroring `struct_key`.
+    fn enum_key(&self, type_name: &str) -> Option<String> {
+        let base = type_name.split('<').next().unwrap_or(type_name).trim();
+        let resolved = resolve_alias_base(self.module_env, base);
+        if self.module_env.enums.contains_key(&resolved) {
+            return Some(resolved);
+        }
+        self.module_env
+            .enums
             .keys()
             .find(|fqn| {
                 fqn.rsplit("::").next() == Some(resolved.as_str())
@@ -81,24 +98,112 @@ impl<'a> NominalChecker<'a> {
             .map(|f| f.type_name.as_str())
     }
 
-    /// Struct type of `expr` when it is syntactically evident.
-    fn struct_type_of(&self, expr: &Expr) -> Option<String> {
+    /// Declared type of a uniquely-owned named enum payload.
+    fn enum_payload_type(&self, key: &str, field: &str) -> Option<String> {
+        let enum_def = self.module_env.enums.get(key)?;
+        let mut payload_type = None;
+        for variant in &enum_def.variants {
+            let Some(index) = variant.fields.iter().position(|decl| {
+                decl.split_once(':')
+                    .is_some_and(|(name, _)| name.trim() == field)
+            }) else {
+                continue;
+            };
+            if payload_type.is_some() {
+                return None;
+            }
+            payload_type = variant
+                .field_types
+                .get(index)
+                .map(crate::verification::support::datatype::payload_field_type_name);
+        }
+        payload_type
+    }
+
+    fn field_or_payload_type(&self, base_type: &str, field: &str) -> Option<String> {
+        if let Some(base_key) = self.struct_key(base_type) {
+            if let Some(field_type) = self.field_type(&base_key, field) {
+                return Some(field_type.to_string());
+            }
+        }
+        if field == "tag" {
+            return None;
+        }
+        let base_key = self.enum_key(base_type)?;
+        self.enum_payload_type(&base_key, field)
+    }
+
+    fn canonical_pattern_type(&self, type_name: &str) -> String {
+        self.struct_key(type_name)
+            .or_else(|| self.enum_key(type_name))
+            .unwrap_or_else(|| {
+                let base = type_name.split('<').next().unwrap_or(type_name).trim();
+                resolve_alias_base(self.module_env, base)
+            })
+    }
+
+    fn bind_pattern_types(&mut self, pattern: &Pattern, type_name: Option<&str>) {
+        match pattern {
+            Pattern::Variable(name) => {
+                let ty = type_name.map(|type_name| self.canonical_pattern_type(type_name));
+                self.types.insert(name.clone(), ty);
+            }
+            Pattern::Variant {
+                variant_name,
+                fields,
+            } => {
+                let field_types = type_name
+                    .and_then(|type_name| self.enum_key(type_name))
+                    .and_then(|enum_key| self.module_env.enums.get(&enum_key))
+                    .and_then(|enum_def| {
+                        enum_def.variants.iter().find(|variant| {
+                            variant.name == variant_name.rsplit("::").next().unwrap_or(variant_name)
+                        })
+                    })
+                    .filter(|variant| variant.field_types.len() == fields.len())
+                    .map(|variant| {
+                        variant
+                            .field_types
+                            .iter()
+                            .map(|field_type| field_type.display_name())
+                            .collect::<Vec<_>>()
+                    });
+                if let Some(field_types) = field_types {
+                    for (field_pattern, field_type) in fields.iter().zip(field_types) {
+                        self.bind_pattern_types(field_pattern, Some(&field_type));
+                    }
+                } else {
+                    for field_pattern in fields {
+                        self.bind_pattern_types(field_pattern, None);
+                    }
+                }
+            }
+            Pattern::Wildcard | Pattern::Literal(_) => {}
+        }
+    }
+
+    /// Declared type name of `expr` when it is syntactically evident.
+    fn declared_type_name(&self, expr: &Expr) -> Option<String> {
         match expr {
-            Expr::StructInit { type_name, .. } => self.struct_key(type_name),
-            Expr::Variable(v) => self
-                .types
-                .get(v)
-                .and_then(|t| t.as_deref())
-                .and_then(|t| self.struct_key(t)),
-            Expr::Call(name, _) => self
-                .lookup_atom(name)
-                .and_then(|a| a.return_type.as_deref())
-                .and_then(|t| self.struct_key(t)),
-            Expr::ChanRecv { channel } => self.chan_payload_struct(channel).map(|(_, key)| key),
+            Expr::StructInit { type_name, .. } => Some(type_name.clone()),
+            Expr::Variable(v) => self.types.get(v).and_then(|ty| ty.clone()),
+            Expr::Call(name, _) => {
+                if let Some(atom) = self.lookup_atom(name) {
+                    atom.return_type.clone()
+                } else {
+                    self.module_env
+                        .resolve_variant_owner_by_hint(name, None)
+                        .ok()
+                        .flatten()
+                        .map(|def| def.name.clone())
+                }
+            }
+            Expr::ChanRecv { channel } => self
+                .chan_payload_struct(channel)
+                .map(|(payload, _)| payload),
             Expr::FieldAccess(base, field) => {
-                let base_key = self.struct_type_of(base)?;
-                let ty = self.field_type(&base_key, field)?;
-                self.struct_key(ty)
+                let base_type = self.declared_type_name(base)?;
+                self.field_or_payload_type(&base_type, field)
             }
             Expr::IfThenElse {
                 then_branch,
@@ -109,6 +214,22 @@ impl<'a> NominalChecker<'a> {
             Expr::Match { arms, .. } => {
                 self.join_struct_types(arms.iter().map(|arm| arm.body.as_ref()))
             }
+            _ => None,
+        }
+    }
+
+    /// Struct type of `expr` when it is syntactically evident.
+    fn struct_type_of(&self, expr: &Expr) -> Option<String> {
+        self.declared_type_name(expr)
+            .and_then(|type_name| self.struct_key(&type_name))
+    }
+
+    /// Enum type of a constructor or a variable already known to be an enum.
+    fn enum_type_of(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Call(..) | Expr::Variable(..) | Expr::FieldAccess(..) => self
+                .declared_type_name(expr)
+                .and_then(|type_name| self.enum_key(&type_name)),
             _ => None,
         }
     }
@@ -143,6 +264,106 @@ impl<'a> NominalChecker<'a> {
         Some((payload, key))
     }
 
+    /// Struct-typed payload arguments of an enum constructor `E::V` (or a
+    /// bare `V` call): the declared payload type must match the argument's
+    /// struct type nominally, just like an atom call parameter.
+    fn enum_ctor_args(&self, name: &str, args: &[Expr], span: &Span) -> MumeiResult<()> {
+        let Some(enum_def) = self.module_env.resolve_variant_owner_by_hint(name, None)? else {
+            return Ok(());
+        };
+        let leaf = name.rsplit("::").next().unwrap_or(name);
+        let Some(variant) = enum_def.variants.iter().find(|v| v.name == leaf) else {
+            return Ok(());
+        };
+        for (i, (ft, arg)) in variant.field_types.iter().zip(args.iter()).enumerate() {
+            let Some(expected) = self.struct_key(&ft.name) else {
+                continue;
+            };
+            if let Some(actual) = self.struct_type_of(arg) {
+                if actual != expected {
+                    return Err(self.mismatch(
+                        format!(
+                            "payload {} of '{}::{}' expects struct '{}' but got struct '{}'",
+                            i + 1,
+                            enum_def.name,
+                            leaf,
+                            expected,
+                            actual
+                        ),
+                        span,
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `root.field = value` nominal check: the field's declared struct type
+    /// (a struct field, or a named enum payload slot) must match the value's
+    /// struct type nominally.
+    fn field_assign(
+        &mut self,
+        root: &str,
+        field: &str,
+        value: &Expr,
+        span: &Span,
+    ) -> MumeiResult<()> {
+        let Some(declared) = self.types.get(root).and_then(|t| t.as_deref()) else {
+            return Ok(());
+        };
+        let segments: Vec<&str> = field.split('.').collect();
+        let Some(head) = segments.first().copied() else {
+            return Ok(());
+        };
+        let (mut field_decl, enum_payload) = if let Some(skey) = self.struct_key(declared) {
+            let Some(field_decl) = self.field_type(&skey, head) else {
+                return Ok(());
+            };
+            (field_decl.to_string(), false)
+        } else {
+            let Some(ekey) = self.enum_key(declared) else {
+                return Ok(());
+            };
+            // Unique-owner scan, mirroring the translator: only a payload
+            // name owned by exactly one variant has a declared type.
+            let Some(field_decl) = self.enum_payload_type(&ekey, head) else {
+                return Ok(());
+            };
+            (field_decl, true)
+        };
+        for segment in &segments[1..] {
+            let next_decl = if let Some(skey) = self.struct_key(&field_decl) {
+                self.field_type(&skey, segment).map(str::to_string)
+            } else if let Some(ekey) = self.enum_key(&field_decl) {
+                self.enum_payload_type(&ekey, segment)
+            } else {
+                None
+            };
+            let Some(next_decl) = next_decl else {
+                return Ok(());
+            };
+            field_decl = next_decl;
+        }
+        let Some(expected) = self.struct_key(&field_decl) else {
+            return Ok(());
+        };
+        if let Some(actual) = self.struct_type_of(value) {
+            if actual != expected {
+                let message = if enum_payload {
+                    format!(
+                        "payload '{field}' of '{root}' expects struct '{expected}' but got struct '{actual}'"
+                    )
+                } else {
+                    format!(
+                        "field '{field}' of '{root}' expects struct '{expected}' but got struct '{actual}'"
+                    )
+                };
+                return Err(self.mismatch(message, span));
+            }
+        }
+        Ok(())
+    }
+
     fn mismatch(&self, msg: String, span: &Span) -> MumeiError {
         MumeiError::type_error_at(
             format!(
@@ -155,6 +376,7 @@ impl<'a> NominalChecker<'a> {
 
     fn expr(&mut self, expr: &Expr, span: &Span) -> MumeiResult<()> {
         match expr {
+            Expr::Paren(inner) => self.expr(inner, span),
             Expr::Number(_)
             | Expr::Float(_)
             | Expr::StringLit(_)
@@ -185,7 +407,7 @@ impl<'a> NominalChecker<'a> {
                     self.expr(arg, span)?;
                 }
                 let Some(callee) = self.lookup_atom(name) else {
-                    return Ok(());
+                    return self.enum_ctor_args(name, args, span);
                 };
                 for (i, (param, arg)) in callee.params.iter().zip(args).enumerate() {
                     let Some(expected) =
@@ -238,12 +460,35 @@ impl<'a> NominalChecker<'a> {
             Expr::FieldAccess(base, _) => self.expr(base, span),
             Expr::Match { target, arms } => {
                 self.expr(target, span)?;
+                let target_type = self.enum_type_of(target);
+                let mut first: Option<String> = None;
                 for arm in arms {
-                    if let Some(guard) = &arm.guard {
-                        self.expr(guard, span)?;
+                    let target_type = target_type.clone();
+                    let ty = self.scoped(|checker| {
+                        checker.bind_pattern_types(&arm.pattern, target_type.as_deref());
+                        if let Some(guard) = &arm.guard {
+                            checker.expr(guard, span)?;
+                        }
+                        checker.stmt_result_type(&arm.body)
+                    })?;
+                    let Some(ty) = ty else {
+                        continue;
+                    };
+                    match &first {
+                        Some(existing) if *existing != ty => {
+                            return Err(self.mismatch(
+                                format!(
+                                    "match branches yield struct '{}' and struct '{}'",
+                                    existing, ty
+                                ),
+                                span,
+                            ));
+                        }
+                        Some(_) => {}
+                        None => first = Some(ty),
                     }
                 }
-                self.branches_agree("match", arms.iter().map(|arm| arm.body.as_ref()), span)
+                Ok(())
             }
             Expr::Async { body } | Expr::Lambda { body, .. } => self.scoped(|c| c.stmt(body)),
             Expr::Await { expr } => self.expr(expr, span),
@@ -336,12 +581,17 @@ impl<'a> NominalChecker<'a> {
         match stmt {
             Stmt::Let { var, value, span } => {
                 self.expr(value, span)?;
-                let ty = self.struct_type_of(value);
+                let ty = self
+                    .struct_type_of(value)
+                    .or_else(|| self.enum_type_of(value));
                 self.types.insert(var.clone(), ty);
                 Ok(())
             }
             Stmt::Assign { var, value, span } => {
                 self.expr(value, span)?;
+                if let Some((root, field)) = var.split_once('.') {
+                    return self.field_assign(root, field, value, span);
+                }
                 let declared = self
                     .types
                     .get(var)
@@ -487,6 +737,9 @@ mod tests {
                 }
                 Item::StructDef(s) => {
                     module_env.structs.insert(s.name.clone(), s.clone());
+                }
+                Item::EnumDef(e) => {
+                    module_env.enums.insert(e.name.clone(), e.clone());
                 }
                 _ => {}
             }
@@ -722,5 +975,272 @@ body: {{ let q = Pair {{ a: 1, b: 2 }}; q }};
         let errors = check(&src);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("body yields struct 'Pair' but the atom returns struct 'Point'"));
+    }
+
+    const ENUMS: &str = r#"
+struct Point { x: i64, y: i64 }
+struct Pair { a: i64, b: i64 }
+enum Ev { Move(p: Point), Idle }
+"#;
+
+    #[test]
+    fn same_layout_enum_ctor_payload_is_rejected() {
+        let src = format!(
+            "{ENUMS}
+trusted atom main() -> i64
+requires: true;
+ensures: true;
+body: {{ let e = Ev::Move(Pair {{ a: 1, b: 2 }}); 0 }};
+"
+        );
+        let errors = check(&src);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0]
+            .contains("payload 1 of 'Ev::Move' expects struct 'Point' but got struct 'Pair'"));
+    }
+
+    #[test]
+    fn matching_enum_ctor_payload_is_accepted() {
+        let src = format!(
+            "{ENUMS}
+trusted atom main() -> i64
+requires: true;
+ensures: true;
+body: {{ let e = Ev::Move(Point {{ x: 1, y: 2 }}); 0 }};
+"
+        );
+        assert!(check(&src).is_empty(), "{:?}", check(&src));
+    }
+
+    #[test]
+    fn same_layout_enum_payload_write_is_rejected() {
+        let src = format!(
+            "{ENUMS}
+trusted atom main(e: Ev) -> i64
+requires: true;
+ensures: true;
+body: {{ e.p = Pair {{ a: 1, b: 2 }}; 0 }};
+"
+        );
+        let errors = check(&src);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("payload 'p' of 'e' expects struct 'Point' but got struct 'Pair'")
+        );
+    }
+
+    #[test]
+    fn matching_enum_payload_write_is_accepted() {
+        let src = format!(
+            "{ENUMS}
+trusted atom main(e: Ev) -> i64
+requires: true;
+ensures: true;
+body: {{ e.p = Point {{ x: 1, y: 2 }}; 0 }};
+"
+        );
+        assert!(check(&src).is_empty(), "{:?}", check(&src));
+    }
+
+    #[test]
+    fn same_layout_struct_field_write_is_rejected() {
+        let src = format!(
+            "{ENUMS}
+struct Wrap {{ q: Point }}
+
+trusted atom main(w: Wrap) -> i64
+requires: true;
+ensures: true;
+body: {{ w.q = Pair {{ a: 1, b: 2 }}; 0 }};
+"
+        );
+        let errors = check(&src);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("field 'q' of 'w' expects struct 'Point' but got struct 'Pair'"));
+    }
+
+    const DEEP_ENUMS: &str = r#"
+struct Inner { x: i64, y: i64 }
+struct Other { x: i64, y: i64 }
+struct Outer { inner: Inner, z: i64 }
+struct WrapDeep { a: Outer }
+enum EvI { Hold(i: Inner), Idle }
+enum Ev { Move(p: Outer), Idle }
+"#;
+
+    #[test]
+    fn deep_struct_and_enum_field_assignments_reject_same_layout_structs() {
+        let src = format!(
+            "{DEEP_ENUMS}
+trusted atom local_enum_payload_mismatch() -> i64
+requires: true;
+ensures: true;
+body: {{ let e = EvI::Hold(Inner {{ x: 1, y: 2 }}); e.i = Other {{ x: 1, y: 2 }}; 0 }};
+
+trusted atom local_enum_deep_payload_mismatch() -> i64
+requires: true;
+ensures: true;
+body: {{ let e = Ev::Move(Outer {{ inner: Inner {{ x: 1, y: 2 }}, z: 3 }}); e.p.inner = Other {{ x: 1, y: 2 }}; 0 }};
+
+trusted atom param_enum_deep_payload_mismatch(e: Ev) -> i64
+requires: true;
+ensures: true;
+body: {{ e.p.inner = Other {{ x: 1, y: 2 }}; 0 }};
+
+trusted atom ordinary_struct_deep_field_mismatch() -> i64
+requires: true;
+ensures: true;
+body: {{ let o = WrapDeep {{ a: Outer {{ inner: Inner {{ x: 1, y: 2 }}, z: 3 }} }}; o.a.inner = Other {{ x: 1, y: 2 }}; 0 }};
+"
+        );
+        let errors = check(&src);
+        assert_eq!(errors.len(), 4, "{errors:?}");
+        for (atom, expected) in [
+            (
+                "local_enum_payload_mismatch",
+                "payload 'i' of 'e' expects struct 'Inner' but got struct 'Other'",
+            ),
+            (
+                "local_enum_deep_payload_mismatch",
+                "payload 'p.inner' of 'e' expects struct 'Inner' but got struct 'Other'",
+            ),
+            (
+                "param_enum_deep_payload_mismatch",
+                "payload 'p.inner' of 'e' expects struct 'Inner' but got struct 'Other'",
+            ),
+            (
+                "ordinary_struct_deep_field_mismatch",
+                "field 'a.inner' of 'o' expects struct 'Inner' but got struct 'Other'",
+            ),
+        ] {
+            let atom_context = format!("in atom '{atom}'");
+            let matches = errors
+                .iter()
+                .filter(|error| error.contains(&atom_context) && error.contains(expected))
+                .count();
+            assert_eq!(
+                matches, 1,
+                "expected exactly one matching diagnostic for atom '{atom}': {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn atom_call_type_takes_precedence_over_same_named_variant() {
+        let src = r#"
+struct VariantPayload { x: i64, y: i64 }
+struct AtomPayload { x: i64, y: i64 }
+enum VariantOwner { Produce(p: VariantPayload), Idle }
+enum AtomReturn { Built(p: AtomPayload), Empty }
+
+trusted atom Produce() -> AtomReturn
+requires: true;
+ensures: true;
+body: { AtomReturn::Built(AtomPayload { x: 1, y: 2 }) };
+
+trusted atom main() -> i64
+requires: true;
+ensures: true;
+body: {
+    let value = Produce();
+    value.p = AtomPayload { x: 3, y: 4 };
+    0
+};
+"#;
+        assert!(check(src).is_empty(), "{:?}", check(src));
+    }
+
+    #[test]
+    fn matching_deep_struct_and_enum_field_assignments_are_accepted() {
+        let src = format!(
+            "{DEEP_ENUMS}
+trusted atom local_enum_payload_match() -> i64
+requires: true;
+ensures: true;
+body: {{ let e = EvI::Hold(Inner {{ x: 1, y: 2 }}); e.i = Inner {{ x: 3, y: 4 }}; 0 }};
+
+trusted atom local_enum_deep_payload_match() -> i64
+requires: true;
+ensures: true;
+body: {{ let e = Ev::Move(Outer {{ inner: Inner {{ x: 1, y: 2 }}, z: 3 }}); e.p.inner = Inner {{ x: 3, y: 4 }}; 0 }};
+
+trusted atom param_enum_deep_payload_match(e: Ev) -> i64
+requires: true;
+ensures: true;
+body: {{ e.p.inner = Inner {{ x: 3, y: 4 }}; 0 }};
+
+trusted atom ordinary_struct_deep_field_match() -> i64
+requires: true;
+ensures: true;
+body: {{ let o = WrapDeep {{ a: Outer {{ inner: Inner {{ x: 1, y: 2 }}, z: 3 }} }}; o.a.inner = Inner {{ x: 3, y: 4 }}; 0 }};
+
+trusted atom enum_scalar_deep_field_write() -> i64
+requires: true;
+ensures: true;
+body: {{ let e = Ev::Move(Outer {{ inner: Inner {{ x: 1, y: 2 }}, z: 3 }}); e.p.inner.x = 1; 0 }};
+
+trusted atom enum_alias_keeps_nominal_type(e: Ev) -> i64
+requires: true;
+ensures: true;
+body: {{ let alias = e; alias.p.inner = Inner {{ x: 3, y: 4 }}; 0 }};
+"
+        );
+        assert!(check(&src).is_empty(), "{:?}", check(&src));
+    }
+
+    #[test]
+    fn enum_intermediate_payload_struct_writes_are_nominally_checked() {
+        let src = r#"
+struct Inner { x: i64, y: i64 }
+struct Other { x: i64, y: i64 }
+enum Chan { Tcp(p: Inner), Udp }
+struct B { e: Chan, k: i64 }
+
+trusted atom local_enum_slot_mismatch() -> i64
+requires: true;
+ensures: true;
+body: {
+    let b = B { e: Chan::Tcp(Inner { x: 1, y: 2 }), k: 3 };
+    b.e.p = Other { x: 4, y: 5 };
+    0
+};
+
+trusted atom param_enum_slot_mismatch(b: B) -> i64
+requires: true;
+ensures: true;
+body: { b.e.p = Other { x: 4, y: 5 }; 0 };
+
+trusted atom local_enum_slot_match() -> i64
+requires: true;
+ensures: true;
+body: {
+    let b = B { e: Chan::Tcp(Inner { x: 1, y: 2 }), k: 3 };
+    b.e.p = Inner { x: 4, y: 5 };
+    0
+};
+
+trusted atom param_enum_slot_match(b: B) -> i64
+requires: true;
+ensures: true;
+body: { b.e.p = Inner { x: 4, y: 5 }; 0 };
+"#;
+        let errors = check(src);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        for atom in ["local_enum_slot_mismatch", "param_enum_slot_mismatch"] {
+            let atom_context = format!("in atom '{atom}'");
+            let matches = errors
+                .iter()
+                .filter(|error| {
+                    error.contains(&atom_context)
+                        && error.contains(
+                            "field 'e.p' of 'b' expects struct 'Inner' but got struct 'Other'",
+                        )
+                })
+                .count();
+            assert_eq!(
+                matches, 1,
+                "expected one nominal mismatch for {atom}: {errors:?}"
+            );
+        }
     }
 }

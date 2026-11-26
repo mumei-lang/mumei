@@ -1,0 +1,155 @@
+{
+  "schema_version": "mumei.native-evidence-acceptance/v1",
+  "acceptance": "evaluated",
+  "accepted": true,
+  "scope": "native_bundle_object_translation_correspondence",
+  "checks_performed": [
+    "bundle_identity_binding",
+    "fresh_same_profile_source_recheck",
+    "llvm_snapshot_translation_recheck",
+    "toolchain_object_executable_reproduction",
+    "canonical_link_argument_vector_reproduction",
+    "object_symbol_correspondence",
+    "object_call_edge_correspondence",
+    "object_link_correspondence",
+    "function_coverage",
+    "function_count",
+    "llvm_ir_object_equivalence",
+    "relocation_targets",
+    "relocation_bounds",
+    "relocation_resolved_values",
+    "relocation_applied_values",
+    "hir_llvm_model_correspondence",
+    "object_data_correspondence",
+    "object_symbol_attribute_correspondence",
+    "machine_code_leaf_function_tv",
+    "machine_code_callee_saved_register_preservation",
+    "machine_code_entry_wrapper_tv",
+    "object_source_machine_code_correspondence"
+  ],
+  "checks_not_performed": [
+    "producer_authenticity",
+    "descriptor_authenticity",
+    "historical_execution",
+    "raw_link_argument_vector_reproduction",
+    "register_convention_validation",
+    "optimizer_semantics",
+    "abi_runtime_semantics",
+    "os_exit_status_observation",
+    "os_stdout_observation",
+    "os_stderr_observation",
+    "runtime_observation_semantics",
+    "grade_promotion",
+    "lean_kernel_checks"
+  ],
+  "build_id": "0000000000000000000000000000000000000000000000000000000000000001",
+  "llvm_sha256": "0000000000000000000000000000000000000000000000000000000000000002",
+  "object_sha256": "0000000000000000000000000000000000000000000000000000000000000003",
+  "evidence_fingerprint": "0000000000000000000000000000000000000000000000000000000000000004",
+  "register_convention_assumed": "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax",
+  "input_domain": "unconstrained_64_bit_bitvectors",
+  "functions": {
+    "__mumei_user_main": {
+      "outcome": "equivalent_within_profile",
+      "callee_saved_preservation": "preserved"
+    },
+    "main": {
+      "outcome": "equivalent_within_profile",
+      "callee_saved_preservation": "preserved",
+      "role": "entry_wrapper"
+    }
+  },
+  "object_translation": {
+    "status": "checked_correspondence",
+    "transformations": [
+      {
+        "from": "llvm_ir",
+        "to": "object_code",
+        "relation": "llc_instruction_selection_register_allocation",
+        "output_identity": "0000000000000000000000000000000000000000000000000000000000000003",
+        "validation": "checked_llvm_ir_object_model_correspondence",
+        "result": "checked_correspondence"
+      },
+      {
+        "from": "object_code",
+        "to": "linked_executable",
+        "relation": "static_link_relocation_placement",
+        "output_identity": "0000000000000000000000000000000000000000000000000000000000000005",
+        "validation": "checked_object_link_correspondence",
+        "result": "checked_correspondence"
+      },
+      {
+        "from": "source_atom",
+        "to": "machine_code",
+        "relation": "machine_code_translation_validation",
+        "output_identity": null,
+        "validation": "checked_source_machine_tv_within_profile"
+      },
+      {
+        "from": "hir",
+        "to": "llvm_ir",
+        "relation": "existing_llvm_emitter",
+        "output_identity": null,
+        "validation": "checked_hir_llvm_model_correspondence",
+        "result": "checked_correspondence"
+      }
+    ],
+    "functions": [
+      {
+        "ir_function": "__mumei_user_main",
+        "object_symbol": "__mumei_user_main",
+        "object_section": ".text",
+        "object_offset": 0,
+        "object_size": 16,
+        "executable_address": 4198400
+      }
+    ],
+    "relocations": [
+      {
+        "object_section": ".text",
+        "object_offset": 8,
+        "kind": "R_X86_64_PLT32",
+        "target_symbol": "__mumei_user_main",
+        "addend": -4,
+        "resolved_value": -24,
+        "applied_offset": null,
+        "assumption": null
+      }
+    ],
+    "correspondence": {
+      "status": "checked_correspondence",
+      "checks": [
+        { "item": "function_coverage", "result": "checked", "detail": "all IR functions present in object" },
+        { "item": "function_count", "result": "checked", "detail": "1 IR function matches 1 object function" },
+        { "item": "llvm_ir_object_equivalence", "result": "checked", "detail": "1 of 1 liftable functions equivalent" },
+        { "item": "relocation_targets", "result": "checked", "detail": "all 1 relocation targets resolved" },
+        { "item": "relocation_bounds", "result": "checked", "detail": "all 1 relocations within section bounds" },
+        { "item": "relocation_resolved_values", "result": "checked", "detail": "all 1 relocation values recomputed" },
+        { "item": "relocation_applied_values", "result": "checked", "detail": "all 1 applied relocation bytes match" },
+        { "item": "hir_llvm_model_correspondence", "result": "checked", "detail": "1 of 1 atoms match" },
+        { "item": "object_data_correspondence", "result": "checked", "detail": "no IR data globals" },
+        { "item": "object_symbol_attribute_correspondence", "result": "checked", "detail": "all symbol bindings match" }
+      ]
+    }
+  },
+  "source_machine_tv": {
+    "status": "checked_source_machine_tv_within_profile",
+    "non_equivalent_functions": [],
+    "unchecked_domains": [
+      "producer_authenticity",
+      "descriptor_authenticity",
+      "historical_execution",
+      "raw_link_argument_vector_reproduction",
+      "register_convention_validation",
+      "optimizer_semantics",
+      "abi_runtime_semantics",
+      "os_exit_status_observation",
+      "os_stdout_observation",
+      "os_stderr_observation",
+      "runtime_observation_semantics",
+      "grade_promotion",
+      "lean_kernel_checks"
+    ],
+    "object_link_correspondence": "checked_object_link_correspondence"
+  }
+}

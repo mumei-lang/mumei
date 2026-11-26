@@ -2,7 +2,105 @@ use mumei_core::emitter::Emitter;
 use mumei_core::hir::lower_atom_to_hir_with_env;
 use mumei_core::parser::Item;
 use mumei_core::{emitter, hir, parser, verification};
+use mumei_emit_llvm::translation_validation::{self as tv, Options, Outcome};
+use std::fs;
 use std::path::{Path, PathBuf};
+
+// `--emit binary` and `mumei run` wire the C09 native module validator
+// into the merged snapshot before object emission. The report artifact
+// is advisory: it records each atom's outcome but never blocks the
+// link, and a module outside the bounded profile (externs, non-i64
+// atoms, no `main`) simply leaves no report behind. Passing
+// `report_path: None` prints the advisory without writing an artifact.
+pub(crate) fn run_translation_validation_check(
+    source: &str,
+    ll_path: &Path,
+    report_path: Option<&Path>,
+) {
+    // A rebuild that skips validation (module outside the bounded
+    // profile) must not leave an earlier report beside the new binary.
+    if let Some(path) = report_path {
+        let _ = fs::remove_file(path);
+    }
+    let Ok(llvm_ir) = fs::read_to_string(ll_path) else {
+        return;
+    };
+    let report = match tv::validate_native_module(
+        source,
+        &llvm_ir,
+        Options::default(),
+        mumei_core::semantic_contract::RefinedAdmission::V2,
+    ) {
+        Ok(report) => report,
+        Err(_) => return,
+    };
+    let label = |outcome: &Outcome| match outcome {
+        Outcome::EquivalentWithinProfile => "equivalent_within_profile",
+        Outcome::Different => "different",
+        Outcome::UndefinedBehavior => "undefined_behavior",
+        Outcome::Inconclusive => "inconclusive",
+    };
+    if let Some(path) = report_path {
+        let functions: Vec<serde_json::Value> = report
+            .functions
+            .iter()
+            .map(|function| {
+                serde_json::json!({
+                    "function_name": function.function_name,
+                    "outcome": label(&function.outcome),
+                })
+            })
+            .collect();
+        let mut record = serde_json::json!({
+            "schema_version": "mumei.translation-validation-report/v1",
+            "profile": report.profile,
+            "source_profile": report.source_profile,
+            "target": report.target,
+            "data_layout": report.data_layout,
+            "checked_stage": report.checked_stage,
+            "input_domain": report.input_domain,
+            "source_sha256": report.source_sha256,
+            "llvm_sha256": report.llvm_sha256,
+            "timeout_ms": report.timeout_ms,
+            "resource_limit": report.resource_limit,
+            "functions": functions,
+            "outcome": label(&report.outcome),
+        });
+        // `unroll_bound` joins the record only when the profile admits
+        // a bounded `while` — its absence says loop coverage was never
+        // claimed, distinct from any bound value.
+        if let Some(bound) = report.unroll_bound {
+            record["unroll_bound"] = bound.into();
+        }
+        let bytes = match serde_json::to_vec_pretty(&record) {
+            Ok(bytes) => bytes,
+            Err(_) => return,
+        };
+        if fs::write(path, bytes).is_err() {
+            return;
+        }
+    }
+    let suffix = report_path
+        .map(|path| format!(" ({})", path.display()))
+        .unwrap_or_default();
+    match report.outcome {
+        Outcome::EquivalentWithinProfile => println!(
+            "  ✅ Translation validation: {} function(s) equivalent within profile{}",
+            report.functions.len(),
+            suffix
+        ),
+        Outcome::Inconclusive => println!(
+            "  ⚠️  Translation validation inconclusive for {} function(s){}",
+            report.functions.len(),
+            suffix
+        ),
+        Outcome::Different | Outcome::UndefinedBehavior => eprintln!(
+            "  ⚠️  Translation validation: {}{}",
+            label(&report.outcome),
+            suffix
+        ),
+    }
+}
 
 pub(crate) fn collect_extern_blocks(
     module_env: &verification::ModuleEnv,

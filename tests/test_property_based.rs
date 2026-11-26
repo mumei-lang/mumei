@@ -4,7 +4,7 @@ use std::process::Command;
 use mumei_core::parser::{Atom, Param, RefinedType, Span, TrustLevel};
 use mumei_core::verification::{
     check_generated_assignment, generator_from_refinement, run_property_based_test,
-    shrink_counterexample, synthesize_input_generators, GeneratedValue, InputGenerator, ModuleEnv,
+    shrink_counterexample, synthesize_input_generators, GeneratedValue, ModuleEnv,
     PropertyBasedTestConfig,
 };
 
@@ -28,6 +28,7 @@ fn base_atom(name: &str) -> Atom {
         is_async: false,
         trust_level: TrustLevel::Verified,
         max_unroll: None,
+        str_bound: None,
         invariant: None,
         effects: Vec::new(),
         return_type: Some("i64".to_string()),
@@ -64,24 +65,29 @@ fn refined(name: &str, base_type: &str, operand: &str, predicate: &str) -> Refin
 
 #[test]
 fn synthesizes_nat_generator_from_refinement_type() {
-    let generator = generator_from_refinement(&refined("Nat", "i64", "v", "v >= 0"));
+    let mut module_env = ModuleEnv::new();
+    module_env.register_type(&refined("Nat", "i64", "v", "v >= 0"));
+    let generator = generator_from_refinement("Nat", &module_env);
 
-    assert_eq!(generator.min, 0);
-    assert_eq!(generator.max, 100);
-    assert!(generator
-        .boundary_values()
-        .contains(&GeneratedValue::Int(0)));
+    let values = generator.boundary_values();
+    assert!(values.contains(&GeneratedValue::Int(0)));
+    assert!(values
+        .iter()
+        .all(|v| matches!(v, GeneratedValue::Int(i) if *i >= 0)));
 }
 
 #[test]
 fn synthesizes_bounded_generator_from_refinement_type() {
-    let generator = generator_from_refinement(&refined("Small", "i64", "v", "v >= -3 && v <= 7"));
+    let mut module_env = ModuleEnv::new();
+    module_env.register_type(&refined("Small", "i64", "v", "v >= -3 && v <= 7"));
+    let generator = generator_from_refinement("Small", &module_env);
 
-    assert_eq!(generator.min, -3);
-    assert_eq!(generator.max, 7);
-    assert!(generator
-        .boundary_values()
-        .contains(&GeneratedValue::Int(7)));
+    let values = generator.boundary_values();
+    assert!(values.contains(&GeneratedValue::Int(-3)));
+    assert!(values.contains(&GeneratedValue::Int(7)));
+    assert!(values
+        .iter()
+        .all(|v| matches!(v, GeneratedValue::Int(i) if (-3..=7).contains(i))));
 }
 
 #[test]
@@ -192,6 +198,42 @@ fn property_based_validation_keeps_negative_values_signed_in_bitvector_mode() {
     atom.body_expr = "x".to_string();
     let mut assignment = HashMap::new();
     assignment.insert("x".to_string(), GeneratedValue::Int(-1));
+
+    assert!(check_generated_assignment(&atom, &module_env, &assignment).is_none());
+}
+
+#[test]
+fn out_of_domain_bool_input_is_skipped_not_a_counterexample() {
+    // `x: Flag` with `v == true` must skip `x = false` — evaluating the
+    // body against an out-of-domain input would report a phantom
+    // counterexample on a correct atom.
+    let mut module_env = ModuleEnv::new();
+    module_env.register_type(&refined("Flag", "bool", "v", "v == true"));
+    let mut atom = base_atom("flagged");
+    atom.params = vec![param("x", "Flag")];
+    atom.ensures = "result == true".to_string();
+    atom.return_type = Some("bool".to_string());
+    atom.body_expr = "x".to_string();
+    let mut assignment = HashMap::new();
+    assignment.insert("x".to_string(), GeneratedValue::Bool(false));
+
+    assert!(check_generated_assignment(&atom, &module_env, &assignment).is_none());
+}
+
+#[test]
+fn out_of_domain_int_input_is_skipped_not_a_counterexample() {
+    // A non-range predicate like `v % 2 == 0` cannot narrow the generator
+    // bounds, so the precondition check itself must filter `x = 3`.
+    let mut module_env = ModuleEnv::new();
+    module_env.register_type(&refined("Even", "i64", "v", "v % 2 == 0"));
+    let mut atom = base_atom("even_id");
+    atom.params = vec![param("x", "Even")];
+    // `result % 2 == 0` fails on the unfiltered input, so `None` only
+    // comes back when the precondition check actually skipped it.
+    atom.ensures = "result % 2 == 0".to_string();
+    atom.body_expr = "x".to_string();
+    let mut assignment = HashMap::new();
+    assignment.insert("x".to_string(), GeneratedValue::Int(3));
 
     assert!(check_generated_assignment(&atom, &module_env, &assignment).is_none());
 }

@@ -43,10 +43,11 @@ pub use review::{generate_escalation_bundle, generate_human_review_queue};
 
 pub use validation::{
     check_certificate_hash, get_required_lowering_rules, lean_axiom_audit,
-    lean_certificate_metadata_is_current, lean_translator_metadata_is_current,
-    refresh_certificate_integrity, validate_certificate_translator_versions,
-    validate_translator_version, validate_translator_version_with_semantics, verify_certificate,
-    verify_certificate_in_env, CertificateAtomCheck, CertificateHashCheck, LeanAxiomAudit,
+    lean_certificate_metadata_is_current, lean_dual_check_status,
+    lean_translator_metadata_is_current, refresh_certificate_integrity,
+    validate_certificate_translator_versions, validate_translator_version,
+    validate_translator_version_with_semantics, verify_certificate, verify_certificate_in_env,
+    CertificateAtomCheck, CertificateHashCheck, LeanAxiomAudit, LeanDualCheck,
     LEAN_STANDARD_KERNEL_AXIOMS,
 };
 
@@ -95,6 +96,7 @@ mod tests {
             is_async: false,
             trust_level: parser::TrustLevel::Verified,
             max_unroll: None,
+            str_bound: None,
             invariant: None,
             effects: vec![],
             return_type: None,
@@ -604,6 +606,626 @@ mod tests {
         (cert, root, callee, env)
     }
 
+    fn effect_dependency_fixture(transition: &str) -> (ProofCertificate, parser::Atom, ModuleEnv) {
+        let source = format!(
+            "effect Work\n\
+             states: [Idle, Busy];\n\
+             initial: Idle;\n\
+             transition {transition};\n\
+             atom f(x: i64) -> i64\n\
+             effects: [Work];\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: f(x);\n"
+        );
+        let mut env = ModuleEnv::new();
+        for item in parser::parse_module(&source) {
+            match item {
+                parser::Item::Atom(atom) => env.register_atom(&atom),
+                parser::Item::EffectDef(effect_def) => env.register_effect(&effect_def),
+                _ => {}
+            }
+        }
+        let root = env.get_atom("g").unwrap().clone();
+        let mut results = HashMap::new();
+        results.insert(
+            root.name.clone(),
+            (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+        );
+        let cert = generate_certificate("test.mm", &[&root], &results, &env, None, None, None);
+        (cert, root, env)
+    }
+
+    fn enum_dependency_fixture(
+        enum_definition: &str,
+    ) -> (ProofCertificate, parser::Atom, ModuleEnv) {
+        let source = format!(
+            "{enum_definition}\n\
+             atom choose(e: E) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: match e {{ E::A(v) => v, _ => 0 }};\n"
+        );
+        let mut env = ModuleEnv::new();
+        for item in parser::parse_module(&source) {
+            match item {
+                parser::Item::Atom(atom) => env.register_atom(&atom),
+                parser::Item::EnumDef(enum_def) => env.register_enum(&enum_def),
+                _ => {}
+            }
+        }
+        let root = env.get_atom("choose").unwrap().clone();
+        let mut results = HashMap::new();
+        results.insert(
+            root.name.clone(),
+            (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+        );
+        let cert = generate_certificate("test.mm", &[&root], &results, &env, None, None, None);
+        (cert, root, env)
+    }
+
+    fn enum_fields_dependency_fixture(
+        enum_definition: &str,
+    ) -> (ProofCertificate, parser::Atom, ModuleEnv) {
+        let source = format!(
+            "{enum_definition}\n\
+             atom choose(e: E) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: 0;\n"
+        );
+        let mut env = ModuleEnv::new();
+        for item in parser::parse_module(&source) {
+            match item {
+                parser::Item::Atom(atom) => env.register_atom(&atom),
+                parser::Item::EnumDef(enum_def) => env.register_enum(&enum_def),
+                _ => {}
+            }
+        }
+        let root = env.get_atom("choose").unwrap().clone();
+        let mut results = HashMap::new();
+        results.insert(
+            root.name.clone(),
+            (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+        );
+        let cert = generate_certificate("test.mm", &[&root], &results, &env, None, None, None);
+        (cert, root, env)
+    }
+
+    fn signature_type_dependency_fixture(
+        source: &str,
+        root_name: &str,
+    ) -> (ProofCertificate, parser::Atom, ModuleEnv) {
+        let mut env = ModuleEnv::new();
+        for item in parser::parse_module(source) {
+            match item {
+                parser::Item::Atom(atom) => env.register_atom(&atom),
+                parser::Item::TypeDef(refined) => env.register_type(&refined),
+                parser::Item::StructDef(struct_def) => env.register_struct(&struct_def),
+                parser::Item::EnumDef(enum_def) => env.register_enum(&enum_def),
+                _ => {}
+            }
+        }
+        let root = env.get_atom(root_name).unwrap().clone();
+        let mut results = HashMap::new();
+        results.insert(
+            root.name.clone(),
+            (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+        );
+        let cert = generate_certificate("test.mm", &[&root], &results, &env, None, None, None);
+        (cert, root, env)
+    }
+
+    #[test]
+    fn enum_signature_proof_hash_matches_current_policy() {
+        let (_, root, env) = enum_dependency_fixture("enum E { A(v: i64), B }");
+        assert_eq!(
+            crate::resolver::compute_proof_hash(&root, &env),
+            "e9bec41c0fb54c53024a512f8f8fd0bfd3c2c394338ec993a6029b8d159f8603"
+        );
+    }
+
+    #[test]
+    fn proof_hash_tracks_refined_types_used_by_struct_fields() {
+        let source = "type Pos = i64 where v >= 1;\n\
+                      struct P { x: Pos }\n\
+                      atom g(a: i64) -> i64\n\
+                      requires: a >= 1;\n\
+                      ensures: result >= 1;\n\
+                      body: { let p = P { x: a }; p.x };\n";
+        let (_, root, env) = signature_type_dependency_fixture(source, "g");
+        let changed_source = source.replace("v >= 1", "v >= 2");
+        let (_, changed_root, changed_env) =
+            signature_type_dependency_fixture(&changed_source, "g");
+
+        assert_eq!(root.body_expr, changed_root.body_expr);
+        assert_ne!(
+            crate::resolver::compute_proof_hash(&root, &env),
+            crate::resolver::compute_proof_hash(&root, &changed_env)
+        );
+    }
+
+    #[test]
+    fn verify_certificate_in_env_detects_changed_signature_enum_definition() {
+        let (cert, root, env) = enum_dependency_fixture("enum E { A(v: i64), B }");
+        let dependency_hashes = cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(dependency_hashes.contains_key("enum:E"));
+        assert_eq!(
+            verify_certificate_in_env(&cert, &[&root], false, Some(&env))[0].status,
+            status::CERTIFICATE_PROVEN
+        );
+
+        for changed_enum in ["enum E { A(v: bool), B }", "enum E { A(v: i64), B, C }"] {
+            let (_, _, changed_env) = enum_dependency_fixture(changed_enum);
+            let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+            assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+            assert_eq!(check[0].changed_dependencies, vec!["enum:E"]);
+        }
+    }
+
+    #[test]
+    fn verify_certificate_in_env_detects_changed_enum_payload_field_names() {
+        let (cert, root, _) = enum_fields_dependency_fixture("enum E { A(a: i64, b: i64), B }");
+        let (_, _, swapped_env) = enum_fields_dependency_fixture("enum E { A(b: i64, a: i64), B }");
+
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&swapped_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+        assert_eq!(check[0].changed_dependencies, vec!["enum:E"]);
+    }
+
+    #[test]
+    fn verify_certificate_in_env_marks_legacy_signature_enum_hashes_unchecked() {
+        let (mut cert, root, env) = enum_dependency_fixture("enum E { A(v: i64), B }");
+        cert.atoms[0]
+            .dependency_hashes
+            .as_mut()
+            .unwrap()
+            .remove("enum:E");
+
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_UNCHECKED);
+        assert_eq!(check[0].unchecked_dependencies, vec!["enum:E"]);
+    }
+
+    #[test]
+    fn verify_certificate_in_env_keys_enums_reached_through_structs() {
+        let source = "enum E { A(v: i64), B }\n\
+                      struct Wrapper { value: E }\n\
+                      atom read(w: Wrapper) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: 0;\n";
+        let mut env = ModuleEnv::new();
+        for item in parser::parse_module(source) {
+            match item {
+                parser::Item::Atom(atom) => env.register_atom(&atom),
+                parser::Item::EnumDef(enum_def) => env.register_enum(&enum_def),
+                parser::Item::StructDef(struct_def) => env.register_struct(&struct_def),
+                _ => {}
+            }
+        }
+        let root = env.get_atom("read").unwrap().clone();
+        let mut results = HashMap::new();
+        results.insert(
+            root.name.clone(),
+            (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+        );
+        let cert = generate_certificate("test.mm", &[&root], &results, &env, None, None, None);
+        let dependency_hashes = cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(dependency_hashes.contains_key("struct:Wrapper"));
+        assert!(dependency_hashes.contains_key("enum:E"));
+
+        let changed_source = source.replace("B }", "B, C }");
+        let mut changed_env = ModuleEnv::new();
+        for item in parser::parse_module(&changed_source) {
+            match item {
+                parser::Item::Atom(atom) => changed_env.register_atom(&atom),
+                parser::Item::EnumDef(enum_def) => changed_env.register_enum(&enum_def),
+                parser::Item::StructDef(struct_def) => changed_env.register_struct(&struct_def),
+                _ => {}
+            }
+        }
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+        assert_eq!(check[0].changed_dependencies, vec!["enum:E"]);
+    }
+
+    #[test]
+    fn verify_certificate_in_env_tracks_structs_nested_in_struct_fields() {
+        let source = "struct Inner { value: i64 }\n\
+                      struct Outer { inner: Inner }\n\
+                      atom read(value: Outer) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: 0;\n";
+        let (cert, root, _) = signature_type_dependency_fixture(source, "read");
+        let dependency_hashes = cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(dependency_hashes.contains_key("struct:Outer"));
+        assert!(dependency_hashes.contains_key("struct:Inner"));
+
+        let changed_source = source.replace("Inner { value: i64 }", "Inner { value: bool }");
+        let (_, _, changed_env) = signature_type_dependency_fixture(&changed_source, "read");
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+        assert_eq!(check[0].changed_dependencies, vec!["struct:Inner"]);
+    }
+
+    #[test]
+    fn verify_certificate_in_env_tracks_structs_reached_through_enum_payloads() {
+        let source = "struct P { value: i64 }\n\
+                      enum E { A(p: P), B }\n\
+                      atom read(value: E) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: 0;\n";
+        let (cert, root, _) = signature_type_dependency_fixture(source, "read");
+        let dependency_hashes = cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(dependency_hashes.contains_key("enum:E"));
+        assert!(dependency_hashes.contains_key("struct:P"));
+
+        let changed_source = source.replace("P { value: i64 }", "P { value: bool }");
+        let (_, _, changed_env) = signature_type_dependency_fixture(&changed_source, "read");
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+        assert_eq!(check[0].changed_dependencies, vec!["struct:P"]);
+    }
+
+    #[test]
+    fn verify_certificate_in_env_tracks_refined_type_reached_from_body_struct_literal() {
+        let source = "type Pos = i64 where v >= 1;\n\
+                      struct P { x: Pos }\n\
+                      atom g(a: i64) -> i64\n\
+                      requires: a >= 1;\n\
+                      ensures: result >= 1;\n\
+                      body: { let p = P { x: a }; p.x };\n";
+        let (cert, root, _) = signature_type_dependency_fixture(source, "g");
+        let dependency_hashes = cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(dependency_hashes.contains_key("struct:P"));
+        assert!(dependency_hashes.contains_key("type:Pos"));
+
+        let changed_source = source.replace("v >= 1", "v >= 2");
+        let (_, _, changed_env) = signature_type_dependency_fixture(&changed_source, "g");
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+        assert_eq!(check[0].changed_dependencies, vec!["type:Pos"]);
+    }
+
+    #[test]
+    fn verify_certificate_in_env_tracks_enums_referenced_only_in_the_body() {
+        for body in [
+            "match value { E::A(v) => v, _ => 0 }",
+            "{ let constructed = E::A(value); value }",
+        ] {
+            let source = format!(
+                "enum E {{ A(v: i64), B }}\n\
+                 atom read(value: i64) -> i64\n\
+                 requires: true;\n\
+                 ensures: true;\n\
+                 body: {body};\n"
+            );
+            let (cert, root, env) = signature_type_dependency_fixture(&source, "read");
+            let dependency_hashes = cert.atoms[0]
+                .dependency_hashes
+                .as_ref()
+                .expect("generated dependency hashes");
+            assert!(dependency_hashes.contains_key("enum:E"), "{body}");
+            assert!(
+                !crate::resolver::compute_legacy_dependency_hashes(&root, &env)
+                    .contains_key("enum:E"),
+                "{body}"
+            );
+
+            let changed_source = source.replace("B }", "B, C }");
+            let (_, _, changed_env) = signature_type_dependency_fixture(&changed_source, "read");
+            let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+            assert_eq!(
+                check[0].status,
+                status::CERTIFICATE_DEPENDENCY_CHANGED,
+                "{body}"
+            );
+            assert_eq!(check[0].changed_dependencies, vec!["enum:E"], "{body}");
+        }
+
+        let bare_source = "enum E { A(v: i64), B }\n\
+                           enum F { A(v: i64), B }\n\
+                           atom read(value: i64) -> i64\n\
+                           requires: true;\n\
+                           ensures: true;\n\
+                           body: { let e = E::A(value); match e { A(v) => v, _ => 0 } };\n";
+        let (bare_cert, _bare_root, _) = signature_type_dependency_fixture(bare_source, "read");
+        let bare_hashes = bare_cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(bare_hashes.contains_key("enum:E"));
+        assert!(bare_hashes.contains_key("enum:F"));
+    }
+
+    #[test]
+    fn verify_certificate_in_env_tracks_callee_signature_types() {
+        let source = "struct P { x: i64 }\n\
+                      atom mk(a: i64) -> P\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: P { x: a };\n\
+                      atom read(a: i64) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: { let p = mk(a); p.x };\n";
+        let (cert, _, _) = signature_type_dependency_fixture(source, "read");
+        let dependency_hashes = cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(dependency_hashes.contains_key("atom:mk"));
+        assert!(dependency_hashes.contains_key("struct:P"));
+    }
+
+    #[test]
+    fn verify_certificate_in_env_tracks_nested_generic_enum_payload_types() {
+        let source = "struct P { value: i64 }\n\
+                      enum Opt<T> { Some(v: T), Nothing }\n\
+                      enum W { A(o: Opt<P>), B }\n\
+                      atom read(value: W) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: 0;\n";
+        let (cert, root, _) = signature_type_dependency_fixture(source, "read");
+        let dependency_hashes = cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(dependency_hashes.contains_key("enum:W"));
+        assert!(dependency_hashes.contains_key("enum:Opt"));
+        assert!(dependency_hashes.contains_key("struct:P"));
+
+        let changed_source = source.replace("P { value: i64 }", "P { value: bool }");
+        let (_, _, changed_env) = signature_type_dependency_fixture(&changed_source, "read");
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+        assert_eq!(check[0].changed_dependencies, vec!["struct:P"]);
+    }
+
+    #[test]
+    fn verify_certificate_in_env_tracks_generic_arguments_in_parameter_type_refs() {
+        let source = "struct P { value: i64 }\n\
+                      enum Opt<T> { Some(v: T), Nothing }\n\
+                      atom read(value: Opt<P>) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: 0;\n";
+        let (_, mut root, env) = signature_type_dependency_fixture(source, "read");
+        root.params[0].type_name = Some("Opt".to_string());
+        let mut results = HashMap::new();
+        results.insert(
+            root.name.clone(),
+            (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+        );
+        let cert = generate_certificate("test.mm", &[&root], &results, &env, None, None, None);
+        let dependency_hashes = cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(dependency_hashes.contains_key("struct:P"));
+
+        let changed_source = source.replace("P { value: i64 }", "P { value: bool }");
+        let (_, _, changed_env) = signature_type_dependency_fixture(&changed_source, "read");
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+        assert_eq!(check[0].changed_dependencies, vec!["struct:P"]);
+    }
+
+    #[test]
+    fn verify_certificate_in_env_tracks_generic_signature_arguments() {
+        let source = "struct P { value: i64 }\n\
+                      enum Opt<T> { Some(v: T), Nothing }\n\
+                      atom read(value: Opt<P>) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: 0;\n";
+        let (cert, _, _) = signature_type_dependency_fixture(source, "read");
+        let dependency_hashes = cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(dependency_hashes.contains_key("enum:Opt"));
+        assert!(dependency_hashes.contains_key("struct:P"));
+    }
+
+    #[test]
+    fn verify_certificate_in_env_excludes_generic_enum_type_parameters() {
+        let source = "enum E { A, B }\n\
+                      enum Opt<E> { Some(v: E), Nothing }\n\
+                      atom read(value: Opt<i64>) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: 0;\n";
+        let (cert, root, _) = signature_type_dependency_fixture(source, "read");
+        let dependency_hashes = cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(dependency_hashes.contains_key("enum:Opt"));
+        assert!(!dependency_hashes.contains_key("enum:E"));
+
+        let changed_source = source.replace("enum E { A, B }", "enum E { A, B, C }");
+        let (_, _, changed_env) = signature_type_dependency_fixture(&changed_source, "read");
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_PROVEN);
+    }
+
+    #[test]
+    fn verify_certificate_in_env_excludes_generic_struct_and_atom_type_parameters() {
+        let generic_struct = "struct T { field: i64 }\n\
+                              struct Box<T> { value: T }\n\
+                              atom read(value: Box<i64>) -> i64\n\
+                              requires: true;\n\
+                              ensures: true;\n\
+                              body: 0;\n";
+        let (struct_cert, struct_root, _) =
+            signature_type_dependency_fixture(generic_struct, "read");
+        let struct_hashes = struct_cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(struct_hashes.contains_key("struct:Box"));
+        // 'T' is also a real struct definition, and every struct gates every
+        // atom's verification through the module-wide projection-collision
+        // check, so it is keyed as a module definition — not because the
+        // generic parameter name leaked into the dependency set.
+        assert!(struct_hashes.contains_key("struct:T"));
+
+        let changed_struct = generic_struct.replace("T { field: i64 }", "T { field: bool }");
+        let (_, _, changed_struct_env) = signature_type_dependency_fixture(&changed_struct, "read");
+        let struct_check = verify_certificate_in_env(
+            &struct_cert,
+            &[&struct_root],
+            false,
+            Some(&changed_struct_env),
+        );
+        assert_eq!(
+            struct_check[0].status,
+            status::CERTIFICATE_DEPENDENCY_CHANGED
+        );
+
+        let generic_atom = "struct T { field: i64 }\n\
+                            atom read<T>(value: T) -> i64\n\
+                            requires: true;\n\
+                            ensures: true;\n\
+                            body: 0;\n";
+        let (atom_cert, atom_root, _) = signature_type_dependency_fixture(generic_atom, "read");
+        let atom_hashes = atom_cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        // Same module-definition keying: 'T' is a real struct in the env.
+        assert!(atom_hashes.contains_key("struct:T"));
+
+        let changed_atom = generic_atom.replace("T { field: i64 }", "T { field: bool }");
+        let (_, _, changed_atom_env) = signature_type_dependency_fixture(&changed_atom, "read");
+        let atom_check =
+            verify_certificate_in_env(&atom_cert, &[&atom_root], false, Some(&changed_atom_env));
+        assert_eq!(atom_check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+    }
+
+    #[test]
+    fn verify_certificate_in_env_terminates_for_recursive_enum_dependencies() {
+        let recursive = "enum L { Cons(h: i64, t: Self), Nil }\n\
+                         atom read(value: L) -> i64\n\
+                         requires: true;\n\
+                         ensures: true;\n\
+                         body: 0;\n";
+        let (recursive_cert, _, _) = signature_type_dependency_fixture(recursive, "read");
+        assert!(recursive_cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .unwrap()
+            .contains_key("enum:L"));
+
+        let mutually_recursive = "enum A { Next(b: B), End }\n\
+                                  enum B { Next(a: A), End }\n\
+                                  atom read(value: A) -> i64\n\
+                                  requires: true;\n\
+                                  ensures: true;\n\
+                                  body: 0;\n";
+        let (mutual_cert, _, _) = signature_type_dependency_fixture(mutually_recursive, "read");
+        let mutual_hashes = mutual_cert.atoms[0].dependency_hashes.as_ref().unwrap();
+        assert!(mutual_hashes.contains_key("enum:A"));
+        assert!(mutual_hashes.contains_key("enum:B"));
+    }
+
+    #[test]
+    fn verify_certificate_in_env_marks_legacy_nested_struct_hashes_unchecked() {
+        let source = "struct Inner { value: i64 }\n\
+                      struct Outer { inner: Inner }\n\
+                      atom read(value: Outer) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: 0;\n";
+        let (mut cert, root, env) = signature_type_dependency_fixture(source, "read");
+        cert.atoms[0]
+            .dependency_hashes
+            .as_mut()
+            .unwrap()
+            .remove("struct:Inner");
+
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_UNCHECKED);
+        assert_eq!(check[0].unchecked_dependencies, vec!["struct:Inner"]);
+    }
+
+    #[test]
+    fn compute_legacy_dependency_hashes_does_not_expand_signature_type_closure() {
+        let source = "struct Inner { value: i64 }\n\
+                      struct Outer { inner: Inner }\n\
+                      atom read(value: Outer) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: 0;\n";
+        let (_, root, env) = signature_type_dependency_fixture(source, "read");
+        let legacy_hashes = crate::resolver::compute_legacy_dependency_hashes(&root, &env);
+        assert!(legacy_hashes.contains_key("struct:Outer"));
+        assert!(!legacy_hashes.contains_key("struct:Inner"));
+    }
+
+    #[test]
+    fn verify_certificate_in_env_tracks_enum_reached_through_refined_base_type() {
+        let source = "enum E { A(v: i64), B }\n\
+                      type Alias = E where v >= 0;\n\
+                      atom read(value: Alias) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: 0;\n";
+        let (cert, _, _) = signature_type_dependency_fixture(source, "read");
+        let dependency_hashes = cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(dependency_hashes.contains_key("type:Alias"));
+        assert!(dependency_hashes.contains_key("enum:E"));
+    }
+
+    #[test]
+    fn verify_certificate_in_env_tracks_refined_enum_base_despite_atom_type_parameter_name() {
+        let source = "enum E { A(v: i64), B }\n\
+                      type Alias = E where v >= 0;\n\
+                      atom read<E>(value: Alias) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: 0;\n";
+        let (cert, root, _) = signature_type_dependency_fixture(source, "read");
+        let dependency_hashes = cert.atoms[0]
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes");
+        assert!(dependency_hashes.contains_key("enum:E"));
+
+        let changed_source = source.replace("B }", "B, C }");
+        let (_, _, changed_env) = signature_type_dependency_fixture(&changed_source, "read");
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+        assert_eq!(check[0].changed_dependencies, vec!["enum:E"]);
+    }
+
     #[test]
     fn verify_certificate_in_env_checks_dependency_hashes_and_unresolved_keys() {
         let (mut cert, root, _callee, env) = dependency_fixture(status::Z3_UNSAT);
@@ -625,13 +1247,18 @@ mod tests {
             .as_mut()
             .unwrap()
             .insert("atom:missing".to_string(), "stale".to_string());
+        cert.atoms[0]
+            .dependency_hashes
+            .as_mut()
+            .unwrap()
+            .insert("effect:missing".to_string(), "stale".to_string());
         let mut unresolved_env = ModuleEnv::new();
         unresolved_env.register_atom(&root);
         let check = verify_certificate_in_env(&cert, &[&root], false, Some(&unresolved_env));
         assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_UNCHECKED);
         assert_eq!(
             check[0].unchecked_dependencies,
-            vec!["atom:f", "atom:missing"]
+            vec!["atom:f", "atom:missing", "effect:missing"]
         );
 
         let (mut cert, root, _, _) = dependency_fixture(status::Z3_UNSAT);
@@ -653,6 +1280,30 @@ mod tests {
         assert!(check[0]
             .unchecked_dependencies
             .contains(&"atom:missing".to_string()));
+    }
+
+    #[test]
+    fn verify_certificate_in_env_detects_changed_callee_effect_definition() {
+        let (cert, root, _) = effect_dependency_fixture("start: Idle -> Busy");
+        let (_, _, changed_env) = effect_dependency_fixture("start: Idle -> Idle");
+
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+        assert_eq!(check[0].changed_dependencies, vec!["effect:Work"]);
+    }
+
+    #[test]
+    fn verify_certificate_in_env_marks_legacy_effect_hashes_unchecked() {
+        let (mut cert, root, env) = effect_dependency_fixture("start: Idle -> Busy");
+        cert.atoms[0]
+            .dependency_hashes
+            .as_mut()
+            .unwrap()
+            .retain(|key, _| !key.starts_with("effect:"));
+
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_UNCHECKED);
+        assert_eq!(check[0].unchecked_dependencies, vec!["effect:Work"]);
     }
 
     #[test]
@@ -1152,6 +1803,121 @@ mod tests {
         assert_eq!(
             verify_certificate(&stale_cert, &[&stale_atom], true)[0],
             ("hard_lemma".to_string(), "stale_translator".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dual_check_metadata_does_not_change_certificate_verification_status() {
+        let atom = make_test_atom("hard_lemma", "true", "true", "42");
+        let atoms = [&atom];
+        for z3_result in [status::Z3_UNSAT, status::Z3_LEAN_VERIFIED] {
+            let mut results = HashMap::new();
+            results.insert(
+                "hard_lemma".to_string(),
+                (z3_result.to_string(), status::VERIFIED.to_string()),
+            );
+            let mut cert = generate_certificate(
+                "test.mm",
+                &atoms,
+                &results,
+                &ModuleEnv::new(),
+                None,
+                None,
+                None,
+            );
+            if z3_result == status::Z3_LEAN_VERIFIED {
+                let mut metadata = current_lean_metadata();
+                metadata.kernel_axioms = Some(vec!["propext".to_string()]);
+                metadata.axiom_audit = Some("passed".to_string());
+                cert.atoms[0].lean_result_metadata = Some(metadata);
+            }
+
+            for allow_lean_verified in [false, true] {
+                let expected = verify_certificate_in_env(&cert, &atoms, allow_lean_verified, None);
+                for dual_check in [
+                    None,
+                    Some({
+                        let mut metadata = current_lean_metadata();
+                        metadata.kernel_axioms = Some(vec!["propext".to_string()]);
+                        metadata.axiom_audit = Some("passed".to_string());
+                        metadata
+                    }),
+                    Some({
+                        let mut metadata = current_lean_metadata();
+                        metadata.kernel_axioms = Some(vec!["propext".to_string()]);
+                        metadata.axiom_audit = Some("error".to_string());
+                        metadata
+                    }),
+                ] {
+                    let mut with_dual_check = cert.clone();
+                    with_dual_check.atoms[0].lean_dual_check = dual_check;
+                    assert_eq!(
+                        verify_certificate_in_env(
+                            &with_dual_check,
+                            &atoms,
+                            allow_lean_verified,
+                            None
+                        ),
+                        expected,
+                        "{z3_result}, allow_lean_verified={allow_lean_verified}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_lean_dual_check_serde_compatibility_and_certificate_hash() {
+        let atom = make_test_atom("hard_lemma", "true", "true", "42");
+        let atoms = [&atom];
+        let results = HashMap::from([(
+            "hard_lemma".to_string(),
+            (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+        )]);
+        let mut cert = generate_certificate(
+            "test.mm",
+            &atoms,
+            &results,
+            &ModuleEnv::new(),
+            None,
+            None,
+            None,
+        );
+        let legacy_json = serde_json::to_vec(&cert).expect("serialize without dual check");
+        assert!(!String::from_utf8_lossy(&legacy_json).contains("\"lean_dual_check\""));
+        assert_eq!(check_certificate_hash(&cert), CertificateHashCheck::Match);
+        let round_trip: ProofCertificate =
+            serde_json::from_slice(&legacy_json).expect("deserialize legacy certificate");
+        assert_eq!(
+            serde_json::to_vec(&round_trip).expect("re-serialize legacy certificate"),
+            legacy_json
+        );
+        assert_eq!(round_trip.certificate_hash, cert.certificate_hash);
+        assert_eq!(
+            check_certificate_hash(&round_trip),
+            CertificateHashCheck::Match
+        );
+
+        let mut metadata = current_lean_metadata();
+        metadata.kernel_axioms = Some(vec!["propext".to_string()]);
+        metadata.axiom_audit = Some("passed".to_string());
+        cert.atoms[0].lean_dual_check = Some(metadata);
+        refresh_certificate_integrity(&mut cert);
+        let encoded = serde_json::to_vec(&cert).expect("serialize dual check");
+        let value: Value = serde_json::from_slice(&encoded).expect("parse serialized certificate");
+        assert_eq!(
+            value["atoms"][0]["lean_dual_check"]["theorem_name"],
+            "hard_lemma_correct"
+        );
+        let decoded: ProofCertificate =
+            serde_json::from_slice(&encoded).expect("deserialize dual check");
+        assert_eq!(
+            serde_json::to_value(decoded.atoms[0].lean_dual_check.as_ref().unwrap()).unwrap(),
+            value["atoms"][0]["lean_dual_check"]
+        );
+        assert_eq!(
+            check_certificate_hash(&decoded),
+            CertificateHashCheck::Match
         );
     }
 

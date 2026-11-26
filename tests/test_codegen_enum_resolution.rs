@@ -154,7 +154,9 @@ atom bake(n: i64) -> Fruit
         "bake",
     );
     assert!(
-        ir.contains("insertvalue { i64, i64 } { i64 0") && ir.contains("i64 %0"),
+        (ir.contains("insertvalue { i64, i64 } { i64 0")
+            || ir.contains("insertvalue { i64, i64 } zeroinitializer"))
+            && ir.contains("i64 %0"),
         "Apple(n) must insert tag 0 plus the param payload:\n{ir}"
     );
     assert!(
@@ -189,7 +191,8 @@ atom mk(p: i64) -> Mine
         "mk",
     );
     assert!(
-        ir.contains("insertvalue { i64, i64 } { i64 0"),
+        ir.contains("insertvalue { i64, i64 } { i64 0")
+            || ir.contains("insertvalue { i64, i64 } zeroinitializer"),
         "Mine::Cons must insert Mine's tag 0, not prelude List's 1:\n{ir}"
     );
 }
@@ -509,5 +512,122 @@ trusted atom bad_len(m: Mine) -> i64
     }
 "#,
         "is only supported on arrays and Str",
+    );
+}
+
+// A `.tag` read on a bound enum is slot 0 of its tagged-union layout —
+// the same index `match` dispatch compares and `emit_enum_variant_init`
+// writes. Before this, `.tag` verified but had no emitter lowering.
+#[test]
+fn tag_read_on_enum_param_extracts_slot_zero() {
+    let ir = emit_atom_ir(
+        "tag_param",
+        r#"
+enum Chan { Tcp(i64), Idle }
+
+atom tag_of(c: Chan) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        c.tag
+    }
+"#,
+        "tag_of",
+    );
+    let read = ir
+        .lines()
+        .find(|l| l.contains("extractvalue") && l.contains(", 0"))
+        .unwrap_or_else(|| panic!("no slot-0 extractvalue for c.tag:\n{ir}"));
+    assert!(
+        read.contains("{ i64, i64 }"),
+        "c.tag must read slot 0 of the tagged union:\n{ir}"
+    );
+}
+
+#[test]
+fn tag_read_on_let_bound_enum_extracts_slot_zero() {
+    let ir = emit_atom_ir(
+        "tag_let",
+        r#"
+enum Chan { Tcp(i64), Idle }
+
+atom idle_tag(c: Chan) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        let m = c;
+        m.tag
+    }
+"#,
+        "idle_tag",
+    );
+    assert!(
+        ir.lines()
+            .any(|l| l.contains("extractvalue") && l.contains(", 0")),
+        "m.tag must read slot 0 of the tagged union:\n{ir}"
+    );
+}
+
+// A struct declaring a real `tag` field reads that field — the enum
+// shortcut must not hijack it.
+#[test]
+fn tag_field_on_struct_reads_the_field_not_a_variant_index() {
+    let ir = emit_atom_ir(
+        "tag_struct",
+        r#"
+struct Meta { tag: i64, weight: i64 }
+
+atom weight_of(m: Meta) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        m.tag + m.weight
+    }
+"#,
+        "weight_of",
+    );
+    assert!(
+        ir.contains("add"),
+        "m.tag must add as a plain field read:\n{ir}"
+    );
+    assert!(
+        !ir.contains("pat_tag_eq") && !ir.contains("variant"),
+        "struct tag must not dispatch like an enum:\n{ir}"
+    );
+}
+
+// A struct with a `tag` field must not hijack an enum receiver's
+// `.tag` read: the field-index fallback scans every struct, so before
+// the typed dispatch `c.tag` read Meta's `tag` slot instead of the
+// tagged union's index slot.
+#[test]
+fn tag_read_on_enum_with_same_named_struct_field_reads_slot_zero() {
+    let ir = emit_atom_ir(
+        "tag_shadow",
+        r#"
+enum Chan { Tcp(i64), Idle }
+struct Meta { weight: i64, tag: i64 }
+
+atom tag_of(c: Chan) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        c.tag
+    }
+"#,
+        "tag_of",
+    );
+    let read = ir
+        .lines()
+        .find(|l| l.contains("extractvalue") && l.contains(", 0"))
+        .unwrap_or_else(|| panic!("no slot-0 extractvalue for c.tag:\n{ir}"));
+    assert!(
+        read.contains("{ i64, i64 }"),
+        "c.tag must read slot 0, not Meta's tag field slot:\n{ir}"
+    );
+    assert!(
+        !ir.lines()
+            .any(|l| l.contains("extractvalue") && l.contains(", 1")),
+        "c.tag must not read the payload slot via Meta's index:\n{ir}"
     );
 }

@@ -168,6 +168,14 @@ pub struct ModuleEnv {
     /// リソース定義（非同期安全性検証用）
     /// リソース名 → (優先度, アクセスモード)
     pub resources: HashMap<String, ResourceDef>,
+    /// Registered resource name → source file that defined it.
+    pub resource_origins: HashMap<String, Option<String>>,
+    /// Registered refined type name → source file that defined it.
+    pub type_origins: HashMap<String, Option<String>>,
+    /// Registered struct name → source file that defined it.
+    pub struct_origins: HashMap<String, Option<String>>,
+    /// Source file → transitive imported source files.
+    pub import_closure: HashMap<String, std::collections::BTreeSet<String>>,
     /// エフェクト定義（副作用検証用）
     /// エフェクト名 → EffectDef
     pub effects: HashMap<String, EffectDef>,
@@ -208,13 +216,25 @@ impl ModuleEnv {
     }
 
     pub fn register_type(&mut self, refined_type: &RefinedType) {
+        self.register_type_with_origin(refined_type, None);
+    }
+
+    pub fn register_type_with_origin(&mut self, refined_type: &RefinedType, origin: Option<&str>) {
         self.types
             .insert(refined_type.name.clone(), refined_type.clone());
+        self.type_origins
+            .insert(refined_type.name.clone(), origin.map(str::to_string));
     }
 
     pub fn register_struct(&mut self, struct_def: &StructDef) {
+        self.register_struct_with_origin(struct_def, None);
+    }
+
+    pub fn register_struct_with_origin(&mut self, struct_def: &StructDef, origin: Option<&str>) {
         self.structs
             .insert(struct_def.name.clone(), struct_def.clone());
+        self.struct_origins
+            .insert(struct_def.name.clone(), origin.map(str::to_string));
     }
 
     pub fn register_atom(&mut self, atom: &Atom) {
@@ -231,6 +251,25 @@ impl ModuleEnv {
 
     pub fn get_type(&self, name: &str) -> Option<&RefinedType> {
         self.types.get(name)
+    }
+
+    /// The declaration chain behind `name`: `name` itself first, then each
+    /// ancestor whose `_base_type` names another declaration, ending at a
+    /// literal base or an undeclared name. A base that revisits an earlier
+    /// name is a cycle and returns `Err` — the declaration is a type error,
+    /// not a silently constraint-free alias.
+    pub fn refined_chain<'a>(&'a self, name: &str) -> Result<Vec<&'a RefinedType>, String> {
+        let mut chain = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut current = name;
+        while let Some(refined) = self.types.get(current) {
+            if !seen.insert(current) {
+                return Err(format!("cyclic refined type declaration at '{current}'"));
+            }
+            chain.push(refined);
+            current = refined._base_type.as_str();
+        }
+        Ok(chain)
     }
 
     /// Unit tag of `name`, inherited through alias chains: `type Money = Usd;`
@@ -295,6 +334,36 @@ impl ModuleEnv {
         // qualifier resolves by the leaf name, as before.
         if let Some((qual, leaf)) = variant_name.rsplit_once("::") {
             if let Some(qual_enum) = self.get_enum(qual) {
+                // A qualifier naming the generic declaration resolves to a
+                // `qual<...>` instance: the decl hint pins it when it names
+                // one, a sole registered instance wins, several are
+                // ambiguous (the generic def itself is not encodable).
+                let qual_enum = if qual_enum.type_params.is_empty() {
+                    qual_enum
+                } else {
+                    let hinted = decl_hint.and_then(|h| {
+                        self.get_enum(h).filter(|e| {
+                            e.name.starts_with(&format!("{qual}<"))
+                                && e.variants.iter().any(|v| v.name == leaf)
+                        })
+                    });
+                    let instances =
+                        crate::verification::support::datatype::generic_instances(self, qual, leaf);
+                    match hinted.or_else(|| (instances.len() == 1).then(|| instances[0])) {
+                        Some(e) => e,
+                        None if instances.is_empty() => qual_enum,
+                        None => {
+                            return Err(MumeiError::verification(format!(
+                                "Match arm '{variant_name}' is ambiguous: instances {} all declare '{leaf}' — qualify the concrete type",
+                                instances
+                                    .iter()
+                                    .map(|e| e.name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )));
+                        }
+                    }
+                };
                 if let Some(hint) = decl_hint {
                     if let Some(hint_enum) = self.get_enum(hint) {
                         if hint_enum.name != qual_enum.name {
@@ -375,10 +444,24 @@ impl ModuleEnv {
         if type_name == "Str" {
             return "Str".to_string();
         }
-        if let Some(refined) = self.types.get(type_name) {
-            return refined._base_type.clone();
+        // Follow the declaration chain to the leaf base: `type F2 = Flag`
+        // resolves to `bool`, not `Flag` — a one-level answer would mint the
+        // parameter/result at a different sort than the refinement operand.
+        let mut current = type_name;
+        let mut seen = std::collections::HashSet::new();
+        while let Some(refined) = self.types.get(current) {
+            if !seen.insert(current) {
+                break;
+            }
+            current = refined._base_type.as_str();
         }
-        type_name.to_string()
+        // The 64-bit target's width-typed leaves fold onto their machine
+        // base: `usize` is `u64`, `isize` is `i64`.
+        match current {
+            "usize" => "u64".to_string(),
+            "isize" => "i64".to_string(),
+            other => other.to_string(),
+        }
     }
 
     pub fn register_trait(&mut self, trait_def: &TraitDef) {
@@ -475,8 +558,18 @@ impl ModuleEnv {
 
     /// リソース定義を登録する
     pub fn register_resource(&mut self, resource_def: &ResourceDef) {
+        self.register_resource_with_origin(resource_def, None);
+    }
+
+    pub fn register_resource_with_origin(
+        &mut self,
+        resource_def: &ResourceDef,
+        origin: Option<&str>,
+    ) {
         self.resources
             .insert(resource_def.name.clone(), resource_def.clone());
+        self.resource_origins
+            .insert(resource_def.name.clone(), origin.map(str::to_string));
     }
 
     /// リソース定義を取得する
@@ -804,8 +897,8 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
         span: Span::default(),
     });
 
-    // --- 組み込み impl: i64, u64, f64 は Eq + Ord + Numeric を自動実装 ---
-    for base_type in &["i64", "u64", "f64"] {
+    // --- 組み込み impl: i64, u64, f64 と幅別名は Eq + Ord + Numeric を自動実装 ---
+    for base_type in &["i64", "u64", "f64", "usize", "isize"] {
         module_env.register_impl(&ID {
             trait_name: "Eq".into(),
             target_type: base_type.to_string(),

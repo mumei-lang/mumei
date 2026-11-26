@@ -408,7 +408,7 @@ atom inc(n: Nat)
 
 4. CLI integration
    - mumei doc <input> -o <output_dir>
-   - mumei doc --json (structured output)
+   - mumei doc <input> --format json (structured output to stdout and <output_dir>/docs.json; implemented formats: html, markdown/md, json; there is no separate --json flag)
 ```
 
 **Files to create/modify**:
@@ -2668,6 +2668,7 @@ benchmark 105 atom の proof certificate（`benchmarks/evaluation_suite.py` B-7 
 - 群 3 ギャップ解消（2026-09-19、mumei + mumei-lean）: cert の `requires` が spec-level `forall` conjunct を `true` に正規化していたため `sum_array` / `queue_total_is_nonnegative` の step VC は要素前提を欠き証明不能だった → `AtomCertificate.forall_constraints`（`{q_type, var, start, end, condition}` 構造化出力、`schema/proof-cert.schema.json` 更新）を追加し、mumei-lean ingest が requires へ `forall(...)` conjunct として復元するようになった。**3 atom 全てが実 emitted cert で `--external-proofs` → `lean_verified` を実証**（mumei-lean e2e pin: sum_array / queue_total_is_nonnegative、ai_proof_used=true, known_witness_used=false）。C-1 群 3 は B-4 入力面 + 証明到達経路ともに実証完了。
 - 群 3 B-4 実運用化（2026-09-19、mumei-agent）: これら atom は Z3 `unsat` のため `extract_unknown_atoms` の候補に乗らず AI 経路へ自動到達しなかった → `measure_lean_ai_proof.py --force-lean-atom <atom>`（repeatable）が bridge 入力 cert の写像でのみ `unknown` へ降格し、昇格マージもその写像で行う（未証明なら元の Z3 verdict へ復帰、出力回帰なし）。`run.json` に `force_lean_atoms` / `forced_atoms` / `lean_verified_forced` を出処として記録。**実走行（gpt-4o、ENABLE_LEAN_AI_PROOF=1）で `all_transactions_within_limit` が手動 `--external-proofs` 無しに AI 生成証明で `lean_verified` 到達**を実証。残 2 atom は OpenAI 429 で停止したためローカル Ollama `qwen2.5-coder:1.5b` で再実行 — AI 段には到達したが `tactic_failed` / `unsound_source` で未証明（小規模モデルの能力限界。未証明 forced atom は出力 cert で元の Z3 verdict に復帰することも実走行で確認）。
 - 走査対象外: Z3 `sat` の 13 atom（`take_buffer` / `take_point` の `unsupported_call` を含む）は counterexample 課題であり escalation 母数に入らない。
+- **残余棚卸し再測定（2026-11-16）**: 現行 benchmark 46 ファイル / 105 atom の proof certificate を再生成して `unknown` を再分類した。結果は `sat` 20 / `unsat` 79 / `unknown` 6 — 残る `unknown` は `arithmetic/finite_field_modular.mm` の `ff_zero_is_zero_bench` / `ff_mul_commutes_bench` / `ff_mul_assoc_bench` / `ff_mul_add_distrib_bench` と `domain_compliance/modular_commitment.mm` の `commitment_homomorphic_add_bench` / `commitment_scalar_distrib_bench` の 6 atom で、いずれも `requires: p > 0` + `ff_eq` goal の finite-field modular 形状 = B-7 が記録した escalation 候補コホート（C-1 群分類の対象外、bridge 経路が既に受理する形状）と完全一致。**新しい非算術 goal 形状は残っておらず、本残余項目はこれで尽きた**（ladder 末尾追記・bridge lemma 追加・AI 証明振り分けの新たな入力は 0 件）。`sat` の増分（13 → 20）は counterexample 側の母数変化であり escalation とは無関係。
 
 ---
 
@@ -2754,11 +2755,12 @@ templates are:
 - `mumei claims` は既存の proof certificate と現在のソースから読み取り専用レポートを生成し、atom ごとの証拠、freshness、依存関係を決定的な `claimbook.json` / `CLAIMBOOK.md` にまとめる。
 - PR-1 は atom 自身の grade と freshness を扱い、drifted / uncertified の base grade は G0 とする。PR-2 は assumed clause と依存 atom の grade を effective grade に伝播し、limiting premise、unresolved dependency、trusted base を示す。
 - `--require-grade G0..G5` は最低 grade を gate する。回帰ゲートは `cargo test --test test_claimbook`。
-- G5 / G3 / G2 は対応する証拠ソースが実装されるまで予約し、現時点では出力しない。
+- G2 は observation-backed に実装済み（`consistent` / `entailed` があり、`contradicts_ensures` / `not_entailed` がない場合）。G3 は bounded-proof evidence source が実装されるまで予約する。controls は discrimination / `--require-discriminating` を通じて grade と直交する。G5 は Lean dual-check で実装済み：mumei が `lean_dual_check` を読んで Claim Book で G5 を判定し（#762）、mumei-lean の `bridge.py --dual-check` がこの欄を書き込む（mumei-lean#138）。
 
 ## P35: Charter Gate — ✅ Implemented（PR #737 / #739）
 
 - 人間が所有する Charter のファイルハッシュを `mumei charter lock` で固定し、`mumei charter check` で実装の署名と契約 refinement を検査する。証明書を渡した場合は effective Seal Grade も gate できる。
+- `.github/workflows/mumei-gate.yml` が Claim Book / Charter の再利用可能な CI gate を提供する。mumei-demo は `charter_gate_demo` の `correct.mm` を G4 + Charter でこの gate に通す dogfood を PR と週次 cron で実行している（mumei-demo#85）。
 - 回帰ゲートは `cargo test --test charter_cli`。Charter 本文は trusted な reviewed contract であり、その placeholder body は検証しない。非対応 clause / solver uncertainty は fail closed、top-level quantified constraint の差分は inconclusive とする。
 
 ## P36: Contract Erosion — ✅ Implemented（PR #740）
@@ -2780,7 +2782,1153 @@ templates are:
 
 - version 1.1 certificate は atom の依存先 contract hash を記録し、import 時に dependency freshness を検査する。`dependency_changed` と `dependency_unchecked` は source-content drift と区別され、strict import は両方を拒否する。回帰ゲートは `cargo test --test test_cert_dependency_freshness`。
 - `--proof-store` は成功した Z3 proof の再利用を opt-in で有効にし、`mumei proof-store stats` / `prune` で管理する。Unix では directory を mode 0700、entry file を mode 0600 で作成し、group / other writable な既存 directory と entry を拒否する。回帰ゲートは `cargo test --test proof_store_cli`。
-- dependency coverage がない旧証明書は non-strict import で warning 付き unchecked になり得る。proof store に owner check はまだなく、trusted / failed / Lean-verified / escalation-candidate / inconclusive の結果は保存・再利用しない。
+- dependency coverage がない旧証明書は non-strict import で warning 付き unchecked になり得る。trusted / failed / Lean-verified / escalation-candidate / inconclusive の結果は proof store に保存・再利用しない。
+
+## Verification-Native foundation and follow-ups
+
+The [canonical cross-project order](CROSS_PROJECT_ROADMAP.md#verification-native-program-ordered-implementation)
+and [architecture contract](VERIFICATION_NATIVE.md) own this program.
+Mumei owns C01–C03 and C08–C10/C12/C14: a small common specification/semantic
+core, standard verification, shared evidence/acceptance rules and LLVM emission.
+Non-executable proof models need not compile to LLVM. No universal IR, new grade,
+external verifier adoption or verified-binary claim is introduced by the first
+contract/schema slice. C02 producer/consumer integration and broader C03
+obligation/translation contracts remain follow-ups in the linked issues.
+
+The C02 #786 outcome non-promotion regression is covered end to end by
+`tests/test_c02_outcome_non_promotion.rs`. This is regression coverage only:
+no producer or grade behavior changes, and C02 remains open. The `All
+verified:` line reports the re-check verdict, not the certificate's stored
+claim.
+
+C02 #786 now also promotes the native object-route acceptance descriptor
+(`mumei.native-evidence-acceptance/v1` emitted by `mumei native-bundle accept-object --json`)
+into the backend-neutral evidence contract via
+`schema/native-object-acceptance.schema.json`, `mumei_core::object_acceptance`,
+and `mumei evidence check-object-acceptance [--json | --emit-evidence]`.
+Validation and projection are representation-only: every unchecked domain
+stays in `exclusions`, no Core recheck is rerun, and proof grades, Claim Book
+semantics, and Lean gates remain unchanged.
+
+Opt-in detached-signature binding covers `mumei evidence accept` requirement
+routes, `accept-list` over raw list-envelope bytes, and `accept-source` over
+raw saved-record bytes. `produced_at_signed` reports that a producer signed the
+record's declared timestamp, not that the timestamp is true. Revocation-list
+v2 adds a root-signed, consumer-pinned minimum-version and declared-window
+check. Because consumers are stateless, replay protection holds only up to the
+pinned minimum version, and `not_after` (checked under the same flag) bounds
+how long an older signed list stays usable. Key rotation and root-key
+revocation (#886 deferred), and clock authenticity remain open.
+
+The initial delivery documents ownership and minimal semantics, and adds a
+standalone evidence schema with synthetic positive/negative fixtures. Its schema
+validation checks representation consistency, not proof truth, source fidelity
+or artifact authenticity. Existing proof-certificate serialization is unchanged.
+
+The first C03 scalar API now extracts an opt-in, fail-closed
+`mumei.pure-i64-comparison/v1` description through the existing parser/HIR/MIR.
+Its real CLI regression checks a Z3 certificate, LLVM generation, fixed finite
+native observations and a wrong-LLVM negative control. This is not a universal
+IR, default sidecar output or semantic equivalence proof; target requests and
+compiler-local fingerprints do not establish artifact binding. See the
+[supported scope and exclusions](VERIFICATION_NATIVE.md#first-supported-scalar-slice).
+`tests/test_c03_module_trace.rs` traces every atom of a multi-atom module
+contract to its certificate obligation, Lean goal and LLVM definition, and
+checks that unsupported specification clauses fail closed. Transformation
+relations are exposed per edge, while formal source-to-LLVM correspondence
+remains open; this is regression coverage only and C03 remains open.
+
+Roadmap item 9 ([#1448](https://github.com/mumei-lang/mumei/issues/1448),
+[C03 #787](https://github.com/mumei-lang/mumei/issues/787)) delivers the
+[read-only region and slice profile design](VERIFICATION_NATIVE.md#read-only-region-and-slice-profile)
+and an opt-in Z3 source-model slice for shared `ref [i64]` inputs. The slice
+is deliberately narrower than the design target: exactly one atom and exactly
+one requires/ensures/body clause pair, at most 65,536 bytes and 256 lexer
+tokens, no quantifiers or field/qualified access, and no comparisons nested in
+parentheses. C03 remains open: subviews, Lean memory lowering, executable
+memory correspondence and these admission widenings are not implemented by
+this slice.
+
+Refined predicates over `u64` bases compare unsigned; documented v10 literal
+wrapping (`0 - 1` is `u64::MAX` in a `u64` context) is unchanged, and general
+width-aware literal spelling above `i64::MAX` remains open.
+
+WASM remains the existing deferred P7-C item, tracked by
+[C14](https://github.com/mumei-lang/mumei/issues/792); dynamic capability
+delegation/revocation stays behind its existing demand gate.
+
+The first C08 implementation adds opt-in `mumei native-bundle build/check` for
+the [restricted native identity profile](VERIFICATION_NATIVE.md#first-native-identity-bundle-slice).
+It freshly verifies one explicit pure-i64 main, reuses existing LLVM/native
+generation, records actual object target/layout and toolchain observations,
+and binds the certificate/LLVM IR/object/executable to source/specification/IR
+identities. The consumer requires an externally pinned build ID and checks
+current snapshots without executing the artifact. It is only identity
+consistency, not authenticity, translation validation or `artifact_verified`.
+System dependency closure, wider programs/targets/runtime/ABI, attestation,
+C02 integration and full C08/C10 consumer policies remain open. Existing
+build/run, Claim Book, grades and Lean gates are unchanged.
+
+The next C08 slice adds
+[opt-in detached signing of object acceptance descriptors](VERIFICATION_NATIVE.md#detached-object-descriptor-signing-partial-c08).
+`native-bundle accept-object` can sign the exact JSON descriptor bytes only
+after the existing acceptance gates pass. The descriptor and attempt
+fingerprint are unchanged. This is partial C08: key trust, producer and
+descriptor authenticity, historical execution, consumer trust policy, and
+common Evidence promotion are not evaluated by signing.
+
+The first C09 pilot adds opt-in source-body/LLVM-SSA equivalence checking via
+the existing Z3 bitvector library for C03's i64 comparison/conditional fragment.
+It fixes LLVM 17, Linux/x86_64 and target/layout, screens memory-free acyclic
+i1/i64 SSA, and compares all concrete i64 inputs rather than finite observations.
+Wrong lowering is refuted; unsupported semantics, invalid IR and inconclusive
+solver results are not equivalence. The fragment now also covers wrapping
+add/sub/mul on both sides (mod 2^64): the emitter never sets nsw/nuw, flagged
+IR arithmetic is rejected, and nonlinear solver timeouts stay `Inconclusive`.
+Signed division, remainder and shifts (`sdiv`/`srem`/`shl`/`ashr`) join under
+refinement semantics — both sides bind inputs only where defined (nonzero
+divisor except `i64::MIN / -1`, shift amount `0..64`), IR poison on a
+source-defined input reports `UndefinedBehavior`, a vacuous source domain is
+an error, and hard nonlinear queries stay `Inconclusive`. Source
+`&`/`|`/`^` are admitted as total i64 bitwise `and`/`or`/`xor` on both
+sides — bitwise ops are defined for every input, so they carry no domain
+obligation. Bodies may sequence `let` bindings, scalar reassignments and
+pure expression
+statements before the value
+statement: initializers, rebindings and discarded expressions are
+checked and
+encoded in order under the
+enclosing guard (partial operations keep their domain obligations) and
+bindings are block-lexical — a branch-local or shadowing `let` cannot
+leak. Nested blocks in leading positions are checked and encoded like
+discarded expressions — their bindings stay lexical. Reassignment is
+restricted to names bound on the current linear
+path, but an `if` branch may rebind those names: each written name
+merges under the branch condition like the emitter's per-name phi, a
+name written on one side carries its prior value through the other,
+and a partial operation in a branch keeps its definedness obligation
+under the refined guard. Writes inside operands, `let` initializers,
+expression blocks and match arms may only
+touch names bound within them. Unbound assignment,
+call statements and other statement forms
+stay unsupported. Declared `bool` parameters and `-> bool` results are
+admitted, completing the Boolean half of the issue's pure
+integer/Boolean scope: a `bool`
+parameter lowers to i64 carrying 0/1, so its source value is the truth
+of `input != 0` and the signature bounds that input to `{0, 1}`; a
+`-> bool` result lowers the same way (the emitter zexts its i1 to i64),
+so the checked source value is the Boolean body's 0/1 materialization
+and an `i1` return is a signature error, not a value difference;
+boolean values stay two-valued (a `bool` binding is not an i64 operand
+and a `-> bool` body must produce a Bool kind). Declared subrange
+integer types (`i8`/`i16`/`i32`/`u8`/`u16`/`u32`) are admitted the same
+way: they lower to an i64 formal, so the source value is the input and
+the signature bounds the checked domain to the type's range — `x == 200`
+on an `i8` parameter is equivalent to `false` only because the bound
+rules it out. A declared subrange integer result type lowers to an i64
+return the same way — the emitter emits no truncation, so the checked
+result is the body's full i64 value; `u64`/`usize`/`isize` and `i128`
+stay out on both sides of the signature.
+`match` on an i64
+scrutinee is checked in first-match order — literal patterns contribute
+one `target == n` test each, an arm may add a Boolean guard evaluated in
+the arm's scope so the arm hits only on `pattern ∧ guard`, and arms
+encode as an ite chain under the accumulated negations of earlier hits;
+a trailing unguarded `Wildcard`/`Variable` catch-all is required for
+exhaustive coverage (a `Variable` arm binds the scrutinee for its guard
+and body). A guarded catch-all, non-literal patterns, a non-i64
+scrutinee, a non-Boolean guard and mixed-kind arms stay rejected.
+Mid-block `while` loops join under a bounded-unrolling profile: the
+source side unrolls `LOOP_BOUND` (4) guard evaluations, merges
+escapable writes per name under `alive ∧ cond`, and charges each
+reached loop an exit obligation `guard ⇒ exited-within-bound`, so the
+compared domain is the inputs on which every reached loop exits within
+the bound — a `while` inside an untaken branch owes no exit. The LLVM
+side walks cyclic CFGs by tracking per-block visit depth along each
+path, drops a path whose depth exceeds the bound, models the emitted
+`__mumei_task_group_should_cancel_current` poll as `0` only when it is
+a bare declaration (a defined same-named function stays an ordinary
+call site), and reports a covered input whose every path was dropped
+as `Inconclusive` — bound truncation is neither a proven divergence
+nor a license for vacuous equivalence. Nested `while`s at any depth,
+a `while` in value position and a non-Boolean condition stay rejected,
+and cyclic IR against a loop-free source still fails acyclicity. The IR side admits `unreachable` —
+reachable on a defined input it reports `UndefinedBehavior`, and a dead
+`unreachable` block stays harmless; the existing emitter's match
+lowering never emits it (its final else edge is a constant-true branch).
+Unsigned forms and
+flagged variants remain outside the profile. The bounded C03
+recheck/native-bundle fragment stays closed to arithmetic, so build and
+recheck keep agreeing on one source grammar. See the
+[checked snapshot and exclusions](VERIFICATION_NATIVE.md#first-llvm-translation-validation-slice).
+This is partial C09: no postcondition proof, pipeline-history attestation,
+later optimizer/backend/linker/runtime/binary correctness, native-bundle
+acceptance, new evidence route or grade. C08 hash checks remain identity-only;
+broader C09 semantics and C02/C10 consumer integration remain open.
+
+**C09 Step 4 addendum ([#789](https://github.com/mumei-lang/mumei/issues/789), partial):**
+the direct LLVM IR → Linux x86-64 object-code check now compares flat
+`{ i64, double }` and `{ double, i64 }` results bit-for-bit in `rax` and
+`xmm0`. This does not widen the source → LLVM profile or change object
+acceptance. Nested mixed results, mixed `sret`, FP arithmetic and comparisons,
+and the existing deferred set stay outside this slice. See
+[the decision record](DESIGN_LLVM_OBJECT_CORRESPONDENCE.md) and
+[roadmap item 8](https://github.com/mumei-lang/mumei/issues/1448).
+
+The first C10 Stage A consumer adds opt-in `native-bundle recheck-source`:
+existing C08 pinned identity/status checks plus a fresh, bounded C03 source
+postcondition query using fixed Z3 settings, without project configuration,
+proof caches, producer tools or artifact execution. Self-consistent forged
+certificates cannot replace that query; refuted/inconclusive/unsupported results
+fail closed. The result is source-and-identity-only, not `artifact_verified`,
+authenticity, LLVM correspondence or binary correctness. Existing `check`,
+grades and Lean gates remain unchanged. See the
+[clean consumer boundary](VERIFICATION_NATIVE.md#first-clean-source-recheck-consumer-slice).
+This is partial C10: C09 integration/Stage B, dependency closure, wider profiles,
+runtime/ABI/linker and final-artifact assurance remain open.
+
+The first C10 Stage B slice adds opt-in `native-bundle recheck-llvm`: all Stage A
+gates plus a fresh comparison of the source i64 body with the actual pinned
+native LLVM user-main definition. A separate C09-derived two-function profile
+checks the direct-call/i64-to-i32-truncation/return wrapper, exact GNU x86_64
+target/layout and record observations without rewriting snapshots or broadening
+the scalar C09 checker. Different bodies, unsupported wrappers/modules and
+inconclusive results cannot become success. Read-only consumers do not invoke
+producer tools, load project config/cache, execute artifacts or write evidence.
+See the [native LLVM snapshot boundary](VERIFICATION_NATIVE.md#first-native-llvm-snapshot-consumer-slice).
+This is partial C09/C10 integration, not LLVM-to-object correspondence, OS exit
+status equivalence, ABI/runtime/linker/final-binary correctness, authenticity or
+full C10. Dependency closure, wider profiles/targets and C02 evidence integration
+remain open; existing commands, grades and Lean gates stay unchanged. No external
+verifier is adopted.
+
+The first C02/C10 producer connection adds opt-in `native-bundle recheck-llvm
+--json` after all Stage A/B gates succeed. Its envelope separates three common
+Evidence records for identity, fresh source postcondition and restricted LLVM
+user-body correspondence, while explicitly leaving acceptance unevaluated.
+Only checked snapshot digests, fixed labels/scopes and approved non-secret
+configuration/provenance are emitted; failures and inconclusive results emit
+no partial Evidence. The default text output and existing commands are preserved.
+See the [producer boundary](VERIFICATION_NATIVE.md#first-native-consumer-evidence-producer).
+This is partial C02/C10 output integration, not proof/grade/Lean acceptance,
+report authentication or object/linker/runtime/ABI/OS/final-binary assurance.
+General evidence consumers, dependency/toolchain closure and broader C09/C10
+remain open. No external verifier is adopted.
+
+The next C02/C10 consumer connection adds `native-bundle recheck-evidence` for
+saved native reports. A closed, size-limited decoder and separately trusted
+build-ID pin precede fresh Stage B checks; all decoded report data must agree
+with the fresh same-profile/provenance result. Stored success claims never
+replace either query. This is report consistency replay, not general Evidence
+acceptance, authenticity, historical proof execution, grade/Lean promotion or
+object/linker/runtime/OS/final-binary assurance. Existing commands and the common
+schema remain unchanged. See the [replay boundary](VERIFICATION_NATIVE.md#first-saved-native-evidence-replay-consumer).
+General acceptance/mapping, broader C09/C10 and final-artifact assurance remain
+open; no external verifier is adopted.
+
+The first wider C10 profile adds multi-atom native module bundles: sources with
+more than one atom take a module producer path recording
+`mumei.native-module-bundle/v1` under
+`mumei.native-pure-i64-module-linux-x86_64/v1`, disjoint from the single-atom
+record family. All Stage A/B toolchain, atomic-publish and fresh-verification
+gates carry over; the module additionally requires every top-level item to be an
+atom and exactly one zero-argument `main` with a literal `true` precondition,
+and the certificate covers every atom while the source binding carries a
+per-atom hash map. `check`, `recheck-source` and `recheck-llvm` dispatch on the
+record's own schema. Sibling calls stay inside the widened i64 profile as
+uninterpreted call sites: the source recheck checks one postcondition obligation
+per atom plus one domain obligation per call site — each independently, so a
+vacuous conjunct can never mask a real counterexample — and the LLVM recheck
+reuses `mumei.llvm17-native-module-snapshot/v1`. See the
+[module bundle boundary](VERIFICATION_NATIVE.md#multi-atom-native-module-bundles).
+This is partial C10, still identity-plus-recheck scopes only: no
+object/optimizer/linker/runtime/ABI/final-executable semantics, producer
+authenticity or attestation, and the recorded source-dependency digest remains
+pinned to the empty closure.
+
+The next C10 consumer stage adds `native-bundle recheck-artifact` for both
+record families: after the full identity/source/LLVM chain, the pinned
+`program.ll` is re-emitted to an object and the pinned `program.o` is
+re-linked, each under the recorded toolchain, and both produced byte streams
+must equal the pinned artifacts with matching toolchain observations. The
+scope is toolchain determinism plus pinned-artifact correspondence — the
+raw link argument vector stays a build-time observation while the optional
+canonical pin (`canonical_arguments_sha256`, path-dependent arguments
+replaced by `{output}`/`{input:i}`/`{toolchain}` placeholders) is
+re-derived and compared when present — and execution, ABI/runtime,
+optimizer-path and attestation claims remain out of scope. See
+the [artifact recheck boundary](VERIFICATION_NATIVE.md#pinned-toolchain-artifact-recheck).
+The execution slice follows as `native-bundle recheck-exit-status`: the
+record pins `link_build.expected_exit_status` (one no-argument,
+closed-stdio run of the just-linked executable at build time) and the
+consumer re-runs the byte-identical reproduction it just verified,
+comparing exit statuses — spawn failure, timeout, signal termination and
+pre-field records report inconclusive rather than claiming a comparison.
+An OS-level observation only: no runtime, ABI, process-semantics or
+historical-execution claim. The paired `native-bundle
+accept-exit-status` emits the anonymous acceptance descriptor on a
+matching observation — `os_exit_status_observation` moves into
+`checks_performed` while `accept-artifact` keeps it excluded (it runs
+no execution). See the [exit-status recheck
+boundary](VERIFICATION_NATIVE.md#pinned-executable-exit-status-recheck).
+The channel-observation slice follows as `native-bundle recheck-stdout`
+and `accept-stdout`: the record pins
+`link_build.expected_stdout_sha256` (SHA-256 of ≤64 KiB stdout from the
+same single no-argument, closed-stdin build-time run), and the consumer
+compares the reproduced executable's observed stdout digest — spawn
+failure, timeout, signal termination, capture overflow and pre-field
+records report inconclusive rather than claiming a comparison. An
+OS-level observation of one channel only: no exit-status comparison,
+stderr, runtime, ABI or historical-execution claim. See the [stdout
+recheck
+boundary](VERIFICATION_NATIVE.md#pinned-executable-stdout-recheck).
+The closing channel-observation slice is `native-bundle recheck-stderr`
+and `accept-stderr`: the record pins
+`link_build.expected_stderr_sha256` (SHA-256 of ≤64 KiB stderr from the
+same single no-argument, closed-stdin build-time run), and the consumer
+compares the reproduced executable's observed stderr digest with the
+same inconclusive mapping. This completes the OS channel-observation
+trio — exit status, stdout and stderr are each pinned and reproduced —
+while runtime, ABI and historical-execution claims stay out of scope.
+See the [stderr recheck
+boundary](VERIFICATION_NATIVE.md#pinned-executable-stderr-recheck).
+The C10 runtime-observation slice adds
+`native-bundle recheck-observations`: after artifact reproduction it runs
+the reproduced executable once and compares exit status, stdout digest and
+stderr digest together against all three pins. A match emits the
+`mumei.runtime-observation/v1` descriptor; missing pins or an incomplete
+observation are inconclusive, and any mismatch is `Different`. The scope
+is one invocation's observations only — no runtime/ABI or
+historical-execution claim. See the [runtime-observation recheck
+boundary](VERIFICATION_NATIVE.md#pinned-executable-runtime-observation-recheck).
+The paired `native-bundle accept-observations` emits an anonymous
+acceptance descriptor only when the artifact chain and all three
+observations match in one invocation; it is the only descriptor that
+performs `runtime_observation_semantics`. Its JSON envelope declares
+`argv: []`, `stdin: "closed"`, `timeout_ms: 30000`,
+`channel_cap_bytes: 65536`, `environment: "empty"` and
+`working_directory: "executable_directory"`; it does not claim multiple
+invocations, non-empty argv, stdin bytes or CPU/memory limits. Every
+native observation uses this policy, including build-time pins and all
+per-channel and runtime-observation recheck/accept commands. The record
+now optionally pins `link_build.observation_envelope`; pins from a
+different envelope are not compared, so runtime rechecks are inconclusive
+(exit 3). Legacy records without the field are still compared and report
+`pin_envelope: "unrecorded"`.
+Per-channel `accept-*` JSON descriptors also carry `invocation`, `host` and
+`pin_envelope`; none of these properties is covered by
+`runtime_observation_semantics`. The Agent
+`native-observations-accept` route (mumei-agent#1039) now performs this
+check from the descriptor; its acceptance rests on Core's exit code and
+input recheck, and it does not validate the Core-reported envelope. See the [runtime-observation acceptance
+boundary](VERIFICATION_NATIVE.md#pinned-executable-runtime-observation-acceptance).
+Both runtime-observation descriptors also report the consumer binary's
+compile-time `os`/`arch`/`family` as host observations, not claims; no
+host is pinned or compared, and the producer host, libc/loader/kernel
+versions and CPU features are unrecorded, so the scope is some host of
+that OS/architecture, not an attested environment (design-memo Option D
+folded into Option A).
+The third bounded C10 Option B step extends `native-bundle recheck-object` to
+compare the reproduced object's public function symbols and direct call edges
+with the pinned IR, then compare each program function's size and bytes with
+its linked executable placement. Supported four-byte x86-64 `PLT32`/`PC32`
+fields must contain the resolved PC-relative target values. CRT/startup code,
+the dynamic loader, libc, external symbols, non-call relocations and
+instruction semantics are not checked; this is not general linker-semantics or
+ABI validation. Local/private definitions, indirect calls and unsupported or
+unresolvable relocations are inconclusive. Full object-code translation
+validation remains the deep endpoint.
+
+The per-instruction C10 Option B TV profile adds opt-in
+`native-bundle recheck-machine-tv`, which runs the complete object recheck and
+then asks Z3 whether reproduced machine code for straight-line, acyclic-branch,
+or bounded-loop functions matches each source atom's pure-i64 model. Unknown per-path
+equivalence queries retry the identical obligations with `simplify → smt`
+under the same budget; constant-divisor magic-number sequences may remain
+inconclusive. Direct calls in
+branching functions are matched per path to ordered source `CallSite`s;
+provably false guards are skipped and argument expressions and call-result
+terms are compared as uninterpreted sites. Unresolved guards remain outside
+the profile as `conditional_call`.
+Branches must land on decoded instruction starts. Bounded loops use
+`LOOP_BOUND = 4` and the same `loop_bound_exits` input domain as LLVM
+translation validation. A per-path sixth visit to an instruction is dropped
+only after path conditions, input bindings, parameter domains, definedness,
+call-result bounds, and `loop_bound_exits` prove Unsat; Sat or Unknown returns
+`loop_bound`. Symbolic path exploration is bounded at 64 completed paths. The
+instruction profile includes `setcc`, byte-register views and extensions,
+masked immediate, implicit-one, and `%cl`-count shifts, and `or` logical flags.
+The division slice adds `cqto`/`cltd`, register `idivq`/`divq`/`divl`, and
+one-operand `imulq` high-half products. A division is accepted only when each
+path proves the divisor is nonzero and the quotient fits; otherwise it is
+`division_trap`. The unary slice adds register `inc{l,q}`, `dec{l,q}`,
+`neg{l,q}`, and `not{l,q}`, plus base-and-index `leaq` forms with implicit
+unit scale and displacement. Increment/decrement flags model only the zero
+flag; negation models subtract-from-zero flags, and `not` preserves flags.
+Memory-operand unary forms remain unsupported. Masked-zero shifts preserve
+the prior flags; nonzero shifts model only the result zero flag, and an
+undecided symbolic count makes flags unknown. These are bounded proof
+obligations, not a runtime no-trap or ABI claim. The cancellation poll returns
+zero under the no-cancellation-requested assumption; cancellation and runtime
+semantics are not checked. The x86-64 integer-register
+convention and callee-saved preservation are assumed, not verified. The C
+stack-argument slice supports up to 16 arguments under an assumed convention:
+incoming argument `k >= 7` is at entry-relative `%rsp + 8*(k-6)`, and outgoing
+argument `k >= 7` is at call-time `%rsp + 8*(k-7)`. Only 64-bit `movq` loads and binary
+(`addq`/`subq`/`imulq`/`andq`/`orq`/`xorq`/`cmpq`/`testq`) incoming reads and modeled
+outgoing `movq`/`pushq` stores (sign-extended
+immediate, register, or incoming-argument/memory source) are supported; the incoming area is read-only.
+Frame slots inside the current frame read back the value the function
+recorded storing there (register spill/reload). A packed
+`movaps`/`movups`/`movdqa`/`movdqu` `N(%rsp)`↔xmm transfer copies two
+adjacent slots at once — LLVM's vectorized argument forwarding — with
+each qword half resolved like the scalar forms. The
+`main` wrapper, CRT/startup
+code, loader, libc and runtime are not covered. Full object-code TV remains
+the deeper endpoint.
+
+Native-bundle linking conditionally adds the embedded runtime only for
+undefined object symbols it exports and pins its source in the optional
+`runtime_source_sha256` field. Runtime semantics remain outside all claims.
+When an external runtime call makes object-link correspondence uncheckable,
+`recheck-object` stays inconclusive; machine-TV reports the link check as not
+performed rather than implying it was established.
+
+`machine_code_forward_branch_function_tv` retains its forward-only meaning;
+`machine_code_acyclic_branch_function_tv` covers equivalent functions with
+backward but acyclic edges. The not-performed vocabulary changed from
+`machine_code_tv_backward_branch_functions` to
+`machine_code_tv_cyclic_control_flow_functions`; it is listed only when a
+function outcome is `cyclic_control_flow` or `loop_bound`. The
+`machine_code_bounded_loop_function_tv` check is performed for an equivalent
+function with a reachable loop; `machine_code_tv_loop_executions_beyond_bound`
+and `runtime_cancellation_semantics` remain not performed. mumei-agent
+consumers must adopt these new descriptor names.
+`machine_code_conditional_call_function_tv` is performed when an
+equivalent function has both a conditional branch and a call; those functions
+remain counted as direct-call functions rather than forward- or acyclic-branch
+functions.
+
+The next C10 Option B producer adds `native-bundle accept-object`. It performs
+the same bounded machine-TV evaluation and emits an acceptance descriptor only
+when at least one source-atom function is present, every such function is
+equivalent, the supported C `main` entry wrapper is equivalent when applicable,
+and every remaining defined function has the exact `not_a_source_atom` outcome.
+The wrapper check compares the low 32 bits from one unconditional call to
+`__mumei_user_main`; `argc` and `argv` are unused. It does not claim CRT,
+loader, or OS exit-status semantics. Its Core-owned
+`object_source_machine_code_correspondence` check is mapped by the future
+mumei-agent `native-object-accept` route to the agent-owned
+`object_translation_correspondence` check; the Core descriptor does not emit
+the agent name. Inconclusive outcomes emit no descriptor, and ABI/runtime,
+authenticity and historical-execution claims remain outside scope.
+Machine-TV function entries separately report
+`callee_saved_preservation`, and descriptors perform
+`machine_code_callee_saved_register_preservation` only when every equivalent
+function is proved preserved. Direct and poll callees remain assumed to
+preserve these registers, so in-module composition requires each source callee
+to be independently proved; the external-callee assumption is listed as
+`machine_code_callee_saved_preservation_assumed_for_external_callees`.
+
+The C10 consumer side of `accept-object` adds `native-bundle
+recheck-object-acceptance <bundle> <source> <descriptor>`. It reads a saved
+descriptor with bounded, duplicate-key-free decoding and validates its object
+acceptance envelope. It then reruns `accept-object` on the pinned inputs and
+recomputes `evidence_fingerprint`. A saved descriptor for other attempt inputs
+is rejected as unbound, and one that differs in any field is rejected as
+tampered. Malformed, foreign or non-accepted descriptors are rejected before
+the pipeline runs, and an inconclusive fresh acceptance exits 3. After C09
+(#1470), flat `{f64,i64}` and `{i64,f64}` return pairs replay as consistent,
+and a tampered `functions` outcome or the other field order's descriptor is
+rejected. This is a partial C10 slice, not C10 completion. Descriptor and producer authenticity,
+historical execution, and dependency or toolchain closure stay unchecked. So
+do register-convention, ABI/runtime/OS and final-artifact assurance. See the
+[replay contract](VERIFICATION_NATIVE.md#saved-object-acceptance-replay).
+
+The consumer replay can now also pin the detached C08 producer signature over
+the exact saved descriptor bytes. The signature subject is the raw-byte SHA-256,
+not the attempt-input `evidence_fingerprint`; malformed envelopes, wrong keys,
+key-label mismatches and failed explicitly supplied freshness/registry/
+revocation gates reject before the fresh acceptance. Omitting `--signature`
+keeps consistency-only replay. This is still partial C08×C10: it binds bytes to
+a pinned key chain but does not establish real-world producer identity,
+historical execution, dependency/toolchain closure, ABI/runtime/OS semantics,
+final-artifact correctness, reusable Evidence or `artifact_verified`.
+
+The next C10 Option B slice re-derives module and multifile machine-TV source
+models under the profile pinned by the record, matching the LLVM recheck;
+single-file rechecks keep `RefinedAdmission::Reject`. Refined scalar parameter
+predicates are carried in the input domain, whose refined-signature label
+matches LLVM's exact module label and retains the loop-bound suffix. U64 leaves
+use full-width 64-bit bitvectors without an extra signature-domain constraint;
+unsigned comparisons, `udiv`/`urem`, and `lshr` retain their source semantics.
+Unsupported memory, enums and composite operations beyond plain struct values,
+and non-scalar f64 features remain outside the machine-TV
+profile. Wide struct leaves inside parameters, call arguments and aggregate
+results flatten into the same two-INTEGER-slot sequence LLVM emits for them,
+bounded by the same sixteen-leaf argument and four-leaf result limits. Scalar `i128`/`u128` values use consecutive low/high GPR pairs and
+`rax`/`rdx` results for the bounded add/subtract/negate, comparison,
+pass-through and direct-call subset. Wide multiplication remains
+fail-closed as `unsupported_instruction` because the bounded solver returned
+`Unknown` for LLVM's limb-product sequence; external division libcalls also
+remain fail-closed.
+Agent consumers must adopt both check names and the function field.
+
+The C10 Option B machine-TV profile proves register-only scalar f64
+functions with a bounded SSE2 profile, NaN-aware result comparison, `xmm0`–`xmm7`
+entry registers for f64 parameters and the low 64 bits of `xmm0` for f64
+results. Direct calls classify f64 arguments into `xmm0`–`xmm7` and integers
+into `rdi`–`r9`, then overflow arguments of both classes into stack slots laid
+out in declaration order. Their f64 arguments must
+first match NaN-aware and then pass an exact-bit proof against the machine XMM
+argument or spilled stack slot under the same path assumptions. Pass-through
+calls can be admitted;
+computed f64 arguments whose NaN payload bits are not provably identical and
+f64 tail calls fail closed as `call_arguments`. f64 call results remain
+supported. MXCSR RNE, masked
+exceptions, disabled FTZ/DAZ, and NaN payload bits remain unverified.
+The descriptor performs `machine_code_f64_scalar_function_tv` for equivalent
+functions with any f64 leaf, including one inside a struct or call shape, and
+lists `machine_code_tv_mxcsr_control_state` and
+`machine_code_tv_nan_payload_bits` as not performed. F64 struct aggregates
+use the mixed INTEGER/SSE rules described below. Register-only
+`ucomisd`/`comisd` model unordered/equal/less flags exactly
+(`ZF = unordered || fp.eq`, `CF = unordered || fp.lt`, `PF = unordered`;
+`OF/SF/AF = 0`); their branch, `setcc`, and `cmovcc` conditions are supported.
+Memory operands and parity conditions after integer flag producers remain
+outside the profile. Agent consumers must adopt these names.
+
+The same bounded profile admits one- through sixteen-leaf struct parameters
+and direct-call arguments whose leaves are INTEGER (`i64`) and/or SSE (`f64`) —
+the admission fragment's own sixteen-leaf flattening limit bounds how large a
+struct a source can declare.
+INTEGER leaves use the next GPR from `rdi`–`r9`; SSE leaves use the next XMM
+register from `xmm0`–`xmm7`, independently. LLVM `expand` lowering flattens
+aggregates leaf-by-leaf into the scalar argument sequence, so leaves that
+do not fit their class's registers spill to the argument stack exactly
+like scalar arguments — INTEGER leaves past `r9` and SSE leaves past
+`xmm7` share one stack area laid out in declaration order. Spilled f64
+leaves are read through `movsd` loads or directly as SSE memory operands
+(`*sd` arithmetic and `ucomisd`/`comisd` with an `N(%rsp)` source);
+cross-class slot reads fail closed. On the outgoing side, a call argument
+past `xmm7` must be written with a `movsd %xmm, N(%rsp)` store into the
+same declaration-ordered stack area, and the slot carries the same
+NaN-aware plus exact-bit obligations as a register argument.
+
+Register-resident aggregate results follow a per-class register
+budget: at most three INTEGER leaves (`rax`, `rdx`, `rcx`) and at
+most two SSE leaves (`xmm0`, `xmm1`) — a five-leaf
+`{i64,f64,i64,f64,i64}` still returns in registers. Real `llc-17 -O2`
+output returned three INTEGER leaves in `rax`, `rdx`, `rcx` and
+`{i64,f64,i64,f64}` in `rax`, `xmm0`, `rdx`, `xmm1`. It did not return a
+fourth INTEGER leaf in `r8`: once INTEGER leaves overflow the budget
+the whole aggregate returns through a hidden sret pointer and memory
+stores, `f64` leaves landing as `movsd` stores. For three f64
+leaves with INTEGER leaves still fitting, the third leaf uses an x87
+stack register, outside this model.
+Register-resident supported results preserve source leaf order; f64 leaves
+compare NaN-aware and integer leaves compare exactly.
+Aggregate results of four to sixteen leaves are instead admitted
+through the SysV `sret` convention on the callee side: `rdi` carries a
+hidden caller-buffer pointer, INTEGER arguments shift one register right to
+`rsi`, `movq`/`movsd` stores through a register still holding that pointer write the
+result-buffer leaves, and `rax` must hand the pointer back. Stores into
+slots never written compare against fresh constants, so a dropped leaf store
+is `different`; a callee that forgets the pointer return fails the `rax`
+obligation. The caller side is modeled the same way: a call whose
+result needs `sret` reads `rdi` as the caller-allocated
+buffer pointer, INTEGER arguments begin at `rsi`, the buffer's frame
+offset is recovered from `rdi - rsp`, each result leaf lands in the
+frame slot map, and `rax` returns the pointer — `N(%rsp)` reads and
+reads through a register still holding the pointer resolve to the same
+leaf slots, `movsd` reads and writes of `f64` leaves included. This is an assumed LLVM first-class aggregate lowering
+convention plus the modeled sret store convention, not general SysV C-ABI
+aggregate classification.
+
+F64 struct-call arguments use NaN-aware Query A matching plus a per-path
+exact-bit Query B obligation, whose failure is `call_arguments`, never
+`different`. Struct field writes, nested field writes and branch- or
+match-merged struct values are admitted when their source values flatten to
+the modeled register leaves. These are local value updates, not memory
+modeling; LLVM stack-memory lowering remains outside the profile. Enum
+signatures and values, including branch-built results, `match` projections,
+scalar equality and payload writes, are admitted when their flattened tag and
+payload leaves fit the existing register classes and aggregate limits,
+including the existing 3–4-leaf first-class lowering preflights. Every modeled
+leaf is compared exactly; LLVM's first-class aggregate lowering
+zero-initializes inactive payload slots. This assumes that LLVM lowering and
+does not validate an ABI. F64 tail calls remain fail-closed. Function-signature and direct-call
+aggregates used as parameters or call arguments with seventeen or more
+leaves remain fail-closed. Result aggregates outside the admitted
+shapes — register-resident within the per-class budgets, or sret
+results of four to sixteen leaves — remain fail-closed. Local struct values inside a body are not subject to this
+aggregate limit because the source model flattens them. i128/u128 leaves inside
+aggregate parameters, call arguments, aggregate results and enum payloads
+follow the same
+flattening — each wide leaf is two consecutive INTEGER slots, and LLVM emits
+its low half first, matching the source model's `[lo, hi]` slot order. The
+halves are independent scalars: when registers run out mid-pair the low half
+keeps the last register and only the high half spills to the argument stack.
+Enum-valued direct-call results in modules with f64 features remain
+fail-closed as `call_arguments` because their source call model does not
+retain per-leaf SSE classes. Leaf-function bounded arrays admit qword `%rsp`-relative
+red-zone accesses with proven `-128..=-8` offsets; red-zone non-clobbering is
+assumed, not validated. Red-zone accesses in functions with calls
+(`frame_memory_call`) or stack adjustments (`frame_memory_stack_adjust`) remain
+fail-closed. Non-leaf bounded arrays may use one allocated entry-relative
+region per path, with qword accesses proved inside the region. Calls are
+allowed under the explicit assumption that callees write only below their
+return address and that no stack-argument slot occupies the region; this is
+not a validated ABI claim. The region closes when `%rsp` is deallocated past
+its lower bound and cannot be reopened. Deallocated or reallocated-region
+accesses fail as `frame_memory_bounds`, and stack-argument calls whose slot is
+routed through the region fail as `call_arguments`. Equivalent functions
+using allocated-frame memory carry
+`_allocated_frame_memory_assumed_callee_isolated`. Non-qword accesses and
+`.rodata`/`Str` memory remain fail-closed. Equivalent functions using struct
+signatures or direct calls perform
+`machine_code_composite_register_aggregate_tv`. Aggregates wider
+than two leaves use
+`_llvm_first_class_aggregates_split_into_registers_result_rax_rdx_rcx_xmm0_xmm1`
+in the active integer or f64 convention string. Aggregate uses that still
+stand for an assumed SysV memory-class ABI — wide aggregate parameters and
+aggregate call arguments — list
+`machine_code_tv_sysv_memory_class_aggregate_abi` as not performed; a
+modeled register-resident or sret result the lifter validates, on
+either side of the call, does not. The
+convention names LLVM aggregate lowering and does not claim general ABI
+validation.
+
+Sibling descriptors now name the exit-status observation only as
+`os_exit_status_observation` (formerly bare `os_exit_status` in
+non-exit-status `checks_not_performed` lists).
+General optimizer/ABI/runtime assurance and producer authenticity stay
+open — the records now pin the intra-source call graph as
+`source_dependencies_sha256`, the canonical JSON of the Claim Book
+`{atom: [sorted direct callees]}` map, and the file-level `import`
+dependency closure is partially closed by the multifile slice below.
+
+The next C10 stage closes the file-level `import` dependency closure,
+including nested, transitive and subdirectory members:
+`native-bundle build` on a source declaring `import` items takes the
+multifile path and records
+`mumei.native-multifile-bundle/v1` under
+`mumei.native-pure-i64-multifile-linux-x86_64/v1`, pinning every original
+member byte-for-byte under `sources/` at its `/`-separated member key
+plus a file-level
+`import_graph_sha256` (`{member: [sorted direct imports]}` over the
+whole closure), and merging the closure — a post-order walk emits each
+member after its own imports, diamonds once, cycles honestly rejected —
+into the canonical text the module pipeline compiles, with each member's
+`alias::`/`stem::` call qualifiers normalized to bare names file-locally
+and duplicate qualifiers per file rejected. Imports resolve
+file-relative against each member's own directory (the language
+resolver's `base_dir` semantics), so `sub/dep.mm` members merge with an
+unaliased qualifier of the last-segment stem, and `..`/absolute/`\\`/`:`
+segments are rejected to keep member keys inside the root's
+subtree namespace; `std/`-prefixed imports additionally fall back to
+the language's shipped-stdlib chain (compiler-adjacent `std/`,
+working-directory `std/`) and any still-unresolved import to
+`MUMEI_STD_PATH` — the producer delegates to the language's own
+`resolve_path` — pinned under the importer-prefixed member key so
+consumers never re-resolve.
+`check`, `recheck-source`,
+`recheck-llvm` and `recheck-artifact` re-derive the merge from the
+pinned members.
+Consumer Evidence lands as `mumei.native-multifile-consumer-evidence/v1`
+— the module envelope shape plus a merge-correspondence record binding
+the `import_graph_sha256` pin to the re-derived merged text — so
+`--json`/`recheck-evidence`/`accept-*` all serve the family.
+Refined scalar `type` members are
+admitted by the later v2 profiles; struct/enum member items and
+alias pinning stay outside this slice. See the
+[multifile bundle boundary](VERIFICATION_NATIVE.md#multifile-import-closure-bundles).
+
+Consumer Evidence reaches module bundles through the sibling envelope
+`mumei.native-module-consumer-evidence/v1`: `recheck-llvm --json` emits one
+identity record plus a per-atom postcondition and source-to-LLVM record
+(`1 + 2·atoms`), and `recheck-evidence` dispatches on the saved file's own
+`schema_version`, so a single-atom report can never stand in for a module
+bundle or the reverse. The replay bound widens to the record's 1 MiB because
+module reports grow with atom count. Emission still happens only on aggregate
+equivalence — there is no partial-success module report — and `acceptance`
+stays `not_evaluated`. See the [module evidence envelope](VERIFICATION_NATIVE.md#first-native-consumer-evidence-producer).
+
+The native family gains an acceptance surface through
+`mumei native-bundle accept-evidence <bundle> <source> <evidence> --expected-build-id <id> [--json]`:
+the same evaluation as `recheck-evidence` (saved-report decode, full
+identity/source/LLVM recheck chain, fresh-report equality) reported in the
+acceptance vocabulary for both the single-atom and module families. Acceptance
+emits one anonymous `mumei.native-evidence-acceptance/v1` descriptor naming
+`checks_performed` (bundle identity binding, fresh source and LLVM-snapshot
+rechecks, saved-evidence consistency) and `checks_not_performed` (authenticity,
+historical execution, artifact/linker recheck, optimizer/ABI/runtime/OS
+semantics, grade/Lean). Non-acceptance emits nothing. See the
+[native acceptance contract](VERIFICATION_NATIVE.md#native-evidence-acceptance-evaluation).
+
+`mumei native-bundle accept-artifact <bundle> <source> --expected-build-id
+<id> [--json]` reports the deepest verifiable chain in the same vocabulary:
+the `recheck-artifact` evaluation (identity pin, fresh source/LLVM rechecks,
+then object re-emission and executable relinking byte-identical to the pinned
+artifacts under the recorded toolchain) with an acceptance scope of
+`native_bundle_source_llvm_and_toolchain_artifact_reproduction`.
+`checks_performed` gains `canonical_link_argument_vector_reproduction`
+(the placeholder-normalized argv re-derived and compared when the record
+pins it — a pre-field record instead names it among the checks not
+performed) while `checks_not_performed` keeps authenticity, historical
+execution, optimizer/ABI/runtime/OS semantics, grade/Lean and — honestly —
+`raw_link_argument_vector_reproduction`, the raw `arguments_sha256` build
+observation no recheck can reproduce. Acceptance is byte reproduction, not execution or
+exit-status proof. See the
+[artifact acceptance contract](VERIFICATION_NATIVE.md#native-artifact-acceptance-evaluation).
+
+The next C02/C13 slice moves the common v1 representation model and runtime
+validation into `mumei_core::verification_evidence`. Native producer/replay use
+the shared shape/combination gate without changing emitted JSON or their fresh
+query/pin/profile comparison policy. Required nullable targets must be present;
+replay no longer permits omitting that already-required v1 field. A shared
+schema-derived oracle covers 1,152 combination cases, alongside structural and
+privacy regressions. This is not a common acceptance engine or a new backend:
+truth, trust/freshness, grade/Lean promotion, general mapping and final-artifact
+assurance remain separate/open. See the [Core gate](VERIFICATION_NATIVE.md#shared-core-representation-gate).
+
+The next bounded C02/C13 consumer entry point is
+`mumei evidence check <record> [--json]`, applying the shared Core gate to one bounded regular
+file. Static anonymous diagnostics never echo report metadata or serve as a
+proof/acceptance receipt. A valid counterexample/timeout/unsupported record still
+exits 0 for representation only; malformed/inconsistent data fails closed.
+Native pins/fresh rechecks and certificate/grade/Lean policies remain unchanged.
+General acceptance/mapping and artifact assurance stay open. See the
+[standalone CLI contract](VERIFICATION_NATIVE.md#standalone-representation-only-cli-consumer).
+
+The multi-record C02/C13 admission is `mumei evidence check-list
+<envelope> [--json]` over `mumei.verification-evidence-list/v1`: each element's
+raw bytes pass the single-record gate independently — duplicate keys,
+unknown fields and invalid combinations fail closed exactly as standalone —
+bounded at 64 records within the shared 65,536-byte limit. The static
+diagnostic reports `record_count` and declares cross-record consistency
+unchecked; an empty list is representation-valid. No deduplication, ordering,
+coverage, truth or acceptance is implied, and the envelope is not reusable
+Evidence or a receipt. See the
+[list check contract](VERIFICATION_NATIVE.md#bounded-multi-record-representation-check).
+
+The declared cross-record gap now has its own structural check:
+`mumei evidence check-consistency <envelope> [--json]` reads the same list
+envelope and reports `mumei.evidence-consistency-check/v1` — `consistent`,
+a bounded `conflicts` list naming each disagreeing pair's indices and field
+(`conflict_count` carries the true total), and `record_count`. Records
+sharing `subject.id` *and* `subject.sha256` must pin one `subject.kind` —
+a `subject.id` alone is a producer label, not an identity. Records sharing
+`obligation_id` must pin one subject, specification, semantics and method.
+Outcome fields are claims, not identity, and are never compared. Agreement
+stays syntactic — pin correctness, truth, freshness and authenticity remain
+unperformed. See the
+[consistency check contract](VERIFICATION_NATIVE.md#cross-record-identity-pin-consistency).
+
+`evidence check`, `evidence check-list` and `evidence check-consistency`
+now accept `--expected-adapter <id>`: after the representation gate, every
+record's declared `provenance.adapter.id` must equal the externally
+supplied expectation, mirroring how `--expected-build-id` binds a native
+record to a trusted channel. A mismatch fails with a static diagnostic
+before any success output; gated JSON diagnostics add `checks_performed`
+with `declared_producer_identity`, while `producer_authenticity` stays
+unperformed — a declared id match is identity, not signed or attested
+authenticity. The deep `accept-*` consumers bind provenance already through
+`fresh == saved`, so no flag is added there. See the
+[declared producer-identity gate](VERIFICATION_NATIVE.md#declared-producer-identity-gate).
+
+The first standalone C02/C13 source producer now connects the existing bounded
+C03 bitvector model to fresh linked-Z3 queries without a Native bundle:
+`mumei evidence verify-source <source> [--json]`. Only fresh unsat emits one
+common Evidence record; refuted, unknown, unsupported and vacuous-precondition
+inputs cannot emit success. The literal-true, at-most-16-parameter pure-i64
+comparison/conditional profile has explicit positive solver budgets and trusted,
+not independently proved, source-model correspondence. Saved output is not
+accepted proof, grade promotion, LLVM correspondence or executable assurance.
+General acceptance/mapping and wider producers/consumers stay open. See the
+[source producer contract](VERIFICATION_NATIVE.md#standalone-fresh-source-evidence-producer).
+
+The standalone saved-source consumer is now connected through
+`evidence recheck-source <record> --source <source> [--json]` and a Core API.
+It decodes one bounded record, runs the existing source producer fresh with
+caller-supplied source/budgets, and requires equality of every field with the
+current same-profile/provenance result. Forged success and rebound digests do
+not replace that query. Static anonymous diagnostics are not Evidence or
+acceptance receipts. This remains partial C02/C13, not authenticity, historical
+execution, grade/Lean promotion, LLVM/native semantics or common acceptance.
+Native consumers and Agent ownership remain unchanged. See the
+[source consistency contract](VERIFICATION_NATIVE.md#standalone-source-evidence-consistency-recheck).
+
+The first Core-side `acceptance: evaluated` surface is
+`mumei evidence accept-source <record> --source <source> [--json]` and
+`mumei_core::source_evidence::accept`: the same bounded pipeline as the
+consistency recheck (representation gate, fresh caller-budgeted query, full
+field equality) reported in the acceptance vocabulary — `Accepted`,
+`Rejected`, `Inconclusive`. Accepted emits one anonymous
+`mumei.source-evidence-acceptance/v1` descriptor naming
+`checks_performed`/`checks_not_performed` (authenticity, historical execution,
+record freshness, independent correspondence, LLVM/artifact/grade/Lean stay
+unassessed); it echoes no digest and is not reusable Evidence or a
+certificate. Non-acceptance emits nothing; acceptance remains bounded to the
+one restricted profile. See the
+[acceptance contract](VERIFICATION_NATIVE.md#standalone-source-evidence-acceptance-evaluation).
+
+Acceptance descriptors now carry an optional `evidence_fingerprint` binding:
+the SHA-256 hex of the accepted record's input bytes. `accept-source` and
+`native-bundle accept-evidence` always emit it — a holder can prove *which*
+record the descriptor evaluated without the descriptor replaying any claim
+or digest as identity. `native-bundle accept-artifact` evaluates no record,
+so the key stays absent; the bundle identity pin remains its binding. The
+fingerprint is a binding token, not claim identity: descriptors still decode
+as no reusable Evidence, certificate or grade.
+
+The first detached producer-authenticity slice adds `mumei evidence sign
+<record> --key-file <PATH> --producer-key-id <ID> [--json]`: any bounded
+record (4 MiB (4,194,304-byte) limit; `--stdin` shares it) is hashed and signed
+over its raw bytes — never parsed or canonicalized — into the closed five-field
+`mumei.producer-signature/v1` envelope. `subject_digest` is the record's
+SHA-256 hex (the `evidence_fingerprint` convention); the signature covers the
+digest's ASCII bytes, matching `crypto_verify_signature`; `producer_key_id`
+is a caller-declared label, never derived from key bytes. `--key-file` must
+hold exactly the 64-char lowercase-hex ed25519 secret; malformed material,
+empty key ids, oversized inputs and non-regular files fail closed without
+echoing key material, and decoded key bytes are zeroized. The envelope binds
+only the declared key to the declared digest — no key or producer
+authenticity, freshness, revocation, claim truth or acceptance. See the
+[detached envelope contract](VERIFICATION_NATIVE.md#detached-producer-signature-envelope).
+The 4 MiB subject ceiling matches the semantic-contract sidecar consumer cap.
+
+The `mumei.source-evidence-recheck/v1` diagnostic carries the same optional
+`evidence_fingerprint` binding — the SHA-256 hex of the rechecked record's
+input bytes — so a holder can prove *which* record the consistency diagnostic
+covers and host folds (for example Agent's declared binding evaluation) can
+attribute it. The diagnostic stays anonymous and non-reusable: no subject,
+no provenance, no new trust over the same-profile recheck itself.
+
+The Agent C04/C11 planner also adds optional exact result-contract routing:
+one profile/method pair, scope, bound/assumption identifiers and correspondence
+relation/status must match one complete declared offer. Explicit/automatic
+selection and permitted preflight fallback cannot weaken it or borrow fields
+across offers. Unconstrained v1 plans remain unchanged. This is partial routing,
+not capability truth, Evidence acceptance, execution/resource enforcement,
+runtime conflict reconciliation or grade/Lean promotion. See the
+[canonical milestone](CROSS_PROJECT_ROADMAP.md#wave-2-explicit-result-contract-routing-follow-up).
+
+The Agent C04/C11 planner adds a typed non-secret configuration follow-up:
+host-approved Boolean, bounded integer and closed-choice schemas resolve
+defaults plus per-adapter overrides before selection. Unknown/invalid settings
+fail closed; permitted fallback uses its own settings and preserves the exact
+result contract. Only the approved selected projection is exposed/fingerprinted;
+legacy schema-less JSON stays unchanged. This is not a Core Evidence identity,
+secret detector, permission grant, execution or acceptance receipt. Actual input
+preparation, tool execution/resource enforcement and runtime reconciliation
+remain open. See the [canonical milestone](CROSS_PROJECT_ROADMAP.md#wave-2-typed-configuration-follow-up).
+
+The Agent C04/C11 input-preparation follow-up binds a bounded immutable source
+snapshot to an explicit supported input format, exact result contract and
+freshly selected metadata plan. Host-pinned raw-byte identity is checked without
+opening paths or parsing source meaning. Explicit manifests omit source text;
+their fingerprints are not Evidence identities, execution authorization or
+acceptance receipts. Actual tool execution, transport, input-access permissions,
+resource enforcement and reconciliation remain open. See the
+[canonical milestone](CROSS_PROJECT_ROADMAP.md#wave-2-bounded-source-input-preparation).
+
+The next Agent C04/C11 pre-execution slice filters declared permission
+requirements against an explicit closed-set policy, including fallback.
+Unspecified policy preserves legacy planning, not implicit execution approval.
+This is metadata matching only: real authority, OS enforcement and execution
+remain open, with C12 still demand-gated. See the
+[canonical permission milestone](CROSS_PROJECT_ROADMAP.md#wave-2-declared-permission-policy-filtering).
+
+Agent's next C11/C13 contract adds bounded host-reported attempt histories tied
+to prepared-request fingerprints. It distinguishes cancellation requests from
+acknowledgements and rejects contradictory/late terminal observations, but does
+not execute, monitor clocks, enforce authority/resources or accept Evidence.
+See the [canonical lifecycle milestone](CROSS_PROJECT_ROADMAP.md#wave-2-bounded-host-observed-attempt-lifecycle).
+
+The same-attempt follow-up accepts only matching-bound, exact-prefix extensions
+of the caller's current record, with duplicate reports treated idempotently and
+stale/divergent/rewritten histories rejected. It does not arbitrate independent
+branches, maintain global/atomic storage, prevent replay, execute or accept
+Evidence. See the [canonical reconciliation milestone](CROSS_PROJECT_ROADMAP.md#wave-2-same-attempt-report-reconciliation).
+
+Agent's bounded stdout follow-up binds opaque host-supplied bytes and a supplied
+digest to an exited attempt and explicit prepared-request/number/timeout metadata.
+It rejects oversized bodies and conflicting snapshots without interpreting JSON,
+exit code zero or empty output as Evidence. Body access stays explicit; repr/JSON
+contain metadata only. Stream collection, origin/completeness, actual enforcement
+and Core Evidence checks remain open. See the
+[canonical output milestone](CROSS_PROJECT_ROADMAP.md#wave-2-bounded-opaque-stdout-snapshots).
+
+The explicit JSON decode follow-up checks bounded UTF-8/single-object syntax,
+unique keys and exact numbers without changing raw snapshots or treating saved
+success as Evidence. Private detached trees must not be logged or reserialized
+as authoritative input; Core checks still consume original bytes. See the
+[canonical JSON milestone](CROSS_PROJECT_ROADMAP.md#wave-2-bounded-json-stdout-decoding).
+
+Core's explicit `evidence check --stdin` follow-up checks original bytes without
+an intermediate file or reserialization. It preserves file mode and anonymous
+representation-only diagnostics, bounds stdin reads to 65,536 bytes plus one
+overflow byte, and adds no Agent runner, acceptance or grade promotion. Host
+deadlines and input closure remain required. See the
+[canonical stdin milestone](CROSS_PROJECT_ROADMAP.md#wave-2-original-byte-core-stdin-representation-checks).
+
+The refined scalar member slice landed in two profile levels: modules
+may declare `type <Name> = <scalar> where <operand> <predicate>;`
+aliases and use them in atom signatures. The first level builds under
+`mumei.pure-i64-refined-scalar/v1` and the `/v2` module/multifile
+profiles — single-level aliases onto the integer-sort vocabulary. The
+widened level — `mumei.pure-i64-refined-scalar/v2` plus the `/v3`
+module/multifile profiles — additionally admits `bool` leaves and
+alias chains, since the verifier now composes every ancestor conjunct
+and binds a bool leaf as `Bool`; the member profile a module pins is
+derived from what its declarations actually need, and calls carry the
+callee's declared signature kinds (a `bool` argument/result lowers to
+the profile's i64 0/1 convention). The alias gate stays fail-closed in
+both: `unit` metadata, cyclic or unresolvable bases, non-scalar leaves
+(`f64`/`Str`), and atom-name collisions are
+rejected. `u64`/`usize`/`isize` leaves additionally require
+`mumei.pure-i64-composite/v10` — the same gate the literal signature
+leaves carry — and fold like them (`usize`→`u64`, `isize`→`i64`); their
+predicates compare unsigned exactly as a literal `u64` parameter's
+clauses do. An `f64` leaf requires
+`mumei.pure-i64-composite/v12` — again the literal leaf's own gate —
+with predicates limited to the `f64` vocabulary (`==` needs the v19
+arithmetic surface, ordering predicates stay out, and float literals
+remain rejected at the token level); a `Str` leaf stays rejected for
+lack of a String sort. `i128`/`u128` leaves require
+`mumei.pure-i64-composite/v21` (`v22` inside enum payloads): the alias
+flattens to the literal leaf's two-slot shape and its predicates apply
+to the combined 128-bit operand under the same signedness and the same
+tag-conditional domain. Each alias's predicates fold into the obligations the module
+already proves: parameters strengthen the signature domain established
+at every call site, and results strengthen the postcondition the callee
+guarantees. Recheckers dispatch on the pinned profile name, so every
+record is re-admitted under exactly its own admission level.
+Deeper
+optimizer/ABI/runtime assurance and producer authenticity remain
+open. See the
+[refined scalar member profiles](VERIFICATION_NATIVE.md#refined-scalar-member-profiles-v2).
+
+The composite member slice 1 widens the admitted fragment to
+non-generic structs with `i64`/`bool` fields: modules may declare them,
+take them as atom parameters and read their fields, under
+`mumei.pure-i64-composite/v1` and the `/v4` module/multifile profiles
+(pinned only when a struct is declared). A struct parameter flattens to
+one scalar input per field; it is never a scalar value itself and only
+passes through by name to a same-struct sibling parameter. Struct
+construction and results, struct invariants, methods, field
+constraints, subrange fields and non-scalar fields stay rejected.
+Composite slice 2 admits refined-alias fields with `i64`/`bool` leaves
+under `mumei.pure-i64-composite/v2` and the `/v5` profiles. The
+verifier now assumes a field's alias predicates for struct parameters,
+and literal-field modules keep `/v4`. `recheck-source`
+covers the composite fragment, and `recheck-llvm` pairs each emitted
+`{ i64, ... }` struct formal with the flattened field slots
+(`extractvalue` reads and pass-through call arguments). Composite
+slice 3 admits struct values under `mumei.pure-i64-composite/v3` and the
+`/v6` profiles, pinned only when an atom uses one: struct results
+(`result.f` in `ensures`), struct literals, struct-valued `let`s and
+field reads on struct-returning calls. `recheck-llvm` pairs `insertvalue`
+chains, folded constant aggregates, aggregate call results and returned
+aggregates with the field slots. Undefined slots, merged or nested
+aggregates, branch-merged struct values and field assignment still fail
+closed in that source-profile slice. The later C10 machine-TV profile admits
+register-only struct field writes, nested writes and merged struct values,
+plus bounded enum signatures and values through flattened LLVM aggregate
+leaves. The enum lowering is assumed, not ABI-validated, and these machine-TV
+admissions do not expand the preceding source-profile slice. Composite slice 4
+admits enum members under `mumei.pure-i64-composite/v4` and the `/v7`
+profiles: non-generic,
+non-recursive enums with scalar or refined-alias payloads uniform at
+each index ride the merge, and an enum parameter flattens to a tag
+slot bounded by the variant count plus one slot per payload index —
+the emitter's tagged-union layout. `match` on an enum parameter
+admits `Variant` arms plus a final unguarded `_` arm, enum parameters
+pass through by name to same-enum callees, and enum `let`s bind
+pass-through. Enum construction/results, `Literal`/bare-`Variable`
+arms, mixed-type payload slots and recursive or generic enums stay
+out. This is a wider admitted fragment, not deeper
+assurance: the same identity-plus-recheck scopes apply. See the
+[composite member profile](VERIFICATION_NATIVE.md#composite-struct-member-profile-v4).
+
+The C03 `mumei.pure-i64-composite/v24` source profile admits an omitted
+atom return type only when compiler inference is exactly `i64`, and
+pins v24 only when the module relies on that inference. Other inferred
+types remain rejected; native module and multifile bundle profile v27
+uses this source admission for inferred-`i64` atoms.
+
+The C03 `mumei.pure-i64-composite/v25` source profile records simple
+stateful effect declarations and atom effect annotations; `perform`
+is a value no-op in the contract, with effect containment and temporal
+conformance remaining separate verifier obligations. Native module and
+multifile bundles pin v25 sources at profile v28, while semantic-contract
+sidecar production, recheck and acceptance use CompositeV26.
+
+The C03 `mumei.pure-i64-composite/v26` profile adds read-only owned
+`[i64]` parameters with explicit in-bounds obligations and a disclosed
+nonnegative-length assumption. Native module and multifile bundle v29
+uses CompositeV26. Native translation validation maps the `{ i64, ptr }`
+ABI and fails closed on unsupported pointer uses; object-level machine TV
+remains unsupported for these signatures, so object acceptance is
+inconclusive.
+
+The C03 `mumei.pure-i64-composite/v27` profile is limited to semantic-contract
+sidecars and adds scalar-only callback parameters. Callback calls use fresh
+uninterpreted functions, check argument domains and callback preconditions as
+guarded obligations, and assume callback result domains and postconditions.
+Passing `atom_ref(g)` checks exact signature agreement and, when a callback
+contract exists, verifies contract precondition/postcondition subsumption
+using `g`'s contract rather than its body. Callback contracts accept only
+verifier positional aliases and are disclosed as
+`callback_contract_assumed_not_runtime_checked`. Unsupported callback values,
+types and call forms fail closed. Callback-free V26/V27 sidecar output remains
+byte-identical. Native bundles and translation validation remain on
+CompositeV26 and do not support callback parameters.
+
+The C03 `mumei.pure-i64-composite/v28` sidecar profile also admits omitted
+returns inferred as refined aliases over `i64`, but erases the refinement to
+the base: there is no result-predicate obligation and callers assume only the
+callee's `ensures`. Type propagation (such as `Nat + Nat`) does not prove a
+range guarantee under wrapping i64 arithmetic. Explicit refined return types
+retain their existing obligations and caller assumptions; non-i64 inferred
+aliases remain unsupported. The
+`inferred_refined_return_erased_to_base` disclosure identifies this
+interpretation. Native bundles and translation validation remain on
+CompositeV26.
+
+Remaining signature rejections after v27 (for #651), measured on develop at
+#1355 under CompositeV26: 105 `.mm` files fail with `explicit owned scalar i64
+signature required`. The classifier re-confirmed 104 of them: 71 have one
+blocker and 33 have more than one. "Only" counts files where the blocker is the
+sole cause; "Any" counts every file that has the blocker.
+
+| Blocker | Only | Any | Kind | Next step |
+|---|---:|---:|---|---|
+| `atom_ref` / fn parameter | 14 | 23 | profile | Sidecar-only v27 above; lambdas and callback values stay rejected |
+| `Str` parameter | 14 | 15 | profile, low yield | Design only, not implemented (see below) |
+| Omitted return, not inferable | 19 | 42 | type inference | Separate compiler task (see below) |
+| `[T]` beyond v26 | 13 | 31 | profile | Array returns and array call results (5), `[u32]` and other narrow elements (3), struct/enum elements (4), nested `[[i64]]` (1) |
+| `ref` / `ref mut` parameter | 4 | 19 | ownership / aliasing | `ref` on a scalar could be modeled as a value; `ref mut` needs write-back modeling. Most of these files are borrow-checker negative fixtures that the value contract cannot express |
+| Omitted return inferred as a refined alias | 4 | 8 | profile (small v24 extension) | Admit an inferred refined alias over i64 as a plain i64 return. The refinement is erased: it is not a result obligation, and callers do not assume it, because inference propagates aliases through arithmetic without checking them |
+| `[Str]` | 2 | 2 | profile | Depends on `Str` parameters |
+| Untyped parameter | 0 | 2 | language / type inference | Not a profile issue |
+| Tuple result | 1 | 1 | profile | Tuples are outside the profile; low yield |
+
+The `Str` design, if it is resumed:
+- A `Str` input is immutable UTF-8 byte memory with no interior NUL. This
+  matches the LLVM ABI, a bare pointer to a NUL-terminated buffer.
+- `len(s)` is the byte length, as `strlen` computes it, not the number of
+  Unicode scalars.
+- Only `len`, `is_empty` and comparisons against literals would be admitted.
+- Indexing a parameter stays rejected, because the verifier and codegen do not
+  share a byte model for `Str` parameters.
+- Implementation is deferred because this slice would admit 4 negative fixtures
+  and no positive file.
+
+The 84 omitted-return atoms that cannot be inferred (in 42 files) break down by
+the form of the tail expression:
+- 38 call another atom, often one whose return is also omitted. Interprocedural
+  inference would cover these.
+- 17 are `len(..)` on an array or untyped parameter. Inferring `len` as i64
+  would cover these.
+- 18 are `task` or `task_group` results. These stay outside the profile even
+  with better inference.
+- 11 are `call(f, ..)` or lambda calls. These need inference from the fn type,
+  plus v27; lambdas stay out.
+
+Most of these files are negative fixtures, so the expected gain in proved files
+is small. Measure it after the inference change.
+
+Measured after the inference change (mumei#1411, develop post-merge, under
+`CompositeV29`, same corpus — all git-tracked `.mm` files, now 698):
+`admit_pure_i64_atoms` now admits 179 files; the `explicit owned scalar i64
+signature required` bucket holds 72 files. Across those files 89 atoms omit
+their return type — the fixpoint resolves 46 to `i64` (call chains plus
+`len`), infers 2 to a non-`i64` type and leaves 41 uninferable, mostly on
+`task`/`task_group` tails and lambda/`call(f, ..)` tails — shapes that stay
+outside the profile by design. File-level, 47 of the 72 have every declared
+return in `{None, i64}` and 31 of them fully resolve to `i64` under the
+fixpoint, so an omitted return is no longer their blocker at all; the rest
+fail on co-present features (concurrency bodies, generics, refined-alias
+returns, non-i64 parameters). The residual signature gate is therefore
+feature-bound, not inference-bound; further omitted-return inference would
+admit little without those profiles.
+
+Design memos for the residual shapes measured after v27:
+- **Array returns and array call results (5 files):** implemented —
+  `mumei.pure-i64-composite/v29` plus module profile `v30` (#1409) admit
+  `-> [i64]` results on top of the fat-pointer codegen (#1403): locally
+  constructed arrays are copied into a `malloc` + `llvm.memcpy` buffer so the
+  returned `{ i64, ptr }` no longer dangles, while an array parameter
+  returned unchanged reuses the caller's pointer; callers bind call/if
+  results as arrays, and contract call sites model `len`/`store`
+  uninterpreted with `len >= 0`. Machine TV keeps `[i64]`-returning members
+  and their callers inconclusive.
+- **`[u32]` and other narrow element kinds (3 files):** 1 positive file.
+  It passes an array as a call argument, and one file uses a lambda. A
+  narrow-element read can assume the zero-extended element range. Passing
+  `[i64]` where `[u32]` is expected needs a per-element domain obligation
+  over a symbolic length, which is a quantified obligation outside the
+  bounded model. Held.
+- **Struct and enum element arrays (4 files):** 2 positive files. These need
+  array stores over datatype sorts and payload-range obligations per
+  element. Held.
+- **Nested `[[i64]]` (1 file) and `[Str]` (2 files):** held. `[Str]`
+  depends on the deferred `Str` parameter design.
+- **Tuple result (1 file):** a tuple return needs a product sort in the
+  contract and a struct-return ABI mapping. Held for a single file.
+
+Residual limitations of the bounded-loop model, common to every profile.
+`LOOP_BOUND` = 4 counts guard evaluations, including the final false one, so
+a loop exits within the bound only after at most 3 body iterations:
+- Obligations cover only inputs whose loops exit within the unroll bound.
+  The contract says nothing about inputs that need more iterations, because
+  they are outside the checked domain.
+- The module-obligation recheck rejects an empty checked domain in two
+  steps. This recheck is used by native module and multifile bundles,
+  `recheck-sidecar` and `accept-sidecar`.
+  - #1355 checks the source domain together with loop exits.
+  - #1366 checks the same domain under every postcondition hypothesis:
+    `requires`, callee `ensures` and callback assumptions.
+
+  Neither step proves that the checked domain covers every input that
+  satisfies `requires`. A partially covered domain is accepted within the
+  bound, not rejected.
+- The single-atom source recheck (zero-argument `main` bundles) checks only
+  the counterexample formula and has no empty-domain step.
+- Loop-exit terms needed to assume a callee's `ensures` are required at the
+  caller. This can reject a caller that does not need that `ensures`, which
+  fails closed.
+- An `unknown` solver result on either domain step is reported as
+  inconclusive, not accepted.
+
+`mumei build --semantic-contract` is an opt-in production sidecar. It binds the
+exact emitted `.ll` bytes by SHA-256 only; correspondence remains unchecked,
+and it is not default output. `mumei evidence recheck-sidecar` freshly checks
+caller-supplied source extraction and module obligations as a diagnostic only.
+`mumei evidence accept-sidecar` emits a bounded acceptance descriptor and can
+bind a producer signature to the exact sidecar bytes, but neither command
+establishes source-to-LLVM correspondence or artifact semantics.
+
+The Evidence v1 record now carries an optional `produced_at` field —
+slice 2 of the mumei-agent issue #894 design memo. `evidence
+verify-source --produced-at <RFC 3339>` stamps a caller-declared
+timestamp onto the emitted record; the flag is opt-in and the value
+is never read from the system clock, so production stays
+reproducible. Validation is strict RFC 3339 at the byte level:
+`YYYY-MM-DD[Tt]hh:mm:ss[.f+](Z|z|±hh:mm)` with range checks (month
+1–12, day 1–31, hour ≤ 23, minute ≤ 59, second ≤ 60, offset hour
+≤ 23 / minute ≤ 59); non-ASCII digits, date-only, missing offsets
+and unseparated offsets fail closed. Because the stamp is part of
+the record bytes, a `verify-source` recheck must declare the same
+`produced_at` or the saved record is inconsistent. The standalone
+JSON schema and the shared Core gate accept the optional field
+identically, so records without it are byte-identical to before.
+Freshness, clock authenticity and producer-time authenticity are
+still claims: stamping declares, it does not authenticate — that
+binding waits on producer-side signing. `native-bundle` evidence
+production keeps omitting the field.
 
 ## Related Documents
 
@@ -2788,5 +3936,5 @@ templates are:
 - [`docs/CONCURRENCY.md`](CONCURRENCY.md) — Structured concurrency (Phase D foundation)
 - [`docs/STDLIB.md`](STDLIB.md) — Standard library reference (Phase B/C additions)
 - [`docs/TOOLCHAIN.md`](TOOLCHAIN.md) — CLI commands and distribution
-- [`instruction.md`](../instruction.md) — Development guidelines and priorities
+- [`instruction.md`](instruction.md) — Development guidelines and priorities
 - [`docs/CROSS_PROJECT_ROADMAP.md`](CROSS_PROJECT_ROADMAP.md) — Cross-project roadmap for mumei + mumei-agent (2026-03〜)

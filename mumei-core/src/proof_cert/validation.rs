@@ -15,10 +15,23 @@ pub enum LeanAxiomAudit {
     Unaudited,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeanDualCheck {
+    Absent,
+    Passed,
+    Stale,
+    AxiomRejected,
+    NotVerified,
+}
+
 pub fn lean_axiom_audit(atom: &AtomCertificate) -> LeanAxiomAudit {
     let Some(metadata) = lean_result_metadata(atom) else {
         return LeanAxiomAudit::Unaudited;
     };
+    lean_axiom_audit_for_metadata(metadata)
+}
+
+fn lean_axiom_audit_for_metadata(metadata: &LeanResultMetadata) -> LeanAxiomAudit {
     let disallowed = metadata
         .kernel_axioms
         .as_deref()
@@ -246,6 +259,17 @@ pub fn verify_certificate_in_env(
                                     current.entry(key).or_insert(hash);
                                 }
                             }
+                            for key in expected.keys() {
+                                if !current.contains_key(key) {
+                                    if let Some(name) = key.strip_prefix("resource:") {
+                                        if let Some(hash) =
+                                            crate::resolver::resource_dependency_hash(name, env)
+                                        {
+                                            current.insert(key.clone(), hash);
+                                        }
+                                    }
+                                }
+                            }
                             for (key, hash) in expected {
                                 match current.get(key) {
                                     Some(current_hash) if current_hash != hash => {
@@ -255,6 +279,19 @@ pub fn verify_certificate_in_env(
                                     None => unchecked_dependencies.push(key.clone()),
                                 }
                             }
+                            unchecked_dependencies.extend(
+                                current
+                                    .keys()
+                                    .filter(|key| {
+                                        (key.starts_with("effect:")
+                                            || key.starts_with("enum:")
+                                            || key.starts_with("resource:")
+                                            || key.starts_with("struct:")
+                                            || key.starts_with("type:"))
+                                            && !expected.contains_key(*key)
+                                    })
+                                    .cloned(),
+                            );
                         } else {
                             unchecked_dependencies.push(format!("atom:{}", ac.name));
                         }
@@ -322,10 +359,38 @@ pub fn lean_translator_metadata_is_current(atom: &AtomCertificate) -> bool {
     let Some(metadata) = lean_result_metadata(atom) else {
         return false;
     };
+    lean_result_metadata_is_current(metadata)
+}
+
+fn lean_result_metadata_is_current(metadata: &LeanResultMetadata) -> bool {
     metadata.status == status::LEAN_STATUS_VERIFIED
         && !metadata.theorem_name.is_empty()
         && metadata.translator_version == verification::LEAN_TRANSLATOR_VERSION
         && metadata.bridge_lemma_hash == verification::LEAN_BRIDGE_LEMMA_HASH
+}
+
+pub fn lean_dual_check_status(atom: &AtomCertificate) -> LeanDualCheck {
+    let Some(metadata) = atom.lean_dual_check.as_ref() else {
+        return LeanDualCheck::Absent;
+    };
+    if metadata.status != status::LEAN_STATUS_VERIFIED || metadata.theorem_name.is_empty() {
+        return LeanDualCheck::NotVerified;
+    }
+    if !lean_result_metadata_is_current(metadata) {
+        return LeanDualCheck::Stale;
+    }
+    match lean_axiom_audit_for_metadata(metadata) {
+        LeanAxiomAudit::Passed { .. }
+            if metadata.axiom_audit.as_deref() == Some("passed")
+                && metadata.kernel_axioms.is_some() =>
+        {
+            LeanDualCheck::Passed
+        }
+        LeanAxiomAudit::Passed { .. }
+        | LeanAxiomAudit::Rejected { .. }
+        | LeanAxiomAudit::Error
+        | LeanAxiomAudit::Unaudited => LeanDualCheck::AxiomRejected,
+    }
 }
 
 /// Validate that an atom certificate matches the expected Lean translator bridge.
@@ -453,6 +518,112 @@ pub fn get_required_lowering_rules(logic_fragment_tags: &[String]) -> Vec<String
     rules.sort();
     rules.dedup();
     rules
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::{self, Item};
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn expected_resource_keys_are_resolved_from_the_environment() {
+        let mut atom = parser::parse_module(
+            "atom c_fn() -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: 0;",
+        )
+        .into_iter()
+        .find_map(|item| match item {
+            Item::Atom(atom) => Some(atom),
+            _ => None,
+        })
+        .expect("parse C atom");
+        atom.spec_metadata
+            .insert("source_file".to_string(), "/c.mm".to_string());
+
+        let resource = parser::parse_module(
+            "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;",
+        )
+        .into_iter()
+        .find_map(|item| match item {
+            Item::ResourceDef(resource) => Some(resource),
+            _ => None,
+        })
+        .expect("parse B resource");
+        let mut env = ModuleEnv::default();
+        env.register_resource_with_origin(&resource, Some("/b.mm"));
+        env.import_closure
+            .insert("/c.mm".to_string(), BTreeSet::new());
+
+        let resource_hash =
+            crate::resolver::resource_dependency_hash("counter", &env).expect("resource hash");
+        let content_hash = compute_atom_content_hash_for_version(
+            super::super::generation::CERTIFICATE_VERSION,
+            &atom,
+        )
+        .expect("current atom hash");
+        let certificate = |hash: &str| {
+            serde_json::from_value(serde_json::json!({
+                "version": super::super::generation::CERTIFICATE_VERSION,
+                "timestamp": "",
+                "z3_version": "",
+                "file": "/c.mm",
+                "atoms": [{
+                    "name": "c_fn",
+                    "z3_check_result": "unsat",
+                    "content_hash": content_hash,
+                    "status": "verified",
+                    "dependency_hashes": {
+                        "resource:counter": hash
+                    }
+                }]
+            }))
+            .expect("deserialize certificate")
+        };
+
+        let matching = certificate(&resource_hash);
+        let matching_check = verify_certificate_in_env(&matching, &[&atom], false, Some(&env));
+        assert_eq!(matching_check[0].status, status::CERTIFICATE_PROVEN);
+
+        let changed = certificate("changed-resource-hash");
+        let changed_check = verify_certificate_in_env(&changed, &[&atom], false, Some(&env));
+        assert_eq!(
+            changed_check[0].status,
+            status::CERTIFICATE_DEPENDENCY_CHANGED
+        );
+        assert_eq!(
+            changed_check[0].changed_dependencies,
+            vec!["resource:counter".to_string()]
+        );
+
+        let missing: ProofCertificate = serde_json::from_value(serde_json::json!({
+            "version": super::super::generation::CERTIFICATE_VERSION,
+            "timestamp": "",
+            "z3_version": "",
+            "file": "/c.mm",
+            "atoms": [{
+                "name": "c_fn",
+                "z3_check_result": "unsat",
+                "content_hash": content_hash,
+                "status": "verified",
+                "dependency_hashes": {
+                    "resource:missing": "expected-hash"
+                }
+            }]
+        }))
+        .expect("deserialize certificate with unknown resource");
+        let missing_check = verify_certificate_in_env(&missing, &[&atom], false, Some(&env));
+        assert_eq!(
+            missing_check[0].status,
+            status::CERTIFICATE_DEPENDENCY_UNCHECKED
+        );
+        assert_eq!(
+            missing_check[0].unchecked_dependencies,
+            vec!["resource:missing".to_string()]
+        );
+    }
 }
 
 pub fn validate_certificate_translator_versions(cert: &ProofCertificate) -> Result<(), String> {

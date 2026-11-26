@@ -5,64 +5,112 @@ use super::*;
 use crate::lowering::{lower, LoweredType};
 use serde_json::json;
 
+fn parse_closed_requires_expression(raw: &str) -> MumeiResult<Expr> {
+    crate::parser::parse_expression_checked(raw).map_err(|failures| {
+        MumeiError::verification(format!(
+            "requires expression '{}' is not closed: {}",
+            raw,
+            failures.join("; ")
+        ))
+    })
+}
+
 pub(crate) fn apply_refinement_constraint<'a>(
     vc: &VCtx<'a>,
     solver: &Solver<'a>,
     var_name: &str,
     refined: &RefinedType,
+    module_env: &crate::verification::module_env::ModuleEnv,
     global_env: &mut Env<'a>,
 ) -> MumeiResult<()> {
     let ctx = vc.ctx;
-    // Type System 2.0: ベース型に基づいて変数を生成
-    let var_z3: Dynamic = match refined._base_type.as_str() {
-        // f64 エンコーディング（デフォルト Real、`--ieee754-f64` で
-        // Float）に合わせ、パラメータ側の `param_z3_value` と同一
-        // ソートにする。
-        "f64" if vc.ieee754_f64 => Float::new_const(ctx, var_name, 11, 53).into(),
-        "f64" => Real::new_const(ctx, var_name).into(),
-        "u64" => {
-            let v = Int::new_const(ctx, var_name);
+    // A refined type may name another declaration as its base
+    // (`type Small = Pos where v < 10;`): every ancestor's predicate is a
+    // conjunct of the alias, so the operand must satisfy the whole chain —
+    // applying only the immediate declaration would silently drop the
+    // ancestor's constraints. A cyclic base is a type error, not an alias
+    // carrying no constraints.
+    let chain = module_env
+        .refined_chain(&refined.name)
+        .map_err(|cycle| MumeiError::type_error_at(cycle, refined.span.clone()))?;
+    // Type System 2.0: ベース型に基づいて変数を生成 — the chain's leaf base
+    // name decides the encoding (a chained alias's `_base_type` is the next
+    // declaration, not a scalar).
+    // The 64-bit target's width-typed leaf folds onto its machine base:
+    // `usize` carries `u64`'s unsigned domain (`resolve_base_type`
+    // folds the same way), so a `usize`-based refinement binds Int and
+    // gets the nonneg constraint exactly like a `u64` leaf.
+    let leaf_base = match chain.last().map_or("", |decl| decl._base_type.as_str()) {
+        "usize" => "u64",
+        other => other,
+    };
+    // Reuse the caller's binding when present: a concrete assignment must
+    // stay concrete so the chain predicates actually filter it — rebinding
+    // to a fresh symbolic const would let an out-of-domain input satisfy
+    // the precondition check (and in the symbolic path the binding is the
+    // same name+sort anyway, i.e. the identical z3 const).
+    let var_z3: Dynamic = match global_env.get(var_name) {
+        Some(existing) => existing.clone(),
+        None => match leaf_base {
+            // f64 エンコーディング（デフォルト Real、`--ieee754-f64` で
+            // Float）に合わせ、パラメータ側の `param_z3_value` と同一
+            // ソートにする。
+            "f64" if vc.ieee754_f64 => Float::new_const(ctx, var_name, 11, 53).into(),
+            "f64" => Real::new_const(ctx, var_name).into(),
+            "u64" => Int::new_const(ctx, var_name).into(),
+            // Plan 9-7: Str base type uses Z3 String Sort for refinement constraints
+            "Str" => Z3String::new_const(ctx, var_name).into(),
+            // A refined `i64` keeps the encoding of the run, so a refinement alias
+            // does not silently return an overflow-sensitive parameter to the
+            // unbounded `Int` encoding.
+            "i64" if vc.bitvec_i64 => BV::new_const(ctx, var_name, I64_BITS).into(),
+            "bool" => Bool::new_const(ctx, var_name).into(),
+            _ => Int::new_const(ctx, var_name).into(),
+        },
+    };
+
+    // u64 parameters are non-negative regardless of whether the binding was
+    // reused or freshly minted — a concrete negative input must fail this
+    // assertion just as a symbolic one is constrained by it.
+    if leaf_base == "u64" {
+        if let Some(v) = var_z3.as_int() {
             let track_u64 = Bool::new_const(ctx, format!("track_u64_nonneg_{}", var_name).as_str());
             solver.assert_and_track(&v.ge(&Int::from_i64(ctx, 0)), &track_u64);
             profile_solver_assertion(vc, &format!("u64_nonneg_{}", var_name), None);
-            v.into()
         }
-        // Plan 9-7: Str base type uses Z3 String Sort for refinement constraints
-        "Str" => Z3String::new_const(ctx, var_name).into(),
-        // A refined `i64` keeps the encoding of the run, so a refinement alias
-        // does not silently return an overflow-sensitive parameter to the
-        // unbounded `Int` encoding.
-        "i64" if vc.bitvec_i64 => BV::new_const(ctx, var_name, I64_BITS).into(),
-        _ => Int::new_const(ctx, var_name).into(),
-    };
+    }
 
     global_env.insert(var_name.to_string(), var_z3.clone());
 
-    let mut local_env = global_env.clone();
-    local_env.insert(refined.operand.clone(), var_z3);
+    // Assert every conjunct in the chain — each declaration names its own
+    // operand, and each binds to the same z3 variable.
+    for decl in chain {
+        let mut local_env = global_env.clone();
+        local_env.insert(decl.operand.clone(), var_z3.clone());
 
-    let predicate_ast = parse_expression(&refined.predicate_raw);
-    let predicate_z3 = expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
-        .as_bool()
-        .ok_or(
-            MumeiError::type_error_at(
-                format!("Predicate for {} must be boolean", refined.name),
-                refined.span.clone(),
-            )
-            .with_help(format!(
-                "型 '{}' の制約が boolean 式である必要があります",
-                refined.name
-            )),
-        )?;
+        let predicate_ast = parse_expression(&decl.predicate_raw);
+        let predicate_z3 = refined_predicate_to_z3(vc, decl, &predicate_ast, &mut local_env, None)?
+            .as_bool()
+            .ok_or(
+                MumeiError::type_error_at(
+                    format!("Predicate for {} must be boolean", decl.name),
+                    decl.span.clone(),
+                )
+                .with_help(format!(
+                    "型 '{}' の制約が boolean 式である必要があります",
+                    decl.name
+                )),
+            )?;
 
-    let track_label = format!("track_refined_type_{}::{}", var_name, refined.name);
-    let track_bool = Bool::new_const(ctx, track_label.as_str());
-    solver.assert_and_track(&predicate_z3, &track_bool);
-    profile_solver_assertion(
-        vc,
-        &format!("refined_type_{}::{}", var_name, refined.name),
-        Some(refined.span.to_string()),
-    );
+        let track_label = format!("track_refined_type_{}::{}", var_name, decl.name);
+        let track_bool = Bool::new_const(ctx, track_label.as_str());
+        solver.assert_and_track(&predicate_z3, &track_bool);
+        profile_solver_assertion(
+            vc,
+            &format!("refined_type_{}::{}", var_name, decl.name),
+            Some(decl.span.to_string()),
+        );
+    }
     Ok(())
 }
 
@@ -108,29 +156,29 @@ pub(crate) fn check_contract_subsumption<'a>(
     let mut param_values = Vec::with_capacity(concrete_atom.params.len());
     let mut array_len_constraints = Vec::new();
     for (i, param) in concrete_atom.params.iter().enumerate() {
-        let z3_var = param_z3_value(
-            ctx,
+        let z3_var = crate::verification::support::datatype::param_z3_value_for_vc(
+            vc,
             &format!("__sub_{}", param.name),
             param.type_name.as_deref(),
-            vc.module_env,
-            vc.ieee754_f64,
-            vc.bitvec_i64,
         );
         if param
             .type_name
             .as_deref()
             .is_some_and(|type_name| type_name.trim_start().starts_with('['))
         {
-            let len = array_len_symbol(ctx, &format!("__sub_len_{}", param.name), vc.bitvec_i64);
+            let root_name = format!("__sub_{}", param.name);
+            let len = array_root_len_symbol(ctx, &root_name, vc.bitvec_i64);
             if let Some(nonneg) = nonneg_constraint(ctx, &len) {
                 array_len_constraints.push(nonneg);
             }
-            concrete_env.insert(format!("len_{}", param.name), len.clone());
-            contract_env.insert(format!("len_arg{i}"), len.clone());
+            concrete_env.insert(array_len_key(&param.name), len.clone());
+            concrete_env.insert(array_root_len_key(&root_name), len.clone());
+            contract_env.insert(array_len_key(&format!("arg{i}")), len.clone());
+            contract_env.insert(array_root_len_key(&root_name), len.clone());
             if i == 0 {
-                contract_env.insert("len_x".to_string(), len.clone());
+                contract_env.insert(array_len_key("x"), len.clone());
             } else if i == 1 {
-                contract_env.insert("len_y".to_string(), len.clone());
+                contract_env.insert(array_len_key("y"), len.clone());
             }
         }
         param_values.push(z3_var.clone());
@@ -148,13 +196,10 @@ pub(crate) fn check_contract_subsumption<'a>(
     }
 
     // Create a fresh symbolic result that both ensures clauses reference.
-    let result_var = param_z3_value(
-        ctx,
+    let result_var = crate::verification::support::datatype::param_z3_value_for_vc(
+        vc,
         "__sub_result",
         concrete_atom.return_type.as_deref(),
-        vc.module_env,
-        vc.ieee754_f64,
-        vc.bitvec_i64,
     );
     concrete_env.insert("result".to_string(), result_var.clone());
     contract_env.insert("result".to_string(), result_var);
@@ -189,13 +234,14 @@ pub(crate) fn check_contract_subsumption<'a>(
     let concrete_requires = crate::verification::caller_requires_obligation(concrete_atom);
     let concrete_req = concrete_requires.trim();
     let requires_bool_opt = if concrete_req != "true" && !concrete_req.is_empty() {
-        let req_ast = parse_expression(concrete_req);
-        let value = expr_to_z3(vc, &req_ast, &mut concrete_env, None).map_err(|error| {
-            MumeiError::verification(format!(
-                "Contract subsumption could not lower {}.requires: {}",
-                concrete_atom.name, error
-            ))
-        })?;
+        let req_ast = parse_closed_requires_expression(concrete_req)?;
+        let value = expr_to_z3_with_domain_obligations(vc, &req_ast, &mut concrete_env, None)
+            .map_err(|error| {
+                MumeiError::verification(format!(
+                    "Contract subsumption could not lower {}.requires: {}",
+                    concrete_atom.name, error
+                ))
+            })?;
         Some(value.as_bool().ok_or_else(|| {
             MumeiError::verification(format!(
                 "Contract subsumption requires '{}' to be boolean",
@@ -208,13 +254,14 @@ pub(crate) fn check_contract_subsumption<'a>(
 
     let contract_req = contract_requires.unwrap_or("true").trim();
     let contract_requires_bool_opt = if contract_req != "true" && !contract_req.is_empty() {
-        let req_ast = parse_expression(contract_req);
-        let value = expr_to_z3(vc, &req_ast, &mut contract_env, None).map_err(|error| {
-            MumeiError::verification(format!(
-                "Contract subsumption could not lower contract requires '{}': {}",
-                contract_req, error
-            ))
-        })?;
+        let req_ast = parse_closed_requires_expression(contract_req)?;
+        let value = expr_to_z3_with_domain_obligations(vc, &req_ast, &mut contract_env, None)
+            .map_err(|error| {
+                MumeiError::verification(format!(
+                    "Contract subsumption could not lower contract requires '{}': {}",
+                    contract_req, error
+                ))
+            })?;
         Some(value.as_bool().ok_or_else(|| {
             MumeiError::verification(format!(
                 "Contract subsumption contract requires '{}' must be boolean",
@@ -268,22 +315,24 @@ pub(crate) fn check_contract_subsumption<'a>(
     );
     let concrete_ens_ast = parse_expression(&concrete_ensures);
     let concrete_ens_z3 =
-        expr_to_z3(vc, &concrete_ens_ast, &mut concrete_env, None).map_err(|error| {
-            MumeiError::verification(format!(
-                "Contract subsumption could not lower {}.ensures: {}",
-                concrete_atom.name, error
-            ))
-        })?;
+        expr_to_z3_with_domain_obligations(vc, &concrete_ens_ast, &mut concrete_env, None)
+            .map_err(|error| {
+                MumeiError::verification(format!(
+                    "Contract subsumption could not lower {}.ensures: {}",
+                    concrete_atom.name, error
+                ))
+            })?;
 
     // Parse and evaluate the contract's ensures.
     let contract_ens_ast = parse_expression(contract_ensures);
     let contract_ens_z3 =
-        expr_to_z3(vc, &contract_ens_ast, &mut contract_env, None).map_err(|error| {
-            MumeiError::verification(format!(
-                "Contract subsumption could not lower contract ensures '{}': {}",
-                contract_ensures, error
-            ))
-        })?;
+        expr_to_z3_with_domain_obligations(vc, &contract_ens_ast, &mut contract_env, None)
+            .map_err(|error| {
+                MumeiError::verification(format!(
+                    "Contract subsumption could not lower contract ensures '{}': {}",
+                    contract_ensures, error
+                ))
+            })?;
 
     // Both must be booleans for an implication check.
     let (concrete_bool, contract_bool) =

@@ -31,3 +31,15 @@ atom outer_assign_still_folds(p: Pair) -> i64
     let r = match p { Pair::P(q, b) => { x = 7; q + b } }
     x
   }
+
+// First-match precedence for arm writes: an earlier arm's assignment must
+// override a later arm's, so post-match `y` is 5 when x == 1 (not the
+// trailing `_` arm's 7).
+atom earlier_arm_write_wins(x: i64) -> i64
+  requires: x >= 0 && x <= 2;
+  ensures: x != 1 || result == 5;
+  body: {
+    let y = 0
+    let r = match x { 1 => { y = 5; y }, _ => { y = 7; y } }
+    y
+  }

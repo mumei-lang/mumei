@@ -3,13 +3,17 @@ pub(crate) mod build;
 pub(crate) mod charter;
 pub(crate) mod check;
 pub(crate) mod claims;
+pub(crate) mod config;
 pub(crate) mod controls;
 pub(crate) mod doc;
 pub(crate) mod erosion;
+pub(crate) mod evidence;
 pub(crate) mod infer;
 pub(crate) mod init;
+mod input;
 pub(crate) mod inspect;
 pub(crate) mod list;
+pub(crate) mod native_bundle;
 pub(crate) mod observe;
 pub(crate) mod proof_store;
 pub(crate) mod publish;
@@ -18,3 +22,6 @@ pub(crate) mod run;
 pub(crate) mod verify;
 pub(crate) mod verify_cert;
 pub(crate) mod verify_sarif;
+
+pub(crate) const SEMANTIC_CONTRACT_SIDECAR_SCHEMA_VERSION: &str =
+    "mumei.semantic-contract-sidecar/v1";

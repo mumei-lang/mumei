@@ -594,7 +594,7 @@ pub(crate) fn save_effect_violation_report(
     required_effect: &str,
     source_operation: &str,
     suggested_fixes: &[String],
-) {
+) -> serde_json::Value {
     let mut report = json!({
         "status": "failed",
         "atom": atom_name,
@@ -633,6 +633,7 @@ pub(crate) fn save_effect_violation_report(
         output_dir.join("report.json"),
         serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string()),
     );
+    report
 }
 
 /// Save an effect propagation violation report to report.json for self-healing integration.

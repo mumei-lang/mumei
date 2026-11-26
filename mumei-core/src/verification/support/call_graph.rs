@@ -50,6 +50,7 @@ pub(crate) fn verify_atom_invariant(
         linearity_ctx: None,
         inferred_invariants: None,
         cover_obligations: None,
+        spec_domain_obligations: Default::default(),
         effect_ctx: None,
         constraint_count: None,
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
@@ -63,19 +64,28 @@ pub(crate) fn verify_atom_invariant(
         bitvec_i64,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_struct_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_fields: Default::default(),
         contracts_in_instantiation: std::cell::RefCell::new(Vec::new()),
+        instantiation_params: std::cell::RefCell::new(Vec::new()),
         recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
 
         bitvec_i64_global: false,
+
+        check_i64_overflow: std::cell::Cell::new(false),
+
+        local_int_types: Default::default(),
+        refined_operand_types: Default::default(),
     };
 
     let mut env: Env = HashMap::new();
@@ -88,14 +98,31 @@ pub(crate) fn verify_atom_invariant(
             param.type_name.as_deref(),
         );
         env.insert(param.name.clone(), var);
+        crate::verification::translator::z3_types::seed_struct_array_param_leaves(
+            &vc,
+            &param.name,
+            param.type_name.as_deref(),
+            &mut env,
+        );
 
         // 精緻型制約も適用
         if let Some(type_name) = &param.type_name {
             if let Some(refined) = module_env.get_type(type_name) {
-                apply_refinement_constraint(&vc, &solver, &param.name, refined, &mut env)?;
+                apply_refinement_constraint(
+                    &vc,
+                    &solver,
+                    &param.name,
+                    refined,
+                    module_env,
+                    &mut env,
+                )?;
             }
         }
     }
+
+    // Widened integer payload leaves inside enum-typed params carry the
+    // same declared-width domain the verify path asserts.
+    super::datatype::assert_enum_value_domains(&vc, &solver, &env);
 
     // invariant 式をパース
     let inv_ast = parse_expression(invariant_raw);
@@ -114,7 +141,7 @@ pub(crate) fn verify_atom_invariant(
     // requires → invariant を証明する
     if atom.requires.trim() != "true" {
         let req_ast = parse_expression(&atom.requires);
-        let req_z3 = expr_to_z3(&vc, &req_ast, &mut env, None)?;
+        let req_z3 = expr_to_z3_with_domain_obligations(&vc, &req_ast, &mut env, None)?;
         if let Some(req_bool) = req_z3.as_bool() {
             solver.push();
             // requires を仮定
@@ -168,7 +195,7 @@ pub(crate) fn verify_atom_invariant(
         // requires も仮定
         if atom.requires.trim() != "true" {
             let req_ast = parse_expression(&atom.requires);
-            let req_z3 = expr_to_z3(&vc, &req_ast, &mut env, None)?;
+            let req_z3 = expr_to_z3_with_domain_obligations(&vc, &req_ast, &mut env, None)?;
             if let Some(req_bool) = req_z3.as_bool() {
                 solver.assert(&req_bool);
             }
@@ -207,7 +234,9 @@ pub(crate) fn verify_atom_invariant(
     solver.push();
     if atom.requires.trim() != "true" {
         let req_ast = parse_expression(&atom.requires);
-        if let Some(req_bool) = expr_to_z3(&vc, &req_ast, &mut env, None)?.as_bool() {
+        if let Some(req_bool) =
+            expr_to_z3_with_domain_obligations(&vc, &req_ast, &mut env, None)?.as_bool()
+        {
             solver.assert(&req_bool);
         }
     }
@@ -243,6 +272,7 @@ pub(crate) fn expr_to_source_string(expr: &Expr) -> String {
                 Op::Sub => "-",
                 Op::Mul => "*",
                 Op::Div => "/",
+                Op::Rem => "%",
                 Op::Eq => "==",
                 Op::Neq => "!=",
                 Op::Gt => ">",

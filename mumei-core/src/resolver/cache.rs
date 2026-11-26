@@ -1,4 +1,5 @@
-use crate::parser::ast::Atom;
+use crate::ast::TypeRef;
+use crate::parser::{parse_body_expr, Atom, Expr, Pattern, Stmt};
 use crate::verification::ModuleEnv;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -45,7 +46,50 @@ use std::path::Path;
 /// double-declaration rejected), so previously-verifying programs that
 /// reuse an argument after calling a signature-`consume` callee may now
 /// fail verification and cached results must be re-derived.
-pub const VERIFIER_POLICY_VERSION: u32 = 17;
+/// Version 18 encodes `u64` leaves as machine words (`BV(64)`, unsigned
+/// comparisons and `udiv`/`urem`/`lshr`) instead of unbounded `Int`s: a
+/// `u64` atom verified under version 17 proved wrap-sensitive clauses like
+/// `a + 1 > a` that the compiled code cannot satisfy, so cached `u64`
+/// verdicts must be re-derived.
+/// Version 19 makes the int-model `/` truncate toward zero (the `sdiv`
+/// the emitted IR uses — #781) instead of Z3's Euclidean `div`: a
+/// clause like `-7 / 2 == -4` that verified under version 18 is now
+/// refuted, so every int-model verdict must be re-derived.
+/// Version 20 models tag-gated direct enum payload reads (`e.port`,
+/// `b.e.port`, `e.p.inner.x`) as datatype selectors instead of flattened-key
+/// or unconstrained values, so cached verdicts must be re-derived.
+/// Version 21 materializes struct-valued named enum payload reads (`e.p`,
+/// `e.p.inner`) as struct handles over datatype selectors when each owning tag
+/// is proven, so cached verdicts must be re-derived.
+/// Version 22 havocs stale binding-keyed struct projections when rebinding to
+/// a value whose enum payload tag is unproven, so cached verdicts must be
+/// re-derived.
+/// Version 23 registers nested struct projections under fresh loop-havoced
+/// handles, allowing invariant-backed nested aliases to use post-loop fields,
+/// so cached verdicts must be re-derived.
+/// Version 24 keeps array types out of canonical struct binding detection,
+/// preventing array element fields from becoming struct projection slots, so
+/// cached verdicts must be re-derived.
+/// Version 33 rejects calls where later argument evaluation may mutate an
+/// array root passed by an earlier argument, matching runtime buffer aliasing.
+/// Version 35 uses recursive datatype selectors for scalar payload access and
+/// rejects writes that traverse a recursive self field. Version 36 admits
+/// finite enum and scalar-struct payloads on direct-self-recursive enums and
+/// re-derives cached verdicts after fixed-width refined-predicate comparisons
+/// preserve unsigned u64 semantics.
+/// Version 37 checks fixed-width payload domains when constructing finite and
+/// direct-self-recursive enum values, so cached verdicts must be re-derived.
+/// Version 38 binds refined predicates to their declared operand and rejects
+/// free identifiers, so cached verdicts must be re-derived.
+/// Version 40 compares struct-array equality through its leaf arrays and
+/// includes the carrier in loop havoc, so cached verdicts must be re-derived.
+/// Version 41 havocs every struct-array leaf after a potentially writing call,
+/// so cached verdicts must be re-derived.
+/// Version 42 represents struct-array enum payloads with leaf arrays and rejects
+/// direct reads, so cached verdicts must be re-derived.
+/// Version 43 admits bounded, inhabited mutual-recursive enum groups as Z3 datatypes.
+/// Version 44 preserves explicit comparison grouping and rejects nested middle-chain comparisons.
+pub const VERIFIER_POLICY_VERSION: u32 = 44;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -198,6 +242,11 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
         hasher.update(b"|max_unroll:");
         hasher.update(max.to_string().as_bytes());
     }
+    // str_bound も含める（composite admission の変更を検出）
+    if let Some(bound) = atom.str_bound {
+        hasher.update(b"|str_bound:");
+        hasher.update(bound.to_string().as_bytes());
+    }
     format!("{:x}", hasher.finalize())
 }
 
@@ -327,22 +376,24 @@ pub fn compute_proof_hash_with_flags(
         hasher.update(b"|resource:");
         hasher.update(r.as_bytes());
         if let Some(resource) = module_env.get_resource(r) {
-            hasher.update(b"|priority:");
-            hasher.update(resource.priority.to_string().as_bytes());
-            hasher.update(b"|mode:");
-            hasher.update(format!("{:?}", resource.mode).as_bytes());
-            for field in &resource.state {
-                hasher.update(b"|state:");
-                hasher.update(field.name.as_bytes());
-                hasher.update(b":");
-                hasher.update(field.ty.as_bytes());
-            }
-            if let Some(invariant) = &resource.invariant {
-                hasher.update(b"|resource_invariant:");
-                hasher.update(
-                    crate::verification::support::expr_to_source_string(invariant).as_bytes(),
-                );
-            }
+            hash_resource_definition(&mut hasher, resource);
+        }
+    }
+    for resource_name in body_acquired_resource_names(atom) {
+        if atom.resources.contains(&resource_name) {
+            continue;
+        }
+        hasher.update(b"|acquired_resource:");
+        hasher.update(resource_name.as_bytes());
+        if let Some(resource) = module_env.get_resource(&resource_name) {
+            hash_resource_definition(&mut hasher, resource);
+        }
+    }
+    for resource_name in module_env.resources.keys().collect::<BTreeSet<_>>() {
+        if let Some(resource) = module_env.get_resource(resource_name) {
+            hasher.update(b"|module_resource:");
+            hasher.update(resource_name.as_bytes());
+            hash_resource_definition(&mut hasher, resource);
         }
     }
     for e in &atom.effects {
@@ -462,19 +513,36 @@ pub fn compute_proof_hash_with_flags(
     for name in struct_names {
         hash_struct_contract(&mut hasher, name, module_env);
     }
+    // Enum declarations affect verdicts the atom text does not capture —
+    // match exhaustiveness, variant ownership and, for generic enums,
+    // which `E<...>` instances exist (constructor/pattern disambiguation
+    // is sensitive to the instance set). Hash the whole enum environment
+    // so an identical atom in a different enum context cannot replay a
+    // stale verdict.
+    let mut enum_names: Vec<&String> = module_env.enums.keys().collect();
+    enum_names.sort();
+    for name in enum_names {
+        hash_enum_contract(&mut hasher, name, module_env);
+    }
+    let mut refined_type_names: Vec<&String> = module_env.types.keys().collect();
+    refined_type_names.sort();
+    for name in refined_type_names {
+        if let Some(refined) = module_env.types.get(name) {
+            hasher.update(b"|type_def:");
+            hasher.update(name.as_bytes());
+            hasher.update(b"|");
+            hash_field(&mut hasher, "type_def.operand", &refined.operand);
+            hash_field(&mut hasher, "type_def.base", &refined._base_type);
+            hash_field(&mut hasher, "type_def.predicate", &refined.predicate_raw);
+        }
+    }
 
     // 3. Include callee signatures (transitive dependencies)
     let mut visited = HashSet::new();
     let mut stack = Vec::new();
 
     // Collect direct callees (sorted for deterministic hashing)
-    let mut effect_names: BTreeSet<String> = atom
-        .effects
-        .iter()
-        .map(|effect| effect.name.clone())
-        .collect();
-    effect_names.extend(atom.effect_pre.keys().cloned());
-    effect_names.extend(atom.effect_post.keys().cloned());
+    let mut effect_names = atom_effect_names(atom);
     let mut sorted_callees: Vec<String> = proof_hash_callee_names(atom, module_env)
         .into_iter()
         .collect();
@@ -490,11 +558,10 @@ pub fn compute_proof_hash_with_flags(
         }
         if let Some(callee_atom) = module_env.get_atom(&callee_name) {
             hash_callee_contract(&mut hasher, callee_atom, module_env, true);
+            hash_trait_method_constraints(&mut hasher, callee_atom, module_env);
             hash_string_map(&mut hasher, "effect_pre", &callee_atom.effect_pre);
             hash_string_map(&mut hasher, "effect_post", &callee_atom.effect_post);
-            effect_names.extend(callee_atom.effects.iter().map(|effect| effect.name.clone()));
-            effect_names.extend(callee_atom.effect_pre.keys().cloned());
-            effect_names.extend(callee_atom.effect_post.keys().cloned());
+            effect_names.extend(atom_effect_names(callee_atom));
             let mut sorted_further: Vec<String> = proof_hash_callee_names(callee_atom, module_env)
                 .into_iter()
                 .collect();
@@ -507,8 +574,30 @@ pub fn compute_proof_hash_with_flags(
         }
     }
 
+    for name in collect_effect_def_closure(effect_names, module_env) {
+        if let Some(effect_def) = module_env.effect_defs.get(&name) {
+            hash_effect_def(&mut hasher, effect_def);
+        }
+    }
+
+    format!("{:x}", hasher.finalize())
+}
+
+fn atom_effect_names(atom: &Atom) -> BTreeSet<String> {
+    atom.effects
+        .iter()
+        .map(|effect| effect.name.clone())
+        .chain(atom.effect_pre.keys().cloned())
+        .chain(atom.effect_post.keys().cloned())
+        .collect()
+}
+
+fn collect_effect_def_closure(
+    names: impl IntoIterator<Item = String>,
+    module_env: &ModuleEnv,
+) -> BTreeSet<String> {
     let mut effect_def_names = BTreeSet::new();
-    let mut effect_def_stack: Vec<String> = effect_names.into_iter().collect();
+    let mut effect_def_stack: Vec<String> = names.into_iter().collect();
     while let Some(name) = effect_def_stack.pop() {
         if !effect_def_names.insert(name.clone()) {
             continue;
@@ -518,109 +607,95 @@ pub fn compute_proof_hash_with_flags(
             effect_def_stack.extend(effect_def.parent.iter().cloned());
         }
     }
-    for name in effect_def_names {
-        if let Some(effect_def) = module_env.effect_defs.get(&name) {
-            hasher.update(b"|effect_def:");
-            hash_field(&mut hasher, "effect_def.name", &effect_def.name);
-            hash_field(
-                &mut hasher,
-                "effect_def.params.len",
-                &effect_def.params.len().to_string(),
-            );
-            for param in &effect_def.params {
-                hash_field(&mut hasher, "effect_def.param.name", &param.name);
-                hash_field(&mut hasher, "effect_def.param.type", &param.type_name);
-            }
-            hash_field(
-                &mut hasher,
-                "effect_def.constraint.present",
-                if effect_def.constraint.is_some() {
-                    "true"
-                } else {
-                    "false"
-                },
-            );
-            if let Some(constraint) = &effect_def.constraint {
-                hash_field(&mut hasher, "effect_def.constraint", constraint);
-            }
-            let mut includes = effect_def.includes.clone();
-            includes.sort();
-            hash_field(
-                &mut hasher,
-                "effect_def.includes.len",
-                &includes.len().to_string(),
-            );
-            for included in includes {
-                hash_field(&mut hasher, "effect_def.include", &included);
-            }
-            hash_field(
-                &mut hasher,
-                "effect_def.refinement.present",
-                if effect_def.refinement.is_some() {
-                    "true"
-                } else {
-                    "false"
-                },
-            );
-            if let Some(refinement) = &effect_def.refinement {
-                hash_field(&mut hasher, "effect_def.refinement", refinement);
-            }
-            let mut parents = effect_def.parent.clone();
-            parents.sort();
-            hash_field(
-                &mut hasher,
-                "effect_def.parents.len",
-                &parents.len().to_string(),
-            );
-            for parent in parents {
-                hash_field(&mut hasher, "effect_def.parent", &parent);
-            }
-            hash_field(
-                &mut hasher,
-                "effect_def.states.len",
-                &effect_def.states.len().to_string(),
-            );
-            for state in &effect_def.states {
-                hash_field(&mut hasher, "effect_def.state", state);
-            }
-            hash_field(
-                &mut hasher,
-                "effect_def.transitions.len",
-                &effect_def.transitions.len().to_string(),
-            );
-            for transition in &effect_def.transitions {
-                hash_field(
-                    &mut hasher,
-                    "effect_def.transition.operation",
-                    &transition.operation,
-                );
-                hash_field(
-                    &mut hasher,
-                    "effect_def.transition.from",
-                    &transition.from_state,
-                );
-                hash_field(
-                    &mut hasher,
-                    "effect_def.transition.to",
-                    &transition.to_state,
-                );
-            }
-            hash_field(
-                &mut hasher,
-                "effect_def.initial_state.present",
-                if effect_def.initial_state.is_some() {
-                    "true"
-                } else {
-                    "false"
-                },
-            );
-            if let Some(initial_state) = &effect_def.initial_state {
-                hash_field(&mut hasher, "effect_def.initial_state", initial_state);
-            }
-        }
-    }
+    effect_def_names
+}
 
-    format!("{:x}", hasher.finalize())
+fn hash_effect_def(hasher: &mut Sha256, effect_def: &crate::parser::ast::EffectDef) {
+    hasher.update(b"|effect_def:");
+    hash_field(hasher, "effect_def.name", &effect_def.name);
+    hash_field(
+        hasher,
+        "effect_def.params.len",
+        &effect_def.params.len().to_string(),
+    );
+    for param in &effect_def.params {
+        hash_field(hasher, "effect_def.param.name", &param.name);
+        hash_field(hasher, "effect_def.param.type", &param.type_name);
+    }
+    hash_field(
+        hasher,
+        "effect_def.constraint.present",
+        if effect_def.constraint.is_some() {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    if let Some(constraint) = &effect_def.constraint {
+        hash_field(hasher, "effect_def.constraint", constraint);
+    }
+    let mut includes = effect_def.includes.clone();
+    includes.sort();
+    hash_field(
+        hasher,
+        "effect_def.includes.len",
+        &includes.len().to_string(),
+    );
+    for included in includes {
+        hash_field(hasher, "effect_def.include", &included);
+    }
+    hash_field(
+        hasher,
+        "effect_def.refinement.present",
+        if effect_def.refinement.is_some() {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    if let Some(refinement) = &effect_def.refinement {
+        hash_field(hasher, "effect_def.refinement", refinement);
+    }
+    let mut parents = effect_def.parent.clone();
+    parents.sort();
+    hash_field(hasher, "effect_def.parents.len", &parents.len().to_string());
+    for parent in parents {
+        hash_field(hasher, "effect_def.parent", &parent);
+    }
+    hash_field(
+        hasher,
+        "effect_def.states.len",
+        &effect_def.states.len().to_string(),
+    );
+    for state in &effect_def.states {
+        hash_field(hasher, "effect_def.state", state);
+    }
+    hash_field(
+        hasher,
+        "effect_def.transitions.len",
+        &effect_def.transitions.len().to_string(),
+    );
+    for transition in &effect_def.transitions {
+        hash_field(
+            hasher,
+            "effect_def.transition.operation",
+            &transition.operation,
+        );
+        hash_field(hasher, "effect_def.transition.from", &transition.from_state);
+        hash_field(hasher, "effect_def.transition.to", &transition.to_state);
+    }
+    hash_field(
+        hasher,
+        "effect_def.initial_state.present",
+        if effect_def.initial_state.is_some() {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    if let Some(initial_state) = &effect_def.initial_state {
+        hash_field(hasher, "effect_def.initial_state", initial_state);
+    }
 }
 
 fn hash_callee_contract(
@@ -732,6 +807,51 @@ fn hash_callee_contract(
     );
 }
 
+fn hash_resource_definition(hasher: &mut Sha256, resource: &crate::parser::ResourceDef) {
+    hasher.update(b"|priority:");
+    hasher.update(resource.priority.to_string().as_bytes());
+    hasher.update(b"|mode:");
+    hasher.update(format!("{:?}", resource.mode).as_bytes());
+    for field in &resource.state {
+        hasher.update(b"|state:");
+        hasher.update(field.name.as_bytes());
+        hasher.update(b":");
+        hasher.update(field.ty.as_bytes());
+    }
+    if let Some(invariant) = &resource.invariant {
+        hasher.update(b"|resource_invariant:");
+        hasher.update(crate::verification::support::expr_to_source_string(invariant).as_bytes());
+    }
+}
+
+fn hash_trait_method_constraints(hasher: &mut Sha256, callee: &Atom, module_env: &ModuleEnv) {
+    let callee_type = callee
+        .params
+        .first()
+        .and_then(|param| param.type_name.as_deref())
+        .unwrap_or("i64");
+    let Some((trait_name, trait_method)) = module_env
+        .get_traits_for_method(&callee.name)
+        .into_iter()
+        .find(|(trait_name, _)| module_env.find_impl(trait_name, callee_type).is_some())
+    else {
+        return;
+    };
+    if !trait_method.param_constraints.iter().any(Option::is_some) {
+        return;
+    }
+
+    hasher.update(b"|trait_method_constraint:");
+    hash_field(hasher, "trait_method.callee", &callee.name);
+    hash_field(hasher, "trait_method.trait", trait_name);
+    for (index, constraint) in trait_method.param_constraints.iter().enumerate() {
+        if let Some(constraint) = constraint {
+            hash_field(hasher, "trait_method.constraint.index", &index.to_string());
+            hash_field(hasher, "trait_method.constraint.value", constraint);
+        }
+    }
+}
+
 fn hash_dependency_signature_units(
     hasher: &mut Sha256,
     atom: &crate::parser::Atom,
@@ -766,6 +886,15 @@ pub fn compute_dependency_hashes(
     compute_dependency_hashes_with_names(atom, module_env, false)
 }
 
+pub(crate) fn resource_dependency_hash(name: &str, module_env: &ModuleEnv) -> Option<String> {
+    let resource = module_env.get_resource(name)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"|resource:");
+    hasher.update(name.as_bytes());
+    hash_resource_definition(&mut hasher, resource);
+    Some(format!("{:x}", hasher.finalize()))
+}
+
 pub(crate) fn compute_legacy_dependency_hashes(
     atom: &crate::parser::Atom,
     module_env: &ModuleEnv,
@@ -781,6 +910,42 @@ fn compute_dependency_hashes_with_names(
     legacy_names: bool,
 ) -> BTreeMap<String, String> {
     let mut hashes = BTreeMap::new();
+    let mut effect_names = if legacy_names {
+        BTreeSet::new()
+    } else {
+        atom_effect_names(atom)
+    };
+    let atom_type_params = atom.type_params.iter().cloned().collect::<HashSet<_>>();
+    let mut pending_type_names = Vec::new();
+    let mut resource_names = BTreeSet::new();
+    if !legacy_names {
+        resource_names.extend(atom.resources.iter().cloned());
+        collect_atom_signature_type_names(atom, &mut pending_type_names);
+        let body = parse_body_expr(&atom.body_expr);
+        collect_body_type_names_stmt(
+            &body,
+            module_env,
+            &atom_type_params,
+            &mut pending_type_names,
+        );
+        collect_acquired_resource_names_stmt(&body, &mut resource_names);
+        let source_file = atom.spec_metadata.get("source_file");
+        let imported_files =
+            source_file.and_then(|source_file| module_env.import_closure.get(source_file));
+        if let (Some(source_file), Some(imported_files)) = (source_file, imported_files) {
+            for (name, origin) in &module_env.resource_origins {
+                if origin
+                    .as_deref()
+                    .is_some_and(|origin| origin == source_file || imported_files.contains(origin))
+                {
+                    resource_names.insert(name.clone());
+                }
+            }
+        } else {
+            // Top-level atoms are source-attributed too; only imported files have tracked closures.
+            resource_names.extend(module_env.resources.keys().cloned());
+        }
+    }
     let mut pending = dependency_callees(atom, module_env, legacy_names)
         .into_iter()
         .collect::<BTreeSet<_>>();
@@ -798,6 +963,10 @@ fn compute_dependency_hashes_with_names(
             format!("atom:{}", callee_atom.name),
             compute_dependency_hash_for_callee(callee_atom, module_env),
         );
+        if !legacy_names {
+            effect_names.extend(atom_effect_names(callee_atom));
+            collect_atom_signature_type_names(callee_atom, &mut pending_type_names);
+        }
         pending.extend(
             dependency_callees(callee_atom, module_env, legacy_names)
                 .into_iter()
@@ -805,29 +974,170 @@ fn compute_dependency_hashes_with_names(
         );
     }
 
-    let mut type_names = BTreeSet::new();
-    let mut struct_names = BTreeSet::new();
-    for type_name in atom
-        .params
-        .iter()
-        .filter_map(|param| param.type_name.as_deref())
-        .chain(atom.return_type.as_deref())
-    {
-        let bare_name = type_name.split('<').next().unwrap_or(type_name).trim();
-        if module_env.get_type(bare_name).is_some() {
-            type_names.insert(bare_name.to_string());
-        }
-        if module_env.get_struct(bare_name).is_some() {
-            struct_names.insert(bare_name.to_string());
+    if !legacy_names {
+        for name in collect_effect_def_closure(effect_names, module_env) {
+            if let Some(effect_def) = module_env.effect_defs.get(&name) {
+                let mut hasher = Sha256::new();
+                hash_effect_def(&mut hasher, effect_def);
+                hashes.insert(format!("effect:{name}"), format!("{:x}", hasher.finalize()));
+            }
         }
     }
-    for param in &atom.params {
-        if let Some(type_ref) = &param.type_ref {
-            if module_env.get_type(&type_ref.name).is_some() {
-                type_names.insert(type_ref.name.clone());
+
+    let mut type_names = BTreeSet::new();
+    let mut struct_names = BTreeSet::new();
+    let mut enum_names = BTreeSet::new();
+    if legacy_names {
+        for type_name in atom
+            .params
+            .iter()
+            .filter_map(|param| param.type_name.as_deref())
+            .chain(atom.return_type.as_deref())
+        {
+            let bare_name = type_name.split('<').next().unwrap_or(type_name).trim();
+            if module_env.get_type(bare_name).is_some() {
+                type_names.insert(bare_name.to_string());
             }
-            if module_env.get_struct(&type_ref.name).is_some() {
-                struct_names.insert(type_ref.name.clone());
+            if module_env.get_struct(bare_name).is_some() {
+                struct_names.insert(bare_name.to_string());
+            }
+            if module_env.enums.contains_key(bare_name) {
+                enum_names.insert(bare_name.to_string());
+            }
+        }
+        for param in &atom.params {
+            if let Some(type_ref) = &param.type_ref {
+                if module_env.get_type(&type_ref.name).is_some() {
+                    type_names.insert(type_ref.name.clone());
+                }
+                if module_env.get_struct(&type_ref.name).is_some() {
+                    struct_names.insert(type_ref.name.clone());
+                }
+                let bare_name = type_ref
+                    .name
+                    .split('<')
+                    .next()
+                    .unwrap_or(&type_ref.name)
+                    .trim();
+                if module_env.enums.contains_key(bare_name) {
+                    enum_names.insert(bare_name.to_string());
+                }
+            }
+        }
+    } else {
+        // Same origin widening as resources: module-env-wide checks run for
+        // every atom — every refined type's constraint is SAT-checked and every
+        // struct's flattened projection paths are collision-checked — so an
+        // unreferenced definition's change can flip this atom's verdict. Seed
+        // the type-name walk with definitions whose origin is the atom's own
+        // file or a transitively imported file; unattributed environments stay
+        // conservative and seed every definition. The walk then pulls in the
+        // definitions these reach transitively (e.g. enums nested in a
+        // struct's fields).
+        let source_file = atom.spec_metadata.get("source_file");
+        let imported_files =
+            source_file.and_then(|source_file| module_env.import_closure.get(source_file));
+        // Monomorphized instance names ('Opt<i64>') never appear in a module's
+        // raw items, so an importing environment cannot recompute their keys;
+        // raw declarations never contain '<'.
+        let is_monomorphized_instance = |name: &String| name.contains('<');
+        if let (Some(source_file), Some(imported_files)) = (source_file, imported_files) {
+            let within_closure = |origin: &Option<String>| {
+                origin
+                    .as_deref()
+                    .is_some_and(|origin| origin == source_file || imported_files.contains(origin))
+            };
+            pending_type_names.extend(
+                module_env
+                    .type_origins
+                    .iter()
+                    .filter(|(name, origin)| {
+                        within_closure(origin) && !is_monomorphized_instance(name)
+                    })
+                    .map(|(name, _)| name.clone()),
+            );
+            pending_type_names.extend(
+                module_env
+                    .struct_origins
+                    .iter()
+                    .filter(|(name, origin)| {
+                        within_closure(origin) && !is_monomorphized_instance(name)
+                    })
+                    .map(|(name, _)| name.clone()),
+            );
+        } else {
+            pending_type_names.extend(
+                module_env
+                    .types
+                    .keys()
+                    .filter(|name| !is_monomorphized_instance(name))
+                    .cloned(),
+            );
+            pending_type_names.extend(
+                module_env
+                    .structs
+                    .keys()
+                    .filter(|name| !is_monomorphized_instance(name))
+                    .cloned(),
+            );
+        }
+
+        let empty_bound_params = HashSet::new();
+        let mut visited_type_names = HashSet::new();
+        while let Some(name) = pending_type_names.pop() {
+            if name == "Self" || !visited_type_names.insert(name.clone()) {
+                continue;
+            }
+            if let Some(refined) = module_env.get_type(&name) {
+                type_names.insert(name.clone());
+                let base_name = refined
+                    ._base_type
+                    .split('<')
+                    .next()
+                    .unwrap_or(&refined._base_type)
+                    .trim();
+                if module_env.get_struct(base_name).is_some()
+                    || module_env.enums.contains_key(base_name)
+                {
+                    collect_signature_type_names(
+                        &refined._base_type,
+                        &mut pending_type_names,
+                        &empty_bound_params,
+                    );
+                }
+            }
+            if let Some(struct_def) = module_env.get_struct(&name) {
+                struct_names.insert(name.clone());
+                let bound_params = struct_def
+                    .type_params
+                    .iter()
+                    .cloned()
+                    .collect::<HashSet<_>>();
+                for field in &struct_def.fields {
+                    collect_signature_type_names(
+                        &field.type_name,
+                        &mut pending_type_names,
+                        &bound_params,
+                    );
+                    collect_signature_type_ref_names(
+                        &field.type_ref,
+                        &mut pending_type_names,
+                        &bound_params,
+                    );
+                }
+            }
+            if let Some(enum_def) = module_env.enums.get(&name) {
+                enum_names.insert(name.clone());
+                let bound_params = enum_def.type_params.iter().cloned().collect::<HashSet<_>>();
+                for variant in &enum_def.variants {
+                    for field_type in &variant.field_types {
+                        collect_signature_type_ref_names(
+                            field_type,
+                            &mut pending_type_names,
+                            &bound_params,
+                        );
+                    }
+                }
             }
         }
     }
@@ -850,13 +1160,414 @@ fn compute_dependency_hashes_with_names(
         hash_struct_contract(&mut hasher, &name, module_env);
         hashes.insert(format!("struct:{name}"), format!("{:x}", hasher.finalize()));
     }
+    if !legacy_names {
+        for name in enum_names {
+            let mut hasher = Sha256::new();
+            hash_enum_contract(&mut hasher, &name, module_env);
+            if let Some(enum_def) = module_env.enums.get(&name) {
+                for variant in &enum_def.variants {
+                    hasher.update(b"|fields:");
+                    hasher.update(variant.name.as_bytes());
+                    for field in &variant.fields {
+                        hasher.update(b":");
+                        hasher.update(field.as_bytes());
+                    }
+                }
+            }
+            if let Some(unit) = module_env.unit_of_type(&name) {
+                hasher.update(b"|unit:");
+                hasher.update(unit.as_bytes());
+            }
+            hashes.insert(format!("enum:{name}"), format!("{:x}", hasher.finalize()));
+        }
+        for name in resource_names {
+            if let Some(hash) = resource_dependency_hash(&name, module_env) {
+                hashes.insert(format!("resource:{name}"), hash);
+            }
+        }
+    }
 
     hashes
+}
+
+fn collect_signature_type_names(
+    type_name: &str,
+    names: &mut Vec<String>,
+    bound_params: &HashSet<String>,
+) {
+    let type_name = type_name.trim();
+    if type_name.is_empty() {
+        return;
+    }
+
+    let bare_name = type_name.split('<').next().unwrap_or(type_name).trim();
+    if !bare_name.is_empty() && !bound_params.contains(bare_name) {
+        names.push(bare_name.to_string());
+    }
+
+    let Some(open) = type_name.find('<') else {
+        return;
+    };
+    let Some(close) = type_name.rfind('>') else {
+        return;
+    };
+    if close <= open {
+        return;
+    }
+
+    let arguments = &type_name[open + 1..close];
+    let mut argument_start = 0;
+    let mut nesting = 0usize;
+    for (index, ch) in arguments.char_indices() {
+        match ch {
+            '<' => nesting += 1,
+            '>' => nesting = nesting.saturating_sub(1),
+            ',' if nesting == 0 => {
+                collect_signature_type_names(
+                    &arguments[argument_start..index],
+                    names,
+                    bound_params,
+                );
+                argument_start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    collect_signature_type_names(&arguments[argument_start..], names, bound_params);
+}
+
+fn collect_signature_type_ref_names(
+    type_ref: &TypeRef,
+    names: &mut Vec<String>,
+    bound_params: &HashSet<String>,
+) {
+    collect_signature_type_names(&type_ref.name, names, bound_params);
+    for type_arg in &type_ref.type_args {
+        collect_signature_type_ref_names(type_arg, names, bound_params);
+    }
+}
+
+fn collect_atom_signature_type_names(atom: &Atom, names: &mut Vec<String>) {
+    let bound_params = atom.type_params.iter().cloned().collect::<HashSet<_>>();
+    for type_name in atom
+        .params
+        .iter()
+        .filter_map(|param| param.type_name.as_deref())
+        .chain(atom.return_type.as_deref())
+    {
+        collect_signature_type_names(type_name, names, &bound_params);
+    }
+    for param in &atom.params {
+        if let Some(type_ref) = &param.type_ref {
+            collect_signature_type_ref_names(type_ref, names, &bound_params);
+        }
+    }
+}
+
+fn collect_body_type_names_stmt(
+    stmt: &Stmt,
+    module_env: &ModuleEnv,
+    bound_params: &HashSet<String>,
+    names: &mut Vec<String>,
+) {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            collect_body_type_names_expr(value, module_env, bound_params, names);
+        }
+        Stmt::ArrayStore { index, value, .. } => {
+            collect_body_type_names_expr(index, module_env, bound_params, names);
+            collect_body_type_names_expr(value, module_env, bound_params, names);
+        }
+        Stmt::Block(stmts, _) => {
+            for stmt in stmts {
+                collect_body_type_names_stmt(stmt, module_env, bound_params, names);
+            }
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            collect_body_type_names_expr(cond, module_env, bound_params, names);
+            collect_body_type_names_expr(invariant, module_env, bound_params, names);
+            if let Some(decreases) = decreases {
+                collect_body_type_names_expr(decreases, module_env, bound_params, names);
+            }
+            collect_body_type_names_stmt(body, module_env, bound_params, names);
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            collect_body_type_names_stmt(body, module_env, bound_params, names);
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                collect_body_type_names_stmt(child, module_env, bound_params, names);
+            }
+        }
+        Stmt::Cancel { .. } => {}
+        Stmt::Expr(expr, _) => {
+            collect_body_type_names_expr(expr, module_env, bound_params, names);
+        }
+    }
+}
+
+fn collect_body_type_names_expr(
+    expr: &Expr,
+    module_env: &ModuleEnv,
+    bound_params: &HashSet<String>,
+    names: &mut Vec<String>,
+) {
+    match expr {
+        Expr::Paren(inner) => collect_body_type_names_expr(inner, module_env, bound_params, names),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => {}
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                collect_body_type_names_expr(element, module_env, bound_params, names);
+            }
+        }
+        Expr::ArrayAccess(_, index) => {
+            collect_body_type_names_expr(index, module_env, bound_params, names);
+        }
+        Expr::BinaryOp(left, _, right) => {
+            collect_body_type_names_expr(left, module_env, bound_params, names);
+            collect_body_type_names_expr(right, module_env, bound_params, names);
+        }
+        Expr::Block(stmt) => collect_body_type_names_stmt(stmt, module_env, bound_params, names),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_body_type_names_expr(cond, module_env, bound_params, names);
+            collect_body_type_names_stmt(then_branch, module_env, bound_params, names);
+            collect_body_type_names_stmt(else_branch, module_env, bound_params, names);
+        }
+        Expr::Call(name, args) => {
+            collect_enum_variant_owner_names(name, module_env, names);
+            for arg in args {
+                collect_body_type_names_expr(arg, module_env, bound_params, names);
+            }
+        }
+        Expr::StructInit { type_name, fields } => {
+            collect_signature_type_names(type_name, names, bound_params);
+            for (_, value) in fields {
+                collect_body_type_names_expr(value, module_env, bound_params, names);
+            }
+        }
+        Expr::FieldAccess(inner, _) => {
+            collect_body_type_names_expr(inner, module_env, bound_params, names);
+        }
+        Expr::Match { target, arms } => {
+            collect_body_type_names_expr(target, module_env, bound_params, names);
+            for arm in arms {
+                collect_body_type_names_pattern(&arm.pattern, module_env, names);
+                if let Some(guard) = &arm.guard {
+                    collect_body_type_names_expr(guard, module_env, bound_params, names);
+                }
+                collect_body_type_names_stmt(&arm.body, module_env, bound_params, names);
+            }
+        }
+        Expr::Async { body } => collect_body_type_names_stmt(body, module_env, bound_params, names),
+        Expr::Await { expr } => {
+            collect_body_type_names_expr(expr, module_env, bound_params, names);
+        }
+        Expr::CallRef { callee, args } => {
+            collect_body_type_names_expr(callee, module_env, bound_params, names);
+            for arg in args {
+                collect_body_type_names_expr(arg, module_env, bound_params, names);
+            }
+        }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                collect_body_type_names_expr(arg, module_env, bound_params, names);
+            }
+        }
+        Expr::Lambda { body, .. } => {
+            collect_body_type_names_stmt(body, module_env, bound_params, names);
+        }
+        Expr::ChanSend { channel, value } => {
+            collect_body_type_names_expr(channel, module_env, bound_params, names);
+            collect_body_type_names_expr(value, module_env, bound_params, names);
+        }
+        Expr::ChanRecv { channel } => {
+            collect_body_type_names_expr(channel, module_env, bound_params, names);
+        }
+    }
+}
+
+fn body_acquired_resource_names(atom: &Atom) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    collect_acquired_resource_names_stmt(&parse_body_expr(&atom.body_expr), &mut names);
+    names
+}
+
+fn collect_acquired_resource_names_stmt(stmt: &Stmt, names: &mut BTreeSet<String>) {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            collect_acquired_resource_names_expr(value, names);
+        }
+        Stmt::ArrayStore { index, value, .. } => {
+            collect_acquired_resource_names_expr(index, names);
+            collect_acquired_resource_names_expr(value, names);
+        }
+        Stmt::Block(stmts, _) => {
+            for stmt in stmts {
+                collect_acquired_resource_names_stmt(stmt, names);
+            }
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            collect_acquired_resource_names_expr(cond, names);
+            collect_acquired_resource_names_expr(invariant, names);
+            if let Some(decreases) = decreases {
+                collect_acquired_resource_names_expr(decreases, names);
+            }
+            collect_acquired_resource_names_stmt(body, names);
+        }
+        Stmt::Acquire { resource, body, .. } => {
+            names.insert(resource.clone());
+            collect_acquired_resource_names_stmt(body, names);
+        }
+        Stmt::Task { body, .. } => collect_acquired_resource_names_stmt(body, names),
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                collect_acquired_resource_names_stmt(child, names);
+            }
+        }
+        Stmt::Cancel { .. } => {}
+        Stmt::Expr(expr, _) => collect_acquired_resource_names_expr(expr, names),
+    }
+}
+
+fn collect_acquired_resource_names_expr(expr: &Expr, names: &mut BTreeSet<String>) {
+    match expr {
+        Expr::Paren(inner) => collect_acquired_resource_names_expr(inner, names),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => {}
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                collect_acquired_resource_names_expr(element, names);
+            }
+        }
+        Expr::ArrayAccess(_, index) => collect_acquired_resource_names_expr(index, names),
+        Expr::BinaryOp(left, _, right) => {
+            collect_acquired_resource_names_expr(left, names);
+            collect_acquired_resource_names_expr(right, names);
+        }
+        Expr::Block(stmt) => collect_acquired_resource_names_stmt(stmt, names),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_acquired_resource_names_expr(cond, names);
+            collect_acquired_resource_names_stmt(then_branch, names);
+            collect_acquired_resource_names_stmt(else_branch, names);
+        }
+        Expr::Call(_, args) => {
+            for arg in args {
+                collect_acquired_resource_names_expr(arg, names);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_acquired_resource_names_expr(value, names);
+            }
+        }
+        Expr::FieldAccess(inner, _) => collect_acquired_resource_names_expr(inner, names),
+        Expr::Match { target, arms } => {
+            collect_acquired_resource_names_expr(target, names);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_acquired_resource_names_expr(guard, names);
+                }
+                collect_acquired_resource_names_stmt(&arm.body, names);
+            }
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => {
+            collect_acquired_resource_names_stmt(body, names);
+        }
+        Expr::Await { expr } => collect_acquired_resource_names_expr(expr, names),
+        Expr::CallRef { callee, args } => {
+            collect_acquired_resource_names_expr(callee, names);
+            for arg in args {
+                collect_acquired_resource_names_expr(arg, names);
+            }
+        }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                collect_acquired_resource_names_expr(arg, names);
+            }
+        }
+        Expr::ChanSend { channel, value } => {
+            collect_acquired_resource_names_expr(channel, names);
+            collect_acquired_resource_names_expr(value, names);
+        }
+        Expr::ChanRecv { channel } => collect_acquired_resource_names_expr(channel, names),
+    }
+}
+
+fn collect_body_type_names_pattern(
+    pattern: &Pattern,
+    module_env: &ModuleEnv,
+    names: &mut Vec<String>,
+) {
+    match pattern {
+        Pattern::Variant {
+            variant_name,
+            fields,
+        } => {
+            collect_enum_variant_owner_names(variant_name, module_env, names);
+            for field in fields {
+                collect_body_type_names_pattern(field, module_env, names);
+            }
+        }
+        Pattern::Wildcard | Pattern::Literal(_) | Pattern::Variable(_) => {}
+    }
+}
+
+fn collect_enum_variant_owner_names(
+    variant_name: &str,
+    module_env: &ModuleEnv,
+    names: &mut Vec<String>,
+) {
+    if let Some((enum_name, _)) = variant_name.rsplit_once("::") {
+        let enum_name = enum_name.split('<').next().unwrap_or(enum_name).trim();
+        if module_env.enums.contains_key(enum_name) {
+            names.push(enum_name.to_string());
+        }
+        return;
+    }
+
+    let bare_variant = variant_name.rsplit("::").next().unwrap_or(variant_name);
+    for (enum_name, enum_def) in &module_env.enums {
+        if enum_def
+            .variants
+            .iter()
+            .any(|variant| variant.name == bare_variant)
+        {
+            names.push(enum_name.clone());
+        }
+    }
 }
 
 fn compute_dependency_hash_for_callee(atom: &Atom, module_env: &ModuleEnv) -> String {
     let mut hasher = Sha256::new();
     hash_callee_contract(&mut hasher, atom, module_env, false);
+    hash_trait_method_constraints(&mut hasher, atom, module_env);
     hash_dependency_signature_units(&mut hasher, atom, module_env);
     hash_string_map(&mut hasher, "effect_pre", &atom.effect_pre);
     hash_string_map(&mut hasher, "effect_post", &atom.effect_post);
@@ -942,6 +1653,8 @@ fn hash_struct_contract(hasher: &mut Sha256, name: &str, module_env: &ModuleEnv)
             hasher.update(f.name.as_bytes());
             hasher.update(b":");
             hasher.update(f.type_name.as_bytes());
+            hasher.update(b":resolved:");
+            hasher.update(module_env.resolve_base_type(&f.type_name).as_bytes());
             if let Some(constraint) = &f.constraint {
                 hasher.update(b"|field_constraint:");
                 hasher.update(name.as_bytes());
@@ -956,6 +1669,21 @@ fn hash_struct_contract(hasher: &mut Sha256, name: &str, module_env: &ModuleEnv)
             hasher.update(name.as_bytes());
             hasher.update(b"=");
             hasher.update(invariant.as_bytes());
+        }
+    }
+}
+
+fn hash_enum_contract(hasher: &mut Sha256, name: &str, module_env: &ModuleEnv) {
+    hasher.update(b"|enum:");
+    hasher.update(name.as_bytes());
+    if let Some(enum_def) = module_env.enums.get(name) {
+        for variant in &enum_def.variants {
+            hasher.update(b"|variant:");
+            hasher.update(variant.name.as_bytes());
+            for field_type in &variant.field_types {
+                hasher.update(b":");
+                hasher.update(field_type.name.as_bytes());
+            }
         }
     }
 }
@@ -1365,6 +2093,12 @@ mod nominal_hash_tests {
     }
 
     fn dependency_hash_for(source: &str, root_name: &str, dependency_key: &str) -> String {
+        dependency_hashes_for(source, root_name)
+            .remove(dependency_key)
+            .unwrap()
+    }
+
+    fn dependency_hashes_for(source: &str, root_name: &str) -> BTreeMap<String, String> {
         let items = parse_module(source);
         let mut module_env = ModuleEnv::default();
         for item in items {
@@ -1373,13 +2107,38 @@ mod nominal_hash_tests {
                     module_env.atoms.insert(atom.name.clone(), atom);
                 }
                 Item::TypeDef(refined) => module_env.register_type(&refined),
+                Item::ResourceDef(resource) => module_env.register_resource(&resource),
                 _ => {}
             }
         }
         let root = module_env.atoms.get(root_name).unwrap().clone();
         compute_dependency_hashes(&root, &module_env)
-            .remove(dependency_key)
-            .unwrap()
+    }
+
+    fn trait_dependency_and_proof_hashes(
+        source: &str,
+        root_name: &str,
+    ) -> (String, BTreeMap<String, String>) {
+        let items = parse_module(source);
+        let mut module_env = ModuleEnv::default();
+        for item in items {
+            match item {
+                Item::Atom(atom) => {
+                    module_env
+                        .dependency_graph
+                        .insert(atom.name.clone(), collect_callees_from_atom(&atom));
+                    module_env.register_atom(&atom);
+                }
+                Item::TraitDef(trait_def) => module_env.register_trait(&trait_def),
+                Item::ImplDef(impl_def) => module_env.register_impl(&impl_def),
+                _ => {}
+            }
+        }
+        let root = module_env.get_atom(root_name).unwrap().clone();
+        (
+            compute_proof_hash(&root, &module_env),
+            compute_dependency_hashes(&root, &module_env),
+        )
     }
 
     fn proof_hash_for(source: &str, root_name: &str) -> String {
@@ -1451,6 +2210,28 @@ mod nominal_hash_tests {
         compute_proof_hash(&root, &module_env)
     }
 
+    fn dependency_hashes_with_effect_defs(
+        source: &str,
+        root_name: &str,
+        effect_defs: Vec<EffectDef>,
+    ) -> BTreeMap<String, String> {
+        let items = parse_module(source);
+        let mut module_env = ModuleEnv::default();
+        for item in items {
+            match item {
+                Item::Atom(atom) => module_env.register_atom(&atom),
+                Item::TypeDef(refined) => module_env.register_type(&refined),
+                Item::EffectDef(effect_def) => module_env.register_effect(&effect_def),
+                _ => {}
+            }
+        }
+        for effect_def in effect_defs {
+            module_env.register_effect(&effect_def);
+        }
+        let root = module_env.get_atom(root_name).unwrap().clone();
+        compute_dependency_hashes(&root, &module_env)
+    }
+
     fn base_effect_def() -> EffectDef {
         EffectDef {
             name: "Work".to_string(),
@@ -1473,6 +2254,20 @@ mod nominal_hash_tests {
         }
     }
 
+    fn bare_effect_def(name: &str) -> EffectDef {
+        let mut effect_def = base_effect_def();
+        effect_def.name = name.to_string();
+        effect_def.params.clear();
+        effect_def.constraint = None;
+        effect_def.includes.clear();
+        effect_def.refinement = None;
+        effect_def.parent.clear();
+        effect_def.states.clear();
+        effect_def.transitions.clear();
+        effect_def.initial_state = None;
+        effect_def
+    }
+
     #[test]
     fn dependency_hashes_ignore_callee_trust_but_proof_hashes_include_it() {
         let (verified_dependencies, verified_proof) =
@@ -1483,6 +2278,218 @@ mod nominal_hash_tests {
             assert_eq!(dependencies, verified_dependencies);
             assert_ne!(proof, verified_proof);
         }
+    }
+
+    #[test]
+    fn trait_method_parameter_constraints_participate_in_freshness_hashes() {
+        let source = "trait Picker { fn pick(a: Self where v >= 0) -> Self; }\n\
+                      impl Picker for i64 { fn pick(a: i64) -> i64 { a } }\n\
+                      atom pick(a: i64) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: a;\n\
+                      atom g(x: i64) -> i64\n\
+                      requires: x >= 0;\n\
+                      ensures: true;\n\
+                      body: pick(x);\n";
+        let changed_source = source.replace("v >= 0", "v >= 5");
+        let (proof_hash, dependency_hashes) = trait_dependency_and_proof_hashes(source, "g");
+        let (changed_proof_hash, changed_dependency_hashes) =
+            trait_dependency_and_proof_hashes(&changed_source, "g");
+
+        assert_ne!(proof_hash, changed_proof_hash);
+        assert_ne!(
+            dependency_hashes["atom:pick"],
+            changed_dependency_hashes["atom:pick"]
+        );
+    }
+
+    #[test]
+    fn dependency_hashes_include_caller_callee_and_effect_definition_closure() {
+        let source = "atom callee(x: i64) -> i64\n\
+             effects: [CalleeWork];\n\
+             effect_pre: { CalleePre: Idle };\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n\
+             atom root(x: i64) -> i64\n\
+             effects: [RootWork];\n\
+             effect_pre: { CallerPre: Idle };\n\
+             effect_post: { CallerPost: Done };\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: callee(x);\n";
+        let mut root_effect = bare_effect_def("RootWork");
+        root_effect.includes = vec!["IncludeOne".to_string()];
+        root_effect.parent = vec!["ParentOne".to_string()];
+        let mut include_one = bare_effect_def("IncludeOne");
+        include_one.includes = vec!["IncludeDeep".to_string()];
+        let mut parent_one = bare_effect_def("ParentOne");
+        parent_one.parent = vec!["ParentDeep".to_string()];
+        let hashes = dependency_hashes_with_effect_defs(
+            source,
+            "root",
+            vec![
+                bare_effect_def("CalleeWork"),
+                bare_effect_def("CalleePre"),
+                bare_effect_def("CallerPre"),
+                bare_effect_def("CallerPost"),
+                root_effect,
+                include_one,
+                bare_effect_def("IncludeDeep"),
+                parent_one,
+                bare_effect_def("ParentDeep"),
+            ],
+        );
+
+        let effect_keys = hashes
+            .keys()
+            .filter(|key| key.starts_with("effect:"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            effect_keys,
+            vec![
+                "effect:CalleePre",
+                "effect:CalleeWork",
+                "effect:CallerPost",
+                "effect:CallerPre",
+                "effect:IncludeDeep",
+                "effect:IncludeOne",
+                "effect:ParentDeep",
+                "effect:ParentOne",
+                "effect:RootWork",
+            ]
+        );
+        assert!(hashes.contains_key("atom:callee"));
+    }
+
+    #[test]
+    fn dependency_hashes_ignore_unreferenced_effect_definitions() {
+        let source = "atom callee(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n\
+             atom root(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: callee(x);\n";
+        let baseline =
+            dependency_hashes_with_effect_defs(source, "root", vec![bare_effect_def("Orphan")]);
+        let mut changed_orphan = bare_effect_def("Orphan");
+        changed_orphan.states.push("Changed".to_string());
+        let changed = dependency_hashes_with_effect_defs(source, "root", vec![changed_orphan]);
+
+        assert_eq!(baseline, changed);
+        assert!(baseline.keys().all(|key| !key.starts_with("effect:")));
+    }
+
+    #[test]
+    fn dependency_hash_tracks_every_hashed_effect_definition_field() {
+        let source = "atom root(x: i64) -> i64\n\
+             effects: [Work];\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n";
+        let base = base_effect_def();
+        let baseline = dependency_hashes_with_effect_defs(source, "root", vec![base.clone()]);
+        assert_eq!(
+            baseline.keys().cloned().collect::<Vec<_>>(),
+            vec!["effect:Work"]
+        );
+
+        let mut changed_defs = Vec::new();
+        let mut changed = base.clone();
+        changed.params[0].name = "resource".to_string();
+        changed_defs.push(("param name", changed));
+        let mut changed = base.clone();
+        changed.params[0].type_name = "Path".to_string();
+        changed_defs.push(("param type", changed));
+        let mut changed = base.clone();
+        changed.params.push(EffectDefParam {
+            name: "mode".to_string(),
+            type_name: "Mode".to_string(),
+        });
+        changed_defs.push(("param count", changed));
+        let mut changed = base.clone();
+        changed.constraint = Some("path == \"/tmp\"".to_string());
+        changed_defs.push(("constraint", changed));
+        let mut changed = base.clone();
+        changed.constraint = None;
+        changed_defs.push(("constraint presence", changed));
+        let mut changed = base.clone();
+        changed.includes = vec!["OtherLeaf".to_string()];
+        changed_defs.push(("includes", changed));
+        let mut changed = base.clone();
+        changed.includes.push("OtherLeaf".to_string());
+        changed_defs.push(("include count", changed));
+        let mut changed = base.clone();
+        changed.refinement = Some("path == \"/tmp\"".to_string());
+        changed_defs.push(("refinement", changed));
+        let mut changed = base.clone();
+        changed.refinement = None;
+        changed_defs.push(("refinement presence", changed));
+        let mut changed = base.clone();
+        changed.parent = vec!["OtherParent".to_string()];
+        changed_defs.push(("parent", changed));
+        let mut changed = base.clone();
+        changed.parent.clear();
+        changed_defs.push(("parent count", changed));
+        let mut changed = base.clone();
+        changed.states[0] = "Ready".to_string();
+        changed_defs.push(("state", changed));
+        let mut changed = base.clone();
+        changed.states.push("Ready".to_string());
+        changed_defs.push(("state count", changed));
+        let mut changed = base.clone();
+        changed.transitions[0].operation = "finish".to_string();
+        changed_defs.push(("transition operation", changed));
+        let mut changed = base.clone();
+        changed.transitions[0].from_state = "Busy".to_string();
+        changed_defs.push(("transition from state", changed));
+        let mut changed = base.clone();
+        changed.transitions[0].to_state = "Idle".to_string();
+        changed_defs.push(("transition to state", changed));
+        let mut changed = base.clone();
+        changed.transitions.push(EffectTransition {
+            operation: "finish".to_string(),
+            from_state: "Busy".to_string(),
+            to_state: "Idle".to_string(),
+        });
+        changed_defs.push(("transition count", changed));
+        let mut changed = base.clone();
+        changed.initial_state = Some("Busy".to_string());
+        changed_defs.push(("initial state", changed));
+        let mut changed = base.clone();
+        changed.initial_state = None;
+        changed_defs.push(("initial state presence", changed));
+
+        for (field, changed_def) in changed_defs {
+            let changed = dependency_hashes_with_effect_defs(source, "root", vec![changed_def]);
+            assert_eq!(
+                baseline.keys().collect::<Vec<_>>(),
+                changed.keys().collect::<Vec<_>>(),
+                "changing effect definition {field} must keep the dependency keys stable"
+            );
+            assert_ne!(
+                baseline["effect:Work"], changed["effect:Work"],
+                "changing effect definition {field} must change only its effect hash"
+            );
+        }
+
+        let mut renamed = base;
+        renamed.name = "RenamedWork".to_string();
+        let renamed_source = source.replace("[Work]", "[RenamedWork]");
+        let renamed_hashes =
+            dependency_hashes_with_effect_defs(&renamed_source, "root", vec![renamed]);
+        assert_eq!(
+            renamed_hashes.keys().cloned().collect::<Vec<_>>(),
+            vec!["effect:RenamedWork"]
+        );
+        assert_ne!(
+            baseline["effect:Work"],
+            renamed_hashes["effect:RenamedWork"]
+        );
     }
 
     #[test]
@@ -1827,6 +2834,49 @@ body: { getx(Pair { a: 1, b: 2 }) };
     }
 
     #[test]
+    fn struct_field_alias_base_change_invalidates_the_proof_hash() {
+        fn hash(source: &str) -> String {
+            let items = parse_module(source);
+            let mut module_env = ModuleEnv::default();
+            let mut main = None;
+            for item in items {
+                match item {
+                    Item::Atom(atom) => main = Some(atom),
+                    Item::StructDef(sdef) => {
+                        module_env.structs.insert(sdef.name.clone(), sdef);
+                    }
+                    Item::TypeDef(refined) => module_env.register_type(&refined),
+                    _ => {}
+                }
+            }
+            compute_proof_hash(&main.expect("main atom parsed"), &module_env)
+        }
+
+        let before = hash(
+            "struct Inner { x: i64 }\n\
+             type U = i64;\n\
+             type T = U;\n\
+             struct S { inner: T, inner_x: i64 }\n\
+             atom main(s: S) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: 0;\n",
+        );
+        let after = hash(
+            "struct Inner { x: i64 }\n\
+             type U = Inner;\n\
+             type T = U;\n\
+             struct S { inner: T, inner_x: i64 }\n\
+             atom main(s: S) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: 0;\n",
+        );
+
+        assert_ne!(before, after);
+    }
+
+    #[test]
     fn callee_semantics_change_invalidates_the_proof_hash() {
         let getx_default =
             "trusted atom getx(p: Pair) -> i64\nrequires: true;\nensures: true;\nbody: { p.a };\n";
@@ -1866,6 +2916,146 @@ body: { p.a };\n";
         let after = env_and_hash(
             "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 1;\n\
              atom main() -> i64\nresources: [counter];\nrequires: true;\nensures: true;\nbody: { 0 }",
+        );
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn declared_resource_invariant_changes_its_dependency_hash() {
+        let before = dependency_hash_for(
+            "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;\n\
+             atom main() -> i64\n\
+             resources: [counter];\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: 0;",
+            "main",
+            "resource:counter",
+        );
+        let after = dependency_hash_for(
+            "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 5;\n\
+             atom main() -> i64\n\
+             resources: [counter];\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: 0;",
+            "main",
+            "resource:counter",
+        );
+        assert_ne!(before, after);
+
+        let acquired = dependency_hash_for(
+            "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;\n\
+             atom main() -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: { acquire counter { counter.value = 3; 0 } };",
+            "main",
+            "resource:counter",
+        );
+        assert_eq!(before, acquired);
+    }
+
+    #[test]
+    fn module_resource_invariant_changes_an_unrelated_atom_hash() {
+        let before_source = "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;\n\
+                             atom main(a: i64) -> i64\n\
+                             requires: true;\n\
+                             ensures: true;\n\
+                             body: a;";
+        let after_source = before_source.replace("counter.value >= 0", "counter.value >= 5");
+
+        assert_ne!(env_and_hash(before_source), env_and_hash(&after_source));
+        assert_ne!(
+            dependency_hash_for(before_source, "main", "resource:counter"),
+            dependency_hash_for(&after_source, "main", "resource:counter")
+        );
+    }
+
+    #[test]
+    fn resource_dependency_keys_follow_atom_source_import_closure() {
+        let items = parse_module(
+            "resource own { value: i64 } priority: 1 mode: exclusive invariant: own.value >= 0;\n\
+             resource imported { value: i64 } priority: 1 mode: exclusive invariant: imported.value >= 0;\n\
+             resource transitive { value: i64 } priority: 1 mode: exclusive invariant: transitive.value >= 0;\n\
+             resource sibling { value: i64 } priority: 1 mode: exclusive invariant: sibling.value >= 0;\n\
+             resource unknown { value: i64 } priority: 1 mode: exclusive invariant: unknown.value >= 0;",
+        );
+        let mut module_env = ModuleEnv::default();
+        for item in items {
+            if let Item::ResourceDef(resource) = item {
+                let origin = match resource.name.as_str() {
+                    "own" => "/c.mm",
+                    "imported" => "/b.mm",
+                    "transitive" => "/d.mm",
+                    "sibling" => "/sibling.mm",
+                    "unknown" => "/outside.mm",
+                    _ => unreachable!("unexpected resource"),
+                };
+                module_env.register_resource_with_origin(&resource, Some(origin));
+            }
+        }
+        module_env.import_closure.insert(
+            "/c.mm".to_string(),
+            ["/b.mm".to_string(), "/d.mm".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        let mut atom = parse_module(
+            "atom main() -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: 0;",
+        )
+        .into_iter()
+        .find_map(|item| match item {
+            Item::Atom(atom) => Some(atom),
+            _ => None,
+        })
+        .expect("parse main atom");
+        atom.spec_metadata
+            .insert("source_file".to_string(), "/c.mm".to_string());
+
+        let hashes = compute_dependency_hashes(&atom, &module_env);
+        assert!(hashes.contains_key("resource:own"));
+        assert!(hashes.contains_key("resource:imported"));
+        assert!(hashes.contains_key("resource:transitive"));
+        assert!(!hashes.contains_key("resource:sibling"));
+        assert!(!hashes.contains_key("resource:unknown"));
+
+        let mut declared = atom.clone();
+        declared.resources.push("sibling".to_string());
+        assert!(compute_dependency_hashes(&declared, &module_env).contains_key("resource:sibling"));
+
+        atom.spec_metadata.remove("source_file");
+        let root_hashes = compute_dependency_hashes(&atom, &module_env);
+        for name in ["own", "imported", "transitive", "sibling", "unknown"] {
+            assert!(root_hashes.contains_key(&format!("resource:{name}")));
+        }
+
+        atom.spec_metadata
+            .insert("source_file".to_string(), "/root.mm".to_string());
+        let annotated_root_hashes = compute_dependency_hashes(&atom, &module_env);
+        for name in ["own", "imported", "transitive", "sibling", "unknown"] {
+            assert!(annotated_root_hashes.contains_key(&format!("resource:{name}")));
+        }
+    }
+
+    #[test]
+    fn body_acquired_resource_invariant_change_invalidates_the_proof_hash() {
+        let before = env_and_hash(
+            "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;\n\
+             atom main() -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: { acquire counter { counter.value = 3; 0 } };",
+        );
+        let after = env_and_hash(
+            "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 5;\n\
+             atom main() -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: { acquire counter { counter.value = 3; 0 } };",
         );
         assert_ne!(before, after);
     }
@@ -2182,6 +3372,10 @@ body: { p.a };\n";
                  ensures: result == x;\n\
                  body: h(x);\n";
         let baseline = proof_hash_for(source, "g");
+        assert_eq!(
+            baseline,
+            "7002005f369e9804b705fcccdb7d24d6ec1eb1151f4bd330c22b274f8a35fbdb"
+        );
         let changed = proof_hash_for(
             &source.replace(
                 "transition start: Idle -> Busy;",
@@ -2193,19 +3387,20 @@ body: { p.a };\n";
     }
 
     #[test]
-    fn effect_free_proof_hash_matches_develop() {
-        let hash = proof_hash_for(
-            "atom main(x: i64) -> i64\n\
-             requires: true;\n\
-             ensures: result == x;\n\
-             body: x;\n",
-            "main",
-        );
+    fn effect_free_proof_hash_matches_policy_version_44() {
+        let source = "atom main(x: i64) -> i64\n\
+                      requires: true;\n\
+                      ensures: result == x;\n\
+                      body: x;\n";
+        let hash = proof_hash_for(source, "main");
 
         assert_eq!(
             hash,
-            "9e1ad8675ce5b94972092795e1f7583c37747cf2ace33fb3a601f459de1631b3"
+            "369e8579e33fa3311a5cba77ce270b739fcc099d2cf8d532c51970ee86dcc8fa"
         );
+        assert!(!dependency_hashes_for(source, "main")
+            .keys()
+            .any(|key| key.starts_with("resource:")));
     }
 }
 

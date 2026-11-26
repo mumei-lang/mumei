@@ -209,6 +209,7 @@ mod tests {
             is_async,
             trust_level,
             max_unroll: None,
+            str_bound: None,
             invariant: None,
             effects,
             return_type,

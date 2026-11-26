@@ -54,6 +54,7 @@ fn rich_atom() -> Atom {
         is_async: true,
         trust_level: TrustLevel::Trusted,
         max_unroll: None,
+        str_bound: None,
         invariant: None,
         effects: vec![
             Effect::simple("Zeta"),

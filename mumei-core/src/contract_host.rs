@@ -21,12 +21,15 @@
 //! - `=>` prints as `not a or b` (Python) / `!a || b` (Rust). `=>` is
 //!   left-associative and binds looser than `||`/`&&`, so both operands are
 //!   always parenthesized.
-//! - `/` on integer operands prints EUCLIDEAN division matching the verifier's
-//!   Z3 `Int` semantics (remainder ≥ 0: `div(7,-2) = -3`, `div(-7,2) = -4`) —
-//!   `(_mumei_d := divmod(a, b))[0] + (_mumei_d[1] < 0)` in Python (divmod
-//!   evaluates each operand once — chained divisions stay linear),
-//!   `a.div_euclid(b)` in Rust. Plain `//` floors and `/` truncates, so
-//!   both plain forms can mischeck a verified clause on negative divisors.
+//! - `/` on integer operands prints TRUNCATING (toward-zero) division
+//!   matching the verifier's semantics — the `sdiv` the LLVM emitter
+//!   produces: `7 / -2 == -3`, `-7 / 2 == -3`, `-7 / -2 == 3`. Python
+//!   emits `(_mumei_d := divmod(a, b))[0] + (_mumei_d[0] < 0 and
+//!   _mumei_d[1] != 0)` — the floored quotient gains 1 exactly when
+//!   the true quotient is negative and nonzero (divmod evaluates each
+//!   operand once — chained divisions stay linear). Rust `/`
+//!   truncates natively. Plain `//` floors, so the naive Python form
+//!   would mischeck a verified clause on negative dividends.
 //!   Float-typed operands keep `/`.
 //! - `forall(v, s, e, c)`/`exists(v, s, e, c)` calls print as
 //!   `all(c for v in range(s, e))`/`any(...)` (Python) and
@@ -312,7 +315,7 @@ fn node_bp(e: &Expr, t: HostTarget) -> u8 {
                     8
                 }
             }
-            Op::Mul | Op::Div => {
+            Op::Mul | Op::Div | Op::Rem => {
                 if t == HostTarget::Python {
                     10
                 } else {
@@ -497,47 +500,54 @@ fn emit_binop(
         // negative exponents — degrade instead of emitting wrong code.
         return None;
     }
+    if *op == Op::Rem {
+        // Python's `%` floors and Rust's truncates only for integers of one
+        // signedness; degrade rather than print a remainder that can differ.
+        return None;
+    }
     if *op == Op::Div && !expr_is_floaty(whole, vars) {
-        // Z3 `Int` division — what `verify` proves `Op::Div` against — is
-        // EUCLIDEAN: `mod` is always ≥ 0, so the quotient floors for positive
-        // divisors and ceils for negative ones (verified against Z3 4.14.1:
-        // `div(7,-2) = -3`, `div(-7,-2) = 4`, `div(-7,2) = -4`). Neither
-        // Python `//` (always floors: `7 // -2 == -4`) nor Rust `/`
-        // (truncates: `-7 / 2 == -3`) matches it for all sign combinations.
-        // Emit Euclidean division so a clause proven by `verify` can never
-        // mischeck in the host:
-        //   Python `divmod(l, r)[0] + (divmod(l, r)[1] < 0)` — adds 1 exactly
-        //   when the floored remainder went negative (only possible for a
-        //   negative divisor); Rust `a.div_euclid(b)` — the stdlib Euclidean
-        //   primitive. Operands emit inside call parens (ctx 0).
+        // `verify` proves `Op::Div` against TRUNCATING (toward-zero)
+        // division — the `sdiv` the LLVM emitter produces and the
+        // quotient `truncated_rem` pairs with. Neither Python `//`
+        // (floors: `-7 // 2 == -4`) nor `divmod` alone matches it for a
+        // negative dividend. Emit truncating division so a clause
+        // proven by `verify` can never mischeck in the host:
+        //   Python `divmod(l, r)[0] + (divmod(l, r)[0] < 0 and
+        //   divmod(l, r)[1] != 0)` — the floored quotient needs +1
+        //   exactly when the true quotient is negative and the division
+        //   does not terminate: q_f < 0 iff signs(l, r) differ (r_f's
+        //   sign follows r, so the quotient's sign is what separates
+        //   the cases); Rust `a / b` truncates natively.
+        //   Operands emit inside call parens (ctx 0).
         let l = emit(l_expr, vars, t, 0)?;
         let r = emit(r_expr, vars, t, 0)?;
         return Some(if t == HostTarget::Python {
             // `divmod` evaluates the operands ONCE — plain `//`/`%` would
             // duplicate each printed operand, doubling text and evaluations
             // per chained division. The walrus reads quotient and remainder
-            // from a single divmod call.
-            format!("((_mumei_d := divmod({l}, {r}))[0] + (_mumei_d[1] < 0))")
+            // from a single divmod call; `and` yields a bool that adds
+            // as 0/1.
+            format!("((_mumei_d := divmod({l}, {r}))[0] + (_mumei_d[0] < 0 and _mumei_d[1] != 0))")
         } else {
-            // The cast pins the receiver type: a literal like `100` is an
-            // ambiguous `{integer}` that cannot receive a method call. The
-            // cast must match operand signedness — `as i64` on a `u64`
-            // dividend above `i64::MAX` would flip its sign, so unsigned
-            // operands divide as `u64` (where Euclidean = trunc = Z3
-            // semantics for nonnegative values). Mixed signedness cannot be
-            // represented faithfully in the host — degrade.
-            // Only an unsigned VARIABLE forces u64 — a nonnegative literal is
-            // polymorphic and adopts either cast; a signed expression can
-            // never be u64.
+            // The cast pins the operand type: a literal like `100` is an
+            // ambiguous `{integer}` whose inferred signedness the
+            // division inherits. `as i64` on a `u64` dividend above
+            // `i64::MAX` would flip its sign, so unsigned operands
+            // divide as `u64` (where truncating = Euclidean = Z3
+            // semantics for nonnegative values). Mixed signedness
+            // cannot be represented faithfully in the host — degrade.
+            // Only an unsigned VARIABLE forces u64 — a nonnegative
+            // literal is polymorphic and adopts either cast; a signed
+            // expression can never be u64.
             let is_uint_var = |e: &Expr| matches!(e, Expr::Variable(n) if vars.get(&n.replace("::", "_")) == ContractVarKind::UInt);
             let nonneg = |e: &Expr| is_uint_var(e) || matches!(e, Expr::Number(n) if *n >= 0);
             match (
                 is_uint_var(l_expr) || is_uint_var(r_expr),
                 nonneg(l_expr) && nonneg(r_expr),
             ) {
-                (true, true) => format!("(({l}) as u64).div_euclid({r})"),
+                (true, true) => format!("(({l}) as u64) / ({r})"),
                 (true, false) => return None,
-                (false, _) => format!("(({l}) as i64).div_euclid({r})"),
+                (false, _) => format!("(({l}) as i64) / ({r})"),
             }
         });
     }
@@ -558,6 +568,7 @@ fn emit_binop(
         Op::Sub => "-",
         Op::Mul => "*",
         Op::Div => "/",
+        Op::Rem => "%",
         Op::Pow => "**",
         Op::Eq => "==",
         Op::Neq => "!=",

@@ -234,6 +234,7 @@ fn callee_contract_refined_type_effect_and_bitvector_changes_do_not_reuse() {
 
     let source = basic_module("result == a + b");
     assert_not_reused("bitvector", &source, &source, &["--bitvec-i64"]);
+    assert_not_reused("i64-overflow", &source, &source, &["--check-i64-overflow"]);
 
     let effects = r#"effect File
     states: [Closed, Open];

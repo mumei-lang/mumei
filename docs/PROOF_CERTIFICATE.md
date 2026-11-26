@@ -22,6 +22,10 @@ keywords: "mumei proof certificate, formal verification, verified imports, Z3, L
    `propext`, `Classical.choice`, and `Quot.sound`; certificates without audit
    fields remain accepted as legacy `Unaudited` evidence.
 
+`lean_dual_check` records an independent Lean re-proof beside the Z3 result.
+It is separate from `lean_result_metadata` and does not affect certificate
+proof status, `--strict`, or `all_verified`.
+
 If translator metadata is missing or stale, certificate verification returns
 `stale_translator` when `--allow-lean-verified` is enabled. A rejected or
 errored kernel-axiom audit returns `axiom_rejected` instead. `verify-cert
@@ -86,6 +90,10 @@ A proof certificate (`.proof-cert.json`) is a JSON file containing cryptographic
 | `artifact_paths` | `Option<Vec<String>>` | Generated artifacts that a harness should collect or compare |
 | `budget_policy_fingerprint` | `Option<String>` | Fingerprint of the harness retry/budget policy used for this certificate |
 
+The `All verified:` line from `mumei verify-cert` reports whether the stored
+claim is supported by the current re-check and integrity result; it is not a
+direct echo of the certificate's `all_verified` field.
+
 ### IntentFidelityMetadata
 
 ```json
@@ -146,6 +154,7 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
   "dependencies": ["helper", "validate"],
   "dependency_hashes": {
     "atom:helper": "sha256:...",
+    "effect:Log": "sha256:...",
     "type:Natural": "sha256:..."
   },
   "effects": ["Log"],
@@ -188,7 +197,7 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
 | `reused_from_store` | `bool` | Optional provenance flag, omitted unless this verified Z3 proof was reused from the local proof store. |
 | `proof_hash` | `String` | Dependency-aware hash from `compute_proof_hash()` — includes transitive callee signatures |
 | `dependencies` | `Vec<String>` | Direct callee atom names from `ModuleEnv.dependency_graph` |
-| `dependency_hashes` | `Option<BTreeMap<String, String>>` | Per-atom hashes for resolved transitive atom contracts and signature-referenced refined types / structs. New certificates store a map (including an empty map); absent maps in legacy certificates cannot establish dependency freshness. |
+| `dependency_hashes` | `Option<BTreeMap<String, String>>` | Per-atom hashes for resolved transitive atom contracts, referenced effect definitions, and signature-referenced refined types / structs / enums. New certificates store a map (including an empty map); absent maps in legacy certificates cannot establish dependency freshness. |
 | `effects` | `Vec<String>` | Declared effect names |
 | `requires` | `String` | Precondition contract text |
 | `ensures` | `String` | Postcondition contract text |
@@ -202,13 +211,14 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
 | `manual_lemma_reason` | `Option<String>` | Reason partial translation must be completed by a manual lemma |
 | `translator_ir` | `TranslatorIRMetadata` | Typed intermediate metadata: obligation sort, binders, theorem goal, provenance span, and lowering rules |
 | `lean_metadata` | `Option<LeanResultMetadata>` | Lean result metadata emitted by mumei-lean (`status`, theorem name, translator version, bridge lemma hash, proof path, diagnostics) |
+| `lean_dual_check` | `Option<LeanResultMetadata>` | Independent Lean re-proof for an obligation already discharged by Z3; recorded separately and never changes proof status, strict checks, or `all_verified` |
 | `retry_policy_fingerprint` | `Option<String>` | SHA-256 fingerprint of the retry budget policy used by the agent/healing process |
 | `attempt_summary` | `Option<AttemptSummary>` | Total attempts, attempts by action class, and final action class before success or manual review |
 | `cost_success_metrics` | `Option<CostSuccessMetrics>` | Attempts, tokens, solver seconds, and spec drift observed before success |
 
 ### Dependency freshness coverage limits
 
-Dependency hashes cover resolved transitive callee contracts, including signature unit tags and effect pre/post states, and refined types or structs referenced directly by an atom's signature, including unit tags. Qualified callees are keyed by their qualified registered name, such as `atom:lib::f` or `atom:Point::get`. Certificates that recorded a bare `atom:<name>` key for a qualified call are still checked against the bare-name resolution, so they keep the coverage they had when they were produced. They do not include a callee's trust level, which is enforced by that callee's own certificate status. They do not yet cover refined types nested inside generics or struct fields, or types referenced only in bodies. If a callee cannot be resolved in the importer's environment, the atom is reported as `dependency_unchecked`, never `dependency_changed`. `proof_hash` remains an internal proof-cache fingerprint and is intentionally not compared for import freshness; it hashes callee effect pre/post states so proof-cache entries are invalidated when those contracts change.
+Dependency hashes cover resolved transitive callee contracts, including signature unit tags and effect pre/post states; effect definitions referenced by the atom or resolved callees, including their `parent` and `includes` closure; and refined types or structs referenced directly by an atom's signature, including unit tags. Qualified callees are keyed by their qualified registered name, such as `atom:lib::f` or `atom:Point::get`. Certificates that recorded a bare `atom:<name>` key for a qualified call are still checked against the bare-name resolution, so they keep the coverage they had when they were produced. They do not include a callee's trust level, which is enforced by that callee's own certificate status. They do not yet cover refined types nested inside generics or struct fields, or types referenced only in bodies. If a callee cannot be resolved in the importer's environment, the atom is reported as `dependency_unchecked`, never `dependency_changed`. `proof_hash` remains an internal proof-cache fingerprint and is intentionally not compared for import freshness; it hashes callee effect pre/post states so proof-cache entries are invalidated when those contracts change.
 
 ## Retry Budget Policy Schema (P8-G)
 
@@ -338,10 +348,39 @@ SHA-256(
 
 `dependency_hashes` is a separate freshness record; consumers must not compare
 or recompute `proof_hash` to decide whether dependencies are current. Its
-ordered keys use `atom:<name>`, `type:<name>`, and `struct:<name>`. Atom values
+ordered keys use `atom:<name>`, `effect:<name>`, `type:<name>`, `struct:<name>`,
+`enum:<name>`, and `resource:<name>`. Atom values
 hash the same contract bytes used by the corresponding `|dep:` proof-hash
-block. Type values cover the named refined type's operand, base type, and raw
-predicate; struct values cover its fields, field constraints, and invariants.
+block and the parameter constraints of the trait method a call resolves to.
+Effect values use the same field hashing as the proof hash's
+`|effect_def:` block. Type values cover the named refined type's operand, base
+type, and raw predicate; struct values cover its fields, field constraints,
+and invariants. Resource values cover the resource name, priority, mode, state
+fields, and invariant for declared or body-acquired resources.
+Root-module atoms also key every resource in the resolved module environment;
+imported atoms key every resource defined in their source module and its
+transitive imports, excluding unrelated sibling imports. Every module resource
+definition is part of the proof hash because initial-state and state-shadowing
+checks run for every atom.
+Refined-type and struct definitions widen the same way: unattributed
+environments key every type and struct, and attributed atoms key every type
+and struct defined in their source module and its transitive imports, because
+the spec-sanity phase SAT-checks every refined type and the
+projection-collision rejection scans every struct — so an unreferenced
+definition's change can flip the verdict. Seeded definitions pull their
+transitively referenced definitions (e.g. enums nested in a struct's fields)
+into the key set too; monomorphized instance names (which never appear in a
+module's raw items) are excluded.
+Enum keys pin variant names, payload field names and types for enums used
+directly in an atom's signature. The proof hash covers every refined-type
+definition in the module.
+The dependency-type closure starts from names in an atom's signature, struct
+literals, enum variant patterns and constructors in its body, and the
+signatures of every keyed callee. It follows struct fields, enum payloads,
+refined-type bases, and generic arguments; other types referenced only in
+bodies are not keyed. Legacy certificates missing a reachable `type:`,
+`struct:`, `enum:`, or `resource:` key are reported as
+`dependency_unchecked`.
 The dependency walk follows syntactic callees through atoms registered in the
 current `ModuleEnv`, independently of its dependency graph. Unresolved names
 are not recorded.
@@ -349,9 +388,12 @@ are not recorded.
 When source content matches, `verify-cert` and import verification compare
 each certificate key against current inputs. A mismatch is
 `dependency_changed`; keys that cannot be resolved, or an absent legacy map,
-are `dependency_unchecked`. Mismatches take precedence over unchecked keys.
-Non-strict imports may accept unchecked freshness with a warning, but changed
-dependency contracts are not accepted; strict imports reject both statuses.
+are `dependency_unchecked`. Certificates without `effect:<name>` keys are
+reported as `dependency_unchecked` when the current source references effect
+definitions. Mismatches take precedence over unchecked keys. Non-strict
+`verify-cert` exits 0 for these warning statuses in non-strict mode; `--strict`
+exits 1. Non-strict imports may continue with a warning, while
+`--strict-imports` rejects both statuses.
 
 This ensures that if any callee's contract changes, all dependent atoms' proof hashes change too, triggering re-verification.
 
@@ -385,7 +427,7 @@ mumei verify-cert path/to/.proof-cert.json
    - **changed**: content hash differs — atom has been modified
    - **unproven**: atom exists in cert but could not be matched
    - **missing**: atom exists in source but not in cert
-6. Exit code 0 if all atoms are "proven", exit code 1 otherwise
+6. Exit code 1 for a tampered certificate, `unproven`, `axiom_rejected`, or `missing`; with `--strict`, also for `changed`, `dependency_changed`, `dependency_unchecked`, or an absent `certificate_hash`; exit code 0 otherwise (see [CLI.md](CLI.md))
 
 ## Import Verification (P5-C)
 

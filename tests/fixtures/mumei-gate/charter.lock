@@ -1,0 +1,9 @@
+{
+  "schema": "mumei.charter-lock/v1",
+  "charters": [
+    {
+      "path": "specs/dosage.charter.mm",
+      "sha256": "ecf12bcb8addbde961af9311576b189f0a046922410e6368be59b31932874aa9"
+    }
+  ]
+}

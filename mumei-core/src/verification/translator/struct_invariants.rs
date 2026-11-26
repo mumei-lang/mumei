@@ -15,7 +15,6 @@
 use super::super::support::*;
 use super::super::*;
 use super::*;
-use crate::parser::expr::normalize_comparison_chains;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(crate) const STRUCT_FIELD_PREFIX: &str = "__struct_";
@@ -50,29 +49,48 @@ pub(crate) fn bind_struct_fields<'a>(
 }
 
 /// Declare one fresh symbol per field of `sdef` for `binding` (sorts follow
-/// `param_z3_value`, i.e. the encoding of the run) and register them.
+/// `param_z3_value_for_vc`, i.e. the encoding of the run — an enum-typed
+/// field seeds as the enum's Z3 datatype like an enum parameter does) and
+/// register them. A struct-typed field seeds recursively — its leaves land
+/// under `__struct_<binding>_<field>_<leaf>`, so a nested read
+/// `<binding>.<field>.<leaf>` projects through the same keys a literal
+/// init writes and two aliases of one inner value compare equal.
+/// Depth is capped like the fragment's admission bound so a recursive
+/// declaration degenerates to an unseeded const instead of looping.
 pub(crate) fn seed_struct_fields<'a>(
-    ctx: &'a Context,
+    vc: &VCtx<'a>,
     env: &mut Env<'a>,
     binding: &str,
     sdef: &StructDef,
-    module_env: &ModuleEnv,
-    ieee754_f64: bool,
-    bitvec_i64: bool,
 ) -> Vec<(String, Dynamic<'a>)> {
+    seed_struct_fields_depth(vc, env, binding, sdef, 0)
+}
+
+fn seed_struct_fields_depth<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    binding: &str,
+    sdef: &StructDef,
+    depth: usize,
+) -> Vec<(String, Dynamic<'a>)> {
+    const MAX_NESTED_SEED_DEPTH: usize = 16;
     let values: Vec<(String, Dynamic<'a>)> = sdef
         .fields
         .iter()
         .map(|field| {
             let name = format!("{binding}_{}", field.name);
-            let value = param_z3_value(
-                ctx,
+            let value = crate::verification::support::datatype::param_z3_value_for_vc(
+                vc,
                 &name,
                 Some(&field.type_name),
-                module_env,
-                ieee754_f64,
-                bitvec_i64,
             );
+            if depth < MAX_NESTED_SEED_DEPTH {
+                if let Some(inner) = vc.module_env.get_struct(&field.type_name) {
+                    // Seed the inner leaves under this field's own
+                    // binding name: `__struct_<binding>_<field>_<leaf>`.
+                    seed_struct_fields_depth(vc, env, &name, inner, depth + 1);
+                }
+            }
             (field.name.clone(), value)
         })
         .collect();
@@ -105,8 +123,9 @@ pub(crate) fn struct_fields_of_value<'a>(
 
 /// Field values of a struct-valued term without knowing its struct type:
 /// the `__struct_<handle>_<field>` entries of a handle, or their field-wise
-/// `ite` for a conditional over handles.
-fn project_struct_fields<'a>(
+/// `ite` for a conditional over handles. Nested field reads use it to
+/// resolve `o.inner.a` once `o.inner` evaluates to an inner handle.
+pub(crate) fn project_struct_fields<'a>(
     env: &Env<'a>,
     value: &Dynamic<'a>,
 ) -> Option<Vec<(String, Dynamic<'a>)>> {
@@ -146,6 +165,42 @@ fn project_struct_fields<'a>(
     Some(fields)
 }
 
+/// The full flat field list of `value`: its direct fields plus every
+/// deeper leaf composed under `<field>_<leaf>` (`b` and `b_c` for
+/// `Inner { b: Sub { c } }`), so re-homing the binding covers
+/// `q.inner.b.c`-style paths and a shallow bind never leaves deep keys
+/// on their pre-write symbols.
+pub(crate) fn nested_field_bindings<'a>(
+    env: &Env<'a>,
+    value: &Dynamic<'a>,
+) -> Vec<(String, Dynamic<'a>)> {
+    fn collect<'a>(
+        env: &Env<'a>,
+        value: &Dynamic<'a>,
+        visiting: &mut std::collections::HashSet<usize>,
+    ) -> Vec<(String, Dynamic<'a>)> {
+        let ast = value.get_z3_ast() as usize;
+        if !visiting.insert(ast) {
+            return Vec::new();
+        }
+        let Some(fields) = project_struct_fields(env, value) else {
+            visiting.remove(&ast);
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(fields.len());
+        for (name, inner) in fields {
+            for (deep, v) in collect(env, &inner, visiting) {
+                out.push((format!("{name}_{deep}"), v));
+            }
+            out.push((name, inner));
+        }
+        visiting.remove(&ast);
+        out
+    }
+
+    collect(env, value, &mut std::collections::HashSet::new())
+}
+
 /// Register the fields of the struct value `value` under the new binding
 /// `alias` (`let alias = value;` / `alias = value;`), so `alias.f` resolves.
 pub(crate) fn alias_struct_fields<'a>(env: &mut Env<'a>, alias: &str, value: &Dynamic<'a>) {
@@ -170,6 +225,32 @@ pub(crate) fn alias_struct_fields<'a>(env: &mut Env<'a>, alias: &str, value: &Dy
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use z3::ast::Int;
+    use z3::{Config, Context};
+
+    #[test]
+    fn nested_field_bindings_stop_at_cyclic_handles() {
+        let context = Context::new(&Config::new());
+        let root: Dynamic<'_> = Int::new_const(&context, "root").into();
+        let next: Dynamic<'_> = Int::new_const(&context, "next").into();
+        let mut env: Env<'_> = std::collections::HashMap::new();
+        bind_struct_fields(&mut env, "root", &[("next".to_string(), next.clone())]);
+        bind_struct_fields(&mut env, "next", &[("self".to_string(), next)]);
+
+        let fields = nested_field_bindings(&env, &root);
+        assert_eq!(
+            fields
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["next_self", "next"]
+        );
+    }
+}
+
 /// Lower a struct invariant against the given field values.
 ///
 /// Inside the expression `self.<field>` (and a bare `<field>`) denotes the
@@ -188,7 +269,7 @@ pub(crate) fn lower_struct_invariant<'a>(
     for (field, value) in fields {
         local_env.insert(field.clone(), value.clone());
     }
-    let ast = normalize_comparison_chains(parse_expression(invariant_raw));
+    let ast = parse_expression(invariant_raw);
     let lowered = expr_to_z3(vc, &ast, &mut local_env, solver_opt)?;
     lowered.as_bool().ok_or_else(|| {
         MumeiError::type_error(format!(
@@ -196,6 +277,40 @@ pub(crate) fn lower_struct_invariant<'a>(
             sdef.name, invariant_raw
         ))
     })
+}
+
+/// The predicates a field's declared refined-alias type imposes on its
+/// value, named by declaration: the alias's whole chain, each declaration
+/// binding its own operand to the field value — exactly what
+/// `apply_refinement_constraint` asserts for a scalar parameter of that
+/// type. Empty for a field of any other type; a cyclic chain is a type
+/// error.
+pub(crate) fn field_type_predicates<'a>(
+    vc: &VCtx<'a>,
+    field: &crate::parser::ast::StructField,
+    field_z3: &Dynamic<'a>,
+    env: &Env<'a>,
+) -> MumeiResult<Vec<(String, Bool<'a>)>> {
+    if !vc.module_env.types.contains_key(&field.type_name) {
+        return Ok(Vec::new());
+    }
+    let chain = vc
+        .module_env
+        .refined_chain(&field.type_name)
+        .map_err(MumeiError::type_error)?;
+    let mut predicates = Vec::with_capacity(chain.len());
+    for decl in chain {
+        let mut local_env = env.clone();
+        local_env.insert(decl.operand.clone(), field_z3.clone());
+        let ast = parse_expression(&decl.predicate_raw);
+        let predicate = refined_predicate_to_z3(vc, decl, &ast, &mut local_env, None)?
+            .as_bool()
+            .ok_or_else(|| {
+                MumeiError::type_error(format!("Predicate for {} must be boolean", decl.name))
+            })?;
+        predicates.push((decl.name.clone(), predicate));
+    }
+    Ok(predicates)
 }
 
 /// Lower the complete struct contract against `fields`.
@@ -216,12 +331,15 @@ where
     F: FnMut(String, Bool<'a>) -> MumeiResult<()>,
 {
     for (field, (_, field_z3)) in sdef.fields.iter().zip(fields) {
+        for (decl, predicate) in field_type_predicates(vc, field, field_z3, env)? {
+            on_fact(format!("field::{}::type::{}", field.name, decl), predicate)?;
+        }
         let Some(constraint_raw) = &field.constraint else {
             continue;
         };
         let mut local_env = env.clone();
         local_env.insert("v".to_string(), field_z3.clone());
-        let ast = normalize_comparison_chains(parse_expression(constraint_raw));
+        let ast = parse_expression(constraint_raw);
         let constraint = expr_to_z3(vc, &ast, &mut local_env, None)?;
         if let Some(constraint) = constraint.as_bool() {
             on_fact(format!("field::{}", field.name), constraint)?;

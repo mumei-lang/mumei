@@ -99,3 +99,6 @@ when a matching claim exists; these fields are omitted otherwise.
 Charter checking is read-only with respect to the implementation and does not
 run verification or modify its contracts. The grade gate evaluates existing
 certificate evidence and does not write a cache.
+
+For a reusable Claim Book and Charter GitHub Actions gate, see
+[Running the gate in CI](CLAIMBOOK.md#running-the-gate-in-ci).

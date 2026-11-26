@@ -10,6 +10,8 @@ keywords: "mumei onboarding, formal verification, existing code audit, mumei-age
 
 Mumei can start from existing code or natural-language requirements, then gradually move the most important logic into `.mm`. Use this path when you want formal feedback before committing to a full `.mm` rewrite.
 
+For the full command and option list, see the [generated CLI option reference](CLI_REFERENCE.md). Environment defaults and integration variables are listed in the [generated environment reference](ENV_REFERENCE.md).
+
 ## Canonical vocabulary
 
 Follow `docs/CROSS_PROJECT_ROADMAP.md` as the top-level contract. User-facing onboarding uses only `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified` for mumei-side evidence. The no-`.mm` path keeps the mumei-agent names `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`; do not rename them when handing users from `audit` / `scan_and_fix` into generated `.mm` verification.

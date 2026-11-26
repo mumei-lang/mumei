@@ -2,11 +2,16 @@
 
 mod agent;
 mod cli;
+#[cfg(test)]
+mod cli_reference;
 mod codegen;
 mod commands;
+mod env_registry;
 mod feedback;
 mod linker;
 mod lsp;
+#[cfg(test)]
+mod naming;
 mod pipeline;
 mod setup;
 mod telemetry;
@@ -27,8 +32,11 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
+        Some(Command::Evidence { command }) => commands::evidence::run(command),
+        Some(Command::NativeBundle { command }) => commands::native_bundle::run(command),
         Some(command @ Command::Build { .. }) => commands::build::cmd_build_command(command),
         Some(command @ Command::Verify { .. }) => commands::verify::cmd_verify_command(command),
+        Some(Command::Config { json, all }) => commands::config::cmd_config(json, all),
         Some(Command::Check { input }) => commands::check::cmd_check(&input),
         Some(Command::Erosion {
             candidate,
@@ -101,10 +109,13 @@ fn main() {
             allow_lean_verified,
             format,
             out_dir,
+            observations,
             controls,
             max_mutants,
             require_discriminating,
+            require_complete,
             require_grade,
+            require_evidence_acceptance,
         }) => commands::claims::cmd_claims(
             &input,
             commands::claims::ClaimsOptions {
@@ -112,10 +123,13 @@ fn main() {
                 allow_lean_verified,
                 format: &format,
                 out_dir: &out_dir,
+                observations: observations.as_deref(),
                 controls_enabled: controls,
                 max_mutants,
                 require_discriminating,
+                require_complete,
                 require_grade: require_grade.as_deref(),
+                require_evidence_acceptance: &require_evidence_acceptance,
             },
         ),
         Some(Command::Controls {

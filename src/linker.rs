@@ -2,8 +2,11 @@
 // P7-B: Linker Pipeline — Link LLVM IR to native binary via clang
 // =============================================================================
 
-use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 /// Cross-platform helper to find an executable on PATH.
 /// Uses `which` on Unix and `where` on Windows.
@@ -148,8 +151,21 @@ pub fn link_to_binary(
     runtime_lib_path: Option<&Path>,
 ) -> Result<(), String> {
     let linker = find_c_linker()?;
+    run_linker(&mut link_command(
+        &linker,
+        inputs,
+        output_path,
+        runtime_lib_path,
+    ))
+}
 
-    let mut cmd = Command::new(&linker);
+fn link_command(
+    linker: &Path,
+    inputs: &[PathBuf],
+    output_path: &Path,
+    runtime_lib_path: Option<&Path>,
+) -> Command {
+    let mut cmd = Command::new(linker);
     cmd.arg("-O2");
     cmd.arg("-o");
     cmd.arg(output_path);
@@ -178,9 +194,17 @@ pub fn link_to_binary(
         cmd.arg("-lz3");
     }
 
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Failed to execute linker '{}': {}", linker.display(), e))?;
+    cmd
+}
+
+fn run_linker(cmd: &mut Command) -> Result<(), String> {
+    let output = cmd.output().map_err(|error| {
+        format!(
+            "Failed to execute linker '{}': {}",
+            cmd.get_program().to_string_lossy(),
+            error
+        )
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -192,6 +216,140 @@ pub fn link_to_binary(
     }
 
     Ok(())
+}
+
+/// Observe the selected driver and its linker before executing the same command.
+/// No raw tool output, environment or path-bearing arguments enter the record.
+pub fn link_recorded(
+    inputs: &[PathBuf],
+    output: &Path,
+) -> Result<mumei_core::native_bundle::LinkBuild, String> {
+    link_recorded_inner(inputs, output, None)
+}
+
+pub fn link_recorded_with_runtime(
+    inputs: &[PathBuf],
+    runtime_source: &Path,
+    output: &Path,
+) -> Result<mumei_core::native_bundle::LinkBuild, String> {
+    use mumei_core::native_bundle::sha256;
+
+    let runtime_bytes = fs::read(runtime_source)
+        .map_err(|_| "Unsupported native runtime source observation".to_owned())?;
+    let mut inputs_with_runtime = inputs.to_vec();
+    inputs_with_runtime.push(runtime_source.to_path_buf());
+    link_recorded_inner(&inputs_with_runtime, output, Some(sha256(&runtime_bytes)))
+}
+
+fn link_recorded_inner(
+    inputs: &[PathBuf],
+    output: &Path,
+    runtime_source_sha256: Option<String>,
+) -> Result<mumei_core::native_bundle::LinkBuild, String> {
+    use mumei_core::native_bundle::{sha256, LinkBuild};
+    let fail = || "Unsupported native bundle linker observation".to_owned();
+    let linker = find_c_linker().map_err(|_| fail())?;
+    let driver = linker
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(fail)?;
+    if !["cc", "gcc", "clang", "clang-17"].contains(&driver) {
+        return Err(fail());
+    }
+    let observe = |flag: &str| -> Result<String, String> {
+        let result = Command::new(&linker)
+            .arg(flag)
+            .output()
+            .map_err(|_| fail())?;
+        if !result.status.success() {
+            return Err(fail());
+        }
+        String::from_utf8(result.stdout).map_err(|_| fail())
+    };
+    let version = regex::Regex::new(r"\b[0-9]+\.[0-9]+(?:\.[0-9]+)?\b").unwrap();
+    let driver_banner = observe("--version")?;
+    let driver_version = version
+        .find(driver_banner.lines().next().unwrap_or(""))
+        .ok_or_else(fail)?
+        .as_str()
+        .to_owned();
+    let driver_target = observe("-dumpmachine")?.trim().to_owned();
+    if !driver_target.starts_with("x86_64-")
+        || !driver_target.contains("linux")
+        || !driver_target
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
+    {
+        return Err(fail());
+    }
+    let mut command = link_command(&linker, inputs, output, None);
+    let args: Vec<_> = command
+        .get_args()
+        .map(|arg| arg.as_encoded_bytes().to_vec())
+        .collect();
+    let arguments_sha256 = sha256(&serde_json::to_vec(&args).map_err(|_| fail())?);
+    // The raw vector carries absolute staging paths and the user-local
+    // bundled-z3 dir, so no recheck can reproduce it — pin the same
+    // vector with those arguments replaced by stable placeholders, which
+    // a recheck CAN recompute and compare.
+    let z3_dir = find_bundled_z3_lib_dir().map(|dir| dir.to_string_lossy().into_owned());
+    let canonical: Vec<Vec<u8>> = args
+        .iter()
+        .map(|arg| {
+            let arg = arg.as_slice();
+            if arg == output.as_os_str().as_encoded_bytes() {
+                return b"{output}".to_vec();
+            }
+            if let Some(index) = inputs
+                .iter()
+                .position(|input| input.as_os_str().as_encoded_bytes() == arg)
+            {
+                return format!("{{input:{index}}}").into_bytes();
+            }
+            if let Some(dir) = &z3_dir {
+                if arg == format!("-L{dir}").as_bytes() {
+                    return b"-L{toolchain}".to_vec();
+                }
+                if arg == format!("-Wl,-rpath,{dir}").as_bytes() {
+                    return b"-Wl,-rpath,{toolchain}".to_vec();
+                }
+            }
+            arg.to_vec()
+        })
+        .collect();
+    let canonical_arguments_sha256 =
+        Some(sha256(&serde_json::to_vec(&canonical).map_err(|_| fail())?));
+    let mut probe = link_command(&linker, inputs, output, None);
+    let result = probe.arg("-Wl,--version").output().map_err(|_| fail())?;
+    if !result.status.success() {
+        return Err(fail());
+    }
+    let banner = String::from_utf8(result.stdout).map_err(|_| fail())?;
+    let line = banner
+        .lines()
+        .find(|line| line.starts_with("GNU ld ") || line.starts_with("LLD "))
+        .ok_or_else(fail)?;
+    let linker_version = version.find(line).ok_or_else(fail)?.as_str().to_owned();
+    let linker_family = if line.starts_with("GNU ld ") {
+        "gnu-ld"
+    } else {
+        "lld"
+    };
+    run_linker(&mut command).map_err(|_| "Native bundle linking failed".to_owned())?;
+    Ok(LinkBuild {
+        driver: driver.to_owned(),
+        driver_version,
+        driver_target,
+        linker: linker_family.to_owned(),
+        linker_version,
+        arguments_sha256,
+        canonical_arguments_sha256,
+        runtime_source_sha256,
+        expected_exit_status: None,
+        expected_stdout_sha256: None,
+        expected_stderr_sha256: None,
+        observation_envelope: None,
+    })
 }
 
 #[cfg(test)]

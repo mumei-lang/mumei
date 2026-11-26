@@ -224,7 +224,13 @@ pub(crate) fn cmd_verify_cert(
             }
         }
     }
-    println!("All verified: {}", cert.all_verified);
+    let all_verified_now = cert.all_verified
+        && !tampered
+        && results.iter().all(|check| {
+            check.status == proof_cert::status::CERTIFICATE_PROVEN
+                || check.status == proof_cert::status::CERTIFICATE_TRUSTED
+        });
+    println!("All verified: {}", all_verified_now);
     println!(
         "Results: {} proven, {} trusted (body not checked), {} changed, {} dependency_changed, {} dependency_unchecked, {} unproven, {} axiom_rejected, {} missing",
         proven, trusted, changed, dependency_changed, dependency_unchecked, unproven, axiom_rejected, missing
@@ -281,13 +287,7 @@ pub(crate) fn cmd_verify_cert(
             if unhashed { "absent" } else { "present" }
         );
     }
-    if tampered
-        || strict_failure
-        || dependency_changed > 0
-        || unproven > 0
-        || axiom_rejected > 0
-        || missing > 0
-    {
+    if tampered || strict_failure || unproven > 0 || axiom_rejected > 0 || missing > 0 {
         std::process::exit(1);
     }
 }

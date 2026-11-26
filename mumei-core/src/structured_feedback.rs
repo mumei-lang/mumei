@@ -459,3 +459,34 @@ fn is_contextual_suggestion(suggestion: &str) -> bool {
     let lower = suggestion.to_lowercase();
     MARKERS.iter().any(|marker| lower.contains(marker))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::StructuredFeedback;
+    use serde_json::json;
+
+    #[test]
+    fn report_failure_types_produce_specific_structured_feedback() {
+        for failure_type in [
+            "precondition_violated",
+            "effect_not_allowed",
+            "linearity_violated",
+            "temporal_effect_violated",
+        ] {
+            let report = json!({
+                "status": "failed",
+                "failure_type": failure_type,
+                "violation_type": "effect_mismatch",
+                "effect_violation": {"required_effect": "FileWrite"}
+            });
+
+            let feedback = StructuredFeedback::from_report(&report);
+
+            assert_eq!(feedback.error_type.as_deref(), Some(failure_type));
+            assert_ne!(
+                feedback.feedback_instruction,
+                "Verification failed. Review the verifier report and repair the atom."
+            );
+        }
+    }
+}

@@ -1,14 +1,14 @@
 use super::module_env::ModuleEnv;
 use super::support::nondeterministic_root;
 use super::translator::{
-    apply_refinement_constraint, expr_to_z3, param_z3_value, stmt_to_z3, VCtx,
-    DEFAULT_CONSTRAINT_BUDGET, I64_BITS,
+    apply_refinement_constraint, expr_to_z3_with_domain_obligations, param_z3_value, stmt_to_z3,
+    VCtx, DEFAULT_CONSTRAINT_BUDGET, I64_BITS,
 };
 use super::types::Env;
 use super::{
     parse_body_expr, parse_expression, Atom, Bool, Config, Dynamic, Int, SatResult, Solver,
 };
-use crate::parser::{Expr, Op, Param, RefinedType, Stmt};
+use crate::parser::{Expr, Op, Param, Stmt};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use z3::ast::Ast;
@@ -359,8 +359,8 @@ pub fn synthesize_input_generator(
                     MAX_ARRAY_LEN,
                 ));
             }
-            if let Some(refined) = ctx.module_env.get_type(type_name) {
-                return Box::new(generator_from_refinement(refined));
+            if ctx.module_env.get_type(type_name).is_some() {
+                return generator_from_refinement(type_name, ctx.module_env);
             }
             Box::new(generator_from_type_and_predicates(
                 Some(type_name),
@@ -375,11 +375,38 @@ pub fn synthesize_input_generator(
     }
 }
 
-pub fn generator_from_refinement(refined: &RefinedType) -> IntRangeGenerator {
-    let parsed = parse_expression(&refined.predicate_raw);
+pub fn generator_from_refinement(
+    type_name: &str,
+    module_env: &ModuleEnv,
+) -> Box<dyn GeneratorShrink> {
+    // A bool-leaf alias takes bool inputs — minting ints would feed
+    // wrong-sorted values into assignments the checker can't evaluate.
+    match module_env.resolve_base_type(type_name).as_str() {
+        "bool" | "Bool" => return Box::new(BoolGenerator),
+        _ => {}
+    }
+    let chain = match module_env.refined_chain(type_name) {
+        Ok(chain) => chain,
+        // Cyclic declarations are already a verify-time type error;
+        // generation falls back to the unrefined range instead of
+        // crashing the property runner.
+        Err(_) => {
+            return Box::new(generator_from_type_and_predicates(
+                Some(type_name),
+                &[],
+                &[],
+            ));
+        }
+    };
+    // Bounds merge across the chain: `Small = Pos where v < 10` must
+    // also honour `Pos`'s `v > 0`, otherwise generated inputs land
+    // outside the declared domain and produce phantom violations.
     let mut bounds = Bounds::default();
-    infer_bounds_from_expr(&parsed, &refined.operand, &mut bounds);
-    IntRangeGenerator::new(bounds.min, bounds.max)
+    for decl in &chain {
+        let parsed = parse_expression(&decl.predicate_raw);
+        infer_bounds_from_expr(&parsed, &decl.operand, &mut bounds);
+    }
+    Box::new(IntRangeGenerator::new(bounds.min, bounds.max))
 }
 
 pub fn synthesize_input_generators(atom: &Atom, module_env: &ModuleEnv) -> GeneratedInputs {
@@ -439,6 +466,15 @@ pub fn run_property_based_test_with_mode(
         return PropertyBasedTestResult::passed(
             0,
             vec!["property-based validation skipped for generic atom".to_string()],
+        );
+    }
+    if has_enum_array_type(atom, module_env) {
+        return PropertyBasedTestResult::passed(
+            0,
+            vec![
+                "property-based validation skipped because enum-array values are not generated"
+                    .to_string(),
+            ],
         );
     }
 
@@ -528,8 +564,8 @@ fn generator_for_param(
     ctx: &GenerationContext<'_>,
 ) -> Box<dyn GeneratorShrink> {
     if let Some(type_name) = param.type_name.as_deref() {
-        if let Some(refined) = module_env.get_type(type_name) {
-            return Box::new(generator_from_refinement(refined));
+        if module_env.get_type(type_name).is_some() {
+            return generator_from_refinement(type_name, module_env);
         }
     }
     let predicates = [atom.requires.as_str(), atom.ensures.as_str()];
@@ -768,6 +804,11 @@ fn check_assignment(
     assignment: &HashMap<String, GeneratedValue>,
     bitvec_i64: bool,
 ) -> CaseOutcome {
+    if has_enum_array_type(atom, module_env) {
+        return CaseOutcome::Inconclusive(
+            "property-based validation does not generate enum-array values".to_string(),
+        );
+    }
     if !assignment_satisfies_preconditions(atom, module_env, assignment, bitvec_i64) {
         return CaseOutcome::Skipped;
     }
@@ -1095,6 +1136,7 @@ fn validation_ctx<'a>(
         linearity_ctx: None,
         inferred_invariants: None,
         cover_obligations: None,
+        spec_domain_obligations: Default::default(),
         effect_ctx: None,
         constraint_count: None,
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
@@ -1109,19 +1151,28 @@ fn validation_ctx<'a>(
             || super::fragment::atom_requires_bitvector_semantics_in_module(atom, module_env),
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_struct_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_fields: Default::default(),
         contracts_in_instantiation: std::cell::RefCell::new(Vec::new()),
+        instantiation_params: std::cell::RefCell::new(Vec::new()),
         recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
 
         bitvec_i64_global: bitvec_i64,
+
+        check_i64_overflow: std::cell::Cell::new(false),
+
+        local_int_types: Default::default(),
+        refined_operand_types: Default::default(),
     }
 }
 
@@ -1161,15 +1212,14 @@ fn seed_concrete_env<'a>(
         env.insert(param.name.clone(), value.clone());
         if let Some(GeneratedValue::Array(values)) = assignment.get(&param.name) {
             env.insert(format!("__z3_arr_{}", param.name), value);
-            env.insert(
-                format!("len_{}", param.name),
-                value_to_dynamic(
-                    ctx,
-                    &param.name,
-                    &GeneratedValue::Int(values.len() as i64),
-                    bitvec_i64,
-                ),
+            let len = value_to_dynamic(
+                ctx,
+                &param.name,
+                &GeneratedValue::Int(values.len() as i64),
+                bitvec_i64,
             );
+            env.insert(super::translator::array_len_key(&param.name), len.clone());
+            env.insert(super::translator::array_root_len_key(&param.name), len);
         }
     }
     let result_value = result
@@ -1237,7 +1287,7 @@ fn assert_parameter_refinements<'a>(
         let Some(refined) = module_env.get_type(type_name) else {
             continue;
         };
-        apply_refinement_constraint(vc, solver, &param.name, refined, env)
+        apply_refinement_constraint(vc, solver, &param.name, refined, module_env, env)
             .map_err(|err| err.to_string())?;
     }
     Ok(())
@@ -1254,7 +1304,8 @@ fn assert_clause<'a>(
         return Ok(());
     }
     let clause_ast = parse_expression(trimmed);
-    let clause_z3 = expr_to_z3(vc, &clause_ast, env, None).map_err(|err| err.to_string())?;
+    let clause_z3 = expr_to_z3_with_domain_obligations(vc, &clause_ast, env, None)
+        .map_err(|err| err.to_string())?;
     let Some(clause_bool) = clause_z3.as_bool() else {
         return Err(format!("clause '{trimmed}' did not evaluate to bool"));
     };
@@ -1264,6 +1315,22 @@ fn assert_clause<'a>(
 
 fn is_array_type(type_name: &str) -> bool {
     type_name.starts_with('[') && type_name.ends_with(']')
+}
+
+fn has_enum_array_type(atom: &Atom, module_env: &ModuleEnv) -> bool {
+    let is_enum_array = |type_name: &str| {
+        let resolved = module_env.resolve_base_type(type_name);
+        if !is_array_type(&resolved) {
+            return false;
+        }
+        let element_type = module_env.resolve_base_type(array_element_type(&resolved));
+        module_env.get_enum(&element_type).is_some()
+    };
+    atom.params
+        .iter()
+        .filter_map(|param| param.type_name.as_deref())
+        .any(is_enum_array)
+        || atom.return_type.as_deref().is_some_and(is_enum_array)
 }
 
 fn array_element_type(type_name: &str) -> &str {
@@ -1337,5 +1404,101 @@ mod replay_binding_tests {
             ),
             GeneratedValue::Int(a - b)
         );
+    }
+}
+
+#[cfg(test)]
+mod refinement_generator_tests {
+    use super::*;
+    use crate::parser::{parse_module, Item, RefinedType, Span};
+
+    fn env_with(types: &[(&str, &str, &str)]) -> ModuleEnv {
+        let mut module_env = ModuleEnv::new();
+        for (name, base, predicate) in types {
+            module_env.register_type(&RefinedType {
+                name: name.to_string(),
+                _base_type: base.to_string(),
+                operand: "v".to_string(),
+                predicate_raw: predicate.to_string(),
+                unit: None,
+                span: Span::default(),
+            });
+        }
+        module_env
+    }
+
+    fn int_boundary_values(gen: &dyn InputGenerator) -> Vec<i64> {
+        gen.boundary_values()
+            .iter()
+            .filter_map(|value| match value {
+                GeneratedValue::Int(v) => Some(*v),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn chained_alias_merges_ancestor_bounds() {
+        // `Small = Pos where v < 10` must keep `Pos`'s `v > 0`: without
+        // the merge the range admits -5.. and feeds out-of-domain inputs.
+        let module_env = env_with(&[("Pos", "i64", "v > 0"), ("Small", "Pos", "v < 10")]);
+        let gen = generator_from_refinement("Small", &module_env);
+        let values = int_boundary_values(&*gen);
+        assert!(!values.is_empty());
+        assert!(
+            values.iter().all(|v| *v > 0 && *v < 10),
+            "every boundary must satisfy both conjuncts: {values:?}"
+        );
+    }
+
+    #[test]
+    fn bool_leaf_alias_generates_bool_inputs() {
+        let module_env = env_with(&[("Flag", "bool", "v == true"), ("F2", "Flag", "v == true")]);
+        let gen = generator_from_refinement("F2", &module_env);
+        let values = gen.boundary_values();
+        assert!(
+            values.iter().all(|v| matches!(v, GeneratedValue::Bool(_))),
+            "bool-leaf aliases must generate bools: {values:?}"
+        );
+    }
+
+    #[test]
+    fn cyclic_alias_falls_back_to_unrefined_range() {
+        let module_env = env_with(&[("A", "B", "v > 0"), ("B", "A", "v < 10")]);
+        let gen = generator_from_refinement("A", &module_env);
+        let values = int_boundary_values(&*gen);
+        assert!(
+            values.iter().any(|v| *v <= 0),
+            "cyclic aliases must not apply partial bounds: {values:?}"
+        );
+    }
+
+    #[test]
+    fn enum_array_property_testing_skips_unmodeled_values() {
+        let source = "enum C { R(v: i64), G }\n\
+                      atom inspect(xs: [C]) -> i64\n\
+                      requires: true;\n\
+                      ensures: true;\n\
+                      body: { 0 };\n";
+        let mut module_env = ModuleEnv::new();
+        let mut atom = None;
+        for item in parse_module(source) {
+            match item {
+                Item::EnumDef(def) => module_env.register_enum(&def),
+                Item::Atom(def) => atom = Some(def),
+                _ => {}
+            }
+        }
+        let result = run_property_based_test_with_mode(
+            &atom.expect("enum-array atom"),
+            &module_env,
+            &PropertyBasedTestConfig::default(),
+            false,
+        );
+        assert_eq!(result.tests_run, 0);
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("enum-array values are not generated")));
     }
 }

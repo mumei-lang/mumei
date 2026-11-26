@@ -1,10 +1,11 @@
 use crate::pipeline::try_load_and_prepare_with_full_options_and_persistence;
 use mumei_core::claimbook::{
-    attach_controls, create_claimbook, fails_discrimination_gate, limiting_premises_text,
-    render_markdown, SealGrade,
+    attach_controls, attach_observations, create_claimbook, fails_discrimination_gate,
+    limiting_premises_text, render_markdown, SealGrade,
 };
 use mumei_core::parser::Item;
-use mumei_core::{controls, parser, proof_cert};
+use mumei_core::{controls, observe, parser, proof_cert};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -13,10 +14,13 @@ pub(crate) struct ClaimsOptions<'a> {
     pub(crate) allow_lean_verified: bool,
     pub(crate) format: &'a str,
     pub(crate) out_dir: &'a str,
+    pub(crate) observations: Option<&'a str>,
     pub(crate) controls_enabled: bool,
     pub(crate) max_mutants: usize,
     pub(crate) require_discriminating: bool,
+    pub(crate) require_complete: bool,
     pub(crate) require_grade: Option<&'a str>,
+    pub(crate) require_evidence_acceptance: &'a [String],
 }
 
 pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
@@ -25,10 +29,13 @@ pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
         allow_lean_verified,
         format,
         out_dir,
+        observations,
         controls_enabled,
         max_mutants,
         require_discriminating,
+        require_complete,
         require_grade,
+        require_evidence_acceptance,
     } = options;
     let cert_path = cert_arg
         .map(PathBuf::from)
@@ -92,6 +99,26 @@ pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
         allow_lean_verified,
         Some(&module_env),
     );
+    if let Some(observations_path) = observations {
+        let harvest_json = fs::read_to_string(observations_path).unwrap_or_else(|error| {
+            eprintln!("❌ Error: could not read harvest '{observations_path}': {error}");
+            std::process::exit(super::verify::EXIT_INPUT_ERROR);
+        });
+        let report = observe::analyze(
+            input,
+            observations_path,
+            &harvest_json,
+            &items,
+            &items,
+            &module_env,
+            None,
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("❌ Error: {error}");
+            std::process::exit(super::verify::EXIT_INPUT_ERROR);
+        });
+        attach_observations(&mut book, &report.results);
+    }
     if controls_enabled {
         let report = controls::analyze(input, &items, &items, &module_env, None, max_mutants)
             .unwrap_or_else(|error| {
@@ -151,6 +178,57 @@ pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
     );
 
     let mut rejected = false;
+    if require_complete {
+        if book.claims.is_empty() {
+            rejected = true;
+            eprintln!("No claims found; --require-complete requires at least one claim");
+        }
+        let incomplete_claims = book
+            .claims
+            .iter()
+            .filter(|claim| !claim.effective_grade_complete)
+            .map(|claim| claim.atom.as_str())
+            .collect::<BTreeSet<_>>();
+        for claim in book
+            .claims
+            .iter()
+            .filter(|claim| !claim.effective_grade_complete)
+        {
+            rejected = true;
+            let mut reasons = Vec::new();
+            if !claim.unresolved_dependencies.is_empty() {
+                reasons.push(format!(
+                    "unresolved dependencies: {}",
+                    claim.unresolved_dependencies.join(", ")
+                ));
+            }
+            let incomplete_dependencies = claim
+                .dependencies
+                .iter()
+                .filter(|dependency| incomplete_claims.contains(dependency.as_str()))
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            if !incomplete_dependencies.is_empty() {
+                reasons.push(format!(
+                    "incomplete dependencies: {}",
+                    incomplete_dependencies.join(", ")
+                ));
+            }
+            if reasons.is_empty() {
+                reasons.push(format!(
+                    "method-name resolution is not exact; resolved dependencies: {}",
+                    claim.dependencies.join(", ")
+                ));
+            }
+            eprintln!(
+                "{}: dependency coverage is incomplete; {}",
+                claim.atom,
+                reasons.join("; ")
+            );
+        }
+    }
     if let Some(required_grade) = require_grade {
         let required_grade = match required_grade {
             "G0" => SealGrade::G0,
@@ -200,6 +278,54 @@ pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
                     discrimination.detail,
                     surviving
                 );
+            }
+        }
+    }
+    if !require_evidence_acceptance.is_empty() {
+        // Fail-closed promotable gate: every declared acceptance
+        // descriptor must pin exactly its declared inputs with verdict
+        // accepted — anything else (a mismatch, a different descriptor,
+        // a non-accepted verdict, unresolved conflicts) is a rejection,
+        // never a silent pass. Every declared triple gates, not just
+        // the first.
+        for triple in require_evidence_acceptance.chunks(3) {
+            let mut gate_inputs = Vec::new();
+            for (label, path, bound) in [
+                (
+                    "requirement list",
+                    &triple[0],
+                    mumei_core::verification_evidence::MAX_INPUT_BYTES as u64,
+                ),
+                (
+                    "evidence",
+                    &triple[1],
+                    mumei_core::verification_evidence::MAX_INPUT_BYTES as u64,
+                ),
+                (
+                    "acceptance",
+                    &triple[2],
+                    mumei_core::evidence_acceptance::MAX_ACCEPTANCE_DESCRIPTOR_BYTES as u64,
+                ),
+            ] {
+                match super::input::read_regular(Path::new(path), bound) {
+                    Ok(bytes) => gate_inputs.push(bytes),
+                    Err(reason) => {
+                        rejected = true;
+                        eprintln!(
+                            "--require-evidence-acceptance: could not read {label} '{path}': {reason}"
+                        );
+                    }
+                }
+            }
+            if gate_inputs.len() == 3 {
+                for failure in mumei_core::evidence_acceptance::promotable_failures(
+                    &gate_inputs[0],
+                    &gate_inputs[1],
+                    &gate_inputs[2],
+                ) {
+                    rejected = true;
+                    eprintln!("--require-evidence-acceptance: {failure}");
+                }
             }
         }
     }

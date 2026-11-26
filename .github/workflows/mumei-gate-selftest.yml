@@ -1,0 +1,42 @@
+name: Mumei gate self-test
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+    paths:
+      - .github/workflows/mumei-gate.yml
+      - .github/workflows/mumei-gate-selftest.yml
+      - tests/test_ci_workflow_mumei_gate.py
+      - tests/fixtures/mumei-gate/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workflow-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test reusable gate argument wiring
+        run: |
+          python -m pip install pytest pyyaml
+          python -m pytest tests/test_ci_workflow_mumei_gate.py -v
+
+  gate:
+    uses: ./.github/workflows/mumei-gate.yml
+    with:
+      working-directory: tests/fixtures/mumei-gate
+      sources: correct.mm
+      require-grade: G4
+      charter: true

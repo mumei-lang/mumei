@@ -1,0 +1,84 @@
+{
+  "schema_version": "mumei.verifier-adapter/v1",
+  "adapter_id": "user.fixture",
+  "adapter_version": "1.0.0",
+  "profiles": [
+    "mumei.test/v1"
+  ],
+  "methods": [
+    "deductive_proof"
+  ],
+  "result_contracts": [
+    {
+      "profile": "mumei.test/v1",
+      "method": "deductive_proof",
+      "scope": "unbounded",
+      "correspondence_relation": "exact_model",
+      "correspondence_status": "assumed"
+    }
+  ],
+  "input_formats": [
+    "mumei.source-text/v1"
+  ],
+  "required_permissions": [],
+  "logic_fragments": [
+    "lia"
+  ],
+  "targets": [
+    "x86_64-unknown-linux-gnu"
+  ],
+  "priority": 7,
+  "enabled": true,
+  "location": "local",
+  "max_timeout_ms": 2000,
+  "max_memory_mb": 512,
+  "setting_specs": [
+    {
+      "name": "depth",
+      "kind": "integer",
+      "default": 4,
+      "minimum": 1,
+      "maximum": 16
+    },
+    {
+      "name": "mode",
+      "kind": "choice",
+      "default": "fast",
+      "choices": [
+        "fast",
+        "safe"
+      ]
+    },
+    {
+      "name": "strict",
+      "kind": "boolean",
+      "default": true
+    }
+  ],
+  "probe_argv": [
+    "python",
+    "-m",
+    "user.adapter",
+    "--probe"
+  ],
+  "attempt_argv": [
+    "python",
+    "-m",
+    "user.adapter",
+    "--marker",
+    "MUMEI_MANIFEST_FIELD_SENTINEL_81b5a9"
+  ],
+  "attempt_stdin": "MUMEI_MANIFEST_FIELD_SENTINEL_81b5a9",
+  "verdict_markers": [
+    {
+      "stream": "stdout",
+      "contains": "MUMEI_MANIFEST_FIELD_SENTINEL_81b5a9",
+      "outcome": "valid"
+    },
+    {
+      "stream": "stderr",
+      "contains": "MUMEI_MANIFEST_FIELD_SENTINEL_81b5a9",
+      "outcome": "inconclusive"
+    }
+  ]
+}

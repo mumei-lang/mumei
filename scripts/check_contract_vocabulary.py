@@ -42,13 +42,14 @@ VERIFIED_SAMPLE_FIXTURE = (
 CANONICAL_DOC = REPO_ROOT / "docs" / "CROSS_PROJECT_ROADMAP.md"
 SYNC_DOCS = [
     REPO_ROOT / "docs" / "ROADMAP.md",
+    REPO_ROOT / "docs" / "VERIFICATION_NATIVE.md",
     REPO_ROOT / "docs" / "ONBOARDING.md",
     REPO_ROOT / "docs" / "PROOF_CERTIFICATE.md",
     REPO_ROOT / "docs" / "TRUSTED_ATOMS.md",
     REPO_ROOT / "docs" / "MCP_TOOL_CONTRACT.md",
     REPO_ROOT / "docs" / "LSP_DIAGNOSTIC_DATA.md",
     REPO_ROOT / "README.md",
-    REPO_ROOT / "instruction.md",
+    REPO_ROOT / "docs" / "instruction.md",
 ]
 NO_MM_LANGUAGE_DOCS = [
     CANONICAL_DOC,
@@ -97,6 +98,16 @@ REQUIRED_NO_MM_LANGUAGE_PHRASES = [
     "TypeScript `name!.length` null/undefined",
     "Go `values[idx]` bounds",
     "Z3 counterexample",
+]
+REQUIRED_C10_OPTION_B_MACHINE_TV_CHECKS = [
+    "machine_code_callee_saved_register_preservation",
+    "machine_code_callee_saved_preservation_assumed_for_external_callees",
+    "machine_code_entry_wrapper_tv",
+    "machine_code_f64_scalar_function_tv",
+    "machine_code_composite_register_aggregate_tv",
+    "machine_code_tv_sysv_memory_class_aggregate_abi",
+    "machine_code_tv_mxcsr_control_state",
+    "machine_code_tv_nan_payload_bits",
 ]
 
 
@@ -263,6 +274,15 @@ def _check_canonical_doc() -> list[Violation]:
     for phrase in required_phrases:
         if phrase not in section:
             violations.append(Violation(CANONICAL_DOC, f"canonical section is missing phrase: {phrase}"))
+
+    for check_name in REQUIRED_C10_OPTION_B_MACHINE_TV_CHECKS:
+        if f"`{check_name}`" not in text:
+            violations.append(
+                Violation(
+                    CANONICAL_DOC,
+                    f"C10 Option B check vocabulary is missing `{check_name}`",
+                )
+            )
 
     return violations
 

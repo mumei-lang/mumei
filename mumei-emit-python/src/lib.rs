@@ -269,8 +269,8 @@ fn escape_message(text: &str) -> String {
 /// Translate a mumei contract expression to a Python expression.
 ///
 /// This is now AST-based (`mumei_core::contract_host`): `=>` prints as
-/// `not a or b`, `/` between integers prints as `//` (floor division, matching
-/// the verifier's Z3 Int lowering), `!`/`!=`/`&&`/`||`/`forall`/`exists` and
+/// `not a or b`, `/` between integers prints as truncating division via
+/// `divmod` (matching the verifier's toward-zero lowering), `!`/`!=`/`&&`/`||`/`forall`/`exists` and
 /// literals are all handled structurally. Returns `None` for clauses with no
 /// runtime-checkable Python form — the caller emits a degrade comment instead
 /// of invalid code.
@@ -327,6 +327,7 @@ mod tests {
             is_async: false,
             trust_level: TrustLevel::Verified,
             max_unroll: None,
+            str_bound: None,
             invariant: None,
             effects: vec![],
             return_type: return_type.map(|s| s.to_string()),
@@ -555,13 +556,13 @@ mod tests {
             tr("a > 0 => b > 0 => c > 0").as_deref(),
             Some("not (not (a > 0) or (b > 0)) or (c > 0)")
         );
-        // `/` between ints → Euclidean division matching Z3 `Int` semantics
-        // (remainder ≥ 0): `divmod` quotient + 1 when the floored remainder
-        // went negative. divmod+walrus evaluates each operand once, so
-        // chained divisions emit linear text.
+        // `/` between ints → truncating division matching the verifier's
+        // toward-zero semantics: `divmod` quotient + 1 exactly when the
+        // true quotient is negative and nonzero. divmod+walrus evaluates
+        // each operand once, so chained divisions emit linear text.
         assert_eq!(
             tr("a / b >= 0").as_deref(),
-            Some("((_mumei_d := divmod(a, b))[0] + (_mumei_d[1] < 0)) >= 0")
+            Some("((_mumei_d := divmod(a, b))[0] + (_mumei_d[0] < 0 and _mumei_d[1] != 0)) >= 0")
         );
         // Quantifiers nested inside an expression still translate
         assert_eq!(
@@ -590,35 +591,36 @@ mod tests {
 
     #[test]
     fn test_contract_translation_negative_division() {
-        // Z3 `Int` division is EUCLIDEAN (remainder ≥ 0), not floor: verified
-        // `div(7,-2) = -3`, `div(-7,-2) = 4`, `div(-7,2) = -4`. The emitted
-        // `divmod(l,r)[0] + (divmod(l,r)[1] < 0)` adds 1 exactly when the
-        // floored remainder went negative — only possible under a negative
-        // divisor — matching Z3 for all sign combinations.
+        // `verify` proves `/` TRUNCATING toward zero (the `sdiv` the
+        // emitter produces): `-7 / 2 == -3`, `7 / -2 == -3`,
+        // `-7 / -2 == 3`. The emitted `divmod(l,r)[0] +
+        // (divmod(l,r)[0] < 0 and divmod(l,r)[1] != 0)` adds 1 exactly
+        // when the floored quotient is negative and the remainder
+        // nonzero — the truncation correction for all sign
+        // combinations.
         let vars = ContractVars::new();
         assert_eq!(
             translate_contract_to_python("0 - a / b <= result", &vars).as_deref(),
-            Some("0 - ((_mumei_d := divmod(a, b))[0] + (_mumei_d[1] < 0)) <= result")
+            Some("0 - ((_mumei_d := divmod(a, b))[0] + (_mumei_d[0] < 0 and _mumei_d[1] != 0)) <= result")
         );
-        // `(-7) / 2`: divmod gives (-4, 1); remainder ≥ 0 → result stays -4
-        // — Z3 `div(-7, 2) == -4`.
+        // `(-7) / 2`: divmod gives (-4, 1); negative quotient with a
+        // nonzero remainder → -4 + 1 == -3 — truncating `-7 / 2`.
         assert_eq!(
-            translate_contract_to_python("(0 - 7) / 2 == 0 - 4", &vars).as_deref(),
-            Some("((_mumei_d := divmod(0 - 7, 2))[0] + (_mumei_d[1] < 0)) == 0 - 4")
+            translate_contract_to_python("(0 - 7) / 2 == 0 - 3", &vars).as_deref(),
+            Some("((_mumei_d := divmod(0 - 7, 2))[0] + (_mumei_d[0] < 0 and _mumei_d[1] != 0)) == 0 - 3")
         );
         // Negative divisor: `7 / (0 - 2)` → divmod gives (-4, -1) →
-        // `-4 + 1 == -3` — Z3 `div(7, -2) == -3` (plain `//` would mischeck
-        // a verified clause here).
+        // `-4 + 1 == -3` — the truncating answer plain `//` misses.
         assert_eq!(
             translate_contract_to_python("7 / (0 - 2) == 0 - 3", &vars).as_deref(),
-            Some("((_mumei_d := divmod(7, 0 - 2))[0] + (_mumei_d[1] < 0)) == 0 - 3")
+            Some("((_mumei_d := divmod(7, 0 - 2))[0] + (_mumei_d[0] < 0 and _mumei_d[1] != 0)) == 0 - 3")
         );
         // Chained divisions stay linear: operands are evaluated once via
         // divmod instead of being printed twice per level.
         assert_eq!(
             translate_contract_to_python("a / b / c >= 0", &vars).as_deref(),
             Some(
-                "((_mumei_d := divmod(((_mumei_d := divmod(a, b))[0] + (_mumei_d[1] < 0)), c))[0] + (_mumei_d[1] < 0)) >= 0"
+                "((_mumei_d := divmod(((_mumei_d := divmod(a, b))[0] + (_mumei_d[0] < 0 and _mumei_d[1] != 0)), c))[0] + (_mumei_d[0] < 0 and _mumei_d[1] != 0)) >= 0"
             )
         );
         // Float operands keep `/`.

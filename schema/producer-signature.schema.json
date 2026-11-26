@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mumei-lang.org/schema/producer-signature.schema.json",
+  "title": "Mumei Producer Signature Envelope v1",
+  "description": "Detached signature over a record's SHA-256 digest ASCII bytes. Validation does not establish producer or key authenticity, freshness, revocation status, claim truth or acceptance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "subject_digest",
+    "algorithm",
+    "signature",
+    "producer_key_id"
+  ],
+  "properties": {
+    "schema_version": {"const":"mumei.producer-signature/v1"},
+    "subject_digest": {"type":"string","minLength":64,"maxLength":64,"pattern":"^[0-9a-f]{64}$"},
+    "algorithm": {"const":"ed25519"},
+    "signature": {"type":"string","minLength":128,"maxLength":128,"pattern":"^[0-9a-f]{128}$"},
+    "producer_key_id": {"type":"string","minLength":1},
+    "produced_at": {"type":"string","minLength":1,"format":"date-time"}
+  }
+}

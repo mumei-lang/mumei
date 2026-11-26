@@ -1,5 +1,7 @@
+use mumei_core::parser::{self, Item};
 use mumei_core::proof_cert::{refresh_certificate_integrity, LeanResultMetadata, ProofCertificate};
-use mumei_core::verification;
+use mumei_core::resolver;
+use mumei_core::verification::{self, ModuleEnv};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -189,6 +191,65 @@ fn setup_modules(fixture: &Fixture) -> (PathBuf, PathBuf, PathBuf, PathBuf, Path
     (a_source, b_source, c_source, a_cert, b_cert)
 }
 
+fn resource_freshness_sources(
+    fixture: &Fixture,
+    invariant_lower_bound: i64,
+    declared: bool,
+) -> (PathBuf, PathBuf) {
+    let a_source = fixture.root.join("a.mm");
+    let b_source = fixture.root.join("b.mm");
+    std::fs::write(
+        &b_source,
+        format!(
+            "resource counter {{ value: i64 }} priority: 1 mode: exclusive invariant: counter.value >= {invariant_lower_bound};\n"
+        ),
+    )
+    .expect("write resource definition");
+    let resource_clause = if declared {
+        "resources: [counter];\n"
+    } else {
+        ""
+    };
+    std::fs::write(
+        &a_source,
+        format!(
+            "import \"./b.mm\";\n\
+             atom main() -> i64\n\
+             {resource_clause}\
+             requires: true;\n\
+             ensures: true;\n\
+             body: {{ acquire counter {{ counter.value = 3; 0 }} }};\n"
+        ),
+    )
+    .expect("write resource caller");
+    (a_source, b_source)
+}
+
+fn module_resource_freshness_sources(
+    fixture: &Fixture,
+    invariant_lower_bound: i64,
+) -> (PathBuf, PathBuf) {
+    let a_source = fixture.root.join("a.mm");
+    let b_source = fixture.root.join("b.mm");
+    std::fs::write(
+        &b_source,
+        format!(
+            "resource counter {{ value: i64 }} priority: 1 mode: exclusive invariant: counter.value >= {invariant_lower_bound};\n"
+        ),
+    )
+    .expect("write module resource definition");
+    std::fs::write(
+        &a_source,
+        "import \"./b.mm\";\n\
+         atom g(a: i64) -> i64\n\
+         requires: true;\n\
+         ensures: true;\n\
+         body: a;\n",
+    )
+    .expect("write unrelated atom");
+    (a_source, b_source)
+}
+
 fn verify_cert(fixture: &Fixture, certificate: &Path, source: &Path, strict: bool) -> Output {
     let mut args = vec![
         "verify-cert".to_string(),
@@ -219,6 +280,137 @@ fn verify_cert_with_lean_opt_in(
     fixture.run(&args)
 }
 
+fn effect_dependency_source(transition: &str) -> String {
+    format!(
+        "effect Work\n\
+         states: [Idle, Busy];\n\
+         initial: Idle;\n\
+         transition {transition};\n\
+         atom f(x: i64) -> i64\n\
+         effects: [Work];\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n\
+         atom g(x: i64) -> i64\n\
+         effects: [Work];\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: f(x);\n"
+    )
+}
+
+#[test]
+fn imported_enum_signature_change_is_a_dependency_change() {
+    let fixture = Fixture::new();
+    let source = fixture.root.join("a.mm");
+    let imported = fixture.root.join("b.mm");
+    let certificate = fixture.root.join("a.proof.json");
+    std::fs::write(&imported, "enum E { A(v: i64), B }\n").expect("write enum module");
+    std::fs::write(
+        &source,
+        "import \"./b.mm\";\n\
+         atom choose(e: E) -> i64\n\
+         requires: true;\n\
+         ensures: true;\n\
+         body: match e { E::A(v) => v, _ => 0 };\n",
+    )
+    .expect("write importing module");
+    assert_success(
+        &fixture.certify(&source, &certificate),
+        "certify enum signature",
+    );
+
+    let cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&certificate).unwrap()).expect("parse certificate");
+    let choose = cert
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "choose")
+        .expect("choose certificate");
+    let dependency_hashes = choose
+        .dependency_hashes
+        .as_ref()
+        .expect("generated dependency hashes");
+    assert!(dependency_hashes.contains_key("enum:E"));
+
+    let unchanged = verify_cert(&fixture, &certificate, &source, false);
+    let unchanged_text = output_text(&unchanged);
+    assert_eq!(unchanged.status.code(), Some(0), "{unchanged_text}");
+    assert!(
+        unchanged_text.contains("choose: proven"),
+        "{unchanged_text}"
+    );
+
+    std::fs::write(&imported, "enum E { A(v: i64), B, C }\n").expect("add an enum variant");
+    let changed = verify_cert(&fixture, &certificate, &source, false);
+    let changed_text = output_text(&changed);
+    assert_eq!(changed.status.code(), Some(0), "{changed_text}");
+    assert!(
+        changed_text.contains("choose: dependency_changed"),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("enum:E"), "{changed_text}");
+}
+
+#[test]
+fn imported_struct_enum_field_change_is_a_dependency_change() {
+    let fixture = Fixture::new();
+    let source = fixture.root.join("a.mm");
+    let imported = fixture.root.join("b.mm");
+    let certificate = fixture.root.join("a.proof.json");
+    std::fs::write(
+        &imported,
+        "enum E { A(v: i64), B }\nstruct Wrapper { value: E }\n",
+    )
+    .expect("write enum and struct module");
+    std::fs::write(
+        &source,
+        "import \"./b.mm\";\n\
+         atom read(value: Wrapper) -> i64\n\
+         requires: true;\n\
+         ensures: result == 0;\n\
+         body: 0;\n",
+    )
+    .expect("write importing module");
+    assert_success(
+        &fixture.certify(&source, &certificate),
+        "certify imported struct signature",
+    );
+
+    let cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&certificate).unwrap()).expect("parse certificate");
+    let read = cert
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "read")
+        .expect("read certificate");
+    let dependency_hashes = read
+        .dependency_hashes
+        .as_ref()
+        .expect("generated dependency hashes");
+    assert!(dependency_hashes.contains_key("struct:Wrapper"));
+    assert!(dependency_hashes.contains_key("enum:E"));
+
+    let unchanged = verify_cert(&fixture, &certificate, &source, false);
+    let unchanged_text = output_text(&unchanged);
+    assert_eq!(unchanged.status.code(), Some(0), "{unchanged_text}");
+    assert!(unchanged_text.contains("read: proven"), "{unchanged_text}");
+
+    std::fs::write(
+        &imported,
+        "enum E { A(v: i64), B, C }\nstruct Wrapper { value: E }\n",
+    )
+    .expect("add enum variant in imported module");
+    let changed = verify_cert(&fixture, &certificate, &source, false);
+    let changed_text = output_text(&changed);
+    assert_eq!(changed.status.code(), Some(0), "{changed_text}");
+    assert!(
+        changed_text.contains("read: dependency_changed"),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("enum:E"), "{changed_text}");
+}
+
 #[test]
 fn stale_transitive_contract_is_rejected_and_claimbook_marks_drift() {
     let fixture = Fixture::new();
@@ -233,6 +425,10 @@ fn stale_transitive_contract_is_rejected_and_claimbook_marks_drift() {
         .as_ref()
         .expect("generated dependency hashes");
     assert!(hashes.contains_key("atom:f"), "keys: {hashes:?}");
+    assert!(
+        hashes.keys().all(|key| !key.starts_with("effect:")),
+        "effect-free dependencies should not emit effect keys: {hashes:?}"
+    );
     let second_cert_path = fixture.root.join("b-second.proof-cert.json");
     assert_success(
         &fixture.certify(&b_source, &second_cert_path),
@@ -256,7 +452,7 @@ fn stale_transitive_contract_is_rejected_and_claimbook_marks_drift() {
     assert_success(&fixture.certify(&a_source, &a_cert), "re-certify changed A");
 
     let changed = verify_cert(&fixture, &b_cert, &b_source, false);
-    assert_eq!(changed.status.code(), Some(1), "{}", output_text(&changed));
+    assert_eq!(changed.status.code(), Some(0), "{}", output_text(&changed));
     let changed_text = output_text(&changed);
     assert!(
         changed_text.contains("dependency_changed"),
@@ -401,6 +597,94 @@ fn legacy_dependency_hashes_are_unchecked_with_strict_policy_and_warning() {
 }
 
 #[test]
+fn effect_definition_drift_is_non_strict_warning_and_strict_failure() {
+    let fixture = Fixture::new();
+    let source = fixture.root.join("effectful.mm");
+    let certificate = fixture.root.join(".effectful.proof-cert.json");
+    std::fs::write(&source, effect_dependency_source("start: Idle -> Busy"))
+        .expect("write effectful source");
+    assert_success(
+        &fixture.certify(&source, &certificate),
+        "certify effectful source",
+    );
+
+    let cert: ProofCertificate = serde_json::from_slice(&std::fs::read(&certificate).unwrap())
+        .expect("parse effectful certificate");
+    let g = cert
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "g")
+        .expect("g certificate");
+    assert!(g
+        .dependency_hashes
+        .as_ref()
+        .unwrap()
+        .contains_key("effect:Work"));
+
+    std::fs::write(&source, effect_dependency_source("start: Idle -> Idle"))
+        .expect("change only the effect definition");
+    let changed = verify_cert(&fixture, &certificate, &source, false);
+    let changed_text = output_text(&changed);
+    assert_eq!(changed.status.code(), Some(0), "{changed_text}");
+    assert!(
+        changed_text.contains("g: dependency_changed"),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("effect:Work"), "{changed_text}");
+
+    let strict = verify_cert(&fixture, &certificate, &source, true);
+    let strict_text = output_text(&strict);
+    assert_eq!(strict.status.code(), Some(1), "{strict_text}");
+    assert!(
+        strict_text.contains("g: dependency_changed"),
+        "{strict_text}"
+    );
+    assert!(strict_text.contains("effect:Work"), "{strict_text}");
+}
+
+#[test]
+fn legacy_effect_dependency_hashes_are_unchecked_with_strict_policy() {
+    let fixture = Fixture::new();
+    let source = fixture.root.join("effectful.mm");
+    let certificate = fixture.root.join(".effectful.proof-cert.json");
+    std::fs::write(&source, effect_dependency_source("start: Idle -> Busy"))
+        .expect("write effectful source");
+    assert_success(
+        &fixture.certify(&source, &certificate),
+        "certify effectful source",
+    );
+
+    let mut cert: ProofCertificate = serde_json::from_slice(&std::fs::read(&certificate).unwrap())
+        .expect("parse effectful certificate");
+    for atom in &mut cert.atoms {
+        if let Some(dependency_hashes) = &mut atom.dependency_hashes {
+            dependency_hashes.retain(|key, _| !key.starts_with("effect:"));
+        }
+    }
+    refresh_certificate_integrity(&mut cert);
+    std::fs::write(&certificate, serde_json::to_vec_pretty(&cert).unwrap())
+        .expect("write certificate without effect hashes");
+
+    let unchecked = verify_cert(&fixture, &certificate, &source, false);
+    let unchecked_text = output_text(&unchecked);
+    assert_eq!(unchecked.status.code(), Some(0), "{unchecked_text}");
+    assert!(
+        unchecked_text.contains("g: dependency_unchecked"),
+        "{unchecked_text}"
+    );
+    assert!(unchecked_text.contains("effect:Work"), "{unchecked_text}");
+
+    let strict = verify_cert(&fixture, &certificate, &source, true);
+    let strict_text = output_text(&strict);
+    assert_eq!(strict.status.code(), Some(1), "{strict_text}");
+    assert!(
+        strict_text.contains("g: dependency_unchecked"),
+        "{strict_text}"
+    );
+    assert!(strict_text.contains("effect:Work"), "{strict_text}");
+}
+
+#[test]
 fn changed_requires_and_refined_types_are_dependency_changes() {
     let fixture = Fixture::new();
     let (a_source, b_source, _, a_cert, b_cert) = setup_modules(&fixture);
@@ -421,6 +705,12 @@ fn changed_requires_and_refined_types_are_dependency_changes() {
         "re-certify A with stronger requires",
     );
     let changed_requires = verify_cert(&fixture, &b_cert, &b_source, false);
+    assert_eq!(
+        changed_requires.status.code(),
+        Some(0),
+        "{}",
+        output_text(&changed_requires)
+    );
     let requires_text = output_text(&changed_requires);
     assert!(
         requires_text.contains("dependency_changed"),
@@ -447,7 +737,7 @@ fn changed_requires_and_refined_types_are_dependency_changes() {
     .expect("change refined-type predicate");
     let changed_type = verify_cert(&type_fixture, &certificate, &source, false);
     let type_text = output_text(&changed_type);
-    assert!(!changed_type.status.success(), "{type_text}");
+    assert!(changed_type.status.success(), "{type_text}");
     assert!(type_text.contains("dependency_changed"), "{type_text}");
     assert!(type_text.contains("type:Positive"), "{type_text}");
 }
@@ -717,6 +1007,93 @@ fn lean_callee_trust_policy_does_not_change_dependency_freshness() {
 
     let strict_import = fixture.verify(&c_source, &["--strict-imports", "--allow-lean-verified"]);
     assert_success(&strict_import, "strictly import B with Lean opt-in");
+}
+
+#[test]
+fn generic_enum_dependency_hash_matches_strict_import_path() {
+    let fixture = Fixture::new();
+    let a_dir = fixture.root.join("a");
+    let b_dir = fixture.root.join("b");
+    std::fs::create_dir(&a_dir).expect("create A directory");
+    std::fs::create_dir(&b_dir).expect("create B directory");
+    let a_source = a_dir.join("a.mm");
+    let b_source = b_dir.join("b.mm");
+    let b_cert = b_dir.join(".proof-cert.json");
+    let b_module = "enum Opt<T> { Some(v: T), Nothing }\n\
+                    atom get(opt: Opt<i64>) -> i64\n\
+                    requires: true;\n\
+                    ensures: true;\n\
+                    body: 0;\n";
+    std::fs::write(&b_source, b_module).expect("write generic enum module");
+    std::fs::write(
+        &a_source,
+        "import \"../b/b.mm\";\n\
+         atom main() -> i64\n\
+         requires: true;\n\
+         ensures: result == 0;\n\
+         body: 0;\n",
+    )
+    .expect("write strict-importing module");
+
+    assert_success(
+        &fixture.certify(&b_source, &b_cert),
+        "certify generic enum module",
+    );
+    let cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&b_cert).unwrap()).expect("parse B certificate");
+    let cert_enum_hash = cert.atoms[0]
+        .dependency_hashes
+        .as_ref()
+        .expect("generated dependency hashes")
+        .get("enum:Opt")
+        .expect("generic enum dependency hash");
+
+    let parse_time_enum_hash = {
+        let mut module_env = ModuleEnv::new();
+        let mut atom = None;
+        for item in parser::parse_module(b_module) {
+            match item {
+                Item::Atom(parsed_atom) => {
+                    if parsed_atom.name == "get" {
+                        atom = Some(parsed_atom.clone());
+                    }
+                    module_env.register_atom(&parsed_atom);
+                }
+                Item::EnumDef(enum_def) => module_env.register_enum(&enum_def),
+                _ => {}
+            }
+        }
+        let atom = atom.expect("parse generic enum atom");
+        resolver::compute_dependency_hashes(&atom, &module_env)
+            .remove("enum:Opt")
+            .expect("parse-time generic enum dependency hash")
+    };
+    assert_eq!(
+        cert_enum_hash, &parse_time_enum_hash,
+        "enum:Opt hash differs between certificate and parse-time import inputs"
+    );
+
+    let unchanged_import = fixture.verify(&a_source, &["--strict-imports"]);
+    assert!(
+        unchanged_import.status.success(),
+        "unchanged strict import rejected the certificate; certificate enum:Opt={cert_enum_hash}, \
+         parse-time enum:Opt={parse_time_enum_hash}\n{}",
+        output_text(&unchanged_import)
+    );
+
+    std::fs::write(&b_source, b_module.replace("Nothing }", "Nothing, Extra }"))
+        .expect("add generic enum variant without regenerating certificate");
+    let changed_import = fixture.verify(&a_source, &["--strict-imports"]);
+    let changed_text = output_text(&changed_import);
+    assert!(
+        !changed_import.status.success(),
+        "strict import accepted a changed generic enum without a fresh certificate:\n{changed_text}"
+    );
+    assert!(
+        changed_text.contains("dependency_changed"),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("enum:Opt"), "{changed_text}");
 }
 
 #[test]
@@ -1256,5 +1633,1049 @@ fn standard_library_bundle_imports_are_dependency_fresh() {
     assert!(
         !imported_text.contains("dependency_unchecked"),
         "{imported_text}"
+    );
+}
+
+#[test]
+fn imported_refined_field_body_reference_invalidates_certificate_and_cache() {
+    let fixture = Fixture::new();
+    let a_source = fixture.root.join("a.mm");
+    let b_source = fixture.root.join("b.mm");
+    let certificate = fixture.root.join("a.proof.json");
+    std::fs::write(
+        &b_source,
+        "type Pos = i64 where v >= 1;\nstruct P { x: Pos }\n",
+    )
+    .expect("write refined field module");
+    std::fs::write(
+        &a_source,
+        "import \"./b.mm\";\n\
+         atom g(a: i64) -> i64\n\
+         requires: a >= 1;\n\
+         ensures: result >= 1;\n\
+         body: {\n\
+           let p = P { x: a };\n\
+           p.x\n\
+         };\n",
+    )
+    .expect("write struct-literal consumer");
+
+    assert_success(
+        &fixture.certify(&a_source, &certificate),
+        "certify struct-literal consumer",
+    );
+    let unchanged_certificate = verify_cert(&fixture, &certificate, &a_source, false);
+    let unchanged_certificate_text = output_text(&unchanged_certificate);
+    assert_eq!(
+        unchanged_certificate.status.code(),
+        Some(0),
+        "{unchanged_certificate_text}"
+    );
+    assert!(
+        unchanged_certificate_text.contains("g: proven"),
+        "{unchanged_certificate_text}"
+    );
+
+    let initial_verify = fixture.verify(&a_source, &[]);
+    assert_success(&initial_verify, "verify unchanged consumer");
+    let cached_verify = fixture.verify(&a_source, &[]);
+    let cached_verify_text = output_text(&cached_verify);
+    assert_success(&cached_verify, "verify cached unchanged consumer");
+    assert!(
+        cached_verify_text.contains("skipped (unchanged)"),
+        "{cached_verify_text}"
+    );
+
+    std::fs::write(
+        &b_source,
+        "type Pos = i64 where v >= 2;\nstruct P { x: Pos }\n",
+    )
+    .expect("strengthen imported refined type");
+    let changed_certificate = verify_cert(&fixture, &certificate, &a_source, false);
+    let changed_certificate_text = output_text(&changed_certificate);
+    assert_eq!(
+        changed_certificate.status.code(),
+        Some(0),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("g: dependency_changed"),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("type:Pos"),
+        "{changed_certificate_text}"
+    );
+
+    let changed_verify = fixture.verify(&a_source, &[]);
+    let changed_verify_text = output_text(&changed_verify);
+    assert!(
+        !changed_verify.status.success(),
+        "changed refined type unexpectedly verified\n{changed_verify_text}"
+    );
+    assert!(
+        !changed_verify_text.contains("skipped (unchanged)"),
+        "{changed_verify_text}"
+    );
+}
+
+#[test]
+fn imported_trait_method_constraint_change_invalidates_certificate_and_cache() {
+    let fixture = Fixture::new();
+    let a_source = fixture.root.join("a.mm");
+    let b_source = fixture.root.join("b.mm");
+    let certificate = fixture.root.join("a.proof.json");
+    std::fs::write(
+        &b_source,
+        "trait Picker {\n\
+         fn pick(a: Self where v >= 0) -> Self;\n\
+         }\n\
+         impl Picker for i64 {\n\
+         fn pick(a: i64) -> i64 { a }\n\
+         }\n\
+         atom pick(a: i64) -> i64\n\
+         requires: true;\n\
+         ensures: true;\n\
+         body: a;\n",
+    )
+    .expect("write trait method and implementation");
+    std::fs::write(
+        &a_source,
+        "import \"./b.mm\";\n\
+         atom g(x: i64) -> i64\n\
+         requires: x >= 0;\n\
+         ensures: true;\n\
+         body: pick(x);\n",
+    )
+    .expect("write trait method caller");
+
+    assert_success(
+        &fixture.certify(&a_source, &certificate),
+        "certify trait method caller",
+    );
+    let cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&certificate).unwrap()).expect("parse certificate");
+    let g = cert
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "g")
+        .expect("g certificate");
+    let dependency_hashes = g
+        .dependency_hashes
+        .as_ref()
+        .expect("generated dependency hashes");
+    assert!(dependency_hashes.contains_key("atom:pick"));
+
+    let unchanged_certificate = verify_cert(&fixture, &certificate, &a_source, false);
+    let unchanged_certificate_text = output_text(&unchanged_certificate);
+    assert_eq!(
+        unchanged_certificate.status.code(),
+        Some(0),
+        "{unchanged_certificate_text}"
+    );
+    assert!(
+        unchanged_certificate_text.contains("g: proven"),
+        "{unchanged_certificate_text}"
+    );
+
+    let initial_verify = fixture.verify(&a_source, &[]);
+    assert_success(&initial_verify, "verify unchanged trait method caller");
+    let cached_verify = fixture.verify(&a_source, &[]);
+    let cached_verify_text = output_text(&cached_verify);
+    assert_success(&cached_verify, "verify cached trait method caller");
+    assert!(
+        cached_verify_text.contains("skipped (unchanged)"),
+        "{cached_verify_text}"
+    );
+
+    std::fs::write(
+        &b_source,
+        "trait Picker {\n\
+         fn pick(a: Self where v >= 5) -> Self;\n\
+         }\n\
+         impl Picker for i64 {\n\
+         fn pick(a: i64) -> i64 { a }\n\
+         }\n\
+         atom pick(a: i64) -> i64\n\
+         requires: true;\n\
+         ensures: true;\n\
+         body: a;\n",
+    )
+    .expect("strengthen trait method parameter constraint");
+
+    let changed_certificate = verify_cert(&fixture, &certificate, &a_source, false);
+    let changed_certificate_text = output_text(&changed_certificate);
+    assert_eq!(
+        changed_certificate.status.code(),
+        Some(0),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("g: dependency_changed"),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("atom:pick"),
+        "{changed_certificate_text}"
+    );
+
+    let changed_verify = fixture.verify(&a_source, &[]);
+    let changed_verify_text = output_text(&changed_verify);
+    assert!(
+        !changed_verify.status.success(),
+        "changed trait constraint unexpectedly verified\n{changed_verify_text}"
+    );
+    assert!(
+        !changed_verify_text.contains("skipped (unchanged)"),
+        "{changed_verify_text}"
+    );
+    assert!(
+        changed_verify_text
+            .contains("Call to 'pick': trait method parameter constraint 'v >= 5' not satisfied"),
+        "{changed_verify_text}"
+    );
+}
+
+#[test]
+fn imported_acquired_resource_invariant_change_invalidates_certificate_and_cache() {
+    let fixture = Fixture::new();
+    let certificate = fixture.root.join("a.proof.json");
+    let (a_source, _) = resource_freshness_sources(&fixture, 0, false);
+
+    assert_success(
+        &fixture.certify(&a_source, &certificate),
+        "certify caller with acquired resource",
+    );
+    let cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&certificate).unwrap()).expect("parse certificate");
+    let main = cert
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "main")
+        .expect("main certificate");
+    assert!(main
+        .dependency_hashes
+        .as_ref()
+        .expect("generated dependency hashes")
+        .contains_key("resource:counter"));
+
+    let mut legacy_cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&certificate).unwrap())
+            .expect("parse certificate for legacy-key check");
+    let main = legacy_cert
+        .atoms
+        .iter_mut()
+        .find(|atom| atom.name == "main")
+        .expect("main certificate");
+    assert!(main
+        .dependency_hashes
+        .as_mut()
+        .expect("generated dependency hashes")
+        .remove("resource:counter")
+        .is_some());
+    refresh_certificate_integrity(&mut legacy_cert);
+    let legacy_certificate = fixture.root.join("a.legacy.proof.json");
+    std::fs::write(
+        &legacy_certificate,
+        serde_json::to_vec_pretty(&legacy_cert).unwrap(),
+    )
+    .expect("write certificate without resource dependency key");
+    let unchecked = verify_cert(&fixture, &legacy_certificate, &a_source, false);
+    let unchecked_text = output_text(&unchecked);
+    assert_eq!(unchecked.status.code(), Some(0), "{unchecked_text}");
+    assert!(
+        unchecked_text.contains("main: dependency_unchecked"),
+        "{unchecked_text}"
+    );
+    assert!(
+        unchecked_text.contains("resource:counter"),
+        "{unchecked_text}"
+    );
+
+    let initial_verify = fixture.verify(&a_source, &[]);
+    assert_success(
+        &initial_verify,
+        "verify caller with unchanged acquired resource",
+    );
+    let cached_verify = fixture.verify(&a_source, &[]);
+    let cached_verify_text = output_text(&cached_verify);
+    assert_success(&cached_verify, "verify cached acquired resource caller");
+    assert!(
+        cached_verify_text.contains("skipped (unchanged)"),
+        "{cached_verify_text}"
+    );
+
+    resource_freshness_sources(&fixture, 5, false);
+    let changed_certificate = verify_cert(&fixture, &certificate, &a_source, false);
+    let changed_certificate_text = output_text(&changed_certificate);
+    assert_eq!(
+        changed_certificate.status.code(),
+        Some(0),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("main: dependency_changed"),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("resource:counter"),
+        "{changed_certificate_text}"
+    );
+
+    let changed_verify = fixture.verify(&a_source, &[]);
+    let changed_verify_text = output_text(&changed_verify);
+    assert!(
+        !changed_verify.status.success(),
+        "changed acquired resource invariant unexpectedly verified\n{changed_verify_text}"
+    );
+    assert!(
+        !changed_verify_text.contains("skipped (unchanged)"),
+        "{changed_verify_text}"
+    );
+    assert!(
+        changed_verify_text
+            .contains("resource 'counter' invariant does not hold for the initial state"),
+        "{changed_verify_text}"
+    );
+}
+
+#[test]
+fn imported_declared_resource_invariant_change_is_a_dependency_change() {
+    let fixture = Fixture::new();
+    let certificate = fixture.root.join("a.proof.json");
+    let (a_source, _) = resource_freshness_sources(&fixture, 0, true);
+
+    assert_success(
+        &fixture.certify(&a_source, &certificate),
+        "certify caller with declared resource",
+    );
+    let cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&certificate).unwrap()).expect("parse certificate");
+    let main = cert
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "main")
+        .expect("main certificate");
+    assert!(main
+        .dependency_hashes
+        .as_ref()
+        .expect("generated dependency hashes")
+        .contains_key("resource:counter"));
+
+    resource_freshness_sources(&fixture, 5, true);
+    let changed_certificate = verify_cert(&fixture, &certificate, &a_source, false);
+    let changed_certificate_text = output_text(&changed_certificate);
+    assert_eq!(
+        changed_certificate.status.code(),
+        Some(0),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("main: dependency_changed"),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("resource:counter"),
+        "{changed_certificate_text}"
+    );
+}
+
+#[test]
+fn imported_unused_module_resource_invalidates_cached_verify() {
+    let fixture = Fixture::new();
+    let certificate = fixture.root.join("a.proof.json");
+    let (a_source, _) = module_resource_freshness_sources(&fixture, 0);
+
+    assert_success(
+        &fixture.certify(&a_source, &certificate),
+        "certify unrelated atom with imported module resource",
+    );
+
+    let initial_verify = fixture.verify(&a_source, &[]);
+    assert_success(
+        &initial_verify,
+        "verify unrelated atom with unchanged module resource",
+    );
+    let cached_verify = fixture.verify(&a_source, &[]);
+    let cached_verify_text = output_text(&cached_verify);
+    assert_success(&cached_verify, "verify cached unrelated atom");
+    assert!(
+        cached_verify_text.contains("skipped (unchanged)"),
+        "{cached_verify_text}"
+    );
+
+    module_resource_freshness_sources(&fixture, 5);
+    let changed_certificate = verify_cert(&fixture, &certificate, &a_source, false);
+    let changed_certificate_text = output_text(&changed_certificate);
+    assert_eq!(
+        changed_certificate.status.code(),
+        Some(0),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("g: dependency_changed"),
+        "{changed_certificate_text}"
+    );
+    assert!(
+        changed_certificate_text.contains("resource:counter"),
+        "{changed_certificate_text}"
+    );
+
+    let changed_verify = fixture.verify(&a_source, &[]);
+    let changed_verify_text = output_text(&changed_verify);
+    assert!(
+        !changed_verify.status.success(),
+        "changed module resource invariant unexpectedly verified\n{changed_verify_text}"
+    );
+    assert!(
+        !changed_verify_text.contains("skipped (unchanged)"),
+        "{changed_verify_text}"
+    );
+    assert!(
+        changed_verify_text
+            .contains("resource 'counter' invariant does not hold for the initial state"),
+        "{changed_verify_text}"
+    );
+}
+
+#[test]
+fn strict_import_keeps_resource_free_module_certificate_proven() {
+    let fixture = Fixture::new();
+    let b_dir = fixture.root.join("b");
+    let c_dir = fixture.root.join("c");
+    let a_dir = fixture.root.join("a");
+    for dir in [&a_dir, &b_dir, &c_dir] {
+        std::fs::create_dir(dir).expect("create module directory");
+    }
+    let b_source = b_dir.join("b.mm");
+    let c_source = c_dir.join("c.mm");
+    let a_source = a_dir.join("a.mm");
+    let b_certificate = b_dir.join(".proof-cert.json");
+    let c_certificate = c_dir.join(".proof-cert.json");
+
+    std::fs::write(
+        &b_source,
+        "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;\n\
+         atom b_fn(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("write resource-bearing B");
+    std::fs::write(
+        &c_source,
+        "atom c_fn(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("write resource-free C");
+    assert_success(
+        &fixture.certify(&b_source, &b_certificate),
+        "certify resource-bearing B standalone",
+    );
+    assert_success(
+        &fixture.certify(&c_source, &c_certificate),
+        "certify resource-free C standalone",
+    );
+    let c_certificate_check = verify_cert(&fixture, &c_certificate, &c_source, false);
+    let c_certificate_text = output_text(&c_certificate_check);
+    assert_success(&c_certificate_check, "check standalone C certificate");
+    assert!(
+        c_certificate_text.contains("c_fn: proven"),
+        "{c_certificate_text}"
+    );
+
+    std::fs::write(
+        &a_source,
+        "import \"../b/b.mm\";\n\
+         import \"../c/c.mm\";\n\
+         atom main(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: c_fn(x);\n",
+    )
+    .expect("write importer");
+    let imported = fixture.verify(&a_source, &["--strict-imports"]);
+    let imported_text = output_text(&imported);
+    assert_success(&imported, "strictly import C after resource-bearing B");
+    assert!(
+        !imported_text.contains("dependency_unchecked"),
+        "{imported_text}"
+    );
+}
+
+#[test]
+fn strict_alias_import_does_not_key_alias_resource_name() {
+    let fixture = Fixture::new();
+    let b_dir = fixture.root.join("b");
+    let a_dir = fixture.root.join("a");
+    for dir in [&a_dir, &b_dir] {
+        std::fs::create_dir(dir).expect("create module directory");
+    }
+    let b_source = b_dir.join("b.mm");
+    let a_source = a_dir.join("a.mm");
+    let b_certificate = b_dir.join(".proof-cert.json");
+
+    std::fs::write(
+        &b_source,
+        "resource counter { value: i64 } priority: 1 mode: exclusive invariant: true;\n\
+         atom b_fn(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("write resource-bearing B");
+    assert_success(
+        &fixture.certify(&b_source, &b_certificate),
+        "certify resource-bearing B standalone",
+    );
+    let standalone = verify_cert(&fixture, &b_certificate, &b_source, false);
+    let standalone_text = output_text(&standalone);
+    assert_success(&standalone, "check standalone B certificate");
+    assert!(
+        standalone_text.contains("b_fn: proven"),
+        "{standalone_text}"
+    );
+
+    std::fs::write(
+        &a_source,
+        "import \"../b/b.mm\" as b;\n\
+         atom main(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("write alias importer");
+    let unchanged = fixture.verify(&a_source, &["--strict-imports"]);
+    let unchanged_text = output_text(&unchanged);
+    assert_success(&unchanged, "strictly import unchanged B through an alias");
+    assert!(
+        !unchanged_text.contains("dependency_unchecked"),
+        "{unchanged_text}"
+    );
+
+    std::fs::write(
+        &b_source,
+        "resource counter { value: i64 } priority: 1 mode: exclusive invariant: 1 == 1;\n\
+         atom b_fn(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("change B resource invariant");
+    let changed = fixture.verify(&a_source, &["--strict-imports"]);
+    let changed_text = output_text(&changed);
+    assert!(!changed.status.success(), "{changed_text}");
+    assert!(
+        changed_text.contains("dependency_changed"),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("resource:counter"), "{changed_text}");
+}
+
+#[test]
+fn strict_import_tracks_resources_from_nested_import_closure() {
+    let fixture = Fixture::new();
+    let b_dir = fixture.root.join("b");
+    let c_dir = fixture.root.join("c");
+    let a_dir = fixture.root.join("a");
+    for dir in [&a_dir, &b_dir, &c_dir] {
+        std::fs::create_dir(dir).expect("create module directory");
+    }
+    let b_source = b_dir.join("b.mm");
+    let c_source = c_dir.join("c.mm");
+    let a_source = a_dir.join("a.mm");
+    let b_certificate = b_dir.join(".proof-cert.json");
+    let c_certificate = c_dir.join(".proof-cert.json");
+
+    std::fs::write(
+        &b_source,
+        "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;\n\
+         atom b_fn(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("write B with resource");
+    std::fs::write(
+        &c_source,
+        "import \"../b/b.mm\";\n\
+         atom c_fn(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("write C importing B");
+    assert_success(
+        &fixture.certify(&b_source, &b_certificate),
+        "certify trusted B",
+    );
+    assert_success(
+        &fixture.certify(&c_source, &c_certificate),
+        "certify C standalone with B imported",
+    );
+    let standalone_c = verify_cert(&fixture, &c_certificate, &c_source, false);
+    let standalone_c_text = output_text(&standalone_c);
+    assert_success(&standalone_c, "check standalone C certificate");
+    assert!(
+        standalone_c_text.contains("c_fn: proven"),
+        "{standalone_c_text}"
+    );
+
+    std::fs::write(
+        &a_source,
+        "import \"../b/b.mm\";\n\
+         import \"../c/c.mm\";\n\
+         atom main(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: c_fn(x);\n",
+    )
+    .expect("write importer of C");
+    let unchanged = fixture.verify(&a_source, &["--strict-imports"]);
+    assert_success(&unchanged, "strictly import unchanged C and B");
+
+    std::fs::write(
+        &b_source,
+        "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 5;\n\
+         atom b_fn(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("change B resource invariant");
+    let changed = fixture.verify(&a_source, &["--strict-imports"]);
+    let changed_text = output_text(&changed);
+    assert!(
+        !changed.status.success(),
+        "strict import unexpectedly accepted stale C certificate\n{changed_text}"
+    );
+    assert!(
+        changed_text.contains("dependency_changed"),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("resource:counter"), "{changed_text}");
+}
+
+#[test]
+fn strict_import_tracks_unrefined_type_definitions() {
+    // An unreferenced refined type still gates every atom's verification: the
+    // spec sanity phase SAT-checks every type in the module environment, so a
+    // predicate change can flip b_fn's verdict and must surface as a dependency
+    // change even though nothing references the type.
+    let fixture = Fixture::new();
+    let b_dir = fixture.root.join("b");
+    let a_dir = fixture.root.join("a");
+    for dir in [&a_dir, &b_dir] {
+        std::fs::create_dir(dir).expect("create module directory");
+    }
+    let b_source = b_dir.join("b.mm");
+    let a_source = a_dir.join("a.mm");
+    let b_certificate = b_dir.join(".proof-cert.json");
+
+    let b_source_text = |predicate: &str| {
+        format!(
+            "type Positive = i64 where v >= 0;\n\
+             type Limit = i64 where {predicate};\n\
+             atom b_fn(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n"
+        )
+    };
+    std::fs::write(&b_source, b_source_text("v < 100")).expect("write B with refined types");
+    assert_success(
+        &fixture.certify(&b_source, &b_certificate),
+        "certify B with an unreferenced refined type",
+    );
+    let certificate: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&b_certificate).unwrap())
+            .expect("parse B certificate");
+    let b_fn = certificate
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "b_fn")
+        .expect("b_fn certificate");
+    let dependency_hashes = b_fn
+        .dependency_hashes
+        .as_ref()
+        .expect("generated dependency hashes");
+    assert!(dependency_hashes.contains_key("type:Limit"));
+    assert!(dependency_hashes.contains_key("type:Positive"));
+
+    std::fs::write(
+        &a_source,
+        "import \"../b/b.mm\";\n\
+         atom main(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("write importer");
+    let unchanged = fixture.verify(&a_source, &["--strict-imports"]);
+    let unchanged_text = output_text(&unchanged);
+    assert_success(
+        &unchanged,
+        "strictly import B holding an unreferenced refined type",
+    );
+    assert!(
+        !unchanged_text.contains("dependency_unchecked"),
+        "{unchanged_text}"
+    );
+
+    // Change the unreferenced predicate: the certificate must report the type
+    // as a changed dependency instead of staying stale-proven.
+    std::fs::write(&b_source, b_source_text("v <= 50")).expect("change the unreferenced predicate");
+    let changed = verify_cert(&fixture, &b_certificate, &b_source, false);
+    let changed_text = output_text(&changed);
+    assert_eq!(changed.status.code(), Some(0), "{changed_text}");
+    assert!(
+        changed_text.contains("dependency_changed"),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("type:Limit"), "{changed_text}");
+
+    // Make it contradictory: every atom's verification now fails the all-types
+    // SAT check, including the importer's.
+    std::fs::write(&b_source, b_source_text("v < 0 && v > 0"))
+        .expect("make the unreferenced predicate contradictory");
+    let unsat = fixture.verify(&a_source, &["--strict-imports"]);
+    let unsat_text = output_text(&unsat);
+    assert!(
+        !unsat.status.success(),
+        "importing B with an unsatisfiable refined type must fail\n{unsat_text}"
+    );
+}
+
+#[test]
+fn strict_import_tracks_unrefined_struct_and_enum_definitions() {
+    // An unreferenced struct still gates every atom's verification: the
+    // projection-collision rejection scans every struct in the module
+    // environment, and a nested enum participates in the same flattened paths.
+    let fixture = Fixture::new();
+    let b_dir = fixture.root.join("b");
+    let a_dir = fixture.root.join("a");
+    for dir in [&a_dir, &b_dir] {
+        std::fs::create_dir(dir).expect("create module directory");
+    }
+    let b_source = b_dir.join("b.mm");
+    let a_source = a_dir.join("a.mm");
+    let b_certificate = b_dir.join(".proof-cert.json");
+
+    let b_source_text = |struct_field: &str, enum_payload: &str| {
+        format!(
+            "struct Inner {{ x: i64 }}\n\
+             enum Step {{ A({enum_payload}: i64), B }}\n\
+             struct Pair {{ inner: Inner, step: Step, other: {struct_field} }}\n\
+             atom b_fn(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n"
+        )
+    };
+    std::fs::write(&b_source, b_source_text("i64", "v")).expect("write B with struct and enum");
+    assert_success(
+        &fixture.certify(&b_source, &b_certificate),
+        "certify B with unreferenced struct and enum",
+    );
+    let certificate: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&b_certificate).unwrap())
+            .expect("parse B certificate");
+    let b_fn = certificate
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "b_fn")
+        .expect("b_fn certificate");
+    let dependency_hashes = b_fn
+        .dependency_hashes
+        .as_ref()
+        .expect("generated dependency hashes");
+    assert!(dependency_hashes.contains_key("struct:Pair"));
+    assert!(dependency_hashes.contains_key("struct:Inner"));
+    assert!(dependency_hashes.contains_key("enum:Step"));
+
+    std::fs::write(
+        &a_source,
+        "import \"../b/b.mm\";\n\
+         atom main(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("write importer");
+    let unchanged = fixture.verify(&a_source, &["--strict-imports"]);
+    let unchanged_text = output_text(&unchanged);
+    assert_success(
+        &unchanged,
+        "strictly import B holding unreferenced struct and enum definitions",
+    );
+    assert!(
+        !unchanged_text.contains("dependency_unchecked"),
+        "{unchanged_text}"
+    );
+
+    // Rename the field so 'inner_x' collides with Inner's flattened 'inner_x'
+    // projection — the module-level gate now rejects every atom in B.
+    std::fs::write(
+        &b_source,
+        b_source_text("i64", "v").replace("other: i64", "inner_x: i64"),
+    )
+    .expect("rename the struct field into a projection collision");
+    let changed = fixture.verify(&a_source, &["--strict-imports"]);
+    let changed_text = output_text(&changed);
+    assert!(
+        !changed.status.success(),
+        "importing B with a colliding projection must fail\n{changed_text}"
+    );
+    assert!(
+        changed_text.contains("projection paths collide")
+            || changed_text.contains("dependency_changed"),
+        "{changed_text}"
+    );
+}
+
+#[test]
+fn manifest_dependency_definitions_stay_in_root_dependency_keys() {
+    // Manifest-only dependencies load into the root file's module environment
+    // just like `import` statements do, so an unused definition there still
+    // gates the consumer's verification. Recording the root import closure
+    // must not drop its key — otherwise the certificate stays stale-proven.
+    let fixture = Fixture::new();
+    let dep_dir = fixture.root.join("dep");
+    let consumer_dir = fixture.root.join("consumer");
+    std::fs::create_dir_all(dep_dir.join("src")).expect("create dep source directory");
+    std::fs::create_dir_all(consumer_dir.join("src")).expect("create consumer source directory");
+
+    std::fs::write(
+        dep_dir.join("mumei.toml"),
+        "[package]\nname = \"dep_pkg\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("write dep manifest");
+    let dep_main = dep_dir.join("src/main.mm");
+    let dep_source = |predicate: &str| {
+        format!(
+            "type Limit = i64 where {predicate};\n\
+             atom dep_fn(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n"
+        )
+    };
+    std::fs::write(&dep_main, dep_source("v >= 0")).expect("write dep source");
+
+    std::fs::write(
+        consumer_dir.join("mumei.toml"),
+        format!(
+            "[package]\nname = \"consumer_pkg\"\nversion = \"0.1.0\"\n\n[dependencies]\ndep_pkg = {{ path = \"{}\" }}\n",
+            dep_dir.display()
+        ),
+    )
+    .expect("write consumer manifest");
+    std::fs::write(
+        consumer_dir.join("src/main.mm"),
+        "atom main(x: i64) -> i64\n  requires: true;\n  ensures: result == x;\n  body: x;\n",
+    )
+    .expect("write consumer source");
+
+    let certificate_path = consumer_dir.join(".proof-cert.json");
+    assert_success(
+        &fixture.run_in_directory(
+            &consumer_dir,
+            &[
+                "verify",
+                "--proof-cert",
+                "--output",
+                certificate_path
+                    .to_str()
+                    .expect("certificate path is UTF-8"),
+                "src/main.mm",
+            ],
+        ),
+        "certify the consumer against a manifest dependency",
+    );
+    let certificate: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&certificate_path).unwrap())
+            .expect("parse consumer certificate");
+    let main_atom = certificate
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "main")
+        .expect("main certificate");
+    assert!(
+        main_atom
+            .dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes")
+            .contains_key("type:Limit"),
+        "the manifest dependency's unused refined type must be keyed"
+    );
+
+    std::fs::write(&dep_main, dep_source("v <= 50")).expect("change the dep predicate");
+    let changed = fixture.run_in_directory(
+        &consumer_dir,
+        &[
+            "verify-cert",
+            certificate_path
+                .to_str()
+                .expect("certificate path is UTF-8"),
+            "src/main.mm",
+        ],
+    );
+    let changed_text = output_text(&changed);
+    assert_eq!(changed.status.code(), Some(0), "{changed_text}");
+    assert!(
+        changed_text.contains("dependency_changed"),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("type:Limit"), "{changed_text}");
+}
+
+#[test]
+fn manifest_dependency_of_dependency_stays_in_dep_dependency_keys() {
+    // B certified standalone keys the definitions its own manifest dependency
+    // A provides. When C loads both packages, B's certificate must still match:
+    // B's entry closure inside C's environment must contain A's entry, or the
+    // stored keys recompute as missing and strict imports reject a fresh
+    // certificate as dependency_unchecked.
+    let fixture = Fixture::new();
+    let a_dir = fixture.root.join("dep_a");
+    let b_dir = fixture.root.join("dep_b");
+    let c_dir = fixture.root.join("consumer");
+    for dir in [&a_dir, &b_dir, &c_dir] {
+        std::fs::create_dir_all(dir.join("src")).expect("create package source directory");
+    }
+
+    std::fs::write(
+        a_dir.join("mumei.toml"),
+        "[package]\nname = \"dep_a\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("write A manifest");
+    let a_main = a_dir.join("src/main.mm");
+    let a_source = |predicate: &str| {
+        format!(
+            "type Limit = i64 where {predicate};\n\
+             atom a_fn(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n"
+        )
+    };
+    std::fs::write(&a_main, a_source("v >= 0")).expect("write A source");
+
+    std::fs::write(
+        b_dir.join("mumei.toml"),
+        format!(
+            "[package]\nname = \"dep_b\"\nversion = \"0.1.0\"\n\n[dependencies]\ndep_a = {{ path = \"{}\" }}\n",
+            a_dir.display()
+        ),
+    )
+    .expect("write B manifest");
+    std::fs::write(
+        b_dir.join("src/main.mm"),
+        "atom b_fn(x: i64) -> i64\n  requires: true;\n  ensures: result == x;\n  body: x;\n",
+    )
+    .expect("write B source");
+    let b_certificate = b_dir.join(".proof-cert.json");
+    assert_success(
+        &fixture.run_in_directory(
+            &b_dir,
+            &[
+                "verify",
+                "--proof-cert",
+                "--output",
+                b_certificate.to_str().expect("certificate path is UTF-8"),
+                "src/main.mm",
+            ],
+        ),
+        "certify B against its manifest dependency",
+    );
+    let certificate: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&b_certificate).unwrap())
+            .expect("parse B certificate");
+    let b_fn = certificate
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "b_fn")
+        .expect("b_fn certificate");
+    assert!(
+        b_fn.dependency_hashes
+            .as_ref()
+            .expect("generated dependency hashes")
+            .contains_key("type:Limit"),
+        "B's manifest-only dependency must contribute its refined type key"
+    );
+
+    // A needs its own certificate for strict import too.
+    assert_success(
+        &fixture.run_in_directory(
+            &a_dir,
+            &[
+                "verify",
+                "--proof-cert",
+                "--output",
+                a_dir
+                    .join(".proof-cert.json")
+                    .to_str()
+                    .expect("certificate path is UTF-8"),
+                "src/main.mm",
+            ],
+        ),
+        "certify A",
+    );
+
+    // C declares both packages; strict import must accept B's certificate
+    // unchanged — B's closure has to reach A's entry for `type:Limit`.
+    std::fs::write(
+        c_dir.join("mumei.toml"),
+        format!(
+            "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\n\n[dependencies]\nx_a = {{ path = \"{}\" }}\ny_b = {{ path = \"{}\" }}\n",
+            a_dir.display(),
+            b_dir.display()
+        ),
+    )
+    .expect("write C manifest");
+    std::fs::write(
+        c_dir.join("src/main.mm"),
+        "atom main(x: i64) -> i64\n  requires: true;\n  ensures: result == x;\n  body: dep_b::b_fn(x);\n",
+    )
+    .expect("write C source");
+    let unchanged =
+        fixture.run_in_directory(&c_dir, &["verify", "--strict-imports", "src/main.mm"]);
+    let unchanged_text = output_text(&unchanged);
+    assert_success(
+        &unchanged,
+        "strictly import B whose certificate keys a dep-of-dep definition",
+    );
+    assert!(
+        !unchanged_text.contains("dependency_unchecked"),
+        "{unchanged_text}"
+    );
+
+    // Changing A's unused refined type must invalidate B's certificate in C's
+    // environment the same way it does for B standalone. A's own certificate
+    // also goes stale, so re-certify A first: the assertion below then
+    // isolates B's invalidation instead of passing only because A's check
+    // (sorted first) already failed.
+    std::fs::write(&a_main, a_source("v <= 50")).expect("change A's predicate");
+    let recertify_a = fixture.run_in_directory(
+        &a_dir,
+        &[
+            "verify",
+            "--proof-cert",
+            "--output",
+            a_dir
+                .join(".proof-cert.json")
+                .to_str()
+                .expect("certificate path is UTF-8"),
+            "src/main.mm",
+        ],
+    );
+    assert_success(&recertify_a, "re-certify A after changing its predicate");
+    let changed = fixture.run_in_directory(&c_dir, &["verify", "--strict-imports", "src/main.mm"]);
+    let changed_text = output_text(&changed);
+    assert!(
+        !changed.status.success() && changed_text.contains("dependency_changed"),
+        "B's stale dep-of-dep definition must surface under strict import\n{changed_text}"
     );
 }

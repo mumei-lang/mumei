@@ -157,7 +157,7 @@ pub(crate) fn generate_candidates(
             vec![
                 Expr::Variable("j".to_string()),
                 Expr::Variable(counter.clone()),
-                Expr::Variable(format!("len_{array}")),
+                Expr::Call("len".to_string(), vec![Expr::Variable(array.clone())]),
                 comparison(
                     Expr::ArrayAccess(array.clone(), Box::new(Expr::Variable("j".to_string()))),
                     Op::Eq,
@@ -374,6 +374,7 @@ pub(crate) fn expr_to_string(expr: &Expr) -> String {
                 Op::Sub => "-",
                 Op::Mul => "*",
                 Op::Div => "/",
+                Op::Rem => "%",
                 Op::Eq => "==",
                 Op::Neq => "!=",
                 Op::Gt => ">",

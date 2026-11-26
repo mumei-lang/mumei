@@ -663,6 +663,8 @@ pub fn outside_decidable_fragment_diagnostic(
             severity: "warning".to_string(),
             atom: atom.name.clone(),
             message: outside_decidable_fragment_message(atom, &tags),
+            failure_type: None,
+            violation_type: None,
             tags,
             escalation_reason: Some("outside_decidable_fragment".to_string()),
         })
@@ -744,6 +746,7 @@ fn is_array_annotation(type_name: &str) -> bool {
 
 fn collect_array_access_names_in_expr(expr: &Expr, names: &mut Vec<String>) {
     match expr {
+        Expr::Paren(inner) => collect_array_access_names_in_expr(inner, names),
         Expr::ArrayAccess(name, index) => {
             names.push(name.clone());
             collect_array_access_names_in_expr(index, names);
@@ -874,6 +877,8 @@ pub fn untyped_array_access_diagnostic(atom: &Atom, strict: bool) -> Option<Diag
              add an explicit `[i64]`/`[f64]`/`[bool]` annotation to select the element sort",
             if names.len() == 1 { "s" } else { "" }
         ),
+        failure_type: None,
+        violation_type: None,
         tags: vec!["untyped_array_access".to_string()],
         escalation_reason: None,
     })
@@ -1348,6 +1353,7 @@ pub(crate) fn collect_array_index_names_from_stmt(stmt: &Stmt, indexes: &mut Vec
 
 pub(crate) fn collect_array_index_names_from_expr(expr: &Expr, indexes: &mut Vec<String>) {
     match expr {
+        Expr::Paren(inner) => collect_array_index_names_from_expr(inner, indexes),
         Expr::ArrayAccess(_, index) => {
             collect_array_index_name(index, indexes);
             collect_array_index_names_from_expr(index, indexes);
@@ -1463,6 +1469,7 @@ pub(crate) fn atom_uses_temporal_effect(atom: &Atom, module_env: &ModuleEnv) -> 
 
 pub(crate) fn expr_has_array_access(expr: &Expr) -> bool {
     match expr {
+        Expr::Paren(inner) => expr_has_array_access(inner),
         Expr::ArrayAccess(_, _) => true,
         Expr::ArrayLit(elements) => elements.iter().any(expr_has_array_access),
         Expr::BinaryOp(left, _, right) => {
@@ -1528,6 +1535,7 @@ pub(crate) fn stmt_has_array_access(stmt: &Stmt) -> bool {
 
 pub(crate) fn expr_has_linear_arithmetic(expr: &Expr) -> bool {
     match expr {
+        Expr::Paren(inner) => expr_has_linear_arithmetic(inner),
         Expr::BinaryOp(
             _,
             Op::Add | Op::Sub | Op::Eq | Op::Neq | Op::Gt | Op::Lt | Op::Ge | Op::Le,
@@ -1608,6 +1616,7 @@ pub(crate) fn stmt_has_linear_arithmetic(stmt: &Stmt) -> bool {
 
 pub(crate) fn expr_has_nonlinear_arithmetic(expr: &Expr) -> bool {
     match expr {
+        Expr::Paren(inner) => expr_has_nonlinear_arithmetic(inner),
         Expr::BinaryOp(_, Op::Pow, _) => true,
         Expr::BinaryOp(left, Op::Mul, right) => {
             (!expr_is_numeric_literal(left) && !expr_is_numeric_literal(right))
@@ -1691,6 +1700,7 @@ pub(crate) fn stmt_has_nonlinear_arithmetic(stmt: &Stmt) -> bool {
 
 pub(crate) fn expr_has_regex_semantics(expr: &Expr) -> bool {
     match expr {
+        Expr::Paren(inner) => expr_has_regex_semantics(inner),
         Expr::Call(name, args) => {
             // P10-B: a regex builtin call is decidable when its pattern is a
             // literal inside the supported RegLan fragment; anything else
@@ -1857,6 +1867,7 @@ pub(crate) fn expr_has_inductive_shape(
     names: &std::collections::HashMap<String, String>,
 ) -> bool {
     match expr {
+        Expr::Paren(inner) => expr_has_inductive_shape(inner, module_env, names),
         // P10-C: a `match` whose arms resolve to a finite, non-recursive enum
         // is verified natively on the Z3 datatype encoding — it is inductive
         // only when a nested subexpression is. Scalar `match`es and recursive
@@ -2025,6 +2036,7 @@ pub(crate) fn stmt_has_while(stmt: &Stmt) -> bool {
 
 pub(crate) fn expr_contains_while(expr: &Expr) -> bool {
     match expr {
+        Expr::Paren(inner) => expr_contains_while(inner),
         Expr::IfThenElse {
             then_branch,
             else_branch,

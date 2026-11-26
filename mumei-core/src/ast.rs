@@ -276,6 +276,19 @@ use crate::parser::{
 use std::collections::{HashMap, HashSet};
 
 /// 単相化コンテキスト: ジェネリック定義と使用インスタンスを管理する
+/// Whether `type_ref` mentions any of the enclosing declaration's type
+/// parameters — `Box<Pair<T>>` inside `Outer<T>` is not concrete even
+/// though `Pair<T>` itself is not a parameter. Names absent from
+/// `type_params` are concrete: a plain `struct I` may be used as a type
+/// argument (`Box<I>`) even though `I` looks like a parameter name.
+fn mentions_type_params(type_ref: &TypeRef, type_params: &[String]) -> bool {
+    type_params.iter().any(|p| p == &type_ref.name)
+        || type_ref
+            .type_args
+            .iter()
+            .any(|a| mentions_type_params(a, type_params))
+}
+
 #[derive(Debug, Default)]
 pub struct Monomorphizer {
     /// ジェネリック Struct 定義: 名前 → 定義
@@ -321,13 +334,18 @@ impl Monomorphizer {
                     // パラメータの型から収集
                     for param in &atom.params {
                         if let Some(type_ref) = &param.type_ref {
-                            self.collect_from_type_ref(type_ref);
+                            self.collect_from_type_ref(type_ref, &atom.type_params);
                         }
+                    }
+                    // 戻り値型からも収集 — `-> Wrap<i64>` は body が構築式を
+                    // 持たなくても `Wrap<i64>` インスタンスを要求する。
+                    if let Some(return_type) = &atom.return_type {
+                        self.collect_from_type_ref(&parse_type_ref(return_type), &atom.type_params);
                     }
                     // body 内の文から収集。構文エラーは回復せず呼び出し元に
                     // 伝える（panics させない fail-closed 経路）。
                     match parse_body_expr_checked(&atom.body_expr) {
-                        Ok(body_stmt) => self.collect_from_stmt(&body_stmt),
+                        Ok(body_stmt) => self.collect_from_stmt(&body_stmt, &atom.type_params),
                         Err(failures) => {
                             for failure in failures {
                                 self.body_parse_failures
@@ -343,24 +361,24 @@ impl Monomorphizer {
                         .chain(atom.invariant.iter())
                     {
                         if clause.trim() != "true" {
-                            self.collect_from_expr(&parse_expression(clause));
+                            self.collect_from_expr(&parse_expression(clause), &atom.type_params);
                         }
                     }
                     for quantifier in &atom.forall_constraints {
                         for part in [&quantifier.start, &quantifier.end, &quantifier.condition] {
-                            self.collect_from_expr(&parse_expression(part));
+                            self.collect_from_expr(&parse_expression(part), &atom.type_params);
                         }
                     }
                 }
                 Item::StructDef(sdef) => {
                     for field in &sdef.fields {
-                        self.collect_from_type_ref(&field.type_ref);
+                        self.collect_from_type_ref(&field.type_ref, &sdef.type_params);
                     }
                 }
                 Item::EnumDef(edef) => {
                     for variant in &edef.variants {
                         for ft in &variant.field_types {
-                            self.collect_from_type_ref(ft);
+                            self.collect_from_type_ref(ft, &edef.type_params);
                         }
                     }
                 }
@@ -369,11 +387,20 @@ impl Monomorphizer {
         }
     }
 
-    /// TypeRef から具体的なジェネリック型インスタンスを収集する
-    fn collect_from_type_ref(&mut self, type_ref: &TypeRef) {
+    /// TypeRef から具体的なジェネリック型インスタンスを収集する。
+    /// `type_params` は外側の宣言が持つ型パラメータ — `Outer<T>` の
+    /// `inner: Box<Pair<T>>` では `T` が未解決なので `Box<Pair<T>>` は
+    /// インスタンスにしない（生成すれば型検査で拒否される宣言になる）。
+    /// 逆に `params` に無い名前は具体型なので、一文字名の構造体 `I` を
+    /// 使う `Box<I>` は正しく単相化される。
+    fn collect_from_type_ref(&mut self, type_ref: &TypeRef, type_params: &[String]) {
         if !type_ref.type_args.is_empty() {
-            // 型引数がすべて具体型（型パラメータでない）場合のみインスタンスとして登録
-            let all_concrete = type_ref.type_args.iter().all(|a| !a.is_type_param());
+            // 型引数のどこにも未解決の型パラメータを含まない場合のみ
+            // インスタンスとして登録する。
+            let all_concrete = type_ref
+                .type_args
+                .iter()
+                .all(|a| !mentions_type_params(a, type_params));
             if all_concrete
                 && (self.generic_structs.contains_key(&type_ref.name)
                     || self.generic_enums.contains_key(&type_ref.name)
@@ -383,117 +410,118 @@ impl Monomorphizer {
             }
             // 再帰的に型引数も収集
             for arg in &type_ref.type_args {
-                self.collect_from_type_ref(arg);
+                self.collect_from_type_ref(arg, type_params);
             }
         }
     }
 
     /// 式から StructInit の type_name を走査してジェネリック使用箇所を収集する
-    fn collect_from_expr(&mut self, expr: &Expr) {
+    fn collect_from_expr(&mut self, expr: &Expr, type_params: &[String]) {
         match expr {
+            Expr::Paren(inner) => self.collect_from_expr(inner, type_params),
             Expr::StructInit { type_name, fields } => {
                 let tref = parse_type_ref(type_name);
-                self.collect_from_type_ref(&tref);
+                self.collect_from_type_ref(&tref, type_params);
                 for (_, field_expr) in fields {
-                    self.collect_from_expr(field_expr);
+                    self.collect_from_expr(field_expr, type_params);
                 }
             }
             Expr::Call(name, args) => {
                 let tref = parse_type_ref(name);
-                self.collect_from_type_ref(&tref);
+                self.collect_from_type_ref(&tref, type_params);
                 for arg in args {
-                    self.collect_from_expr(arg);
+                    self.collect_from_expr(arg, type_params);
                 }
             }
             Expr::ArrayLit(elements) => {
                 for element in elements {
-                    self.collect_from_expr(element);
+                    self.collect_from_expr(element, type_params);
                 }
             }
             Expr::BinaryOp(l, _, r) => {
-                self.collect_from_expr(l);
-                self.collect_from_expr(r);
+                self.collect_from_expr(l, type_params);
+                self.collect_from_expr(r, type_params);
             }
             Expr::IfThenElse {
                 cond,
                 then_branch,
                 else_branch,
             } => {
-                self.collect_from_expr(cond);
-                self.collect_from_stmt(then_branch);
-                self.collect_from_stmt(else_branch);
+                self.collect_from_expr(cond, type_params);
+                self.collect_from_stmt(then_branch, type_params);
+                self.collect_from_stmt(else_branch, type_params);
             }
-            Expr::Block(stmt) => self.collect_from_stmt(stmt),
+            Expr::Block(stmt) => self.collect_from_stmt(stmt, type_params),
             Expr::Match { target, arms } => {
-                self.collect_from_expr(target);
+                self.collect_from_expr(target, type_params);
                 for arm in arms {
-                    self.collect_from_stmt(&arm.body);
+                    self.collect_from_stmt(&arm.body, type_params);
                     if let Some(guard) = &arm.guard {
-                        self.collect_from_expr(guard);
+                        self.collect_from_expr(guard, type_params);
                     }
                 }
             }
             Expr::FieldAccess(expr, _) => {
-                self.collect_from_expr(expr);
+                self.collect_from_expr(expr, type_params);
             }
             Expr::ArrayAccess(_, idx) => {
-                self.collect_from_expr(idx);
+                self.collect_from_expr(idx, type_params);
             }
             Expr::Async { body } => {
-                self.collect_from_stmt(body);
+                self.collect_from_stmt(body, type_params);
             }
             Expr::Await { expr } => {
-                self.collect_from_expr(expr);
+                self.collect_from_expr(expr, type_params);
             }
             Expr::Number(_) | Expr::Float(_) | Expr::Variable(_) | Expr::StringLit(_) => {}
             Expr::AtomRef { name } => {
                 // atom_ref(name) は呼び出し先の atom を参照するため、名前を収集
                 let tref = parse_type_ref(name);
-                self.collect_from_type_ref(&tref);
+                self.collect_from_type_ref(&tref, type_params);
             }
             Expr::CallRef { callee, args } => {
-                self.collect_from_expr(callee);
+                self.collect_from_expr(callee, type_params);
                 for arg in args {
-                    self.collect_from_expr(arg);
+                    self.collect_from_expr(arg, type_params);
                 }
             }
             Expr::Perform { args, .. } => {
                 for arg in args {
-                    self.collect_from_expr(arg);
+                    self.collect_from_expr(arg, type_params);
                 }
             }
             Expr::Lambda { params, body, .. } => {
                 for param in params {
                     if let Some(ref type_ref) = param.type_ref {
-                        self.collect_from_type_ref(type_ref);
+                        self.collect_from_type_ref(type_ref, type_params);
                     }
                 }
-                self.collect_from_stmt(body);
+                self.collect_from_stmt(body, type_params);
             }
             // Plan 8: Channel expressions — traverse inner expressions for generic collection
             Expr::ChanSend { channel, value } => {
-                self.collect_from_expr(channel);
-                self.collect_from_expr(value);
+                self.collect_from_expr(channel, type_params);
+                self.collect_from_expr(value, type_params);
             }
             Expr::ChanRecv { channel } => {
-                self.collect_from_expr(channel);
+                self.collect_from_expr(channel, type_params);
             }
         }
     }
 
     /// 文から StructInit の type_name を走査してジェネリック使用箇所を収集する
-    fn collect_from_stmt(&mut self, stmt: &Stmt) {
+    fn collect_from_stmt(&mut self, stmt: &Stmt, type_params: &[String]) {
         match stmt {
             Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
-                self.collect_from_expr(value);
+                self.collect_from_expr(value, type_params);
             }
             Stmt::ArrayStore { index, value, .. } => {
-                self.collect_from_expr(index);
-                self.collect_from_expr(value);
+                self.collect_from_expr(index, type_params);
+                self.collect_from_expr(value, type_params);
             }
             Stmt::Block(stmts, _) => {
                 for s in stmts {
-                    self.collect_from_stmt(s);
+                    self.collect_from_stmt(s, type_params);
                 }
             }
             Stmt::While {
@@ -503,28 +531,28 @@ impl Monomorphizer {
                 body,
                 ..
             } => {
-                self.collect_from_expr(cond);
-                self.collect_from_expr(invariant);
+                self.collect_from_expr(cond, type_params);
+                self.collect_from_expr(invariant, type_params);
                 if let Some(dec) = decreases {
-                    self.collect_from_expr(dec);
+                    self.collect_from_expr(dec, type_params);
                 }
-                self.collect_from_stmt(body);
+                self.collect_from_stmt(body, type_params);
             }
             Stmt::Acquire { body, .. } => {
-                self.collect_from_stmt(body);
+                self.collect_from_stmt(body, type_params);
             }
             Stmt::Task { body, .. } => {
-                self.collect_from_stmt(body);
+                self.collect_from_stmt(body, type_params);
             }
             Stmt::TaskGroup { children, .. } => {
                 for child in children {
-                    self.collect_from_stmt(child);
+                    self.collect_from_stmt(child, type_params);
                 }
             }
             // Plan 8: Cancel statement — no generic types to collect
             Stmt::Cancel { .. } => {}
             Stmt::Expr(expr, _) => {
-                self.collect_from_expr(expr);
+                self.collect_from_expr(expr, type_params);
             }
         }
     }
@@ -797,6 +825,7 @@ impl Monomorphizer {
             is_async: generic.is_async,
             trust_level: generic.trust_level.clone(),
             max_unroll: generic.max_unroll,
+            str_bound: generic.str_bound,
             invariant: generic.invariant.clone(),
             effects: mono_effects,
             return_type: generic.return_type.clone(),

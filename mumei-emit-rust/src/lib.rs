@@ -278,6 +278,7 @@ mod tests {
             is_async: false,
             trust_level: TrustLevel::Verified,
             max_unroll: None,
+            str_bound: None,
             invariant: None,
             effects: vec![],
             return_type: return_type.map(|s| s.to_string()),
@@ -468,13 +469,11 @@ mod tests {
         );
         // Comparison chains normalize to `&&`-joined comparisons
         assert_eq!(tr("0 <= i < n").as_deref(), Some("0 <= i && i < n"));
-        // `/` between ints → `div_euclid`, matching Z3 `Int` semantics
-        // (remainder ≥ 0), not plain `/` which truncates. `as i64` pins the
-        // receiver so untyped literals can call the method.
-        assert_eq!(
-            tr("a / b >= 0").as_deref(),
-            Some("((a) as i64).div_euclid(b) >= 0")
-        );
+        // `/` between ints → plain `/`, matching the verifier's
+        // truncating (toward-zero) semantics exactly — Rust `/`
+        // truncates. `as i64` pins the operand type so untyped
+        // literals divide as i64.
+        assert_eq!(tr("a / b >= 0").as_deref(), Some("((a) as i64) / (b) >= 0"));
         // Quantifiers nested inside an expression still translate
         assert_eq!(
             tr("n <= 0 || forall(i, 0, n, i >= 0)").as_deref(),
@@ -486,18 +485,18 @@ mod tests {
 
     #[test]
     fn test_contract_translation_negative_division() {
-        // `div_euclid` matches Z3 `Int` division (remainder ≥ 0) exactly:
-        // `(0 - 7).div_euclid(2) == -4` — Z3 `div(-7, 2) == -4`, where plain
-        // `/` would give -3 and mischeck a verified clause. Negative divisors
-        // diverge too: `7.div_euclid(-2) == -3` — Z3 `div(7, -2) == -3`.
+        // Plain `/` matches the verifier's truncating semantics exactly:
+        // `(0 - 7) / 2 == -3` — where `div_euclid` would give -4 and
+        // mischeck a verified clause. Negative divisors truncate too:
+        // `7 / (0 - 2) == -3`.
         let vars = ContractVars::new();
         assert_eq!(
-            translate_contract_to_rust("(0 - 7) / 2 == 0 - 4", &vars).as_deref(),
-            Some("((0 - 7) as i64).div_euclid(2) == 0 - 4")
+            translate_contract_to_rust("(0 - 7) / 2 == 0 - 3", &vars).as_deref(),
+            Some("((0 - 7) as i64) / (2) == 0 - 3")
         );
         assert_eq!(
             translate_contract_to_rust("7 / (0 - 2) == 0 - 3", &vars).as_deref(),
-            Some("((7) as i64).div_euclid(0 - 2) == 0 - 3")
+            Some("((7) as i64) / (0 - 2) == 0 - 3")
         );
         // `u64` operands divide as u64 — `as i64` would flip the sign of a
         // dividend above `i64::MAX`; nonnegative literals adopt u64 too.
@@ -506,11 +505,11 @@ mod tests {
         uvars.insert("ub", mumei_core::contract_host::ContractVarKind::UInt);
         assert_eq!(
             translate_contract_to_rust("ua / ub >= 0", &uvars).as_deref(),
-            Some("((ua) as u64).div_euclid(ub) >= 0")
+            Some("((ua) as u64) / (ub) >= 0")
         );
         assert_eq!(
             translate_contract_to_rust("ua / 2 >= 0", &uvars).as_deref(),
-            Some("((ua) as u64).div_euclid(2) >= 0")
+            Some("((ua) as u64) / (2) >= 0")
         );
         // Mixed signedness cannot be represented faithfully — degrade.
         assert_eq!(translate_contract_to_rust("a / ub >= 0", &uvars), None);

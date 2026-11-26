@@ -3,7 +3,7 @@ members = ["mumei-core", "mumei-emit-llvm", "mumei-emit-json", "mumei-emit-proof
 
 [package]
 name = "mumei"
-version = "0.6.23"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.89"
 description = "Mathematical Proof-Driven Programming Language — formally verified with Z3, compiled to LLVM IR"
@@ -33,7 +33,13 @@ toml = "0.8"
 dirs = "5.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
+tempfile = "3"
+zeroize = "1"
+libc = "0.2"
 miette = { version = "7", features = ["fancy"] }
+object = { version = "=0.40.0", default-features = false, features = ["read"] }
+z3 = "0.12"
 regex = "1"
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["registry"], optional = true }
@@ -41,6 +47,9 @@ tracing-opentelemetry = { version = "0.33", optional = true }
 opentelemetry = { version = "0.32", optional = true }
 opentelemetry_sdk = { version = "0.32", optional = true }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"], optional = true }
+
+[dev-dependencies]
+ed25519-dalek = "2"
 
 [features]
 static-link-z3 = ["mumei-core/static-link-z3"]

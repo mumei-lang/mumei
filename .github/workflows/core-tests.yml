@@ -12,14 +12,23 @@ on:
       - 'mumei-core/**'
       - 'mumei-emit-*/**'
       - 'src/**'
+      - 'scripts/install.sh'
+      - 'scripts/setup*'
       - 'tests/**'
+      - 'docs/CLI_REFERENCE.md'
+      - 'docs/ENV_REFERENCE.md'
       - 'std/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'rust-toolchain.toml'
       - '.github/workflows/core-tests.yml'
   push:
     branches: [develop]
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   core-tests:

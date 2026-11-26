@@ -13,6 +13,14 @@ pub(crate) type UnfoldCall<'a> = (String, Vec<Dynamic<'a>>);
 /// never alias a newer const).
 pub(crate) type CallResultFields<'a> = (Vec<(String, Dynamic<'a>)>, Dynamic<'a>);
 
+#[derive(Clone)]
+pub(crate) struct CallResultArray<'a> {
+    pub(crate) len: Option<Dynamic<'a>>,
+    pub(crate) _keep: Dynamic<'a>,
+    pub(crate) struct_leaves: std::collections::HashMap<String, z3::ast::Array<'a>>,
+    pub(crate) struct_element_type: Option<String>,
+}
+
 /// Cached `rec_fn#` UF plus the signature it was declared with, so a
 /// re-registration with a different domain/range can be caught.
 pub(crate) type RecFnEntry<'a> = (
@@ -124,6 +132,7 @@ pub(crate) struct VCtx<'a> {
         &'a std::cell::RefCell<Vec<crate::verification::invariant_inference::InferredInvariant>>,
     >,
     pub(crate) cover_obligations: Option<std::cell::RefCell<Vec<Bool<'a>>>>,
+    pub(crate) spec_domain_obligations: std::cell::RefCell<Vec<Vec<Bool<'a>>>>,
     /// EffectCtx for tracking allowed vs used effects during body evaluation.
     pub(crate) effect_ctx: Option<&'a std::cell::RefCell<EffectCtx>>,
     /// Per-atom constraint budget: tracks the number of solver.assert() calls.
@@ -166,6 +175,12 @@ pub(crate) struct VCtx<'a> {
     /// included — is verified in the bit-vector encoding, which is what decides
     /// whether a callee's `ensures` may be imported at a call site.
     pub(crate) bitvec_i64_global: bool,
+    /// `--check-i64-overflow`: body `+`, `-`, `*` under the `Int` encoding
+    /// must stay within the range of their operands' integer type (`i64`
+    /// unless a parameter or local is declared `u64`, `i32`, ...), as the
+    /// compiled code would wrap or panic outside it. Contracts keep unbounded arithmetic.
+    /// Set only while the body is lowered.
+    pub(crate) check_i64_overflow: std::cell::Cell<bool>,
     /// Shift amounts lowered while no `Solver` was available (contract clauses
     /// and invariants are lowered with `solver_opt = None`), paired with the
     /// path condition in force at that point. `discharge_bv_shift_obligations`
@@ -174,10 +189,27 @@ pub(crate) struct VCtx<'a> {
     pub(crate) bv_shift_obligations: std::cell::RefCell<Vec<(Bool<'a>, BV<'a>)>>,
     /// `(dividend, divisor)` pairs lowered without a solver, like shift
     /// amounts above, so `divisor != 0` and `!(i64::MIN / -1)` are enforced
-    /// for contract divisions too, not just body divisions.
+    /// for contract divisions too, not just body divisions. The trailing
+    /// flag marks a `u64` (unsigned) pair, which skips the overflow check —
+    /// unsigned division overflow is undefined behavior nowhere.
     /// `discharge_bv_div_obligations` replays them under each entry's path
     /// condition.
-    pub(crate) bv_div_obligations: std::cell::RefCell<Vec<(Bool<'a>, BV<'a>, BV<'a>)>>,
+    pub(crate) bv_div_obligations: std::cell::RefCell<Vec<(Bool<'a>, BV<'a>, BV<'a>, bool)>>,
+    /// Integer and real divisions lowered without a solver, as
+    /// `(path condition, divisor == 0)`. Without them a `requires` such as
+    /// `a / b > 0` would leave `b == 0` unconstrained and let any `ensures`
+    /// through. Checked by `div_safety_status` with the bit-vector pairs.
+    pub(crate) div_zero_obligations: std::cell::RefCell<Vec<(Bool<'a>, Bool<'a>)>>,
+    /// `--check-i64-overflow` obligations from body arithmetic lowered
+    /// without a solver (loop conditions, match guards), as
+    /// `(path condition, overflows, integer type)`. Checked after the body.
+    pub(crate) i64_overflow_obligations:
+        std::cell::RefCell<Vec<(Bool<'a>, Bool<'a>, &'static str)>>,
+    /// Fixed-width integer type (`"u64"`, `"i32"`, ...) of `let`/assign
+    /// bound locals, so `--check-i64-overflow` checks arithmetic on them
+    /// against their own range rather than `i64`.
+    pub(crate) local_int_types: std::cell::RefCell<std::collections::HashMap<String, &'static str>>,
+    pub(crate) refined_operand_types: std::cell::RefCell<Vec<(String, &'static str)>>,
     /// Clause booleans asserted so far during spec validation, in source
     /// order. Deferred obligations are conditioned on the clauses already in
     /// scope so a bound in one conjunct (`result <= 62`) discharges a shift
@@ -195,6 +227,13 @@ pub(crate) struct VCtx<'a> {
     /// parameter type does. Entries are removed when the variable is
     /// reassigned to a value with no inferable enum type.
     pub(crate) local_enum_types: std::cell::RefCell<std::collections::HashMap<String, String>>,
+    /// Declared struct type of each struct-valued binding (parameter,
+    /// `let`, `result`), so a field write `q.f = v` resolves the
+    /// binding's `StructDef` — its field declarations, refined-type
+    /// predicates and invariants — the same way `local_enum_types` lets
+    /// a `match` resolve variant owners. Entries are removed when the
+    /// variable is rebound to a value with no inferable struct type.
+    pub(crate) local_struct_types: std::cell::RefCell<std::collections::HashMap<String, String>>,
     /// Element type name inferred for `let`-bound array literals
     /// (`let a = [1.0, 2.0]` records `a -> "f64"`), so `array_element_sort`
     /// resolves the element type for a local binding the same way a declared
@@ -219,7 +258,7 @@ pub(crate) struct VCtx<'a> {
     /// fresh unconstrained `len_t`. The stored `Dynamic` keeps the key ast
     /// alive (Z3 refcount) so a freed pointer can never alias a new const.
     pub(crate) call_result_lens:
-        std::cell::RefCell<std::collections::HashMap<usize, (Dynamic<'a>, Dynamic<'a>)>>,
+        std::cell::RefCell<std::collections::HashMap<usize, CallResultArray<'a>>>,
     /// Field values of a struct-returning call's result, keyed by the
     /// result handle's raw `Z3_ast` pointer — the struct analogue of
     /// `call_result_lens`. A direct read `f(1).x` cannot rebuild the
@@ -237,6 +276,12 @@ pub(crate) struct VCtx<'a> {
     /// unconstrained result instead of instantiating the contract again, which
     /// only drops assumptions and keeps call lowering finite.
     pub(crate) contracts_in_instantiation: std::cell::RefCell<Vec<String>>,
+    /// `(name, declared type)` of the params of each atom whose contract is
+    /// being instantiated, innermost last. While a callee's contract is
+    /// lowered, its parameter names must resolve to the callee's declared
+    /// types — `binding_declared_type` consults this before
+    /// `current_atom.params`, which still names the caller.
+    pub(crate) instantiation_params: std::cell::RefCell<Vec<(String, Option<String>)>>,
     /// Congruent recursive-contract state (see `RecursionCtx`). Disabled
     /// everywhere except `verify_inner`'s main VCtx.
     pub(crate) recursion: RecursionCtx<'a>,
@@ -250,6 +295,26 @@ pub(crate) struct VCtx<'a> {
 }
 
 impl<'a> VCtx<'a> {
+    pub(crate) fn begin_spec_domain_clause(&self) {
+        self.spec_domain_obligations.borrow_mut().push(Vec::new());
+    }
+
+    pub(crate) fn finish_spec_domain_clause(&self) -> Vec<Bool<'a>> {
+        self.spec_domain_obligations
+            .borrow_mut()
+            .pop()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn record_spec_domain_obligation(&self, obligation: Bool<'a>) -> bool {
+        let mut collectors = self.spec_domain_obligations.borrow_mut();
+        let Some(collector) = collectors.last_mut() else {
+            return false;
+        };
+        collector.push(obligation);
+        true
+    }
+
     /// Innermost active quantifier binder occurring in any of `vals`.
     /// Quantifier sub-terms are not traversed and count as dependent, so the
     /// check errs on the side of rejecting the call.
@@ -397,22 +462,85 @@ impl<'a> VCtx<'a> {
 
     pub(crate) fn enter_contract_instantiation(
         &self,
-        atom: &str,
+        atom: &crate::parser::ast::Atom,
     ) -> ContractInstantiationGuard<'_, 'a> {
         self.contracts_in_instantiation
             .borrow_mut()
-            .push(atom.to_string());
-        ContractInstantiationGuard { vc: self }
+            .push(atom.name.clone());
+        // The callee's contract re-resolves its parameter names — seed its
+        // params over the caller's same-named bindings so `.tag`/match owner
+        // resolution and field-chain typing use the callee's declared types,
+        // not whatever the caller happened to name `h`. Every param shadows:
+        // a non-enum callee param must still clear a caller enum entry of the
+        // same name, and likewise for structs.
+        let mut saved = Vec::new();
+        {
+            let mut enums = self.local_enum_types.borrow_mut();
+            let mut structs = self.local_struct_types.borrow_mut();
+            let mut params = self.instantiation_params.borrow_mut();
+            for param in &atom.params {
+                params.push((param.name.clone(), param.type_name.clone()));
+                let base = param
+                    .type_name
+                    .as_deref()
+                    .map(|t| self.module_env.resolve_base_type(t));
+                let prev_enum = match base.as_deref() {
+                    Some(b) if self.module_env.get_enum(b).is_some() => {
+                        enums.insert(param.name.clone(), b.to_string())
+                    }
+                    _ => enums.remove(&param.name),
+                };
+                let prev_struct = match base.as_deref() {
+                    Some(b) if self.module_env.get_struct(b).is_some() => {
+                        structs.insert(param.name.clone(), b.to_string())
+                    }
+                    _ => structs.remove(&param.name),
+                };
+                saved.push((param.name.clone(), prev_enum, prev_struct));
+            }
+        }
+        ContractInstantiationGuard {
+            vc: self,
+            saved,
+            params_pushed: atom.params.len(),
+        }
     }
 }
 
 pub(crate) struct ContractInstantiationGuard<'v, 'a> {
     vc: &'v VCtx<'a>,
+    saved: Vec<(String, Option<String>, Option<String>)>,
+    params_pushed: usize,
 }
 
 impl Drop for ContractInstantiationGuard<'_, '_> {
     fn drop(&mut self) {
         let _ = self.vc.contracts_in_instantiation.borrow_mut().pop();
+        {
+            let mut params = self.vc.instantiation_params.borrow_mut();
+            let keep = params.len().saturating_sub(self.params_pushed);
+            params.truncate(keep);
+        }
+        let mut enums = self.vc.local_enum_types.borrow_mut();
+        let mut structs = self.vc.local_struct_types.borrow_mut();
+        for (name, old_enum, old_struct) in self.saved.drain(..) {
+            match old_enum {
+                Some(prev) => {
+                    enums.insert(name.clone(), prev);
+                }
+                None => {
+                    enums.remove(&name);
+                }
+            }
+            match old_struct {
+                Some(prev) => {
+                    structs.insert(name, prev);
+                }
+                None => {
+                    structs.remove(&name);
+                }
+            }
+        }
     }
 }
 

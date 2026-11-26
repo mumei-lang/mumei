@@ -127,6 +127,51 @@ body: x;
 }
 
 #[test]
+fn enum_payload_domain_is_a_cover_witness_obligation() {
+    let (dir, output, report, text) = verify_source(
+        "enum_payload_cover",
+        r#"
+enum F { None, Some(v: u32) }
+
+atom f(n: i64) -> bool
+requires: true;
+ensures: true;
+cover "in range": F::Some(n) == F::Some(7);
+body: true;
+"#,
+    );
+
+    assert!(output.status.success(), "{text}");
+    assert_eq!(report["cover_results"][0]["status"], "covered");
+    assert_eq!(report["cover_results"][0]["witness"]["n"], "7");
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
+fn enum_payload_cover_cannot_use_an_out_of_range_witness() {
+    let (dir, output, report, text) = verify_source(
+        "enum_payload_cover_out_of_range",
+        r#"
+enum F { None, Some(v: u32) }
+
+atom f(n: i64) -> bool
+requires: true;
+ensures: true;
+cover "out of range": F::Some(n) == F::Some(4294967296);
+body: true;
+"#,
+    );
+
+    assert!(!output.status.success(), "{text}");
+    assert_ne!(report["cover_results"][0]["status"], "covered");
+    assert!(
+        text.contains("cover \"out of range\" is unreachable"),
+        "{text}"
+    );
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
 fn bitwise_cover_with_explicit_bitvec_mode_is_covered() {
     let (dir, output, report, text) = verify_source(
         "bitwise_cover_bitvec",

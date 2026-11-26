@@ -270,6 +270,23 @@ Arms may also be **qualified**: `match e { Mine::Yes(v) => .., Mine::Nil => .. }
 
 Qualified constructor expressions `E::V(..)` / `E::V` work in bodies too — `Mine::Cons(x)` and `Mine::Nil` build the tagged union in place (tag `insertvalue` + per-slot `bitpreserve` payload), so `atom mk(p: i64) -> Mine { Mine::Cons(p) }` compiles and verifies, and a bound variable named like an enum still wins (`Fruit.label` reads the struct field when `Fruit` is a struct-typed binding, matching the verifier's shadow rule). Construction obeys the same limits as the enum's runtime layout: a recursive enum (`IntList::Nil`) fails the build with a clean "recursive enum" codegen error rather than overflowing the eager layout, and an arity mismatch or unknown variant is a build error (verification already rejects it before codegen is reached). The payload slots are positional unions — an enum mixing pointer (`Str`) and `f64` payloads at the same slot index cannot represent both and fails closed at the cast site. Non-equality binary operators on aggregate values (e.g. `x + s`) remain a clean codegen error. `==`/`!=` between two values of the same enum type compile to deep equality — the tag and every payload slot are compared (`Str` slots via `mumei_str_eq` content equality, `f64` slots via ordered float compare), matching the verifier's datatype equality; `undef` slots of unit variants carry no payload and are skipped. This deep-equality lowering also fixed three latent parameter bugs: enum-typed atom parameters used to be split like fat-pointer arrays, which bound `match` payloads to `0`, compared `a == b` on the tag alone, and passed only the tag when forwarding the value to a callee — parameters now bind the whole tagged-union value, so `match m { Mine::Cons(v) => v }` extracts the real payload and `consume(m)` forwards the full struct. Comparing two *different* enum types, or any struct values, is still a clean codegen error (not a crash).
 
+## Fixed-width `i64` arithmetic (`--check-i64-overflow`)
+
+The default `Int` encoding proves `epoch + 1 == epoch + 1` for every `epoch`, but a compiled `i64` wraps at `i64::MAX` (Go, LLVM) or panics (Rust debug builds). When a `.mm` atom is a port of native code, `--check-i64-overflow` adds one obligation per body `+`, `-` and `*`: if both operands fit in `i64`, the result must fit too, under the `requires` and the enclosing branch guards. Loop conditions (under the invariant) and
+`match` guards are checked too, and a lambda body is checked at each call
+with the actual arguments. A possible overflow fails with `Integer arithmetic may overflow i64`; bound the inputs in `requires` or guard the operation.
+
+The range is that of the operands' declared type: an operation that reads a `u64`, `u32`, `u16`, `u8`, `i32`, `i16` or `i8` parameter, or a `let` computed from one, must stay within that type (`x - 1` on a `u64` fails at `x == 0` with `may overflow u64`), and everything else is checked as `i64`. A function that mixes `x: i64` and `tag: u8` checks `x + 1` as `i64` and `tag + 1` as `u8`.
+
+```mumei
+atom next_epoch(epoch: i64) -> i64
+requires: epoch >= 0 && epoch < 1000000;
+ensures: result == epoch + 1;
+body: { epoch + 1 };
+```
+
+Without the upper bound the atom verifies by default and is rejected with the flag. Contracts are not checked: `ensures: result + 1 > result` still means mathematical arithmetic. Unlike `--bitvec-i64`, the flag does not change the encoding, so array and nonlinear proofs stay in the `Int` theory. The flag is part of the verification cache key.
+
 ## Bit-vector `i64` (`--bitvec-i64`)
 
 By default `i64` is encoded as a Z3 `Int`: an unbounded mathematical integer. That encoding cannot express bit patterns, and it lets a contract claim things a machine never does (`x + 1 > x` always holds). `--bitvec-i64` switches the encoding to `BV(64)`, i.e. a 64-bit two's complement machine integer.

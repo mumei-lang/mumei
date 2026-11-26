@@ -517,6 +517,7 @@ mod tests {
             is_async: false,
             trust_level: TrustLevel::Verified,
             max_unroll: None,
+            str_bound: None,
             invariant: None,
             effects: vec![],
             return_type: Some("i64".to_string()),

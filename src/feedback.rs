@@ -55,6 +55,10 @@ pub(crate) fn infer_failure_type_from_error_text(error_text: &str) -> Option<&'s
     let lower = error_text.to_lowercase();
     if lower.contains("termination measure") {
         Some(verification::FAILURE_TERMINATION_MEASURE_VIOLATED)
+    } else if lower.contains("temporal effect violation") {
+        Some("temporal_effect_violated")
+    } else if lower.contains("effect violation") {
+        Some(verification::FAILURE_EFFECT_NOT_ALLOWED)
     } else if lower.contains("postcondition") || lower.contains("ensures") {
         Some(verification::FAILURE_POSTCONDITION_VIOLATED)
     } else if lower.contains("precondition") || lower.contains("requires") {
@@ -446,8 +450,47 @@ pub(crate) fn resolve_budget_policy_fingerprint(cli_value: Option<String>) -> Op
 
 #[cfg(test)]
 mod tests {
-    use super::{counterexample_model_from_error, reconstruction_loss_from_error, verification};
+    use super::{
+        counterexample_model_from_error, infer_failure_type_from_error_text,
+        reconstruction_loss_from_error, verification,
+    };
     use verification::MumeiError;
+
+    #[test]
+    fn failure_type_inference_prioritizes_specific_error_kinds() {
+        assert_eq!(
+            infer_failure_type_from_error_text(
+                "Termination measure violation: requires the measure to decrease"
+            ),
+            Some(verification::FAILURE_TERMINATION_MEASURE_VIOLATED)
+        );
+        assert_eq!(
+            infer_failure_type_from_error_text(
+                "Temporal effect violation (InvalidPreState): operation requires Open state"
+            ),
+            Some("temporal_effect_violated")
+        );
+        assert_eq!(
+            infer_failure_type_from_error_text(
+                "Effect violation: 'perform FileWrite.write' requires [FileWrite] effect"
+            ),
+            Some(verification::FAILURE_EFFECT_NOT_ALLOWED)
+        );
+        assert_eq!(
+            infer_failure_type_from_error_text(
+                "Postcondition (ensures) failed despite the precondition"
+            ),
+            Some(verification::FAILURE_POSTCONDITION_VIOLATED)
+        );
+        assert_eq!(
+            infer_failure_type_from_error_text("value `t` moved twice"),
+            Some(verification::FAILURE_LINEARITY_VIOLATED)
+        );
+        assert_eq!(
+            infer_failure_type_from_error_text("effect is not declared"),
+            Some(verification::FAILURE_EFFECT_NOT_ALLOWED)
+        );
+    }
 
     #[test]
     fn feedback_replay_skips_unraisable_and_structured_renderings() {

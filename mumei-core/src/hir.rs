@@ -87,6 +87,7 @@ pub enum HirBinOp {
     Mul,
     Pow,
     Div,
+    Rem,
     Eq,
     Neq,
     Gt,
@@ -111,6 +112,7 @@ impl From<Op> for HirBinOp {
             Op::Mul => HirBinOp::Mul,
             Op::Pow => HirBinOp::Pow,
             Op::Div => HirBinOp::Div,
+            Op::Rem => HirBinOp::Rem,
             Op::Eq => HirBinOp::Eq,
             Op::Neq => HirBinOp::Neq,
             Op::Gt => HirBinOp::Gt,
@@ -137,6 +139,7 @@ impl From<HirBinOp> for Op {
             HirBinOp::Mul => Op::Mul,
             HirBinOp::Pow => Op::Pow,
             HirBinOp::Div => Op::Div,
+            HirBinOp::Rem => Op::Rem,
             HirBinOp::Eq => Op::Eq,
             HirBinOp::Neq => Op::Neq,
             HirBinOp::Gt => Op::Gt,
@@ -460,12 +463,13 @@ pub enum HirStmt {
     },
     /// 代入: var = expr
     Assign { var: String, value: Box<HirExpr> },
-    /// 配列要素代入: arr[idx] = value
+    /// 配列要素または構造体フィールド代入: arr[idx][.field] = value
     /// Z3 レベルでは `Array::store(arr, idx, value)` でモデル化される。
     /// LLVM codegen では GEP + store 命令を生成する。
     ArrayStore {
         array: String,
         index: Box<HirExpr>,
+        field_path: Option<Vec<String>>,
         value: Box<HirExpr>,
     },
     /// While ループ
@@ -855,6 +859,7 @@ pub fn lower_expr_with_env(
     module_env: Option<&crate::verification::ModuleEnv>,
 ) -> HirExpr {
     let result = match expr {
+        Expr::Paren(inner) => lower_expr_with_env(inner, module_env),
         Expr::Number(n) => HirExpr::Number(*n),
         Expr::Float(f) => HirExpr::Float(*f),
         // Plan 9: String literal lowering
@@ -1111,7 +1116,12 @@ fn infer_hir_expr_type(
                 | HirBinOp::BitXor
                 | HirBinOp::Shl
                 | HirBinOp::Shr => Some("i64".to_string()),
-                HirBinOp::Add | HirBinOp::Sub | HirBinOp::Mul | HirBinOp::Pow | HirBinOp::Div => {
+                HirBinOp::Add
+                | HirBinOp::Sub
+                | HirBinOp::Mul
+                | HirBinOp::Pow
+                | HirBinOp::Div
+                | HirBinOp::Rem => {
                     if left_ty.as_deref() == Some("f64") || right_ty.as_deref() == Some("f64") {
                         Some("f64".to_string())
                     } else {
@@ -1183,11 +1193,13 @@ pub fn lower_stmt_with_env(
         Stmt::ArrayStore {
             array,
             index,
+            field_path,
             value,
             ..
         } => HirStmt::ArrayStore {
             array: array.clone(),
             index: Box::new(lower_expr_with_env(index, module_env)),
+            field_path: field_path.clone(),
             value: Box::new(lower_expr_with_env(value, module_env)),
         },
         Stmt::Block(stmts, _) => {
@@ -1296,6 +1308,7 @@ pub fn collect_free_variables_stmt(stmt: &HirStmt) -> HashSet<String> {
             array,
             index,
             value,
+            ..
         } => {
             vars.insert(array.clone());
             vars.extend(collect_free_variables_expr(index));
@@ -1349,22 +1362,46 @@ pub fn collect_free_variables_stmt(stmt: &HirStmt) -> HashSet<String> {
 /// Collect outer variable names assigned by a HirStmt.
 ///
 /// Local `let` bindings are excluded so code generation can merge only
-/// assignments that update a value from before a branch.
+/// assignments that update a value from before a branch. A `let q`
+/// that shadows an outer name also shadows its field-slot keys — a
+/// `q.f = v` under the shadow writes the local binding, so none of
+/// `q`/`q_f`/`__struct_q_f` may escape to the merge.
 pub fn collect_assigned_outer_variables_stmt(stmt: &HirStmt) -> HashSet<String> {
     let mut assigned = HashSet::new();
+    collect_outer_stmt(stmt, &mut HashSet::new(), &mut assigned);
+    assigned
+}
+
+fn collect_outer_stmt(stmt: &HirStmt, bound: &mut HashSet<String>, assigned: &mut HashSet<String>) {
     match stmt {
-        HirStmt::Let { value, .. } => {
-            assigned.extend(collect_assigned_outer_variables_expr(value));
+        HirStmt::Let { var, value, .. } => {
+            collect_outer_expr(value, bound, assigned);
+            bound.insert(var.clone());
         }
         HirStmt::Assign { var, value } => {
-            if !var.contains('.') {
-                assigned.insert(var.clone());
+            match var.split_once('.') {
+                Some((base, field)) => {
+                    if !bound.contains(base) {
+                        // A field write rebinds the whole aggregate plus
+                        // that field's slot keys — all three must reach
+                        // the branch merge or post-branch reads keep the
+                        // pre-branch slots.
+                        assigned.insert(base.to_string());
+                        assigned.insert(format!("{base}_{field}"));
+                        assigned.insert(format!("__struct_{base}_{field}"));
+                    }
+                }
+                None => {
+                    if !bound.contains(var.as_str()) {
+                        assigned.insert(var.clone());
+                    }
+                }
             }
-            assigned.extend(collect_assigned_outer_variables_expr(value));
+            collect_outer_expr(value, bound, assigned);
         }
         HirStmt::ArrayStore { index, value, .. } => {
-            assigned.extend(collect_assigned_outer_variables_expr(index));
-            assigned.extend(collect_assigned_outer_variables_expr(value));
+            collect_outer_expr(index, bound, assigned);
+            collect_outer_expr(value, bound, assigned);
         }
         HirStmt::While {
             cond,
@@ -1372,47 +1409,39 @@ pub fn collect_assigned_outer_variables_stmt(stmt: &HirStmt) -> HashSet<String> 
             decreases,
             body,
         } => {
-            assigned.extend(collect_assigned_outer_variables_expr(cond));
-            assigned.extend(collect_assigned_outer_variables_expr(invariant));
+            collect_outer_expr(cond, bound, assigned);
+            collect_outer_expr(invariant, bound, assigned);
             if let Some(decrease) = decreases {
-                assigned.extend(collect_assigned_outer_variables_expr(decrease));
+                collect_outer_expr(decrease, bound, assigned);
             }
-            assigned.extend(collect_assigned_outer_variables_stmt(body));
+            collect_outer_stmt(body, &mut bound.clone(), assigned);
         }
         HirStmt::Block { stmts, tail_expr } => {
-            let mut bound = HashSet::new();
+            let mut bound = bound.clone();
             for stmt in stmts {
-                let stmt_assigned = collect_assigned_outer_variables_stmt(stmt);
-                for name in stmt_assigned {
-                    if !bound.contains(&name) {
-                        assigned.insert(name);
-                    }
-                }
-                if let HirStmt::Let { var, .. } = stmt {
-                    bound.insert(var.clone());
-                }
+                collect_outer_stmt(stmt, &mut bound, assigned);
             }
             if let Some(tail) = tail_expr {
-                for name in collect_assigned_outer_variables_expr(tail) {
-                    if !bound.contains(&name) {
-                        assigned.insert(name);
-                    }
-                }
+                collect_outer_expr(tail, &bound, assigned);
             }
         }
         HirStmt::Acquire { body, .. } => {
-            assigned.extend(collect_assigned_outer_variables_stmt(body));
+            collect_outer_stmt(body, &mut bound.clone(), assigned);
         }
         HirStmt::Expr(expr) => {
-            assigned.extend(collect_assigned_outer_variables_expr(expr));
+            collect_outer_expr(expr, bound, assigned);
         }
     }
-    assigned
 }
 
 /// Collect outer variable names assigned by nested control-flow expressions.
 pub fn collect_assigned_outer_variables_expr(expr: &HirExpr) -> HashSet<String> {
     let mut assigned = HashSet::new();
+    collect_outer_expr(expr, &HashSet::new(), &mut assigned);
+    assigned
+}
+
+fn collect_outer_expr(expr: &HirExpr, bound: &HashSet<String>, assigned: &mut HashSet<String>) {
     match expr {
         HirExpr::Number(_)
         | HirExpr::Float(_)
@@ -1421,96 +1450,95 @@ pub fn collect_assigned_outer_variables_expr(expr: &HirExpr) -> HashSet<String> 
         HirExpr::Variable(_) => {}
         HirExpr::ArrayLit(elements) => {
             for element in elements {
-                assigned.extend(collect_assigned_outer_variables_expr(element));
+                collect_outer_expr(element, bound, assigned);
             }
         }
         HirExpr::ArrayAccess(_, index) => {
-            assigned.extend(collect_assigned_outer_variables_expr(index));
+            collect_outer_expr(index, bound, assigned);
         }
         HirExpr::BinaryOp(left, _, right) => {
-            assigned.extend(collect_assigned_outer_variables_expr(left));
-            assigned.extend(collect_assigned_outer_variables_expr(right));
+            collect_outer_expr(left, bound, assigned);
+            collect_outer_expr(right, bound, assigned);
         }
         HirExpr::IfThenElse {
             cond,
             then_branch,
             else_branch,
         } => {
-            assigned.extend(collect_assigned_outer_variables_expr(cond));
-            assigned.extend(collect_assigned_outer_variables_stmt(then_branch));
-            assigned.extend(collect_assigned_outer_variables_stmt(else_branch));
+            collect_outer_expr(cond, bound, assigned);
+            collect_outer_stmt(then_branch, &mut bound.clone(), assigned);
+            collect_outer_stmt(else_branch, &mut bound.clone(), assigned);
         }
         HirExpr::Call { args, .. } => {
             for arg in args {
-                assigned.extend(collect_assigned_outer_variables_expr(arg));
+                collect_outer_expr(arg, bound, assigned);
             }
         }
         HirExpr::StructInit { fields, .. } => {
             for (_, field) in fields {
-                assigned.extend(collect_assigned_outer_variables_expr(field));
+                collect_outer_expr(field, bound, assigned);
             }
         }
         HirExpr::FieldAccess(expr, _) => {
-            assigned.extend(collect_assigned_outer_variables_expr(expr));
+            collect_outer_expr(expr, bound, assigned);
         }
         HirExpr::Match { target, arms } => {
-            assigned.extend(collect_assigned_outer_variables_expr(target));
+            collect_outer_expr(target, bound, assigned);
             for arm in arms {
-                assigned.extend(collect_assigned_outer_variables_match_arm(arm));
-                if let Some(guard) = &arm.guard {
-                    let mut guard_assigned = collect_assigned_outer_variables_expr(guard);
-                    let mut pattern_bound = HashSet::new();
-                    collect_pattern_bindings(&arm.pattern, &mut pattern_bound);
-                    guard_assigned.retain(|name| !pattern_bound.contains(name));
-                    assigned.extend(guard_assigned);
-                }
+                collect_outer_arm(arm, bound, assigned);
             }
         }
         HirExpr::CallRef { callee, args } => {
-            assigned.extend(collect_assigned_outer_variables_expr(callee));
+            collect_outer_expr(callee, bound, assigned);
             for arg in args {
-                assigned.extend(collect_assigned_outer_variables_expr(arg));
+                collect_outer_expr(arg, bound, assigned);
             }
         }
         HirExpr::Async { body } | HirExpr::Task { body, .. } => {
-            assigned.extend(collect_assigned_outer_variables_stmt(body));
+            collect_outer_stmt(body, &mut bound.clone(), assigned);
         }
         HirExpr::Await { expr } => {
-            assigned.extend(collect_assigned_outer_variables_expr(expr));
+            collect_outer_expr(expr, bound, assigned);
         }
         HirExpr::Perform { args, .. } => {
             for arg in args {
-                assigned.extend(collect_assigned_outer_variables_expr(arg));
+                collect_outer_expr(arg, bound, assigned);
             }
         }
         HirExpr::TaskGroup { children, .. } => {
             for child in children {
-                assigned.extend(collect_assigned_outer_variables_stmt(child));
+                collect_outer_stmt(child, &mut bound.clone(), assigned);
             }
         }
         HirExpr::Lambda { .. } => {}
         HirExpr::ChanSend { channel, value } => {
-            assigned.extend(collect_assigned_outer_variables_expr(channel));
-            assigned.extend(collect_assigned_outer_variables_expr(value));
+            collect_outer_expr(channel, bound, assigned);
+            collect_outer_expr(value, bound, assigned);
         }
         HirExpr::ChanRecv { channel } => {
-            assigned.extend(collect_assigned_outer_variables_expr(channel));
+            collect_outer_expr(channel, bound, assigned);
         }
         HirExpr::VariantInit { fields, .. } => {
             for field in fields {
-                assigned.extend(collect_assigned_outer_variables_expr(field));
+                collect_outer_expr(field, bound, assigned);
             }
         }
     }
-    assigned
+}
+
+fn collect_outer_arm(arm: &HirMatchArm, bound: &HashSet<String>, assigned: &mut HashSet<String>) {
+    let mut bound = bound.clone();
+    collect_pattern_bindings(&arm.pattern, &mut bound);
+    collect_outer_stmt(&arm.body, &mut bound, assigned);
+    if let Some(guard) = &arm.guard {
+        collect_outer_expr(guard, &bound, assigned);
+    }
 }
 
 /// Collect assignments from a match arm while excluding its pattern bindings.
 pub fn collect_assigned_outer_variables_match_arm(arm: &HirMatchArm) -> HashSet<String> {
-    let mut assigned = collect_assigned_outer_variables_stmt(&arm.body);
-    let mut pattern_bound = HashSet::new();
-    collect_pattern_bindings(&arm.pattern, &mut pattern_bound);
-    assigned.retain(|name| !pattern_bound.contains(name));
+    let mut assigned = HashSet::new();
+    collect_outer_arm(arm, &HashSet::new(), &mut assigned);
     assigned
 }
 

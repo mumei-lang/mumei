@@ -1,12 +1,15 @@
 use crate::codegen::lowering::{
-    array_struct_type, bitpreserve_cast, box_payload_to_i64, declare_chan_send_owned,
-    enum_llvm_type, payload_needs_box, release_boxed_payload, resolve_param_type,
-    resolve_return_type, unbox_payload_from_i64, ArrayPtr,
+    array_elem_llvm_type, array_struct_type, bitpreserve_cast, box_payload_to_i64,
+    declare_chan_send_owned, ensure_type_acyclic, enum_llvm_type, payload_needs_box,
+    release_boxed_payload, resolve_param_type, resolve_return_type, type_contains_array_enum,
+    unbox_payload_from_i64, wide_int_cast, ArrayPtr, ArrayPtrMap,
 };
 use crate::codegen::pattern_emit::{
     bind_pattern_variables, compile_pattern_test, find_field_index, find_field_index_by_name,
 };
-use crate::codegen::stmt_emit::compile_hir_stmt;
+use crate::codegen::stmt_emit::{
+    compile_hir_stmt, deep_aggregate_field_slot, deep_slot_type_error,
+};
 use crate::codegen::task_runtime::{
     compile_task_spawn, declare_task_group_any_externs, emit_task_join_only, emit_task_join_raw,
     emit_task_spawn_only, static_next_task_group_id, PendingTask, TaskGroupAnyContext,
@@ -14,7 +17,7 @@ use crate::codegen::task_runtime::{
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
-use inkwell::module::Module;
+use inkwell::module::{Linkage, Module};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{
     AnyValue, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue,
@@ -31,7 +34,7 @@ use std::rc::Rc;
 
 type ArrayMergeState<'a> = (
     HashMap<String, BasicValueEnum<'a>>,
-    HashMap<String, ArrayPtr<'a>>,
+    ArrayPtrMap<'a>,
     BasicBlock<'a>,
     HashSet<String>,
 );
@@ -117,7 +120,7 @@ fn bind_lambda_arg<'a>(
     src_var_ty: Option<&String>,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<()> {
     let is_fat_array = src_array.is_some()
@@ -139,15 +142,26 @@ fn bind_lambda_arg<'a>(
         let data_ptr = builder
             .build_extract_value(struct_val, 1, &format!("{name}_data"))
             .map_err(|e| MumeiError::codegen(format!("lambda arg extract failed: {e:?}")))?;
+        let declared_elem_ty = match declared_ty {
+            Some(type_name) => {
+                super::lowering::array_elem_llvm_type(context, type_name, module_env)?
+            }
+            None => None,
+        };
         let elem_ty = src_array
             .map(|(_, e, _)| e)
-            .or_else(|| {
-                declared_ty
-                    .and_then(|t| super::lowering::array_elem_llvm_type(context, t, module_env))
-            })
+            .or(declared_elem_ty)
             .unwrap_or_else(|| context.i64_type().into());
         array_ptrs.insert(name.to_string(), (len_val, elem_ty, data_ptr));
-        variables.insert(name.to_string(), len_val);
+        // A `Str` binding's scalar value is the `*i8` byte pointer, not
+        // the length (mirroring the `let s = "lit"` arm) — otherwise
+        // `concat(s, …)` inside the lambda hands an i64 to a string use.
+        let scalar = if elem_ty == context.i8_type().into() {
+            data_ptr
+        } else {
+            len_val
+        };
+        variables.insert(name.to_string(), scalar);
         return Ok(());
     }
     variables.insert(name.to_string(), val);
@@ -173,7 +187,7 @@ pub(crate) fn emit_lambda_function<'a>(
     body: &HirStmt,
     outer_variables: &HashMap<String, BasicValueEnum<'a>>,
     outer_var_types: &HashMap<String, String>,
-    outer_array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    outer_array_ptrs: &ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<(String, Vec<String>)> {
     let base = format!(
@@ -251,11 +265,11 @@ pub(crate) fn emit_lambda_function<'a>(
                 context,
                 p.type_ref.as_ref().map(|t| t.to_string()).as_deref(),
                 module_env,
-            )
+            )?
             .into(),
         );
     }
-    let mut ret_ty = resolve_param_type(context, return_type.map(|s| s.as_str()), module_env);
+    let mut ret_ty = resolve_param_type(context, return_type.map(|s| s.as_str()), module_env)?;
 
     // An undeclared `|x: f64| x * 2.0` returns `double`, not `i64` — probe
     // the body's actual result type by compiling once, then rebuild with
@@ -277,7 +291,7 @@ pub(crate) fn emit_lambda_function<'a>(
 
         let mut variables: HashMap<String, BasicValueEnum> = HashMap::new();
         let mut var_types: HashMap<String, String> = HashMap::new();
-        let mut array_ptrs: HashMap<String, ArrayPtr> = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
         // Seed the body with the lambda scope live at the let site — a call
         // to an outer lambda inside the body resolves its `@lam:` marker.
         var_types.extend(lam_marks.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -297,6 +311,9 @@ pub(crate) fn emit_lambda_function<'a>(
                 &mut array_ptrs,
                 module_env,
             )?;
+            if outer_array_ptrs.stack_backed.contains(cap) {
+                array_ptrs.stack_backed.insert(cap.clone());
+            }
         }
         for (i, p) in params.iter().enumerate() {
             let val = lam_fn.get_nth_param((all_caps.len() + i) as u32).unwrap();
@@ -327,6 +344,12 @@ pub(crate) fn emit_lambda_function<'a>(
             }
         }
 
+        let inferred_return = return_type
+            .cloned()
+            .or_else(|| infer_stmt_struct_type_name(body, &var_types, module_env));
+        array_ptrs.return_contains_array_enum = inferred_return
+            .as_deref()
+            .is_some_and(|name| type_contains_array_enum(module_env, name));
         let result = compile_hir_stmt(
             context,
             &lam_builder,
@@ -370,7 +393,7 @@ fn push_lambda_captures<'a>(
     builder: &Builder<'a>,
     caps: &[String],
     variables: &HashMap<String, BasicValueEnum<'a>>,
-    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &ArrayPtrMap<'a>,
 ) -> MumeiResult<Vec<BasicMetadataValueEnum<'a>>> {
     let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::with_capacity(caps.len());
     for cap in caps {
@@ -429,7 +452,7 @@ fn block_lambda_scope<'a>(
     stmts: &[HirStmt],
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
-    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<Option<(HashMap<String, BasicValueEnum<'a>>, HashMap<String, String>)>> {
     let mut local_variables = variables.clone();
@@ -492,7 +515,7 @@ fn collect_lambda_branch_body<'e, 'a>(
     conds: Vec<SelCond<'e, 'a>>,
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
-    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
     require_simple_tail: bool,
     scope: Option<SelScope<'a>>,
@@ -552,7 +575,7 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
     conds: Vec<SelCond<'e, 'a>>,
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
-    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
     scope: Option<SelScope<'a>>,
 ) -> MumeiResult<Option<Vec<SelBranch<'e, 'a>>>> {
@@ -703,7 +726,7 @@ pub(crate) fn emit_lambda_selector<'a>(
     branches: &[(String, Option<SelScope<'a>>)],
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
-    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<Option<(String, Vec<String>)>> {
     // Resolve each branch's lifted fn and marker captures.
@@ -846,7 +869,7 @@ pub(crate) fn emit_lambda_selector<'a>(
     lam_builder.position_at_end(entry);
     let mut scope_vars: HashMap<String, BasicValueEnum> = HashMap::new();
     let mut scope_var_types: HashMap<String, String> = HashMap::new();
-    let mut array_ptrs_local: HashMap<String, ArrayPtr> = HashMap::new();
+    let mut array_ptrs_local = ArrayPtrMap::default();
     let mut arg_vals: Vec<BasicValueEnum> = Vec::new();
 
     let sel_val = lam_fn.get_nth_param(0).unwrap().into_int_value();
@@ -866,6 +889,9 @@ pub(crate) fn emit_lambda_selector<'a>(
             &mut array_ptrs_local,
             module_env,
         )?;
+        if array_ptrs.stack_backed.contains(cap) {
+            array_ptrs_local.stack_backed.insert(cap.clone());
+        }
     }
     for i in 0..arity {
         arg_vals.push(
@@ -975,7 +1001,7 @@ fn emit_lambda_call<'a>(
     args: &[HirExpr],
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     let Some((fn_name, caps)) = parse_lambda_marker(mark) else {
@@ -1053,6 +1079,104 @@ fn reject_array_chan_payload(payload_ty_name: &str, op: &str) -> MumeiResult<()>
     Ok(())
 }
 
+/// Element-wise `i1` equality of one enum payload leaf: integers and
+/// floats compare directly, `Str` pointer slots defer to `mumei_str_eq`,
+/// and an aggregate leaf — a nested enum or struct payload
+/// (`pure-i64-composite/v23`) — recurses field by field. Undef fields
+/// (unit-variant padding) carry no information and are skipped.
+fn enum_leaf_eq<'a>(
+    builder: &Builder<'a>,
+    context: &'a Context,
+    module: &Module<'a>,
+    lf: BasicValueEnum<'a>,
+    rf: BasicValueEnum<'a>,
+) -> MumeiResult<inkwell::values::IntValue<'a>> {
+    fn is_undef(v: BasicValueEnum) -> bool {
+        match v {
+            BasicValueEnum::IntValue(v) => v.is_undef(),
+            BasicValueEnum::FloatValue(v) => v.is_undef(),
+            BasicValueEnum::PointerValue(v) => v.is_undef(),
+            BasicValueEnum::StructValue(v) => v.is_undef(),
+            BasicValueEnum::ArrayValue(v) => v.is_undef(),
+            BasicValueEnum::VectorValue(v) => v.is_undef(),
+        }
+    }
+    match lf {
+        BasicValueEnum::IntValue(l) => Ok(llvm!(builder.build_int_compare(
+            IntPredicate::EQ,
+            l,
+            rf.into_int_value(),
+            "enum_eq_int"
+        ))),
+        BasicValueEnum::FloatValue(l) => Ok(llvm!(builder.build_float_compare(
+            FloatPredicate::OEQ,
+            l,
+            rf.into_float_value(),
+            "enum_eq_float"
+        ))),
+        // `Str` payloads are pointers — compare contents via the runtime
+        // helper.
+        BasicValueEnum::PointerValue(_) => {
+            let str_eq_fn = module.get_function("mumei_str_eq").unwrap_or_else(|| {
+                let ptr_t = context.ptr_type(inkwell::AddressSpace::default());
+                let fn_type = context
+                    .i64_type()
+                    .fn_type(&[ptr_t.into(), ptr_t.into()], false);
+                module.add_function("mumei_str_eq", fn_type, None)
+            });
+            let res = llvm!(builder.build_call(str_eq_fn, &[lf.into(), rf.into()], "enum_eq_str"));
+            let res_int = res
+                .try_as_basic_value()
+                .left()
+                .ok_or(MumeiError::codegen("str_eq returned void".to_string()))?
+                .into_int_value();
+            Ok(llvm!(builder.build_int_compare(
+                IntPredicate::NE,
+                res_int,
+                context.i64_type().const_int(0, false),
+                "enum_eq_str_bool"
+            )))
+        }
+        BasicValueEnum::StructValue(ls) => {
+            let rs = rf.into_struct_value();
+            let mut acc = context.bool_type().const_int(1, false);
+            for idx in 0..ls.get_type().count_fields() {
+                let le = llvm!(builder.build_extract_value(ls, idx, "enum_eq_l"));
+                let re = llvm!(builder.build_extract_value(rs, idx, "enum_eq_r"));
+                if is_undef(le) || is_undef(re) {
+                    continue;
+                }
+                acc = llvm!(builder.build_and(
+                    acc,
+                    enum_leaf_eq(builder, context, module, le, re)?,
+                    "enum_eq_and"
+                ));
+            }
+            Ok(acc)
+        }
+        BasicValueEnum::ArrayValue(la) => {
+            let ra = rf.into_array_value();
+            let mut acc = context.bool_type().const_int(1, false);
+            for idx in 0..la.get_type().len() {
+                let le = llvm!(builder.build_extract_value(la, idx, "enum_eq_l"));
+                let re = llvm!(builder.build_extract_value(ra, idx, "enum_eq_r"));
+                if is_undef(le) || is_undef(re) {
+                    continue;
+                }
+                acc = llvm!(builder.build_and(
+                    acc,
+                    enum_leaf_eq(builder, context, module, le, re)?,
+                    "enum_eq_and"
+                ));
+            }
+            Ok(acc)
+        }
+        BasicValueEnum::VectorValue(_) => Err(MumeiError::codegen(
+            "enum payload leaf equality of a vector value is not supported".to_string(),
+        )),
+    }
+}
+
 /// Declared payload type of the channel `expr` denotes, when the channel is a
 /// binding introduced with a `chan<T>` type.
 pub(crate) fn chan_payload_type_name(
@@ -1068,6 +1192,252 @@ pub(crate) fn chan_payload_type_name(
 /// Resolve a declared type name to its base name with generics stripped —
 /// `get_enum`/`get_struct` are keyed on the unparameterized name, so
 /// `Option<i64>` resolves to `Option`.
+/// A resolved base name that denotes a fixed-width machine integer
+/// (`i8`..`i64`, `u8`..`u64`) — the names `hir_int_type_name` may legitimately
+/// return for a scalar binding.
+pub(crate) fn is_fixed_int_type_name(base: &str) -> bool {
+    matches!(
+        base,
+        "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "i128" | "u128"
+    )
+}
+
+/// Resolved integer type of a `HirExpr` operand — `Some("u64")` marks a
+/// `u64` operand, `Some("i64")` a declared signed one, `None` an adaptive
+/// literal or unresolvable expr. Mirrors the verifier's
+/// `fixed_width_int_type` so codegen picks `udiv`/`urem`/`lshr`/`icmp u*`
+/// for the same operands the verifier encoded with unsigned BV ops.
+pub(crate) fn hir_int_type_name(
+    expr: &HirExpr,
+    var_types: &HashMap<String, String>,
+    module_env: &ModuleEnv,
+) -> Option<String> {
+    match expr {
+        HirExpr::Variable(name) => var_types
+            .get(name)
+            .map(|t| resolve_named_type(module_env, t)),
+        HirExpr::Call { name, .. } => module_env
+            .get_atom(name)
+            .and_then(|atom| atom.return_type.clone())
+            .map(|t| resolve_named_type(module_env, &t)),
+        // Only integer-producing operators propagate a leaf's signedness —
+        // a comparison or logical op yields `bool`, so `(a > 0) == (s.n > 0)`
+        // must not read `u64`/`i64` from its operands and trip the mix check.
+        HirExpr::BinaryOp(
+            l,
+            HirBinOp::Add
+            | HirBinOp::Sub
+            | HirBinOp::Mul
+            | HirBinOp::Pow
+            | HirBinOp::Div
+            | HirBinOp::Rem
+            | HirBinOp::BitAnd
+            | HirBinOp::BitOr
+            | HirBinOp::BitXor
+            | HirBinOp::Shl
+            | HirBinOp::Shr,
+            r,
+        ) => hir_int_type_name(l, var_types, module_env)
+            .or_else(|| hir_int_type_name(r, var_types, module_env)),
+        HirExpr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => stmt_int_type_name(then_branch, var_types, module_env)
+            .or_else(|| stmt_int_type_name(else_branch, var_types, module_env)),
+        HirExpr::FieldAccess(inner, field) => infer_struct_type_name(inner, var_types, module_env)
+            .and_then(|s| {
+                module_env
+                    .get_struct(&s)
+                    .and_then(|sdef| sdef.fields.iter().find(|f| f.name == *field))
+                    .map(|f| resolve_named_type(module_env, &f.type_name))
+            }),
+        _ => None,
+    }
+}
+
+fn emit_enum_payload_field_read<'ctx>(
+    context: &'ctx Context,
+    builder: &Builder<'ctx>,
+    enum_value: inkwell::values::StructValue<'ctx>,
+    enum_type: &str,
+    field_name: &str,
+    module_env: &ModuleEnv,
+) -> MumeiResult<BasicValueEnum<'ctx>> {
+    let Some((index, declared_type, enum_payload_slot)) =
+        deep_aggregate_field_slot(module_env, enum_type, field_name, field_name)?
+    else {
+        return Err(MumeiError::codegen(format!(
+            "enum '{enum_type}' has no named payload '{field_name}'"
+        )));
+    };
+    if !enum_payload_slot {
+        return Err(MumeiError::codegen(format!(
+            "enum '{enum_type}' field '{field_name}' is not a named payload"
+        )));
+    }
+    let expected_type = resolve_param_type(context, Some(&declared_type), module_env)?;
+    let slot_type = enum_value
+        .get_type()
+        .get_field_type_at_index(index)
+        .ok_or_else(|| {
+            MumeiError::codegen(format!(
+                "enum '{enum_type}' has no payload slot for '{field_name}'"
+            ))
+        })?;
+    if slot_type != expected_type {
+        return Err(deep_slot_type_error(
+            module_env,
+            enum_type,
+            &declared_type,
+            index,
+            enum_payload_slot,
+        ));
+    }
+    let extracted = llvm!(builder.build_extract_value(
+        enum_value,
+        index,
+        &format!("enum_payload.{field_name}")
+    ));
+    if extracted.get_type() != expected_type {
+        return Err(deep_slot_type_error(
+            module_env,
+            enum_type,
+            &declared_type,
+            index,
+            enum_payload_slot,
+        ));
+    }
+    Ok(extracted)
+}
+
+/// The declared int type name of a statement's produced value —
+/// `HirStmt::Expr` delegates to `hir_int_type_name`, a `Block`'s
+/// `tail_expr` is its produced value; any other shape has no scalar
+/// name (`pure-i64-composite/v22` merge widening).
+fn stmt_int_type_name(
+    stmt: &HirStmt,
+    var_types: &HashMap<String, String>,
+    module_env: &ModuleEnv,
+) -> Option<String> {
+    match stmt {
+        HirStmt::Expr(expr) => hir_int_type_name(expr, var_types, module_env),
+        HirStmt::Block { stmts, tail_expr } => {
+            let mut scoped_types = var_types.clone();
+            for stmt in stmts {
+                if let HirStmt::Let { var, value, .. } = stmt {
+                    match hir_int_type_name(value, &scoped_types, module_env)
+                        .or_else(|| infer_struct_type_name(value, &scoped_types, module_env))
+                    {
+                        Some(ty) => {
+                            scoped_types.insert(var.clone(), ty);
+                        }
+                        None => {
+                            scoped_types.remove(var);
+                        }
+                    }
+                }
+            }
+            tail_expr
+                .as_deref()
+                .and_then(|expr| hir_int_type_name(expr, &scoped_types, module_env))
+        }
+        _ => None,
+    }
+}
+
+/// The phi type and widened incomings for a branch merge whose arms
+/// disagree on integer width: the verifier's `Num` adaptation lets a
+/// literal arm join a declared-width arm (`pure-i64-composite/v22`), so
+/// a narrower LLVM incoming extends to the widest int type present —
+/// sign-extending unless a wide arm's declared type is unsigned
+/// (`u64`/`u128`). Non-int merges keep the first arm's type so
+/// aggregate/pointer phis behave exactly as before.
+fn widen_merge_incomings<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    incomings: &[(BasicValueEnum<'a>, BasicBlock<'a>)],
+    declared_names: &[Option<String>],
+) -> mumei_core::verification::MumeiResult<(
+    inkwell::types::BasicTypeEnum<'a>,
+    Vec<(BasicValueEnum<'a>, BasicBlock<'a>)>,
+)> {
+    let first_type = incomings
+        .first()
+        .map(|(v, _)| v.get_type())
+        .unwrap_or_else(|| context.i64_type().into());
+    if !incomings.iter().all(|(v, _)| v.get_type().is_int_type()) {
+        return Ok((first_type, incomings.to_vec()));
+    }
+    let width = incomings
+        .iter()
+        .map(|(v, _)| v.get_type().into_int_type().get_bit_width())
+        .max()
+        .unwrap_or(64);
+    let phi_type = context.custom_width_int_type(width).into();
+    // The merge's signedness comes from the arms whose LLVM type is
+    // already the widest — an unresolved name defaults to signed, which
+    // matches `i64`/`i128` adaptation; unsigned arms resolve their
+    // declared `u64`/`u128` name through `hir_int_type_name`.
+    let signed = incomings
+        .iter()
+        .zip(declared_names.iter().chain(std::iter::repeat(&None)))
+        .filter(|((v, _), _)| v.get_type() == phi_type)
+        .all(|(_, name)| !matches!(name.as_deref(), Some("u64" | "u128")));
+    let mut widened = Vec::with_capacity(incomings.len());
+    for (v, block) in incomings {
+        let v = if v.get_type() == phi_type {
+            *v
+        } else {
+            wide_int_cast(builder, *v, phi_type, signed)?
+        };
+        widened.push((v, *block));
+    }
+    Ok((phi_type, widened))
+}
+
+/// `u64` operand semantics for an int binop: `Some(true)` unsigned,
+/// `Some(false)` both signed or adaptive, `Err` on a declared u64/non-u64 mix.
+/// Integer-type name for an unsigned-semantics probe: a `Str` index
+/// read yields a `u64` byte leaf (`pure-i64-composite/v13`) — the i8
+/// element width marks the fat pointer, since `var_types` carries no
+/// marker for `let s = "lit"` bindings. Anything else delegates to
+/// `hir_int_type_name`.
+fn operand_int_type_name<'a>(
+    expr: &HirExpr,
+    var_types: &HashMap<String, String>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+) -> Option<String> {
+    if let HirExpr::ArrayAccess(name, _) = expr {
+        if let Some(&(_, elem_ty, _)) = array_ptrs.get(name.as_str()) {
+            if elem_ty.is_int_type() && elem_ty.into_int_type().get_bit_width() == 8 {
+                return Some("u64".to_string());
+            }
+        }
+    }
+    hir_int_type_name(expr, var_types, module_env)
+}
+
+fn binop_unsigned_operands<'a>(
+    left: &HirExpr,
+    right: &HirExpr,
+    var_types: &HashMap<String, String>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+) -> Result<bool, MumeiError> {
+    let lt = operand_int_type_name(left, var_types, array_ptrs, module_env);
+    let rt = operand_int_type_name(right, var_types, array_ptrs, module_env);
+    let unsigned_name = |t: Option<&str>| matches!(t, Some("u64") | Some("u128"));
+    let (lu, ru) = (unsigned_name(lt.as_deref()), unsigned_name(rt.as_deref()));
+    if (lu && rt.is_some() && !ru) || (ru && lt.is_some() && !lu) {
+        return Err(MumeiError::codegen(
+            "Cannot mix a u64 operand with a declared non-u64 integer operand".to_string(),
+        ));
+    }
+    Ok(lu || ru)
+}
+
 pub(crate) fn resolve_named_type(module_env: &ModuleEnv, type_name: &str) -> String {
     let base = module_env.resolve_base_type(type_name);
     base.split('<')
@@ -1077,35 +1447,6 @@ pub(crate) fn resolve_named_type(module_env: &ModuleEnv, type_name: &str) -> Str
         .to_string()
 }
 
-/// Whether `enum_def` (transitively) references itself in a payload field.
-/// `enum_llvm_type` lowers field types eagerly, so constructing a recursive
-/// enum would recurse forever — construction is rejected instead (the same
-/// pre-existing limitation as enum-typed params).
-fn enum_is_recursive(module_env: &ModuleEnv, enum_def: &mumei_core::parser::EnumDef) -> bool {
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut queue: Vec<String> = vec![enum_def.name.clone()];
-    while let Some(name) = queue.pop() {
-        if !seen.insert(name.clone()) {
-            continue;
-        }
-        let Some(e) = module_env.get_enum(&name) else {
-            continue;
-        };
-        for variant in &e.variants {
-            for field_ty in &variant.field_types {
-                let base = resolve_named_type(module_env, &field_ty.name);
-                if base == enum_def.name {
-                    return true;
-                }
-                if module_env.get_enum(&base).is_some() {
-                    queue.push(base);
-                }
-            }
-        }
-    }
-    false
-}
-
 pub(crate) fn infer_struct_type_name(
     expr: &HirExpr,
     var_types: &HashMap<String, String>,
@@ -1113,6 +1454,24 @@ pub(crate) fn infer_struct_type_name(
 ) -> Option<String> {
     match expr {
         HirExpr::Variable(name) => var_types.get(name).cloned(),
+        HirExpr::ArrayAccess(name, _) => var_types.get(name).and_then(|array_type| {
+            let resolved = module_env.resolve_base_type(array_type);
+            let element = resolved
+                .strip_prefix("[]<")
+                .and_then(|inner| inner.strip_suffix('>'))
+                .or_else(|| {
+                    resolved
+                        .strip_prefix('[')
+                        .and_then(|inner| inner.strip_suffix(']'))
+                })?;
+            let element = resolve_named_type(module_env, element.trim());
+            if module_env.get_struct(&element).is_some() || module_env.get_enum(&element).is_some()
+            {
+                Some(element)
+            } else {
+                None
+            }
+        }),
         HirExpr::StructInit { type_name, .. } => {
             let base = resolve_named_type(module_env, type_name);
             if module_env.get_struct(&base).is_some() {
@@ -1151,10 +1510,25 @@ pub(crate) fn infer_struct_type_name(
                 }
             }
             let inner_ty = infer_struct_type_name(inner, var_types, module_env)?;
-            let sdef = module_env.get_struct(&inner_ty)?;
-            let f = sdef.fields.iter().find(|f| f.name == *field)?;
-            let base = module_env.resolve_base_type(&f.type_name);
-            if module_env.get_struct(&base).is_some() {
+            let parent_ty = module_env.resolve_base_type(&inner_ty);
+            let declared_type = if let Some(sdef) = module_env.get_struct(&parent_ty) {
+                sdef.fields
+                    .iter()
+                    .find(|f| f.name == *field)?
+                    .type_name
+                    .clone()
+            } else if module_env.get_enum(&parent_ty).is_some() {
+                let (_, declared_type, enum_payload_slot) =
+                    deep_aggregate_field_slot(module_env, &parent_ty, field, field).ok()??;
+                if !enum_payload_slot {
+                    return None;
+                }
+                declared_type
+            } else {
+                return None;
+            };
+            let base = module_env.resolve_base_type(&declared_type);
+            if module_env.get_struct(&base).is_some() || module_env.get_enum(&base).is_some() {
                 Some(base)
             } else {
                 None
@@ -1185,6 +1559,19 @@ pub(crate) fn infer_struct_type_name(
                 _ => None,
             }
         }
+        // `match e { E::V(..) => .., _ => .. }` producing enum values
+        // in every arm types as that enum — the same join the
+        // if/else rule above gives, needed so enum equality on a
+        // match-produced operand resolves its declared type.
+        HirExpr::Match { arms, .. } => {
+            let mut names = arms
+                .iter()
+                .map(|arm| infer_stmt_struct_type_name(&arm.body, var_types, module_env));
+            match names.next() {
+                Some(Some(first)) if names.all(|n| n == Some(first.clone())) => Some(first),
+                _ => None,
+            }
+        }
         // P25: a joined `task` carries its body's tail value.
         HirExpr::Task { body, .. } => infer_stmt_struct_type_name(body, var_types, module_env),
         // P25: a joined `task_group` carries a child's tail value (all children
@@ -1196,7 +1583,7 @@ pub(crate) fn infer_struct_type_name(
     }
 }
 
-fn infer_stmt_struct_type_name(
+pub(crate) fn infer_stmt_struct_type_name(
     stmt: &HirStmt,
     var_types: &HashMap<String, String>,
     module_env: &ModuleEnv,
@@ -1222,7 +1609,7 @@ pub(crate) fn emit_array_literal<'a>(
     elements: &[HirExpr],
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<(BasicValueEnum<'a>, BasicTypeEnum<'a>, BasicValueEnum<'a>)> {
     let mut elem_vals = Vec::with_capacity(elements.len());
@@ -1233,9 +1620,91 @@ pub(crate) fn emit_array_literal<'a>(
         )?);
     }
     let elem_ty = elem_vals[0].get_type();
+    let enum_names = elements
+        .iter()
+        .map(|element| {
+            infer_struct_type_name(element, var_types, module_env)
+                .filter(|type_name| module_env.get_enum(type_name).is_some())
+        })
+        .collect::<Vec<_>>();
+    if enum_names.iter().any(Option::is_some) {
+        let Some(enum_name) = enum_names.first().and_then(Option::as_deref) else {
+            return Err(MumeiError::codegen(
+                "array literal mixes enum and non-enum elements",
+            ));
+        };
+        if enum_names
+            .iter()
+            .any(|candidate| candidate.as_deref() != Some(enum_name))
+        {
+            return Err(MumeiError::codegen(
+                "array literal enum elements must have the same datatype",
+            ));
+        }
+        let expected =
+            super::lowering::array_elem_llvm_type(context, &format!("[{enum_name}]"), module_env)?
+                .ok_or_else(|| MumeiError::codegen("enum array element type did not resolve"))?;
+        if elem_ty != expected {
+            return Err(MumeiError::codegen(format!(
+                "enum array literal element type mismatch for '{enum_name}'"
+            )));
+        }
+    }
+    let struct_names = elements
+        .iter()
+        .map(|element| {
+            infer_struct_type_name(element, var_types, module_env)
+                .filter(|type_name| module_env.get_struct(type_name).is_some())
+        })
+        .collect::<Vec<_>>();
+    if struct_names.iter().any(Option::is_some) {
+        let Some(struct_name) = struct_names.first().and_then(Option::as_deref) else {
+            return Err(MumeiError::codegen(
+                "array literal mixes struct and non-struct elements",
+            ));
+        };
+        if struct_names
+            .iter()
+            .any(|candidate| candidate.as_deref() != Some(struct_name))
+        {
+            return Err(MumeiError::codegen(
+                "array literal struct elements must have the same type",
+            ));
+        }
+        let expected = super::lowering::array_elem_llvm_type(
+            context,
+            &format!("[{struct_name}]"),
+            module_env,
+        )?
+        .ok_or_else(|| MumeiError::codegen("struct array element type did not resolve"))?;
+        if elem_ty != expected {
+            return Err(MumeiError::codegen(format!(
+                "struct array literal element type mismatch for '{struct_name}'"
+            )));
+        }
+    }
     let n = elements.len() as u32;
     let array_ty = elem_ty.array_type(n);
-    let data_ptr = llvm!(builder.build_alloca(array_ty, "arrlit_data"));
+    // Every `alloca` goes in the entry block — the canonical LLVM form
+    // (mem2reg only promotes entry allocas, and the bounded-memory
+    // validator's whitelist only admits them there). A literal in a
+    // branch or loop body would otherwise emit a non-entry alloca.
+    let data_ptr = {
+        let placement = builder
+            .get_insert_block()
+            .expect("array literal emission has an insertion block");
+        let entry = function
+            .get_first_basic_block()
+            .expect("a function being emitted has an entry block");
+        if let Some(first) = entry.get_first_instruction() {
+            builder.position_before(&first);
+        } else {
+            builder.position_at_end(entry);
+        }
+        let data_ptr = llvm!(builder.build_alloca(array_ty, "arrlit_data"));
+        builder.position_at_end(placement);
+        data_ptr
+    };
     for (i, elem) in elem_vals.iter().enumerate() {
         // Int elements in an f64 literal widen via sitofp — matching the
         // verifier's int→real coercion for array literals.
@@ -1270,22 +1739,127 @@ pub(crate) fn emit_array_literal<'a>(
     Ok((len_val, elem_ty, data_ptr.into()))
 }
 
+/// Copies `len` elements of `elem_ty` from `data_ptr` into freshly `malloc`ed
+/// storage and returns the heap pointer. Used when a `-> [T]` atom's tail is
+/// callee-local (an array literal or a stack-bound alias): the `alloca` it
+/// points into dies with the frame, so the returned fat pointer must own a
+/// heap copy instead. Bindings copy for the same reason in reverse — the
+/// verifier treats each `let`/`=` binding as an independent array value, so
+/// a `t[i] = v` write must never reach the callee's (or an aliased
+/// parameter's) buffer. Ownership convention: the caller owns the copied
+/// buffer (there is no `free` on this path yet — the bounded-memory model
+/// does not track it).
+pub(crate) fn copy_array_to_heap<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    len_val: BasicValueEnum<'a>,
+    elem_ty: BasicTypeEnum<'a>,
+    data_ptr: BasicValueEnum<'a>,
+) -> MumeiResult<BasicValueEnum<'a>> {
+    let malloc_fn = module.get_function("malloc").unwrap_or_else(|| {
+        let ptr_type = context.ptr_type(inkwell::AddressSpace::default());
+        let fn_type = ptr_type.fn_type(&[context.i64_type().into()], false);
+        module.add_function("malloc", fn_type, Some(Linkage::External))
+    });
+    let elem_size = elem_ty
+        .size_of()
+        .ok_or_else(|| MumeiError::codegen("array element type is unsized"))?;
+    let byte_size =
+        llvm!(builder.build_int_mul(len_val.into_int_value(), elem_size, "ret_arr_bytes"));
+    // A `std/libc` import can declare `malloc` with an integer return; the
+    // real symbol still hands back a pointer, so bitcast the call result
+    // instead of assuming the declaration's shape.
+    let call_result = llvm!(builder.build_call(malloc_fn, &[byte_size.into()], "ret_arr_malloc"))
+        .try_as_basic_value()
+        .left()
+        .ok_or_else(|| MumeiError::codegen("malloc returned no value"))?;
+    let heap_ptr = match call_result {
+        BasicValueEnum::PointerValue(p) => p,
+        BasicValueEnum::IntValue(i) => llvm!(builder.build_int_to_ptr(
+            i,
+            context.ptr_type(inkwell::AddressSpace::default()),
+            "ret_arr_malloc_ptr",
+        )),
+        _ => {
+            return Err(MumeiError::codegen(
+                "malloc returned a non-pointer, non-integer value",
+            ))
+        }
+    };
+    llvm!(builder.build_memcpy(heap_ptr, 8, data_ptr.into_pointer_value(), 8, byte_size,));
+    Ok(heap_ptr.into())
+}
+
+/// `(len, data)` slots for a branch whose tail value is an array: a
+/// `Variable` tail resolving through the branch's `array_ptrs` entry, or a
+/// fat `{i64, ptr}` aggregate a call/`if`/`match`/`ArrayLit` tail produced.
+/// String bindings also register in `array_ptrs`, but they store their
+/// `*i8` in `variables` rather than the i64 length arrays carry, so they
+/// return `None` and keep merging through the scalar path as pointers.
+/// Extracts must be emitted inside `end_block` (before its terminator) —
+/// phi incomings have to be defined in (or dominate) the predecessor they
+/// attach to.
+#[allow(clippy::too_many_arguments)]
+fn array_result_slots<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    branch: &HirStmt,
+    val: BasicValueEnum<'a>,
+    arrays: &ArrayPtrMap<'a>,
+    vars: &HashMap<String, BasicValueEnum<'a>>,
+    end_block: BasicBlock<'a>,
+) -> MumeiResult<Option<(BasicValueEnum<'a>, BasicValueEnum<'a>)>> {
+    if let Some(name) = hir_stmt_tail_expr(branch).and_then(|e| {
+        if let HirExpr::Variable(name) = e {
+            Some(name.as_str())
+        } else {
+            None
+        }
+    }) {
+        if let Some(&(len, _, data)) = arrays.get(name) {
+            let string_binding = vars.get(name).is_some_and(|v| v.is_pointer_value());
+            if !string_binding {
+                return Ok(Some((len, data)));
+            }
+        }
+    }
+    if let BasicValueEnum::StructValue(fat) = val {
+        if fat.get_type() == array_struct_type(context) {
+            let saved = builder.get_insert_block();
+            if let Some(term) = end_block.get_terminator() {
+                builder.position_before(&term);
+            } else {
+                builder.position_at_end(end_block);
+            }
+            let len = llvm!(builder.build_extract_value(fat, 0, "arr_branch_len"));
+            let data = llvm!(builder.build_extract_value(fat, 1, "arr_branch_data"));
+            if let Some(saved) = saved {
+                builder.position_at_end(saved);
+            }
+            return Ok(Some((len, data)));
+        }
+    }
+    Ok(None)
+}
+
 /// Phi-merge array bindings that branches reassigned, mirroring the scalar
 /// variable merge while keeping the fat-pointer slots in sync.
 #[allow(clippy::type_complexity)]
 fn merge_array_ptrs<'a>(
     builder: &Builder<'a>,
-    pre: &HashMap<String, ArrayPtr<'a>>,
-    states: &[(
-        HashMap<String, ArrayPtr<'a>>,
-        BasicBlock<'a>,
-        HashSet<String>,
-    )],
-    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    pre: &ArrayPtrMap<'a>,
+    states: &[(ArrayPtrMap<'a>, BasicBlock<'a>, HashSet<String>)],
+    array_ptrs: &mut ArrayPtrMap<'a>,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
 ) -> MumeiResult<()> {
     *array_ptrs = pre.clone();
-    for (name, pre_array) in pre {
+    for (state, _, _) in states {
+        array_ptrs
+            .stack_backed
+            .extend(state.stack_backed.iter().cloned());
+    }
+    for (name, pre_array) in pre.iter() {
         if !states
             .iter()
             .any(|(_, _, assigned)| assigned.contains(name))
@@ -1325,12 +1899,15 @@ fn merge_array_ptrs<'a>(
                 "incompatible branch array length type for '{name}'"
             )));
         }
+        let is_str = first.1.is_int_type() && first.1.into_int_type().get_bit_width() == 8;
         if values.iter().all(|(len, _, data_ptr)| {
             len.as_value_ref() == first.0.as_value_ref()
                 && data_ptr.as_value_ref() == first.2.as_value_ref()
         }) {
             array_ptrs.insert(name.clone(), first);
-            variables.insert(name.clone(), first.0);
+            // `i8` elements mark a `Str` binding: its scalar value is
+            // the `*i8` pointer (concat/extern uses), not the length.
+            variables.insert(name.clone(), if is_str { first.2 } else { first.0 });
             continue;
         }
         let len_phi = llvm!(builder.build_phi(first.0.get_type(), &format!("phi_{name}_len")));
@@ -1350,10 +1927,31 @@ fn merge_array_ptrs<'a>(
         data_phi.add_incoming(&data_incoming);
 
         let len = len_phi.as_basic_value();
-        array_ptrs.insert(name.clone(), (len, first.1, data_phi.as_basic_value()));
-        variables.insert(name.clone(), len);
+        let data = data_phi.as_basic_value();
+        array_ptrs.insert(name.clone(), (len, first.1, data));
+        variables.insert(name.clone(), if is_str { data } else { len });
     }
     Ok(())
+}
+
+pub(crate) fn array_tail_binding(expr: &HirExpr) -> Option<&str> {
+    fn stmt_tail_binding(stmt: &HirStmt) -> Option<&str> {
+        match stmt {
+            HirStmt::Expr(expr) => array_tail_binding(expr),
+            HirStmt::Block { tail_expr, .. } => array_tail_binding(tail_expr.as_deref()?),
+            _ => None,
+        }
+    }
+
+    match expr {
+        HirExpr::Variable(name) => Some(name),
+        HirExpr::IfThenElse {
+            cond, then_branch, ..
+        } if matches!(cond.as_ref(), HirExpr::Variable(name) if name == "true") => {
+            stmt_tail_binding(then_branch)
+        }
+        _ => None,
+    }
 }
 
 /// Emit `E::V(..)` / `E::V` as a tagged-union struct value. Fail-closed on a
@@ -1368,7 +1966,7 @@ fn emit_enum_variant_init<'a>(
     function: &FunctionValue<'a>,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
     enum_name: &str,
     variant_name: &str,
@@ -1377,12 +1975,7 @@ fn emit_enum_variant_init<'a>(
     let enum_def = module_env.get_enum(enum_name).ok_or_else(|| {
         MumeiError::codegen(format!("Enum '{}' not found in module_env", enum_name))
     })?;
-    if enum_is_recursive(module_env, enum_def) {
-        return Err(MumeiError::codegen(format!(
-            "enum '{}' is recursive — variant construction is unsupported in codegen",
-            enum_name
-        )));
-    }
+    ensure_type_acyclic(module_env, enum_name)?;
     let variant = enum_def
         .variants
         .iter()
@@ -1407,8 +2000,11 @@ fn emit_enum_variant_init<'a>(
         .iter()
         .position(|v| v.name == variant_name)
         .unwrap_or(0);
-    let enum_type = enum_llvm_type(context, enum_def, Some(module_env));
-    let mut val = enum_type.get_undef();
+    let enum_type = enum_llvm_type(context, enum_def, module_env)?;
+    // Payload slots this variant does not fill must read as zero, not
+    // undef: the verification-side model pads the flattened slot union
+    // with zeroed slots, and translation validation compares them.
+    let mut val = enum_type.const_zero();
     // Set tag
     val = llvm!(builder.build_insert_value(
         val,
@@ -1419,10 +2015,107 @@ fn emit_enum_variant_init<'a>(
     .into_struct_value();
     // Set payload fields
     for (i, field_expr) in fields.iter().enumerate() {
-        let field_val = compile_hir_expr(
-            context, builder, module, function, field_expr, variables, var_types, array_ptrs,
-            module_env,
-        )?;
+        let field_type = variant.field_types[i].display_name();
+        let is_array = array_elem_llvm_type(context, &field_type, module_env)?.is_some();
+        let array_binding = is_array.then(|| array_tail_binding(field_expr)).flatten();
+        if is_array && array_binding.is_none() {
+            let conditional = match field_expr {
+                HirExpr::IfThenElse { cond, .. } => {
+                    !matches!(cond.as_ref(), HirExpr::Variable(name) if name == "true")
+                }
+                HirExpr::Match { .. } => true,
+                _ => false,
+            };
+            if conditional {
+                return Err(MumeiError::codegen(format!(
+                    "array payload argument for '{enum_name}::{variant_name}' cannot use if/match control flow"
+                )));
+            }
+        }
+        let field_val = if is_array {
+            if let Some(name) = array_binding {
+                match field_expr {
+                    HirExpr::Variable(_) => {}
+                    HirExpr::IfThenElse { then_branch, .. } => {
+                        super::stmt_emit::compile_hir_stmt(
+                            context,
+                            builder,
+                            module,
+                            function,
+                            then_branch,
+                            variables,
+                            var_types,
+                            array_ptrs,
+                            module_env,
+                        )?;
+                    }
+                    _ => {
+                        return Err(MumeiError::codegen(format!(
+                            "array payload argument for '{enum_name}::{variant_name}' has an unsupported tail binding"
+                        )));
+                    }
+                }
+                let (len, elem_ty, data) = array_ptrs.get(name).copied().ok_or_else(|| {
+                    MumeiError::codegen(format!(
+                        "array payload '{name}' is not registered as a fat pointer"
+                    ))
+                })?;
+                let expected_elem_ty = array_elem_llvm_type(context, &field_type, module_env)?
+                    .ok_or_else(|| {
+                        MumeiError::codegen(format!(
+                            "enum '{enum_name}' array payload has no scalar element type"
+                        ))
+                    })?;
+                if elem_ty != expected_elem_ty {
+                    return Err(MumeiError::codegen(format!(
+                        "array payload '{name}' has an incompatible element type"
+                    )));
+                }
+                let array_ty = array_struct_type(context);
+                let mut aggregate: inkwell::values::AggregateValueEnum =
+                    array_ty.get_undef().into();
+                aggregate = llvm!(builder.build_insert_value(aggregate, len, 0, "payload_arr_len"));
+                aggregate =
+                    llvm!(builder.build_insert_value(aggregate, data, 1, "payload_arr_data"));
+                match aggregate {
+                    inkwell::values::AggregateValueEnum::StructValue(value) => value.into(),
+                    _ => {
+                        return Err(MumeiError::codegen(
+                            "array payload is not a fat-pointer aggregate",
+                        ))
+                    }
+                }
+            } else {
+                let value = compile_hir_expr(
+                    context, builder, module, function, field_expr, variables, var_types,
+                    array_ptrs, module_env,
+                )?;
+                if value.get_type() != array_struct_type(context).into() {
+                    return Err(MumeiError::codegen(format!(
+                        "array payload argument for '{enum_name}::{variant_name}' did not resolve to a fat pointer"
+                    )));
+                }
+                value
+            }
+        } else {
+            compile_hir_expr(
+                context, builder, module, function, field_expr, variables, var_types, array_ptrs,
+                module_env,
+            )?
+        };
+        if is_array && array_ptrs.return_contains_array_enum {
+            let stack_backed = array_binding
+                .map(|name| {
+                    array_ptrs.stack_backed.contains(name) || !array_ptrs.contains_key(name)
+                })
+                .unwrap_or(true);
+            if stack_backed {
+                return Err(MumeiError::codegen(
+                    "stack-backed array payload cannot escape through an array-bearing enum return"
+                        .to_string(),
+                ));
+            }
+        }
         let slot_ty = enum_type
             .get_field_type_at_index((i + 1) as u32)
             .ok_or_else(|| {
@@ -1453,7 +2146,7 @@ pub(crate) fn compile_hir_expr<'a>(
     expr: &HirExpr,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut ArrayPtrMap<'a>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     match expr {
@@ -1659,31 +2352,78 @@ pub(crate) fn compile_hir_expr<'a>(
                 let resolved_callee = module_env
                     .get_atom(name)
                     .or_else(|| module_env.get_atom(&fqn_name));
+                let inferred_callee_return = resolved_callee
+                    .filter(|callee| callee.return_type.is_none())
+                    .and_then(|callee| {
+                        mumei_core::hir::lower_atom_to_hir(callee)
+                            .signature
+                            .inferred_return_type
+                    });
+                let callee_returns_array_enum = resolved_callee
+                    .and_then(|callee| callee.return_type.as_deref())
+                    .or(inferred_callee_return.as_deref())
+                    .is_some_and(|type_name| type_contains_array_enum(module_env, type_name));
+                if array_ptrs.return_contains_array_enum && callee_returns_array_enum {
+                    if let Some(callee) = resolved_callee {
+                        for (i, arg) in args.iter().enumerate() {
+                            let param_is_array = callee
+                                .params
+                                .get(i)
+                                .and_then(|param| param.type_name.as_deref())
+                                .is_some_and(|type_name| {
+                                    matches!(
+                                        mumei_core::lowering::lower(
+                                            &module_env.resolve_base_type(type_name)
+                                        ),
+                                        mumei_core::lowering::LoweredType::Array(_)
+                                    )
+                                });
+                            if !param_is_array {
+                                continue;
+                            }
+                            let stack_backed = match arg {
+                                HirExpr::Variable(array_name) => {
+                                    array_ptrs.stack_backed.contains(array_name)
+                                        || !array_ptrs.contains_key(array_name)
+                                }
+                                _ => true,
+                            };
+                            if stack_backed {
+                                return Err(MumeiError::codegen(format!(
+                                    "stack-backed array argument to '{name}' cannot escape through an array-bearing enum return"
+                                )));
+                            }
+                        }
+                    }
+                }
                 // Lower the callee's signature only when a fresh function
                 // declaration is needed — a callee already declared in this
                 // module (the common case in multi-atom files) is reused
                 // directly, so each callee lowers at most once per module.
                 let callee_fn = if let Some(callee) = resolved_callee {
                     let callee_symbol = callee.name.as_str();
-                    Some(module.get_function(callee_symbol).unwrap_or_else(|| {
+                    if let Some(existing) = module.get_function(callee_symbol) {
+                        Some(existing)
+                    } else {
                         let sig = mumei_core::hir::lower_atom_to_hir(callee).signature;
                         let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = sig
                             .params
                             .iter()
                             .map(|p| {
-                                resolve_param_type(context, p.ty.as_deref(), module_env).into()
+                                resolve_param_type(context, p.ty.as_deref(), module_env)
+                                    .map(Into::into)
                             })
-                            .collect();
+                            .collect::<MumeiResult<_>>()?;
 
                         // Plan 18: Resolve callee return type from its return_type annotation
-                        let callee_ret_type = resolve_return_type(context, &sig, module_env);
+                        let callee_ret_type = resolve_return_type(context, &sig, module_env)?;
                         let fn_type = callee_ret_type.fn_type(&callee_param_types, false);
-                        module.add_function(
+                        Some(module.add_function(
                             callee_symbol,
                             fn_type,
                             Some(inkwell::module::Linkage::External),
-                        )
-                    }))
+                        ))
+                    }
                 } else {
                     // A callee absent from module_env may already be declared
                     // in this module — e.g. `__mumei_user_main`, the renamed
@@ -1691,23 +2431,27 @@ pub(crate) fn compile_hir_expr<'a>(
                     // it, not the C wrapper `main`). When it is not declared
                     // yet (a caller compiled before `main` itself), declare it
                     // from `main`'s own signature so the call still resolves.
-                    module.get_function(name).or_else(|| {
-                        if name != "__mumei_user_main" {
-                            return None;
-                        }
-                        module_env.get_atom("main").map(|main_atom| {
+                    if let Some(existing) = module.get_function(name) {
+                        Some(existing)
+                    } else if name == "__mumei_user_main" {
+                        if let Some(main_atom) = module_env.get_atom("main") {
                             let sig = mumei_core::hir::lower_atom_to_hir(main_atom).signature;
                             let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = sig
                                 .params
                                 .iter()
                                 .map(|p| {
-                                    resolve_param_type(context, p.ty.as_deref(), module_env).into()
+                                    resolve_param_type(context, p.ty.as_deref(), module_env)
+                                        .map(Into::into)
                                 })
-                                .collect();
-                            let ret = resolve_return_type(context, &sig, module_env);
-                            module.add_function(name, ret.fn_type(&param_types, false), None)
-                        })
-                    })
+                                .collect::<MumeiResult<_>>()?;
+                            let ret = resolve_return_type(context, &sig, module_env)?;
+                            Some(module.add_function(name, ret.fn_type(&param_types, false), None))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
                 };
                 if let Some(callee_fn) = callee_fn {
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
@@ -1758,6 +2502,21 @@ pub(crate) fn compile_hir_expr<'a>(
                             context, builder, module, function, arg, variables, var_types,
                             array_ptrs, module_env,
                         )?;
+                        // A 128-bit parameter consumes a native `i128`
+                        // (`pure-i64-composite/v21`): a literal or
+                        // narrower operand extends into the slot.
+                        let val = match callee_fn.get_nth_param(i as u32) {
+                            Some(param) => {
+                                let signed = resolved_callee
+                                    .and_then(|c| c.params.get(i))
+                                    .and_then(|p| p.type_name.as_deref())
+                                    .map(|tn| module_env.resolve_base_type(tn))
+                                    .as_deref()
+                                    == Some("i128");
+                                wide_int_cast(builder, val, param.get_type(), signed)?
+                            }
+                            None => val,
+                        };
                         arg_vals.push(val.into());
                     }
 
@@ -1812,16 +2571,36 @@ pub(crate) fn compile_hir_expr<'a>(
                 let elem_ptr =
                     unsafe { llvm!(builder.build_gep(*elem_ty, data_ptr, &[idx], "elem_ptr")) };
                 let loaded = llvm!(builder.build_load(*elem_ty, elem_ptr, "elem_val"));
+                // `Str` cells are `i8` (`pure-i64-composite/v13`); the
+                // merged read is always `i64` — zero-extend narrower
+                // elements so the byte read carries 0–255 like the
+                // verifier's unsigned leaf.
+                let loaded = if loaded.is_int_value() {
+                    let int_val = loaded.into_int_value();
+                    if int_val.get_type().get_bit_width() < 64 {
+                        llvm!(builder.build_int_z_extend(int_val, context.i64_type(), "elem_zext"))
+                            .into()
+                    } else {
+                        int_val.into()
+                    }
+                } else {
+                    loaded
+                };
+                let result_ty: BasicTypeEnum = if *elem_ty == context.i8_type().into() {
+                    context.i64_type().into()
+                } else {
+                    *elem_ty
+                };
                 let safe_end = builder.get_insert_block().unwrap();
                 llvm!(builder.build_unconditional_branch(merge_block));
 
                 builder.position_at_end(oob_block);
-                let zero_val = context.i64_type().const_int(0, false);
+                let zero_val = result_ty.const_zero();
                 let oob_end = builder.get_insert_block().unwrap();
                 llvm!(builder.build_unconditional_branch(merge_block));
 
                 builder.position_at_end(merge_block);
-                let phi = llvm!(builder.build_phi(context.i64_type(), "arr_result"));
+                let phi = llvm!(builder.build_phi(result_ty, "arr_result"));
                 phi.add_incoming(&[(&loaded, safe_end), (&zero_val, oob_end)]);
                 Ok(phi.as_basic_value())
             } else {
@@ -1899,6 +2678,17 @@ pub(crate) fn compile_hir_expr<'a>(
                 context, builder, module, function, right, variables, var_types, array_ptrs,
                 module_env,
             )?;
+
+            if matches!(op, HirBinOp::Eq | HirBinOp::Neq)
+                && [left.as_ref(), right.as_ref()].iter().any(|operand| {
+                    infer_struct_type_name(operand, var_types, module_env)
+                        .is_some_and(|ty| type_contains_array_enum(module_env, &ty))
+                })
+            {
+                return Err(MumeiError::codegen(
+                    "equality on enums with array payloads is not supported by LLVM codegen",
+                ));
+            }
 
             // Plan 9-8: String operations — if both operands are pointer (Str) type
             if lhs.is_pointer_value() && rhs.is_pointer_value() {
@@ -2051,51 +2841,8 @@ pub(crate) fn compile_hir_expr<'a>(
                                 if is_undef(lf) || is_undef(rf) {
                                     continue;
                                 }
-                                let cmp: inkwell::values::IntValue = if lf.is_int_value() {
-                                    llvm!(builder.build_int_compare(
-                                        IntPredicate::EQ,
-                                        lf.into_int_value(),
-                                        rf.into_int_value(),
-                                        "enum_eq_int"
-                                    ))
-                                } else if lf.is_float_value() {
-                                    llvm!(builder.build_float_compare(
-                                        FloatPredicate::OEQ,
-                                        lf.into_float_value(),
-                                        rf.into_float_value(),
-                                        "enum_eq_float"
-                                    ))
-                                } else {
-                                    // Pointer slot → Str payload — compare
-                                    // contents via the runtime helper.
-                                    let str_eq_fn =
-                                        module.get_function("mumei_str_eq").unwrap_or_else(|| {
-                                            let ptr_t =
-                                                context.ptr_type(inkwell::AddressSpace::default());
-                                            let fn_type = context
-                                                .i64_type()
-                                                .fn_type(&[ptr_t.into(), ptr_t.into()], false);
-                                            module.add_function("mumei_str_eq", fn_type, None)
-                                        });
-                                    let res = llvm!(builder.build_call(
-                                        str_eq_fn,
-                                        &[lf.into(), rf.into()],
-                                        "enum_eq_str"
-                                    ));
-                                    let res_int = res
-                                        .try_as_basic_value()
-                                        .left()
-                                        .ok_or(MumeiError::codegen(
-                                            "str_eq returned void".to_string(),
-                                        ))?
-                                        .into_int_value();
-                                    llvm!(builder.build_int_compare(
-                                        IntPredicate::NE,
-                                        res_int,
-                                        context.i64_type().const_int(0, false),
-                                        "enum_eq_str_bool"
-                                    ))
-                                };
+                                let cmp: inkwell::values::IntValue =
+                                    enum_leaf_eq(builder, context, module, lf, rf)?;
                                 acc = llvm!(builder.build_and(acc, cmp, "enum_eq_and"));
                             }
                             if matches!(op, HirBinOp::Neq) {
@@ -2114,14 +2861,78 @@ pub(crate) fn compile_hir_expr<'a>(
                         op
                     )));
                 }
+                // A 128-bit operand (`pure-i64-composite/v21`) widens the
+                // pair: a literal or narrower operand extends to the
+                // full width — the same `widen_literal_operands` the
+                // verifier applies (`sext` for `i128`, `zext` for
+                // `u128`), so `a + -1` keeps `-1` on `i128`.
+                let unsigned =
+                    binop_unsigned_operands(left, right, var_types, array_ptrs, module_env)?;
+                let (lhs, rhs) = match (lhs, rhs) {
+                    (BasicValueEnum::IntValue(lv), BasicValueEnum::IntValue(rv)) => {
+                        let (lw, rw) =
+                            (lv.get_type().get_bit_width(), rv.get_type().get_bit_width());
+                        if lw < rw {
+                            (
+                                if unsigned {
+                                    llvm!(builder.build_int_z_extend(lv, rv.get_type(), "w_lhs"))
+                                        .into()
+                                } else {
+                                    llvm!(builder.build_int_s_extend(lv, rv.get_type(), "w_lhs"))
+                                        .into()
+                                },
+                                rv.into(),
+                            )
+                        } else if rw < lw {
+                            (
+                                lv.into(),
+                                if unsigned {
+                                    llvm!(builder.build_int_z_extend(rv, lv.get_type(), "w_rhs"))
+                                        .into()
+                                } else {
+                                    llvm!(builder.build_int_s_extend(rv, lv.get_type(), "w_rhs"))
+                                        .into()
+                                },
+                            )
+                        } else {
+                            (lv.into(), rv.into())
+                        }
+                    }
+                    other => other,
+                };
                 let l = lhs.into_int_value();
                 let r = rhs.into_int_value();
                 match op {
                     HirBinOp::Add => Ok(llvm!(builder.build_int_add(l, r, "add_tmp")).into()),
                     HirBinOp::Sub => Ok(llvm!(builder.build_int_sub(l, r, "sub_tmp")).into()),
                     HirBinOp::Mul => Ok(llvm!(builder.build_int_mul(l, r, "mul_tmp")).into()),
+                    HirBinOp::Div if unsigned => {
+                        Ok(llvm!(builder.build_int_unsigned_div(l, r, "udiv_tmp")).into())
+                    }
                     HirBinOp::Div => {
                         Ok(llvm!(builder.build_int_signed_div(l, r, "div_tmp")).into())
+                    }
+                    HirBinOp::Rem if unsigned => {
+                        Ok(llvm!(builder.build_int_unsigned_rem(l, r, "urem_tmp")).into())
+                    }
+                    HirBinOp::Rem => {
+                        // `srem i64::MIN, -1` is undefined in LLVM; `x % -1` is
+                        // always 0, which `x % 1` also yields.
+                        let minus_one = r.get_type().const_all_ones();
+                        let is_minus_one = llvm!(builder.build_int_compare(
+                            IntPredicate::EQ,
+                            r,
+                            minus_one,
+                            "rem_is_minus_one"
+                        ));
+                        let safe_r = llvm!(builder.build_select(
+                            is_minus_one,
+                            r.get_type().const_int(1, false),
+                            r,
+                            "rem_divisor"
+                        ))
+                        .into_int_value();
+                        Ok(llvm!(builder.build_int_signed_rem(l, safe_r, "rem_tmp")).into())
                     }
                     HirBinOp::Pow => Err(MumeiError::codegen(
                         "Unsupported int operator Pow".to_string(),
@@ -2133,6 +2944,9 @@ pub(crate) fn compile_hir_expr<'a>(
                     HirBinOp::BitOr => Ok(llvm!(builder.build_or(l, r, "or_tmp")).into()),
                     HirBinOp::BitXor => Ok(llvm!(builder.build_xor(l, r, "xor_tmp")).into()),
                     HirBinOp::Shl => Ok(llvm!(builder.build_left_shift(l, r, "shl_tmp")).into()),
+                    HirBinOp::Shr if unsigned => {
+                        Ok(llvm!(builder.build_right_shift(l, r, false, "lshr_tmp")).into())
+                    }
                     HirBinOp::Shr => {
                         Ok(llvm!(builder.build_right_shift(l, r, true, "ashr_tmp")).into())
                     }
@@ -2142,13 +2956,17 @@ pub(crate) fn compile_hir_expr<'a>(
                     | HirBinOp::Gt
                     | HirBinOp::Ge
                     | HirBinOp::Le => {
-                        let pred = match op {
-                            HirBinOp::Eq => IntPredicate::EQ,
-                            HirBinOp::Neq => IntPredicate::NE,
-                            HirBinOp::Lt => IntPredicate::SLT,
-                            HirBinOp::Gt => IntPredicate::SGT,
-                            HirBinOp::Ge => IntPredicate::SGE,
-                            HirBinOp::Le => IntPredicate::SLE,
+                        let pred = match (op, unsigned) {
+                            (HirBinOp::Eq, _) => IntPredicate::EQ,
+                            (HirBinOp::Neq, _) => IntPredicate::NE,
+                            (HirBinOp::Lt, true) => IntPredicate::ULT,
+                            (HirBinOp::Gt, true) => IntPredicate::UGT,
+                            (HirBinOp::Ge, true) => IntPredicate::UGE,
+                            (HirBinOp::Le, true) => IntPredicate::ULE,
+                            (HirBinOp::Lt, false) => IntPredicate::SLT,
+                            (HirBinOp::Gt, false) => IntPredicate::SGT,
+                            (HirBinOp::Ge, false) => IntPredicate::SGE,
+                            (HirBinOp::Le, false) => IntPredicate::SLE,
                             _ => unreachable!(),
                         };
                         let cmp = llvm!(builder.build_int_compare(pred, l, r, "cmp_tmp"));
@@ -2192,8 +3010,11 @@ pub(crate) fn compile_hir_expr<'a>(
 
             // Lambda bindings are branch-scoped like the verifier's
             // `local_lambdas`: restore the pre-branch markers before the
-            // else side, then keep only markers both sides agree on.
-            let pre_marks = lambda_marks(var_types);
+            // else side, then keep only markers both sides agree on. The
+            // same scoping applies to every `var_types` entry — a type a
+            // `then` assignment records must not retype the value `else`
+            // still holds from before the branch.
+            let pre_var_types = var_types.clone();
 
             llvm!(builder.build_conditional_branch(cond_bool, then_block, else_block));
 
@@ -2212,8 +3033,8 @@ pub(crate) fn compile_hir_expr<'a>(
             let then_vars = variables.clone();
             let then_arrays = array_ptrs.clone();
             let then_marks = lambda_marks(var_types);
-            var_types.retain(|_, v| !v.starts_with(LAMBDA_MARK));
-            var_types.extend(pre_marks.iter().map(|(k, v)| (k.clone(), v.clone())));
+            let then_var_types = var_types.clone();
+            *var_types = pre_var_types.clone();
             let then_end_block = builder.get_insert_block().unwrap();
             llvm!(builder.build_unconditional_branch(merge_block));
 
@@ -2234,13 +3055,105 @@ pub(crate) fn compile_hir_expr<'a>(
             let else_vars = variables.clone();
             let else_arrays = array_ptrs.clone();
             let else_marks = lambda_marks(var_types);
+            let else_var_types = var_types.clone();
             merge_lambda_marks(var_types, &then_marks, &else_marks);
+            // Non-lambda type tracking merges like the values below: both
+            // branches must record the same type for a name, or the name's
+            // declared pre-branch type stands. An entry only one branch
+            // produced is dropped unless the name existed before the
+            // branch.
+            let mut merged_types: HashMap<String, String> = pre_var_types
+                .iter()
+                .filter(|(_, v)| !v.starts_with(LAMBDA_MARK))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            merged_types.retain(|name, _| {
+                then_var_types.contains_key(name) || else_var_types.contains_key(name)
+            });
+            for (name, ty) in &then_var_types {
+                if !ty.starts_with(LAMBDA_MARK) && else_var_types.get(name) == Some(ty) {
+                    merged_types.insert(name.clone(), ty.clone());
+                }
+            }
+            var_types.retain(|_, v| v.starts_with(LAMBDA_MARK));
+            var_types.extend(merged_types);
             let else_end_block = builder.get_insert_block().unwrap();
             llvm!(builder.build_unconditional_branch(merge_block));
 
             builder.position_at_end(merge_block);
-            let phi = llvm!(builder.build_phi(then_val.get_type(), "if_result"));
-            phi.add_incoming(&[(&then_val, then_end_block), (&else_val, else_end_block)]);
+            // Array-producing branches merge their `(len, data)` slots
+            // into a single `{i64, ptr}` phi — the scalar merge below
+            // would compare a call's fat pointer against a binding's
+            // length. The aggregate is materialised only after every phi
+            // (the slot phis, the merged variable phis and
+            // `merge_array_ptrs`'s) — a non-phi instruction emitted before
+            // a phi makes the block invalid.
+            let then_slots = array_result_slots(
+                context,
+                builder,
+                then_branch,
+                then_val,
+                &then_arrays,
+                &then_vars,
+                then_end_block,
+            )?;
+            let else_slots = array_result_slots(
+                context,
+                builder,
+                else_branch,
+                else_val,
+                &else_arrays,
+                &else_vars,
+                else_end_block,
+            )?;
+            let array_merge = match (then_slots, else_slots) {
+                (Some((then_len, then_data)), Some((else_len, else_data))) => {
+                    if then_len.get_type() != else_len.get_type()
+                        || then_data.get_type() != else_data.get_type()
+                    {
+                        return Err(MumeiError::codegen(
+                            "incompatible branch array value shapes",
+                        ));
+                    }
+                    let len_phi = llvm!(builder.build_phi(then_len.get_type(), "if_arr_len"));
+                    len_phi
+                        .add_incoming(&[(&then_len, then_end_block), (&else_len, else_end_block)]);
+                    let data_phi = llvm!(builder.build_phi(then_data.get_type(), "if_arr_data"));
+                    data_phi.add_incoming(&[
+                        (&then_data, then_end_block),
+                        (&else_data, else_end_block),
+                    ]);
+                    Some((len_phi.as_basic_value(), data_phi.as_basic_value()))
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    return Err(MumeiError::codegen(
+                        "if branches disagree on whether the result is an array",
+                    ));
+                }
+                (None, None) => None,
+            };
+            let scalar_result = if array_merge.is_none() {
+                // A `Num` literal branch adapts to the other branch's
+                // declared width in the verifier's merge — widen the
+                // narrower LLVM value the same way before the phi
+                // (`pure-i64-composite/v22`).
+                let (phi_type, widened) = widen_merge_incomings(
+                    context,
+                    builder,
+                    &[(then_val, then_end_block), (else_val, else_end_block)],
+                    &[
+                        stmt_int_type_name(then_branch, &then_var_types, module_env),
+                        stmt_int_type_name(else_branch, &else_var_types, module_env),
+                    ],
+                )?;
+                let phi = llvm!(builder.build_phi(phi_type, "if_result"));
+                for (val, block) in &widened {
+                    phi.add_incoming(&[(val, *block)]);
+                }
+                Some(phi.as_basic_value())
+            } else {
+                None
+            };
             *variables = pre_vars.clone();
             for (name, pre_val) in &pre_vars {
                 let then_changed = then_assigned.contains(name);
@@ -2283,7 +3196,27 @@ pub(crate) fn compile_hir_expr<'a>(
                 array_ptrs,
                 variables,
             )?;
-            Ok(phi.as_basic_value())
+            // Materialise the merged fat pointer last: `insert_value` is
+            // not a phi and must follow every phi in this block.
+            let result_val = if let Some((len_val, data_val)) = array_merge {
+                let struct_ty = array_struct_type(context);
+                let mut agg: inkwell::values::AggregateValueEnum = struct_ty.get_undef().into();
+                agg = llvm!(builder.build_insert_value(agg, len_val, 0, "if_arr_len_slot"));
+                agg = llvm!(builder.build_insert_value(agg, data_val, 1, "if_arr_data_slot"));
+                match agg {
+                    inkwell::values::AggregateValueEnum::StructValue(s) => s.as_basic_value_enum(),
+                    _ => {
+                        return Err(MumeiError::codegen(
+                            "array if-merge value is not a struct aggregate",
+                        ))
+                    }
+                }
+            } else {
+                scalar_result.ok_or_else(|| {
+                    MumeiError::codegen("if merge produced neither array nor scalar result")
+                })?
+            };
+            Ok(result_val)
         }
 
         HirExpr::StructInit { type_name, fields } => {
@@ -2304,7 +3237,7 @@ pub(crate) fn compile_hir_expr<'a>(
                         // Plan 9: Use resolve_param_type for consistent type resolution
                         resolve_param_type(context, Some(f.type_name.as_str()), module_env)
                     })
-                    .collect();
+                    .collect::<MumeiResult<_>>()?;
                 let struct_type = context.struct_type(&field_types.to_vec(), false);
                 let mut struct_val = struct_type.get_undef();
                 for (field_name, _) in fields.iter() {
@@ -2320,9 +3253,18 @@ pub(crate) fn compile_hir_expr<'a>(
                                     field_name, type_name
                                 ))
                             })?;
+                        // A 128-bit field (`pure-i64-composite/v21`)
+                        // takes a native `i128` leaf — a literal or
+                        // narrower stored value extends into it.
+                        let coerced = wide_int_cast(
+                            builder,
+                            *val,
+                            field_types[def_idx],
+                            module_env.resolve_base_type(&sdef.fields[def_idx].type_name) == "i128",
+                        )?;
                         struct_val = llvm!(builder.build_insert_value(
                             struct_val,
-                            *val,
+                            coerced,
                             def_idx as u32,
                             &format!("struct_{}", field_name)
                         ))
@@ -2352,31 +3294,20 @@ pub(crate) fn compile_hir_expr<'a>(
             let pre_vars = variables.clone();
             let pre_arrays = array_ptrs.clone();
 
-            // Declared enum type of the scrutinee — resolves which enum owns
-            // a colliding variant name deterministically (prelude `List` vs
-            // a user `IntList` both declaring `Cons`). A bare parameter reads
-            // its declared type from `var_types`; `x.f` walks the field's
-            // declared type via the struct def (nested `a.b.c` recurses);
-            // other targets fall back to `infer_expr_type_name` (e.g. `E::V`
-            // ctor expressions and enum-returning calls).
-            let enum_hint: Option<String> = match target.as_ref() {
-                HirExpr::Variable(name) => var_types.get(name).cloned(),
-                HirExpr::FieldAccess(inner, field) => {
-                    infer_struct_type_name(inner, var_types, module_env).and_then(|s| {
-                        module_env
-                            .get_struct(&s)
-                            .and_then(|sdef| sdef.fields.iter().find(|f| f.name == *field))
-                            .map(|f| f.type_name.clone())
-                    })
-                }
-                _ => mumei_core::hir::infer_expr_type_name(target, Some(module_env)),
-            };
+            // Resolve the declared type through shared inference so array
+            // element reads use the same enum hint as equality expressions.
+            let enum_hint =
+                infer_struct_type_name(target, var_types, module_env).and_then(|type_name| {
+                    let resolved = module_env.resolve_base_type(&type_name);
+                    module_env.get_enum(&resolved).map(|_| resolved)
+                });
 
             let merge_block = context.append_basic_block(*function, "match.merge");
             let unreachable_block = context.append_basic_block(*function, "match.unreachable");
 
             let mut incoming: Vec<(BasicValueEnum<'a>, inkwell::basic_block::BasicBlock<'a>)> =
                 Vec::new();
+            let mut arm_names: Vec<Option<String>> = Vec::new();
             let mut arm_states: Vec<ArrayMergeState<'a>> = Vec::new();
 
             let arm_count = arms.len();
@@ -2417,6 +3348,8 @@ pub(crate) fn compile_hir_expr<'a>(
                         &arm.pattern,
                         target_val,
                         &mut guard_vars,
+                        &mut guard_var_types,
+                        array_ptrs,
                         module_env,
                         enum_hint.as_deref(),
                     )?;
@@ -2457,6 +3390,8 @@ pub(crate) fn compile_hir_expr<'a>(
                     &arm.pattern,
                     target_val,
                     &mut arm_vars,
+                    &mut arm_var_types,
+                    array_ptrs,
                     module_env,
                     enum_hint.as_deref(),
                 )?;
@@ -2476,45 +3411,144 @@ pub(crate) fn compile_hir_expr<'a>(
                 let arm_arrays = array_ptrs.clone();
                 llvm!(builder.build_unconditional_branch(merge_block));
                 incoming.push((body_val, body_end));
+                arm_names.push(stmt_int_type_name(&arm.body, &arm_var_types, module_env));
                 let assigned = collect_assigned_outer_variables_match_arm(arm);
                 arm_states.push((arm_vars, arm_arrays, body_end, assigned));
             }
 
-            // Plan 18: Infer phi type from the first arm's body value type
-            // (must be determined before creating the unreachable block value)
-            let phi_type = incoming
-                .first()
-                .map(|(v, _)| v.get_type())
-                .unwrap_or_else(|| context.i64_type().into());
-
-            builder.position_at_end(unreachable_block);
-            // Create a zero/null value matching the inferred phi type
-            let unreachable_val: BasicValueEnum = if phi_type.is_float_type() {
-                context.f64_type().const_float(0.0).into()
-            } else if phi_type.is_pointer_type() {
-                context
-                    .ptr_type(AddressSpace::default())
-                    .const_null()
-                    .into()
-            } else if phi_type.is_struct_type() {
-                phi_type.into_struct_type().get_undef().into()
-            } else {
-                context.i64_type().const_int(0, false).into()
-            };
-            llvm!(builder.build_unconditional_branch(merge_block));
-            incoming.push((unreachable_val, unreachable_block));
-            arm_states.push((
-                pre_vars.clone(),
-                pre_arrays.clone(),
-                unreachable_block,
-                std::collections::HashSet::new(),
-            ));
-
-            builder.position_at_end(merge_block);
-            let phi = llvm!(builder.build_phi(phi_type, "match_result"));
-            for (val, block) in &incoming {
-                phi.add_incoming(&[(val, *block)]);
+            // Array-producing arms merge their `(len, data)` slots the same
+            // way the `if` merge does — a `Variable` tail resolves through
+            // its `array_ptrs` entry, an aggregate tail unpacks in the arm's
+            // end block. Arms must agree on the representation: mixing a
+            // fat pointer with a scalar would feed mismatched types into
+            // the merge phi.
+            let mut arm_slots: Vec<Option<(BasicValueEnum<'a>, BasicValueEnum<'a>)>> =
+                Vec::with_capacity(incoming.len());
+            for (i, (body_val, body_end)) in incoming.iter().enumerate() {
+                let (arm_vars, arm_arrays, _, _) = &arm_states[i];
+                arm_slots.push(array_result_slots(
+                    context,
+                    builder,
+                    &arms[i].body,
+                    *body_val,
+                    arm_arrays,
+                    arm_vars,
+                    *body_end,
+                )?);
             }
+            if arm_slots.iter().any(Option::is_some) && !arm_slots.iter().all(Option::is_some) {
+                return Err(MumeiError::codegen(
+                    "match arms disagree on whether the result is an array",
+                ));
+            }
+            let array_merge: Option<Vec<(BasicValueEnum<'a>, BasicValueEnum<'a>)>> =
+                if arm_slots.iter().all(Option::is_some) && !arm_slots.is_empty() {
+                    Some(arm_slots.into_iter().map(Option::unwrap).collect())
+                } else {
+                    None
+                };
+
+            // The phi type is the widest int type any arm produced — a
+            // `Num` literal arm adapts to a declared-width arm in the
+            // verifier's merge, so narrower incomings extend the same
+            // way before the phi (`pure-i64-composite/v22`). For
+            // non-int results it stays the first arm's body type
+            // (Plan 18) and must be computed before creating the
+            // unreachable block value.
+            // The unreachable block terminates into merge_block in both
+            // modes; only the scalar path needs a fallback value of
+            // `phi_type`. In array mode the slot phis take a (0, null)
+            // incoming from it instead.
+            let mut slot_incoming: Vec<(
+                BasicValueEnum<'a>,
+                BasicValueEnum<'a>,
+                inkwell::basic_block::BasicBlock<'a>,
+            )> = Vec::new();
+            let scalar_result = if let Some(slots) = &array_merge {
+                for ((body_val, body_end), (len, data)) in incoming.iter().zip(slots.iter()) {
+                    let _ = body_val;
+                    slot_incoming.push((*len, *data, *body_end));
+                }
+                builder.position_at_end(unreachable_block);
+                llvm!(builder.build_unconditional_branch(merge_block));
+                slot_incoming.push((
+                    context.i64_type().const_int(0, false).into(),
+                    context
+                        .ptr_type(AddressSpace::default())
+                        .const_null()
+                        .into(),
+                    unreachable_block,
+                ));
+                arm_states.push((
+                    pre_vars.clone(),
+                    pre_arrays.clone(),
+                    unreachable_block,
+                    std::collections::HashSet::new(),
+                ));
+                builder.position_at_end(merge_block);
+                None
+            } else {
+                // The phi type is the widest int type any arm produced — a
+                // `Num` literal arm adapts to a declared-width arm in the
+                // verifier's merge, so narrower incomings extend the same
+                // way before the phi (`pure-i64-composite/v22`). For
+                // non-int results it stays the first arm's body type
+                // (Plan 18) and must be computed before creating the
+                // unreachable block value.
+                let (phi_type, mut incoming) =
+                    widen_merge_incomings(context, builder, &incoming, &arm_names)?;
+
+                builder.position_at_end(unreachable_block);
+                // Create a zero/null value matching the inferred phi type
+                let unreachable_val: BasicValueEnum = if phi_type.is_float_type() {
+                    context.f64_type().const_float(0.0).into()
+                } else if phi_type.is_pointer_type() {
+                    context
+                        .ptr_type(AddressSpace::default())
+                        .const_null()
+                        .into()
+                } else if phi_type.is_struct_type() {
+                    // The fallback arm is unreachable; a zero aggregate
+                    // keeps it poison-free so translation validation can
+                    // model every slot (an `undef` leaf has no slot value).
+                    phi_type.into_struct_type().const_zero().into()
+                } else if phi_type.is_int_type() {
+                    phi_type.into_int_type().const_int(0, false).into()
+                } else {
+                    context.i64_type().const_int(0, false).into()
+                };
+                llvm!(builder.build_unconditional_branch(merge_block));
+                incoming.push((unreachable_val, unreachable_block));
+                arm_states.push((
+                    pre_vars.clone(),
+                    pre_arrays.clone(),
+                    unreachable_block,
+                    std::collections::HashSet::new(),
+                ));
+
+                builder.position_at_end(merge_block);
+                let phi = llvm!(builder.build_phi(phi_type, "match_result"));
+                for (val, block) in &incoming {
+                    phi.add_incoming(&[(val, *block)]);
+                }
+                Some(phi.as_basic_value())
+            };
+
+            // Slot phis first — every phi in merge_block must precede the
+            // variable-merge phis and any non-phi instruction.
+            let slot_phis = if slot_incoming.is_empty() {
+                None
+            } else {
+                let len_ty = slot_incoming[0].0.get_type();
+                let data_ty = slot_incoming[0].1.get_type();
+                let len_phi = llvm!(builder.build_phi(len_ty, "match_arr_len"));
+                let data_phi = llvm!(builder.build_phi(data_ty, "match_arr_data"));
+                for (len, data, block) in &slot_incoming {
+                    len_phi.add_incoming(&[(len, *block)]);
+                    data_phi.add_incoming(&[(data, *block)]);
+                }
+                Some((len_phi.as_basic_value(), data_phi.as_basic_value()))
+            };
             *variables = pre_vars.clone();
             for (name, pre_val) in &pre_vars {
                 let mut merged_incoming = Vec::with_capacity(arm_states.len());
@@ -2557,7 +3591,7 @@ pub(crate) fn compile_hir_expr<'a>(
                 }
             }
             let array_states: Vec<(
-                HashMap<String, ArrayPtr<'a>>,
+                ArrayPtrMap<'a>,
                 inkwell::basic_block::BasicBlock<'a>,
                 std::collections::HashSet<String>,
             )> = arm_states
@@ -2566,7 +3600,23 @@ pub(crate) fn compile_hir_expr<'a>(
                 .collect();
             merge_array_ptrs(builder, &pre_arrays, &array_states, array_ptrs, variables)?;
 
-            Ok(phi.as_basic_value())
+            // Materialise the merged fat pointer last, after every phi.
+            if let Some((len_val, data_val)) = slot_phis {
+                let struct_ty = array_struct_type(context);
+                let mut agg: inkwell::values::AggregateValueEnum = struct_ty.get_undef().into();
+                agg = llvm!(builder.build_insert_value(agg, len_val, 0, "match_arr_len_slot"));
+                agg = llvm!(builder.build_insert_value(agg, data_val, 1, "match_arr_data_slot"));
+                match agg {
+                    inkwell::values::AggregateValueEnum::StructValue(s) => {
+                        Ok(s.as_basic_value_enum())
+                    }
+                    _ => Err(MumeiError::codegen(
+                        "array match-merge value is not a struct aggregate",
+                    )),
+                }
+            } else {
+                Ok(scalar_result.expect("scalar merge always produces a phi"))
+            }
         }
 
         // =================================================================
@@ -2704,10 +3754,12 @@ pub(crate) fn compile_hir_expr<'a>(
                 let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee_sig
                     .params
                     .iter()
-                    .map(|p| resolve_param_type(context, p.ty.as_deref(), module_env).into())
-                    .collect();
+                    .map(|p| {
+                        resolve_param_type(context, p.ty.as_deref(), module_env).map(Into::into)
+                    })
+                    .collect::<MumeiResult<_>>()?;
                 // Plan 18: Use resolve_return_type for consistent type resolution
-                let callee_ret = resolve_return_type(context, &callee_sig, module_env);
+                let callee_ret = resolve_return_type(context, &callee_sig, module_env)?;
                 let fn_type = callee_ret.fn_type(&callee_param_types, false);
                 module.add_function(name, fn_type, Some(inkwell::module::Linkage::External))
             } else {
@@ -2820,10 +3872,12 @@ pub(crate) fn compile_hir_expr<'a>(
                 if let Some(f) = module.get_function(name) {
                     f.get_type().get_return_type()
                 } else {
-                    module_env.get_atom(name).map(|a| {
+                    if let Some(a) = module_env.get_atom(name) {
                         let callee_sig = mumei_core::hir::lower_atom_to_hir(a).signature;
-                        resolve_return_type(context, &callee_sig, module_env)
-                    })
+                        Some(resolve_return_type(context, &callee_sig, module_env)?)
+                    } else {
+                        None
+                    }
                 }
             } else {
                 None
@@ -2951,7 +4005,7 @@ pub(crate) fn compile_hir_expr<'a>(
             let payload = match chan_payload_type_name(channel, var_types) {
                 Some(name) => {
                     reject_array_chan_payload(&name, "send")?;
-                    let payload_ty = resolve_param_type(context, Some(name.as_str()), module_env);
+                    let payload_ty = resolve_param_type(context, Some(name.as_str()), module_env)?;
                     let coerced = coerce_to_chan_payload(builder, val, payload_ty)?;
                     if (payload_needs_box(payload_ty) || payload_needs_box(coerced.get_type()))
                         && coerced.get_type() != payload_ty
@@ -3064,6 +4118,7 @@ pub(crate) fn compile_hir_expr<'a>(
             }
             let payload_ty = payload_name
                 .map(|name| resolve_param_type(context, Some(name.as_str()), module_env))
+                .transpose()?
                 .filter(|ty| *ty != context.i64_type().into());
             match payload_ty {
                 Some(ty) => {
@@ -3119,6 +4174,42 @@ pub(crate) fn compile_hir_expr<'a>(
                         &format!("{}.{}", resource_name, field_name)
                     )));
                 }
+                let receiver_type = infer_struct_type_name(inner_expr, var_types, module_env)
+                    .map(|name| module_env.resolve_base_type(&name));
+                if let Some(enum_type) = receiver_type
+                    .as_deref()
+                    .filter(|name| module_env.get_enum(name).is_some())
+                {
+                    let enum_value =
+                        variables.get(var_name.as_str()).copied().ok_or_else(|| {
+                            MumeiError::codegen(format!(
+                            "enum binding '{var_name}' has no LLVM value for field '{field_name}'"
+                        ))
+                        })?;
+                    if field_name == "tag" {
+                        if enum_value.is_int_value() {
+                            return Ok(enum_value);
+                        }
+                        let BasicValueEnum::StructValue(enum_value) = enum_value else {
+                            return Err(MumeiError::codegen(format!(
+                                "enum binding '{var_name}' is not an LLVM aggregate for its tag"
+                            )));
+                        };
+                        return Ok(llvm!(builder.build_extract_value(
+                            enum_value,
+                            0,
+                            &format!("{var_name}.tag")
+                        )));
+                    }
+                    let BasicValueEnum::StructValue(enum_value) = enum_value else {
+                        return Err(MumeiError::codegen(format!(
+                            "enum binding '{var_name}' is not an LLVM aggregate for field '{field_name}'"
+                        )));
+                    };
+                    return emit_enum_payload_field_read(
+                        context, builder, enum_value, enum_type, field_name, module_env,
+                    );
+                }
                 let candidates = [
                     format!("__struct_{}_{}", var_name, field_name),
                     format!("{}_{}", var_name, field_name),
@@ -3131,9 +4222,21 @@ pub(crate) fn compile_hir_expr<'a>(
                 if let Some(struct_val) = variables.get(var_name.as_str()) {
                     if struct_val.is_struct_value() {
                         let sv = struct_val.into_struct_value();
-                        let idx = infer_struct_type_name(inner_expr, var_types, module_env)
-                            .and_then(|t| find_field_index(&t, field_name, module_env))
-                            .or_else(|| find_field_index(var_name, field_name, module_env));
+                        let idx = match receiver_type {
+                            // A declared receiver only reads its own
+                            // declared fields — an unrelated struct's
+                            // same-named field must not resolve, so
+                            // look the field up on `t` directly rather
+                            // than through find_field_index's
+                            // every-struct scan.
+                            Some(t) => module_env.get_struct(&t).and_then(|sdef| {
+                                sdef.fields
+                                    .iter()
+                                    .position(|f| f.name == *field_name)
+                                    .map(|i| i as u32)
+                            }),
+                            None => find_field_index(var_name, field_name, module_env),
+                        };
                         if let Some(idx) = idx {
                             let extracted = llvm!(builder.build_extract_value(
                                 sv,
@@ -3179,10 +4282,36 @@ pub(crate) fn compile_hir_expr<'a>(
                     context, builder, module, function, inner_expr, variables, var_types,
                     array_ptrs, module_env,
                 )?;
+                let receiver_type = infer_struct_type_name(inner_expr, var_types, module_env)
+                    .map(|name| module_env.resolve_base_type(&name));
+                if let Some(enum_type) = receiver_type
+                    .as_deref()
+                    .filter(|name| module_env.get_enum(name).is_some())
+                {
+                    if field_name == "tag" {
+                        if base_val.is_struct_value() {
+                            return Ok(llvm!(builder.build_extract_value(
+                                base_val.into_struct_value(),
+                                0,
+                                &format!("nested.{field_name}")
+                            )));
+                        }
+                        return Ok(base_val);
+                    }
+                    let BasicValueEnum::StructValue(enum_value) = base_val else {
+                        return Err(MumeiError::codegen(format!(
+                            "enum field base for '{field_name}' is not an LLVM aggregate"
+                        )));
+                    };
+                    return emit_enum_payload_field_read(
+                        context, builder, enum_value, enum_type, field_name, module_env,
+                    );
+                }
                 if base_val.is_struct_value() {
                     let sv = base_val.into_struct_value();
-                    let idx = infer_struct_type_name(inner_expr, var_types, module_env)
-                        .and_then(|t| find_field_index(&t, field_name, module_env))
+                    let idx = receiver_type
+                        .as_deref()
+                        .and_then(|t| find_field_index(t, field_name, module_env))
                         .or_else(|| find_field_index_by_name(field_name, module_env));
                     if let Some(idx) = idx {
                         let extracted = llvm!(builder.build_extract_value(
@@ -3265,7 +4394,7 @@ mod tests {
 
         let mut variables = HashMap::new();
         let mut var_types = HashMap::new();
-        let mut array_ptrs = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
         let result = compile_hir_expr(
             &context,
             &builder,
@@ -3374,7 +4503,7 @@ mod tests {
         variables.insert("B".to_string(), a_struct.into());
         let mut var_types = HashMap::new();
         var_types.insert("B".to_string(), "A".to_string());
-        let mut array_ptrs = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
         let result = compile_hir_expr(
             &context,
             &builder,
@@ -3389,6 +4518,711 @@ mod tests {
 
         assert!(result.is_float_value());
         llvm!(builder.build_return(Some(&result)));
+        assert!(function.verify(false));
+        Ok(())
+    }
+
+    // `let s = "hi"` registers a `(len, i8, *i8)` fat pointer and `s[i]`
+    // emits the bounds-checked `i8` load zero-extended to `i64` — matching
+    // the verifier's byte-cell model (`pure-i64-composite/v13`).
+    #[test]
+    fn str_let_binds_fat_pointer_and_index_read_zero_extends(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        let mut var_types = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
+
+        crate::codegen::stmt_emit::compile_hir_stmt(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &HirStmt::Let {
+                var: "s".to_string(),
+                ty: None,
+                value: Box::new(HirExpr::StringLit("hi".to_string())),
+            },
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+
+        // The bound value stays the `*i8` pointer; the fat pointer is i8-typed.
+        assert!(variables["s"].is_pointer_value());
+        let (len, elem_ty, _) = array_ptrs["s"];
+        assert_eq!(len.into_int_value().get_zero_extended_constant(), Some(2));
+        assert_eq!(elem_ty, context.i8_type().into());
+
+        let read = compile_hir_expr(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &HirExpr::ArrayAccess("s".to_string(), Box::new(HirExpr::Number(0))),
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+        assert!(read.is_int_value());
+        assert_eq!(read.into_int_value().get_type().get_bit_width(), 64);
+
+        llvm!(builder.build_return(Some(&read)));
+        assert!(function.verify(false));
+        assert!(module.print_to_string().to_string().contains("zext i8"));
+        Ok(())
+    }
+
+    // `let t = s` on a `Str` binding aliases the fat pointer and keeps the
+    // `*i8` pointer as the scalar value, not the length.
+    #[test]
+    fn str_alias_keeps_pointer_value() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        let mut var_types = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
+
+        for stmt in [
+            HirStmt::Let {
+                var: "s".to_string(),
+                ty: None,
+                value: Box::new(HirExpr::StringLit("hi".to_string())),
+            },
+            HirStmt::Let {
+                var: "t".to_string(),
+                ty: None,
+                value: Box::new(HirExpr::Variable("s".to_string())),
+            },
+        ] {
+            crate::codegen::stmt_emit::compile_hir_stmt(
+                &context,
+                &builder,
+                &module,
+                &function,
+                &stmt,
+                &mut variables,
+                &mut var_types,
+                &mut array_ptrs,
+                &module_env,
+            )?;
+        }
+
+        assert!(variables["t"].is_pointer_value());
+        assert_eq!(array_ptrs["t"].1, context.i8_type().into());
+        llvm!(builder.build_return(Some(&context.i64_type().const_int(0, false))));
+        assert!(function.verify(false));
+        Ok(())
+    }
+
+    // `s[0] > (0 - 1)` must emit `ugt`: the verifier's `s[i]` byte leaf is
+    // `u64`, so a signed `sgt` would return `true` for `'h' > -1` while the
+    // source model says `104 > u64::MAX` is false.
+    #[test]
+    fn str_index_read_compares_unsigned() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        let mut var_types = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
+
+        compile_hir_stmt(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &HirStmt::Let {
+                var: "s".to_string(),
+                ty: None,
+                value: Box::new(HirExpr::StringLit("hi".to_string())),
+            },
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+
+        let cmp = compile_hir_expr(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &HirExpr::BinaryOp(
+                Box::new(HirExpr::ArrayAccess(
+                    "s".to_string(),
+                    Box::new(HirExpr::Number(0)),
+                )),
+                HirBinOp::Gt,
+                Box::new(HirExpr::BinaryOp(
+                    Box::new(HirExpr::Number(0)),
+                    HirBinOp::Sub,
+                    Box::new(HirExpr::Number(1)),
+                )),
+            ),
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+        llvm!(builder.build_return(Some(&cmp)));
+        assert!(function.verify(false));
+        assert!(module.print_to_string().to_string().contains("icmp ugt"));
+        Ok(())
+    }
+
+    #[test]
+    fn if_expression_with_u64_branch_compares_unsigned() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        variables.insert(
+            "a".to_string(),
+            context.i64_type().const_int(u64::MAX, false).into(),
+        );
+        variables.insert(
+            "b".to_string(),
+            context.i64_type().const_int(0, false).into(),
+        );
+        variables.insert(
+            "c".to_string(),
+            context.i64_type().const_int(1, false).into(),
+        );
+        let mut var_types = HashMap::new();
+        var_types.insert("a".to_string(), "u64".to_string());
+        var_types.insert("b".to_string(), "u64".to_string());
+        let mut array_ptrs = ArrayPtrMap::default();
+
+        let condition = HirExpr::BinaryOp(
+            Box::new(HirExpr::IfThenElse {
+                cond: Box::new(HirExpr::Variable("c".to_string())),
+                then_branch: Box::new(HirStmt::Expr(HirExpr::BinaryOp(
+                    Box::new(HirExpr::Variable("a".to_string())),
+                    HirBinOp::BitOr,
+                    Box::new(HirExpr::Number(0)),
+                ))),
+                else_branch: Box::new(HirStmt::Expr(HirExpr::Variable("b".to_string()))),
+            }),
+            HirBinOp::Le,
+            Box::new(HirExpr::Number(10)),
+        );
+        let cmp = compile_hir_expr(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &condition,
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+        llvm!(builder.build_return(Some(&cmp)));
+        assert!(function.verify(false));
+        assert!(module.print_to_string().to_string().contains("icmp ule"));
+        Ok(())
+    }
+
+    #[test]
+    fn if_expression_with_local_let_shadow_compares_signed(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        variables.insert(
+            "a".to_string(),
+            context.i64_type().const_int(u64::MAX, false).into(),
+        );
+        variables.insert(
+            "c".to_string(),
+            context.i64_type().const_int(1, false).into(),
+        );
+        let mut var_types = HashMap::new();
+        var_types.insert("a".to_string(), "u64".to_string());
+        let mut array_ptrs = ArrayPtrMap::default();
+        let negative_one = || {
+            HirExpr::BinaryOp(
+                Box::new(HirExpr::Number(0)),
+                HirBinOp::Sub,
+                Box::new(HirExpr::Number(1)),
+            )
+        };
+        let condition = HirExpr::BinaryOp(
+            Box::new(HirExpr::IfThenElse {
+                cond: Box::new(HirExpr::Variable("c".to_string())),
+                then_branch: Box::new(HirStmt::Block {
+                    stmts: vec![HirStmt::Let {
+                        var: "a".to_string(),
+                        ty: None,
+                        value: Box::new(negative_one()),
+                    }],
+                    tail_expr: Some(Box::new(HirExpr::Variable("a".to_string()))),
+                }),
+                else_branch: Box::new(HirStmt::Block {
+                    stmts: vec![],
+                    tail_expr: Some(Box::new(negative_one())),
+                }),
+            }),
+            HirBinOp::Lt,
+            Box::new(HirExpr::Number(0)),
+        );
+        let cmp = compile_hir_expr(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &condition,
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+        llvm!(builder.build_return(Some(&cmp)));
+        assert!(function.verify(false));
+        assert!(module.print_to_string().to_string().contains("icmp slt"));
+        Ok(())
+    }
+
+    #[test]
+    fn block_local_struct_field_compares_unsigned() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let mut module_env = ModuleEnv::new();
+        module_env.register_struct(&StructDef {
+            name: "S".to_string(),
+            type_params: vec![],
+            fields: vec![StructField {
+                name: "x".to_string(),
+                type_name: "u64".to_string(),
+                type_ref: parse_type_ref("u64"),
+                constraint: None,
+            }],
+            invariants: vec![],
+            method_names: vec![],
+            methods: vec![],
+            span: Span::default(),
+        });
+
+        let mut variables = HashMap::new();
+        variables.insert(
+            "a".to_string(),
+            context.i64_type().const_int(u64::MAX, false).into(),
+        );
+        variables.insert(
+            "c".to_string(),
+            context.i64_type().const_int(1, false).into(),
+        );
+        let mut var_types = HashMap::new();
+        var_types.insert("a".to_string(), "u64".to_string());
+        let mut array_ptrs = ArrayPtrMap::default();
+        let block = || HirStmt::Block {
+            stmts: vec![HirStmt::Let {
+                var: "p".to_string(),
+                ty: None,
+                value: Box::new(HirExpr::StructInit {
+                    type_name: "S".to_string(),
+                    fields: vec![("x".to_string(), HirExpr::Variable("a".to_string()))],
+                }),
+            }],
+            tail_expr: Some(Box::new(HirExpr::FieldAccess(
+                Box::new(HirExpr::Variable("p".to_string())),
+                "x".to_string(),
+            ))),
+        };
+        let condition = HirExpr::BinaryOp(
+            Box::new(HirExpr::IfThenElse {
+                cond: Box::new(HirExpr::Variable("c".to_string())),
+                then_branch: Box::new(block()),
+                else_branch: Box::new(block()),
+            }),
+            HirBinOp::Lt,
+            Box::new(HirExpr::Number(1)),
+        );
+        let cmp = compile_hir_expr(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &condition,
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+        llvm!(builder.build_return(Some(&cmp)));
+        assert!(function.verify(false));
+        assert!(module.print_to_string().to_string().contains("icmp ult"));
+        Ok(())
+    }
+
+    // `s = "bb"` rebinds the fat pointer (general builds keep their
+    // pre-v13 string-reassign behavior) and `s = 5` drops it so a stale
+    // `s[i]` cannot read the old bytes.
+    #[test]
+    fn str_reassign_rebinds_or_drops_fat_pointer() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        let mut var_types = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
+        macro_rules! run {
+            ($stmt:expr) => {
+                compile_hir_stmt(
+                    &context,
+                    &builder,
+                    &module,
+                    &function,
+                    $stmt,
+                    &mut variables,
+                    &mut var_types,
+                    &mut array_ptrs,
+                    &module_env,
+                )
+            };
+        }
+
+        run!(&HirStmt::Let {
+            var: "s".to_string(),
+            ty: None,
+            value: Box::new(HirExpr::StringLit("a".to_string())),
+        })?;
+        run!(&HirStmt::Assign {
+            var: "s".to_string(),
+            value: Box::new(HirExpr::StringLit("bb".to_string())),
+        })?;
+        assert!(variables["s"].is_pointer_value());
+        assert_eq!(
+            array_ptrs["s"]
+                .0
+                .into_int_value()
+                .get_zero_extended_constant(),
+            Some(2)
+        );
+
+        run!(&HirStmt::Assign {
+            var: "s".to_string(),
+            value: Box::new(HirExpr::Number(5)),
+        })?;
+        assert!(!array_ptrs.contains_key("s"));
+        assert!(variables["s"].is_int_value());
+
+        llvm!(builder.build_return(Some(&variables["s"])));
+        assert!(function.verify(false));
+        Ok(())
+    }
+
+    // `t = s` on a `Str` binding keeps the `*i8` pointer (not the length)
+    // in scalar position — the same rule as the `let t = s` alias.
+    #[test]
+    fn str_assign_alias_keeps_pointer_value() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        let mut var_types = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
+        macro_rules! run {
+            ($stmt:expr) => {
+                compile_hir_stmt(
+                    &context,
+                    &builder,
+                    &module,
+                    &function,
+                    $stmt,
+                    &mut variables,
+                    &mut var_types,
+                    &mut array_ptrs,
+                    &module_env,
+                )
+            };
+        }
+
+        for stmt in [
+            HirStmt::Let {
+                var: "s".to_string(),
+                ty: None,
+                value: Box::new(HirExpr::StringLit("hi".to_string())),
+            },
+            HirStmt::Let {
+                var: "t".to_string(),
+                ty: None,
+                value: Box::new(HirExpr::Number(0)),
+            },
+            HirStmt::Assign {
+                var: "t".to_string(),
+                value: Box::new(HirExpr::Variable("s".to_string())),
+            },
+        ] {
+            run!(&stmt)?;
+        }
+
+        assert!(variables["t"].is_pointer_value());
+        assert_eq!(array_ptrs["t"].1, context.i8_type().into());
+        llvm!(builder.build_return(Some(&context.i64_type().const_int(0, false))));
+        assert!(function.verify(false));
+        Ok(())
+    }
+
+    // A captured `Str` fat pointer binds the `*i8` data pointer inside
+    // the lifted lambda — binding the length would hand an i64 to
+    // `concat`/string uses.
+    #[test]
+    fn str_capture_binds_data_pointer() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        let mut var_types = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
+
+        let global = builder.build_global_string_ptr("hi", "str_lit")?;
+        let data_ptr: BasicValueEnum = global.as_pointer_value().into();
+        let len_val: BasicValueEnum = context.i64_type().const_int(2, false).into();
+        let struct_ty = array_struct_type(&context);
+        let mut agg: inkwell::values::AggregateValueEnum = struct_ty.get_undef().into();
+        agg = llvm!(builder.build_insert_value(agg, len_val, 0, "cap_len"));
+        agg = llvm!(builder.build_insert_value(agg, data_ptr, 1, "cap_data"));
+        let fat: BasicValueEnum = match agg {
+            inkwell::values::AggregateValueEnum::StructValue(s) => s.into(),
+            _ => panic!("expected struct"),
+        };
+
+        bind_lambda_arg(
+            &context,
+            &builder,
+            "s",
+            fat,
+            None,
+            Some((len_val, context.i8_type().into(), data_ptr)),
+            None,
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+
+        assert!(variables["s"].is_pointer_value());
+        assert_eq!(array_ptrs["s"].1, context.i8_type().into());
+        llvm!(builder.build_return(Some(&context.i64_type().const_int(0, false))));
+        assert!(function.verify(false));
+        Ok(())
+    }
+
+    // `if c { s = "bb" }` merges the `Str` fat pointer; the merged
+    // scalar must be the `*i8` data pointer — binding the length phi
+    // instead makes a later `s + "!"` lower pointer concat onto an i64.
+    #[test]
+    fn str_branch_merge_keeps_data_pointer_scalar() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        let mut var_types = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
+        macro_rules! run {
+            ($stmt:expr) => {
+                compile_hir_stmt(
+                    &context,
+                    &builder,
+                    &module,
+                    &function,
+                    $stmt,
+                    &mut variables,
+                    &mut var_types,
+                    &mut array_ptrs,
+                    &module_env,
+                )
+            };
+        }
+
+        run!(&HirStmt::Let {
+            var: "s".to_string(),
+            ty: None,
+            value: Box::new(HirExpr::StringLit("a".to_string())),
+        })?;
+        run!(&HirStmt::Let {
+            var: "c".to_string(),
+            ty: None,
+            value: Box::new(HirExpr::Number(1)),
+        })?;
+        run!(&HirStmt::Let {
+            var: "r".to_string(),
+            ty: None,
+            value: Box::new(HirExpr::IfThenElse {
+                cond: Box::new(HirExpr::Variable("c".to_string())),
+                then_branch: Box::new(HirStmt::Block {
+                    stmts: vec![HirStmt::Assign {
+                        var: "s".to_string(),
+                        value: Box::new(HirExpr::StringLit("bb".to_string())),
+                    }],
+                    tail_expr: Some(Box::new(HirExpr::Number(1))),
+                }),
+                else_branch: Box::new(HirStmt::Block {
+                    stmts: vec![],
+                    tail_expr: Some(Box::new(HirExpr::Number(2))),
+                }),
+            }),
+        })?;
+
+        assert!(variables["s"].is_pointer_value());
+        assert_eq!(array_ptrs["s"].1, context.i8_type().into());
+
+        let concat = compile_hir_expr(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &HirExpr::BinaryOp(
+                Box::new(HirExpr::Variable("s".to_string())),
+                HirBinOp::Add,
+                Box::new(HirExpr::StringLit("!".to_string())),
+            ),
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+        assert!(concat.is_pointer_value());
+        assert!(module
+            .print_to_string()
+            .to_string()
+            .contains("mumei_str_concat"));
+        llvm!(builder.build_return(Some(&context.i64_type().const_int(0, false))));
+        assert!(function.verify(false));
+        Ok(())
+    }
+
+    // `s = f(1)` evaluates the RHS before dropping `s`'s fat pointer:
+    // a lambda capturing `s` packs `{i64, ptr}` from `array_ptrs`, so an
+    // early drop would pass the raw `*i8` against a struct parameter.
+    #[test]
+    fn str_reassign_evaluates_rhs_before_dropping_fat_pointer(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        let mut var_types = HashMap::new();
+        let mut array_ptrs = ArrayPtrMap::default();
+        macro_rules! run {
+            ($stmt:expr) => {
+                compile_hir_stmt(
+                    &context,
+                    &builder,
+                    &module,
+                    &function,
+                    $stmt,
+                    &mut variables,
+                    &mut var_types,
+                    &mut array_ptrs,
+                    &module_env,
+                )
+            };
+        }
+
+        run!(&HirStmt::Let {
+            var: "s".to_string(),
+            ty: None,
+            value: Box::new(HirExpr::StringLit("hi".to_string())),
+        })?;
+        run!(&HirStmt::Let {
+            var: "f".to_string(),
+            ty: None,
+            value: Box::new(HirExpr::Lambda {
+                params: vec![mumei_core::hir::HirLambdaParam {
+                    name: "x".to_string(),
+                    type_ref: None,
+                }],
+                return_type: None,
+                body: Box::new(HirStmt::Block {
+                    stmts: vec![],
+                    tail_expr: Some(Box::new(HirExpr::BinaryOp(
+                        Box::new(HirExpr::ArrayAccess(
+                            "s".to_string(),
+                            Box::new(HirExpr::Number(0)),
+                        )),
+                        HirBinOp::Add,
+                        Box::new(HirExpr::Variable("x".to_string())),
+                    ))),
+                }),
+                captures: vec!["s".to_string()],
+            }),
+        })?;
+        run!(&HirStmt::Assign {
+            var: "s".to_string(),
+            value: Box::new(HirExpr::Call {
+                name: "f".to_string(),
+                args: vec![HirExpr::Number(1)],
+                callee_effects: None,
+            }),
+        })?;
+
+        assert!(!array_ptrs.contains_key("s"));
+        assert!(variables["s"].is_int_value());
+        llvm!(builder.build_return(Some(&variables["s"])));
         assert!(function.verify(false));
         Ok(())
     }

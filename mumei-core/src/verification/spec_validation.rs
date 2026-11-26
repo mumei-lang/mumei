@@ -4,18 +4,19 @@ use super::property_based::{
 };
 use super::support::datatype::param_z3_value_for_vc;
 use super::translator::{
-    apply_refinement_constraint, assume_struct_contract, expr_to_z3, seed_struct_fields,
-    seed_tuple_result_components, struct_fields_of_value, tuple_component_types, VCtx,
-    DEFAULT_CONSTRAINT_BUDGET, UNSUPPORTED_TUPLE_RESULT_INDEXING,
+    apply_refinement_constraint, assume_struct_contract, expr_to_z3_with_domain_obligations,
+    seed_struct_fields, seed_tuple_result_components, struct_fields_of_value,
+    tuple_component_types, VCtx, DEFAULT_CONSTRAINT_BUDGET, UNSUPPORTED_TUPLE_RESULT_INDEXING,
 };
 use super::types::Env;
 use super::SpecContradiction;
-use super::{parse_expression, Atom, Bool, Config, Context, HashMap, SatResult, Solver};
+use super::{Atom, Bool, Config, Context, HashMap, SatResult, Solver};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
+use z3::ast::{Ast, Dynamic, Int};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpecValidationResult {
@@ -229,6 +230,7 @@ pub fn check_spec_satisfiability_with_timeout(
         bitvec_i64_global,
     );
     let mut env = seed_env(&vc, atom);
+    super::support::datatype::assert_enum_value_domains(&vc, &solver, &env);
     let mut had_clause_skips = false;
     assert_parameter_refinements(&vc, &solver, atom, module_env, &mut env)?;
     let checked_requires =
@@ -277,6 +279,11 @@ pub fn check_spec_satisfiability_with_timeout(
         });
     }
 
+    // `ensures` reads post-write fields for struct params the body
+    // rebinds (`q.f = v`), so contradiction checking must havoc those
+    // slots — an input formal would make a post-state clause like
+    // `q.f == 1` look contradictory to `requires q.f == 0`.
+    let body_stmt = crate::parser::parse_body_expr_checked(&atom.body_expr).ok();
     let ensure_clauses = split_top_level_conjunctions(&atom.ensures);
     let mut checked_ensures = 0usize;
     for (index, clause) in ensure_clauses.iter().enumerate() {
@@ -293,6 +300,11 @@ pub fn check_spec_satisfiability_with_timeout(
         )? {
             had_clause_skips = true;
             push_skip_warning(&mut diagnostics, warning);
+        }
+        if let Some(body) = &body_stmt {
+            havoc_written_struct_fields(&vc, atom, body, &mut local_env);
+            havoc_written_struct_array_fields(&vc, atom, body, &mut local_env);
+            super::support::datatype::assert_enum_value_domains(&vc, &local_solver, &local_env);
         }
         match assert_clause(&vc, &local_solver, &mut local_env, atom, clause, "ensures")? {
             ClauseLoweringOutcome::Applied => {
@@ -329,6 +341,15 @@ pub fn check_spec_satisfiability_with_timeout(
             had_clause_skips = true;
             push_skip_warning(&mut diagnostics, warning);
         }
+        if let Some(body) = &body_stmt {
+            havoc_written_struct_fields(&vc, atom, body, &mut combined_env);
+            havoc_written_struct_array_fields(&vc, atom, body, &mut combined_env);
+            super::support::datatype::assert_enum_value_domains(
+                &vc,
+                &combined_solver,
+                &combined_env,
+            );
+        }
         for clause in &ensure_clauses {
             if let ClauseLoweringOutcome::Skipped(warning) = assert_clause(
                 &vc,
@@ -364,6 +385,7 @@ pub fn check_spec_satisfiability_with_timeout(
             }
             let local_solver = Solver::new(&ctx);
             let mut local_env = seed_env(&vc, atom);
+            super::support::datatype::assert_enum_value_domains(&vc, &local_solver, &local_env);
             assert_parameter_refinements(&vc, &local_solver, atom, module_env, &mut local_env)?;
             if let ClauseLoweringOutcome::Skipped(warning) = assert_clause(
                 &vc,
@@ -515,6 +537,7 @@ pub(crate) fn validation_ctx<'a>(
         linearity_ctx: None,
         inferred_invariants: None,
         cover_obligations: None,
+        spec_domain_obligations: Default::default(),
         effect_ctx: None,
         constraint_count: None,
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
@@ -528,27 +551,197 @@ pub(crate) fn validation_ctx<'a>(
         bitvec_i64,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_struct_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_fields: Default::default(),
         contracts_in_instantiation: std::cell::RefCell::new(Vec::new()),
+        instantiation_params: std::cell::RefCell::new(Vec::new()),
         recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
 
         bitvec_i64_global,
+
+        check_i64_overflow: std::cell::Cell::new(false),
+
+        local_int_types: Default::default(),
+        refined_operand_types: Default::default(),
+    }
+}
+
+/// `ensures` reads post-write fields for struct params the body rebinds
+/// (`q.f = v`): the verifier evaluates those clauses on the mutated env
+/// and the emitted code reads post-write slots, so input formal values
+/// must not be asserted here either — otherwise `requires q.f == 0` /
+/// `ensures q.f == 1` reads as a contradiction when it is a normal
+/// post-state spec. Only *written* fields lose their input facts —
+/// havocing `q.y` for a `q.x` write would drop `requires q.y == 1` and
+/// falsely refuse `ensures result == 10 / q.y`. A whole-aggregate
+/// `q = …` rebind updates every field.
+fn havoc_written_struct_fields<'a>(
+    vc: &VCtx<'a>,
+    atom: &Atom,
+    body: &crate::parser::ast::Stmt,
+    env: &mut Env<'a>,
+) {
+    let ctx = vc.ctx;
+    for param in &atom.params {
+        if !body.binds_name(&param.name) {
+            continue;
+        }
+        let Some(sdef) = param
+            .type_name
+            .as_deref()
+            .and_then(|type_name| vc.module_env.get_struct(type_name))
+        else {
+            continue;
+        };
+        let mut written = std::collections::HashSet::new();
+        body.written_fields(&param.name, &mut written);
+        let rebinds = body.rebinds_name(&param.name);
+        for field in &sdef.fields {
+            if !rebinds && !written.contains(&field.name) {
+                continue;
+            }
+            for key in [
+                format!("{}_{}", param.name, field.name),
+                format!("__struct_{}_{}", param.name, field.name),
+            ] {
+                let Some(old) = env.get(&key) else {
+                    continue;
+                };
+                let fresh: Dynamic = match old.get_sort().kind() {
+                    z3::SortKind::Int => Int::fresh_const(ctx, &format!("__post_{key}")).into(),
+                    z3::SortKind::Bool => Bool::fresh_const(ctx, &format!("__post_{key}")).into(),
+                    // Enum-typed fields seed as the enum's datatype
+                    // (`pure-i64-composite/v17`): without the fresh
+                    // post-view, a `requires` referencing the written
+                    // field evaluates against the post-write ctor and
+                    // reads as a contradiction.
+                    z3::SortKind::Datatype => z3::ast::Datatype::new_const(
+                        ctx,
+                        format!("__post_{key}").as_str(),
+                        &old.get_sort(),
+                    )
+                    .into(),
+                    // Non-scalar field slots keep the input view; no
+                    // admitted field-write profile reaches them.
+                    _ => continue,
+                };
+                env.insert(key, fresh);
+            }
+        }
+    }
+}
+
+fn havoc_written_struct_array_fields<'a>(
+    vc: &VCtx<'a>,
+    atom: &Atom,
+    body: &crate::parser::ast::Stmt,
+    env: &mut Env<'a>,
+) {
+    static ARRAY_HAVOC_UID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    for param in &atom.params {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        let element_type =
+            crate::verification::translator::z3_types::array_element_type_from_annotation(
+                Some(type_name),
+                vc.module_env,
+            );
+        let Some(leaves) = crate::verification::translator::z3_types::struct_array_leaf_types(
+            &element_type,
+            vc.module_env,
+        ) else {
+            continue;
+        };
+        if body.rebinds_name(&param.name)
+            || crate::verification::translator::may_write::stmt_may_write_array(
+                vc,
+                body,
+                &param.name,
+                env,
+            )
+        {
+            crate::verification::translator::z3_types::havoc_array_name(vc, &param.name, env);
+            continue;
+        }
+        for write in body.array_store_targets(&param.name) {
+            let paths: Vec<String> = if let Some(path) = &write.field_path {
+                vec![path.join("_")]
+            } else {
+                leaves
+                    .iter()
+                    .map(|(leaf_path, _)| leaf_path.clone())
+                    .collect()
+            };
+            for path in paths {
+                let key = crate::verification::translator::z3_types::struct_array_leaf_key(
+                    &param.name,
+                    &path,
+                );
+                let Some(old) = env.get(&key).cloned() else {
+                    continue;
+                };
+                let Some(old_array) = old.as_array() else {
+                    continue;
+                };
+                let root = crate::verification::translator::z3_types::array_root_ast(&old_array);
+                let uid = ARRAY_HAVOC_UID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let fresh = if !write.may_repeat {
+                    if let crate::parser::ast::Expr::Number(index) = &write.index {
+                        let index = Int::from_i64(vc.ctx, *index);
+                        let previous = old_array.select(&index);
+                        let replacement =
+                            crate::verification::translator::z3_types::z3_fresh_const_like(
+                                vc.ctx,
+                                &format!("__post_struct_array_{uid}"),
+                                &previous,
+                            );
+                        old_array.store(&index, &replacement).into()
+                    } else {
+                        crate::verification::translator::z3_types::z3_fresh_const_like(
+                            vc.ctx,
+                            &format!("__post_struct_array_{uid}"),
+                            &old,
+                        )
+                    }
+                } else {
+                    crate::verification::translator::z3_types::z3_fresh_const_like(
+                        vc.ctx,
+                        &format!("__post_struct_array_{uid}"),
+                        &old,
+                    )
+                };
+                let aliases: Vec<String> = env
+                    .iter()
+                    .filter(|(_, value)| {
+                        value.as_array().is_some_and(|array| {
+                            crate::verification::translator::z3_types::array_root_ast(&array)
+                                == root
+                        })
+                    })
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                for alias in aliases {
+                    env.insert(alias, fresh.clone());
+                }
+            }
+        }
     }
 }
 
 pub(crate) fn seed_env<'a>(vc: &VCtx<'a>, atom: &Atom) -> Env<'a> {
     let ctx = vc.ctx;
     let module_env = vc.module_env;
-    let ieee754_f64 = vc.ieee754_f64;
-    let bitvec_i64 = vc.bitvec_i64;
     let mut env: Env<'a> = HashMap::new();
     env.insert("true".to_string(), Bool::from_bool(ctx, true).into());
     env.insert("false".to_string(), Bool::from_bool(ctx, false).into());
@@ -557,20 +750,18 @@ pub(crate) fn seed_env<'a>(vc: &VCtx<'a>, atom: &Atom) -> Env<'a> {
             param.name.clone(),
             param_z3_value_for_vc(vc, &param.name, param.type_name.as_deref()),
         );
+        crate::verification::translator::z3_types::seed_struct_array_param_leaves(
+            vc,
+            &param.name,
+            param.type_name.as_deref(),
+            &mut env,
+        );
         if let Some(sdef) = param
             .type_name
             .as_deref()
             .and_then(|type_name| module_env.get_struct(type_name))
         {
-            seed_struct_fields(
-                ctx,
-                &mut env,
-                &param.name,
-                sdef,
-                module_env,
-                ieee754_f64,
-                bitvec_i64,
-            );
+            seed_struct_fields(vc, &mut env, &param.name, sdef);
         }
     }
     if tuple_component_types(atom.return_type.as_deref()).is_none() {
@@ -579,30 +770,14 @@ pub(crate) fn seed_env<'a>(vc: &VCtx<'a>, atom: &Atom) -> Env<'a> {
             param_z3_value_for_vc(vc, "result", atom.return_type.as_deref()),
         );
     }
-    seed_tuple_result_components(
-        ctx,
-        &mut env,
-        "result",
-        atom.return_type.as_deref(),
-        module_env,
-        ieee754_f64,
-        bitvec_i64,
-    );
+    seed_tuple_result_components(vc, &mut env, "result", atom.return_type.as_deref());
     // 構造体を返す atom: `result.<field>` を param と対称にシンボル化する
     if let Some(sdef) = atom
         .return_type
         .as_deref()
         .and_then(|type_name| module_env.get_struct(type_name))
     {
-        seed_struct_fields(
-            ctx,
-            &mut env,
-            "result",
-            sdef,
-            module_env,
-            ieee754_f64,
-            bitvec_i64,
-        );
+        seed_struct_fields(vc, &mut env, "result", sdef);
     }
     env
 }
@@ -684,18 +859,20 @@ pub(crate) fn assert_parameter_refinements<'a>(
         let Some(refined) = module_env.get_type(type_name) else {
             continue;
         };
-        apply_refinement_constraint(vc, solver, &param.name, refined, env).map_err(|err| {
-            SpecContradiction::new(
-                &atom.name,
-                "refinement_invalid",
-                format!(
-                    "failed to lower refinement type '{}': {}",
-                    refined.name, err
-                ),
-                vec![refined.predicate_raw.clone()],
-                refined.span.clone(),
-            )
-        })?;
+        apply_refinement_constraint(vc, solver, &param.name, refined, module_env, env).map_err(
+            |err| {
+                SpecContradiction::new(
+                    &atom.name,
+                    "refinement_invalid",
+                    format!(
+                        "failed to lower refinement type '{}': {}",
+                        refined.name, err
+                    ),
+                    vec![refined.predicate_raw.clone()],
+                    refined.span.clone(),
+                )
+            },
+        )?;
     }
     Ok(())
 }
@@ -722,11 +899,22 @@ pub(crate) fn assert_clause<'a>(
     if trimmed.is_empty() || trimmed == "true" {
         return Ok(ClauseLoweringOutcome::Applied);
     }
-    let clause_ast = parse_expression(trimmed);
     let marks = super::translator::obligation_marks(vc);
-    let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
+    let clause_ast = match crate::parser::parse_expression_checked(trimmed) {
+        Ok(ast) => ast,
+        Err(failures) => {
+            super::translator::discard_obligations_since(vc, marks);
+            return Ok(ClauseLoweringOutcome::Skipped(unsupported_clause_warning(
+                label,
+                trimmed,
+                &failures.join("; "),
+            )));
+        }
+    };
+    let clause_z3 = match expr_to_z3_with_domain_obligations(vc, &clause_ast, env, None) {
         Ok(value) => value,
         Err(err) if is_unsupported_clause_error(&err) => {
+            super::translator::discard_obligations_since(vc, marks);
             return Ok(ClauseLoweringOutcome::Skipped(unsupported_clause_warning(
                 label, trimmed, &err,
             )));
@@ -781,9 +969,18 @@ pub(crate) fn assert_negated_clause<'a>(
         solver.assert(&Bool::from_bool(vc.ctx, false));
         return Ok(ClauseLoweringOutcome::Applied);
     }
-    let clause_ast = parse_expression(trimmed);
     let marks = super::translator::obligation_marks(vc);
-    let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
+    let clause_ast = match crate::parser::parse_expression_checked(trimmed) {
+        Ok(ast) => ast,
+        Err(failures) => {
+            return Ok(ClauseLoweringOutcome::Skipped(unsupported_clause_warning(
+                label,
+                trimmed,
+                &failures.join("; "),
+            )));
+        }
+    };
+    let clause_z3 = match expr_to_z3_with_domain_obligations(vc, &clause_ast, env, None) {
         Ok(value) => value,
         Err(err) if is_unsupported_clause_error(&err) => {
             return Ok(ClauseLoweringOutcome::Skipped(unsupported_clause_warning(
@@ -852,20 +1049,26 @@ fn check_standalone_refinements(
         let mut env: Env<'_> = HashMap::new();
         env.insert("true".to_string(), Bool::from_bool(&ctx, true).into());
         env.insert("false".to_string(), Bool::from_bool(&ctx, false).into());
-        apply_refinement_constraint(&vc, &solver, &refined.operand, refined, &mut env).map_err(
-            |err| {
-                SpecContradiction::new(
-                    &atom.name,
-                    "refinement_invalid",
-                    format!(
-                        "failed to lower refinement type '{}': {}",
-                        refined.name, err
-                    ),
-                    vec![refined.predicate_raw.clone()],
-                    refined.span.clone(),
-                )
-            },
-        )?;
+        apply_refinement_constraint(
+            &vc,
+            &solver,
+            &refined.operand,
+            refined,
+            module_env,
+            &mut env,
+        )
+        .map_err(|err| {
+            SpecContradiction::new(
+                &atom.name,
+                "refinement_invalid",
+                format!(
+                    "failed to lower refinement type '{}': {}",
+                    refined.name, err
+                ),
+                vec![refined.predicate_raw.clone()],
+                refined.span.clone(),
+            )
+        })?;
         if check_with_deadline(&solver, &ctx, timeout_ms) == SatResult::Unsat {
             return Err(SpecContradiction::new(
                 &atom.name,

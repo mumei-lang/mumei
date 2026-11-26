@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use super::cache::{load_cache, save_cache};
 use super::imports::{
-    mark_dependency_atoms_with_cert, register_imported_alias_names,
+    mark_dependency_atoms_with_cert, record_import_closure, register_imported_alias_names,
     register_imported_items_with_source, resolve_imports_recursive, verify_import_certificate,
     ResolverContext,
 };
@@ -18,6 +18,20 @@ struct DeferredCertificateCheck {
     entry_path: PathBuf,
     items: Vec<parser::Item>,
     load_message: Option<String>,
+    spec: crate::manifest::Dependency,
+}
+
+struct LoadedDep {
+    entry_path: PathBuf,
+    module_dir: PathBuf,
+    spec: crate::manifest::Dependency,
+    dependency_name: String,
+    package_name: Option<String>,
+}
+
+fn same_module_dir(a: &Path, b: &Path) -> bool {
+    let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canon(a) == canon(b)
 }
 
 fn package_name_alias(
@@ -98,6 +112,33 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
     allow_lean_verified: bool,
     persist_cache: bool,
 ) -> MumeiResult<()> {
+    resolve_manifest_dependencies_with_full_options_persistence_and_source(
+        manifest,
+        project_dir,
+        module_env,
+        strict_imports,
+        allow_lean_verified,
+        persist_cache,
+        None,
+    )
+}
+
+/// Same as [`resolve_manifest_dependencies_with_full_options_and_persistence`]
+/// but records each dependency entry file in `source_file`'s
+/// [`ModuleEnv::import_closure`] entry, so atoms in the root file treat
+/// manifest dependencies as part of their tracked import closure — the same
+/// way `import` statements do. Without it, manifest-loaded definitions would
+/// fall outside the root closure and be dropped from dependency keys even
+/// though module-wide checks see them.
+pub fn resolve_manifest_dependencies_with_full_options_persistence_and_source(
+    manifest: &crate::manifest::Manifest,
+    project_dir: &Path,
+    module_env: &mut ModuleEnv,
+    strict_imports: bool,
+    allow_lean_verified: bool,
+    persist_cache: bool,
+    source_file: Option<&str>,
+) -> MumeiResult<()> {
     let mut deferred_certificates = Vec::new();
 
     for (dep_name, dep) in &manifest.dependencies {
@@ -126,7 +167,20 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                 let mut ctx = ResolverContext::new();
                 ctx.allow_lean_verified = allow_lean_verified;
                 ctx.strict_imports = strict_imports;
-                resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
+                resolve_imports_recursive(
+                    &items,
+                    dep_base_dir,
+                    &mut ctx,
+                    &mut cache,
+                    module_env,
+                    entry_path.to_str(),
+                )?;
+                // Manifest dependencies load into the root file's module
+                // environment just like `import` statements do, so record the
+                // entry edge in the root's import closure — otherwise the
+                // dep's definitions fall outside the tracked closure and are
+                // dropped from the root atoms' dependency keys.
+                record_import_closure(module_env, source_file, entry_path.to_str());
                 if persist_cache {
                     save_cache(&cache_path, &cache);
                 }
@@ -143,6 +197,7 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                     module_dir: abs_path,
                     entry_path: entry_path.to_path_buf(),
                     items,
+                    spec: dep.clone(),
                     load_message: Some(format!(
                         "  📦 Dependency '{}': loaded from {}",
                         dep_name,
@@ -240,7 +295,20 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                 let mut ctx = ResolverContext::new();
                 ctx.allow_lean_verified = allow_lean_verified;
                 ctx.strict_imports = strict_imports;
-                resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
+                resolve_imports_recursive(
+                    &items,
+                    dep_base_dir,
+                    &mut ctx,
+                    &mut cache,
+                    module_env,
+                    entry_path.to_str(),
+                )?;
+                // Manifest dependencies load into the root file's module
+                // environment just like `import` statements do, so record the
+                // entry edge in the root's import closure — otherwise the
+                // dep's definitions fall outside the tracked closure and are
+                // dropped from the root atoms' dependency keys.
+                record_import_closure(module_env, source_file, entry_path.to_str());
                 if persist_cache {
                     save_cache(&cache_path, &cache);
                 }
@@ -257,6 +325,7 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                     module_dir: clone_dir,
                     entry_path: entry_path.to_path_buf(),
                     items,
+                    spec: dep.clone(),
                     load_message: None,
                 });
             } else {
@@ -313,7 +382,14 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                         &mut ctx,
                         &mut cache,
                         module_env,
+                        entry_path.to_str(),
                     )?;
+                    // Manifest dependencies load into the root file's module
+                    // environment just like `import` statements do, so record
+                    // the entry edge in the root's import closure — otherwise
+                    // the dep's definitions fall outside the tracked closure
+                    // and are dropped from the root atoms' dependency keys.
+                    record_import_closure(module_env, source_file, entry_path.to_str());
                     if persist_cache {
                         save_cache(&cache_path, &cache);
                     }
@@ -330,6 +406,7 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                         module_dir: pkg_dir.clone(),
                         entry_path: entry_path.to_path_buf(),
                         items,
+                        spec: dep.clone(),
                         load_message: Some(format!(
                             "  📦 Dependency '{}': loaded from registry ({})",
                             dep_name,
@@ -350,6 +427,84 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                     eprintln!("  ⚠️  Dependency '{}': not found in local registry. Run `mumei publish` in the dependency project first.", dep_name);
                 }
             }
+        }
+    }
+
+    // A dependency can declare its own manifest dependencies: a package
+    // certified standalone keys the definitions its manifest deps provide, so
+    // validating that certificate here needs the same edges in the dep
+    // entry's import closure — not just the root's. Wire every loaded dep
+    // entry to the entries its manifest names. Matching is by resolved
+    // dependency spec, never by bare name: a dependency key is only an alias
+    // in the consumer's manifest, so a same-named but different package must
+    // not leak into the dep's tracked closure. Iterate to a fixpoint so
+    // dep-of-dep chains merge transitively; cycles terminate because each
+    // round adds at least one previously absent edge.
+    let loaded_deps: Vec<LoadedDep> = deferred_certificates
+        .iter()
+        .map(|deferred| {
+            let package_name = crate::manifest::load(&deferred.module_dir.join("mumei.toml"))
+                .ok()
+                .map(|manifest| manifest.package.name);
+            LoadedDep {
+                entry_path: deferred.entry_path.clone(),
+                module_dir: deferred.module_dir.clone(),
+                spec: deferred.spec.clone(),
+                dependency_name: deferred.dependency_name.clone(),
+                package_name,
+            }
+        })
+        .collect();
+    let resolved_target =
+        |dep_name: &str, spec: &crate::manifest::Dependency, base: &Path| -> Option<PathBuf> {
+            loaded_deps.iter().find_map(|loaded| {
+                let matched = if let Some(rel_path) = spec.as_path() {
+                    same_module_dir(&base.join(rel_path), &loaded.module_dir)
+                } else if spec.as_git().is_some() {
+                    loaded.spec.as_git() == spec.as_git()
+                } else {
+                    // Registry specs resolve by name, so the manifest key is
+                    // itself the package name; use it as the fallback when the
+                    // fetched package carries no manifest (remote fetch does
+                    // not require one).
+                    let registry_name = loaded.package_name.as_deref().or_else(|| {
+                        loaded
+                            .spec
+                            .version()
+                            .map(|_| loaded.dependency_name.as_str())
+                    });
+                    registry_name == Some(dep_name)
+                };
+                matched.then(|| loaded.entry_path.clone())
+            })
+        };
+    loop {
+        let mut changed = false;
+        for deferred in &deferred_certificates {
+            let Ok(dep_manifest) = crate::manifest::load(&deferred.module_dir.join("mumei.toml"))
+            else {
+                continue;
+            };
+            for (dep_name, spec) in &dep_manifest.dependencies {
+                let Some(target) = resolved_target(dep_name, spec, &deferred.module_dir) else {
+                    continue;
+                };
+                let (Some(entry), Some(target)) = (deferred.entry_path.to_str(), target.to_str())
+                else {
+                    continue;
+                };
+                let already_wired = module_env
+                    .import_closure
+                    .get(entry)
+                    .is_some_and(|imports| imports.contains(target));
+                if !already_wired {
+                    record_import_closure(module_env, Some(entry), Some(target));
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
         }
     }
 

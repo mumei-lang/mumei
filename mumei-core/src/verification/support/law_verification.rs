@@ -335,6 +335,7 @@ pub fn verify_impl_with_options(
             linearity_ctx: None,
             inferred_invariants: None,
             cover_obligations: None,
+            spec_domain_obligations: Default::default(),
             effect_ctx: None,
             constraint_count: None,
             constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
@@ -348,19 +349,28 @@ pub fn verify_impl_with_options(
             bitvec_i64,
             bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
             bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+            div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+            i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
             clause_context: std::cell::RefCell::new(Vec::new()),
             enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
             local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+            local_struct_types: std::cell::RefCell::new(std::collections::HashMap::new()),
             local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
             local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
             call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
             call_result_fields: Default::default(),
             contracts_in_instantiation: std::cell::RefCell::new(Vec::new()),
+            instantiation_params: std::cell::RefCell::new(Vec::new()),
             recursion: Default::default(),
             quantifier_binders: Default::default(),
             call_result_symbols: Default::default(),
 
             bitvec_i64_global: bitvec_i64,
+
+            check_i64_overflow: std::cell::Cell::new(false),
+
+            local_int_types: Default::default(),
+            refined_operand_types: Default::default(),
         };
 
         let mut env: Env = HashMap::new();

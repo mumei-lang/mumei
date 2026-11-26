@@ -106,6 +106,7 @@ fn detect_loops_in_stmt(stmt: &Stmt, loops: &mut Vec<LoopInfo>, atom: &Atom) {
 
 fn detect_loops_in_expr(expr: &Expr, loops: &mut Vec<LoopInfo>, atom: &Atom) {
     match expr {
+        Expr::Paren(inner) => detect_loops_in_expr(inner, loops, atom),
         Expr::IfThenElse {
             cond,
             then_branch,
@@ -249,6 +250,7 @@ fn collect_mutated_variables(stmt: &Stmt, variables: &mut HashSet<String>) {
 
 fn collect_expr_variables(expr: &Expr, variables: &mut HashSet<String>) {
     match expr {
+        Expr::Paren(inner) => collect_expr_variables(inner, variables),
         Expr::Variable(name) => {
             if !matches!(name.as_str(), "true" | "false") {
                 variables.insert(name.clone());
@@ -386,6 +388,7 @@ fn expression_references_identifier(expression: &str, identifier: &str) -> bool 
 
 fn expr_to_source(expr: &Expr) -> String {
     match expr {
+        Expr::Paren(inner) => format!("({})", expr_to_source(inner)),
         Expr::Number(value) => value.to_string(),
         Expr::Float(value) => value.to_string(),
         Expr::StringLit(value) => {
@@ -477,6 +480,7 @@ fn op_to_source(op: &Op) -> &'static str {
         Op::Sub => "-",
         Op::Mul => "*",
         Op::Div => "/",
+        Op::Rem => "%",
         Op::Eq => "==",
         Op::Neq => "!=",
         Op::Gt => ">",

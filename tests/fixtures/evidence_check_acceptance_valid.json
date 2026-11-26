@@ -1,0 +1,17 @@
+{
+  "schema_version": "mumei.evidence-check-acceptance/v1",
+  "request_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "attempt_number": 1,
+  "output_fingerprint": "f929ae0e8d4c7e23ffb54256f115179925629a76112971aca0a591b24ad5738f",
+  "outcome": "valid",
+  "candidate_match": true,
+  "accepted": true,
+  "checks_not_performed": [
+    "claim_truth",
+    "file_identity",
+    "freshness",
+    "producer_authenticity",
+    "semantic_correspondence",
+    "artifact_semantics"
+  ]
+}

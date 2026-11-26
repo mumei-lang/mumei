@@ -26,6 +26,8 @@ pub fn lower(type_name: &str) -> LoweredType {
         "i64" => LoweredType::I64,
         "i32" => LoweredType::I32,
         "u64" => LoweredType::U64,
+        "usize" => LoweredType::U64,
+        "isize" => LoweredType::I64,
         "u32" => LoweredType::U32,
         "f64" => LoweredType::F64,
         "f32" => LoweredType::F32,

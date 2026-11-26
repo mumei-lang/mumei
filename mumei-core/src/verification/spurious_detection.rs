@@ -33,6 +33,9 @@ pub struct UnusedHypothesisReport {
 #[derive(Debug, Clone)]
 enum EvalValue {
     Int(i64),
+    /// A `u64` leaf: replay uses wrapping machine-word arithmetic and
+    /// unsigned comparisons, matching the `BV(64)` encoding.
+    UInt(u64),
     Float(f64),
     Bool(bool),
     String(String),
@@ -47,6 +50,7 @@ impl PartialEq for EvalValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (EvalValue::Int(a), EvalValue::Int(b)) => a == b,
+            (EvalValue::UInt(a), EvalValue::UInt(b)) => a == b,
             (EvalValue::Float(a), EvalValue::Float(b)) => a == b,
             (EvalValue::Bool(a), EvalValue::Bool(b)) => a == b,
             (EvalValue::String(a), EvalValue::String(b)) => a == b,
@@ -65,6 +69,9 @@ impl PartialEq for EvalValue {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CexValue {
     Int(i64),
+    /// A `u64` model value decoded from a `BV(64)` numeral. Kept unsigned
+    /// so replay does not reinterpret leaves >= 2^63 as negative `i64`s.
+    UInt(u64),
     Float(f64),
     Bool(bool),
     Str(String),
@@ -74,6 +81,7 @@ impl CexValue {
     fn to_eval(&self) -> EvalValue {
         match self {
             CexValue::Int(value) => EvalValue::Int(*value),
+            CexValue::UInt(value) => EvalValue::UInt(*value),
             CexValue::Float(value) => EvalValue::Float(*value),
             CexValue::Bool(value) => EvalValue::Bool(*value),
             CexValue::Str(value) => EvalValue::String(value.clone()),
@@ -142,6 +150,7 @@ pub fn validate_counterexample(
     match eval_stmt(body_stmt, &mut eval_env, module_env, 0) {
         Ok(
             result @ (EvalValue::Int(_)
+            | EvalValue::UInt(_)
             | EvalValue::Float(_)
             | EvalValue::Bool(_)
             | EvalValue::String(_)),
@@ -484,6 +493,7 @@ fn eval_bool_clause(
     match eval_expr(&parse_expression(clause), env, module_env, depth)? {
         EvalValue::Bool(value) => Ok(value),
         EvalValue::Int(value) => Ok(value != 0),
+        EvalValue::UInt(value) => Ok(value != 0),
         EvalValue::Float(value) => Ok(value != 0.0),
         EvalValue::String(_) | EvalValue::Lambda { .. } => {
             Err("non-scalar clause cannot be evaluated as bool".to_string())
@@ -502,6 +512,7 @@ fn eval_stmt(
             let eval = eval_expr(value, env, module_env, depth)?;
             match eval {
                 scalar @ (EvalValue::Int(_)
+                | EvalValue::UInt(_)
                 | EvalValue::Float(_)
                 | EvalValue::Bool(_)
                 | EvalValue::String(_)
@@ -541,6 +552,7 @@ fn eval_expr(
     }
 
     match expr {
+        Expr::Paren(inner) => eval_expr(inner, env, module_env, depth),
         Expr::Number(value) => Ok(EvalValue::Int(*value)),
         Expr::Float(value) => Ok(EvalValue::Float(*value)),
         Expr::StringLit(value) => Ok(EvalValue::String(value.clone())),
@@ -565,6 +577,8 @@ fn eval_expr(
             EvalValue::Bool(false) => eval_stmt(else_branch, env, module_env, depth),
             EvalValue::Int(value) if value != 0 => eval_stmt(then_branch, env, module_env, depth),
             EvalValue::Int(_) => eval_stmt(else_branch, env, module_env, depth),
+            EvalValue::UInt(value) if value != 0 => eval_stmt(then_branch, env, module_env, depth),
+            EvalValue::UInt(_) => eval_stmt(else_branch, env, module_env, depth),
             EvalValue::Float(value) if value != 0.0 => {
                 eval_stmt(then_branch, env, module_env, depth)
             }
@@ -628,6 +642,7 @@ fn eval_expr(
                     crate::parser::Pattern::Variable(name) => (true, Some(name.clone())),
                     crate::parser::Pattern::Literal(n) => match &target_value {
                         EvalValue::Int(v) => (v == n, None),
+                        EvalValue::UInt(v) => (u64::try_from(*n).ok() == Some(*v), None),
                         _ => (false, None),
                     },
                     _ => {
@@ -711,6 +726,7 @@ fn eval_lambda_call(
         let value = eval_expr(arg, env, module_env, depth)?;
         match value {
             scalar @ (EvalValue::Int(_)
+            | EvalValue::UInt(_)
             | EvalValue::Float(_)
             | EvalValue::Bool(_)
             | EvalValue::String(_)
@@ -743,6 +759,7 @@ fn eval_atom_call(
     for (param, arg) in callee.params.iter().zip(args) {
         match eval_expr(arg, env, module_env, depth)? {
             value @ (EvalValue::Int(_)
+            | EvalValue::UInt(_)
             | EvalValue::Float(_)
             | EvalValue::Bool(_)
             | EvalValue::String(_)
@@ -765,6 +782,7 @@ fn eval_atom_call(
     let result = eval_stmt(&body, &mut call_env, module_env, depth)?;
     match &result {
         EvalValue::Int(_)
+        | EvalValue::UInt(_)
         | EvalValue::Float(_)
         | EvalValue::Bool(_)
         | EvalValue::String(_)
@@ -914,6 +932,13 @@ fn eval_binary(left: EvalValue, op: &Op, right: EvalValue) -> Result<EvalValue, 
                 Op::Div if right == 0 => {
                     Err("division by zero during counterexample replay".to_string())
                 }
+                Op::Rem if right == 0 => {
+                    Err("division by zero during counterexample replay".to_string())
+                }
+                Op::Rem => left
+                    .checked_rem(right)
+                    .map(EvalValue::Int)
+                    .ok_or_else(integer_overflow_during_replay),
                 Op::Div => left
                     .checked_div(right)
                     .map(EvalValue::Int)
@@ -940,6 +965,56 @@ fn eval_binary(left: EvalValue, op: &Op, right: EvalValue) -> Result<EvalValue, 
                     Err("shift amount outside 0..64 during counterexample replay".to_string())
                 }
             }
+        }
+        (EvalValue::UInt(left), EvalValue::UInt(right)) => {
+            let (left, right) = (*left, *right);
+            match op {
+                // `u64` leaves are machine words: arithmetic wraps mod 2^64
+                // and division/remainder follow `udiv`/`urem` semantics.
+                Op::Add => Ok(EvalValue::UInt(left.wrapping_add(right))),
+                Op::Sub => Ok(EvalValue::UInt(left.wrapping_sub(right))),
+                Op::Mul => Ok(EvalValue::UInt(left.wrapping_mul(right))),
+                Op::Pow if right <= u64::from(u32::MAX) => {
+                    Ok(EvalValue::UInt(left.wrapping_pow(right as u32)))
+                }
+                Op::Pow => Err("u64 exponent above u32::MAX during replay".to_string()),
+                Op::Div if right == 0 => {
+                    Err("division by zero during counterexample replay".to_string())
+                }
+                Op::Rem if right == 0 => {
+                    Err("division by zero during counterexample replay".to_string())
+                }
+                Op::Rem => Ok(EvalValue::UInt(left % right)),
+                Op::Div => Ok(EvalValue::UInt(left / right)),
+                Op::Eq => Ok(EvalValue::Bool(left == right)),
+                Op::Neq => Ok(EvalValue::Bool(left != right)),
+                Op::Gt => Ok(EvalValue::Bool(left > right)),
+                Op::Lt => Ok(EvalValue::Bool(left < right)),
+                Op::Ge => Ok(EvalValue::Bool(left >= right)),
+                Op::Le => Ok(EvalValue::Bool(left <= right)),
+                Op::And => Ok(EvalValue::Bool(left != 0 && right != 0)),
+                Op::Or => Ok(EvalValue::Bool(left != 0 || right != 0)),
+                Op::Implies => Ok(EvalValue::Bool(left == 0 || right != 0)),
+                Op::BitAnd => Ok(EvalValue::UInt(left & right)),
+                Op::BitOr => Ok(EvalValue::UInt(left | right)),
+                Op::BitXor => Ok(EvalValue::UInt(left ^ right)),
+                Op::Shl if (0..64).contains(&right) => Ok(EvalValue::UInt(left << right)),
+                // `u64 >>` is the logical shift of the BV encoding.
+                Op::Shr if (0..64).contains(&right) => Ok(EvalValue::UInt(left >> right)),
+                Op::Shl | Op::Shr => {
+                    Err("shift amount outside 0..64 during counterexample replay".to_string())
+                }
+            }
+        }
+        // Literals lower as `i64` replay values; mixing one with a `u64`
+        // operand wraps it mod 2^64 — the same two's-complement reading
+        // the translator's `int2bv` bridge gives a literal like `0 - 1`
+        // in `requires a == 0 - 1` (u64::MAX).
+        (EvalValue::UInt(left), EvalValue::Int(right)) => {
+            eval_binary(EvalValue::UInt(*left), op, EvalValue::UInt(*right as u64))
+        }
+        (EvalValue::Int(left), EvalValue::UInt(right)) => {
+            eval_binary(EvalValue::UInt(*left as u64), op, EvalValue::UInt(*right))
         }
         (EvalValue::Bool(left), EvalValue::Bool(right)) => {
             let (left, right) = (*left, *right);
@@ -968,6 +1043,7 @@ fn eval_binary(left: EvalValue, op: &Op, right: EvalValue) -> Result<EvalValue, 
                     Op::Mul => Ok(EvalValue::Float(l * r)),
                     Op::Pow => Ok(EvalValue::Float(l.powf(r))),
                     Op::Div => Ok(EvalValue::Float(l / r)),
+                    Op::Rem => Ok(EvalValue::Float(l % r)),
                     Op::Eq => Ok(EvalValue::Bool(l == r)),
                     Op::Neq => Ok(EvalValue::Bool(l != r)),
                     Op::Gt => Ok(EvalValue::Bool(l > r)),
@@ -997,6 +1073,7 @@ fn eval_binary(left: EvalValue, op: &Op, right: EvalValue) -> Result<EvalValue, 
 fn value_as_f64(value: &EvalValue) -> Option<f64> {
     match value {
         EvalValue::Int(value) => Some(*value as f64),
+        EvalValue::UInt(value) => Some(*value as f64),
         EvalValue::Float(value) => Some(*value),
         EvalValue::Bool(_) | EvalValue::String(_) | EvalValue::Lambda { .. } => None,
     }
@@ -1006,6 +1083,7 @@ fn value_as_bool(value: &EvalValue) -> Option<bool> {
     match value {
         EvalValue::Bool(value) => Some(*value),
         EvalValue::Int(value) => Some(*value != 0),
+        EvalValue::UInt(value) => Some(*value != 0),
         EvalValue::Float(value) => Some(*value != 0.0),
         EvalValue::String(_) | EvalValue::Lambda { .. } => None,
     }
@@ -1031,6 +1109,9 @@ fn floats_close(a: f64, b: f64) -> bool {
 fn cex_matches_eval(model: &CexValue, body: &EvalValue) -> bool {
     match (model, body) {
         (CexValue::Int(m), EvalValue::Int(b)) => m == b,
+        (CexValue::UInt(m), EvalValue::UInt(b)) => m == b,
+        (CexValue::UInt(m), EvalValue::Int(b)) => u64::try_from(*b).ok() == Some(*m),
+        (CexValue::Int(m), EvalValue::UInt(b)) => u64::try_from(*m).ok() == Some(*b),
         (CexValue::Bool(m), EvalValue::Bool(b)) => m == b,
         (CexValue::Int(m), EvalValue::Bool(b)) => *m == i64::from(*b),
         (CexValue::Bool(m), EvalValue::Int(b)) => i64::from(*m) == *b,
@@ -1061,6 +1142,7 @@ pub fn parse_z3_numeric_to_f64(text: &str) -> Option<f64> {
 fn cex_as_f64(value: &CexValue) -> Option<f64> {
     match value {
         CexValue::Int(value) => Some(*value as f64),
+        CexValue::UInt(value) => Some(*value as f64),
         CexValue::Float(value) => Some(*value),
         CexValue::Bool(_) | CexValue::Str(_) => None,
     }
@@ -1069,6 +1151,7 @@ fn cex_as_f64(value: &CexValue) -> Option<f64> {
 fn format_cex_value(value: &CexValue) -> String {
     match value {
         CexValue::Int(value) => value.to_string(),
+        CexValue::UInt(value) => value.to_string(),
         CexValue::Float(value) => value.to_string(),
         CexValue::Bool(value) => value.to_string(),
         CexValue::Str(value) => value.clone(),
@@ -1078,6 +1161,7 @@ fn format_cex_value(value: &CexValue) -> String {
 fn format_eval_value(value: &EvalValue) -> String {
     match value {
         EvalValue::Int(value) => value.to_string(),
+        EvalValue::UInt(value) => value.to_string(),
         EvalValue::Float(value) => value.to_string(),
         EvalValue::Bool(value) => value.to_string(),
         EvalValue::String(value) => value.clone(),
@@ -1127,6 +1211,7 @@ fn collect_expr_symbols(
     lambda_names: &HashSet<String>,
 ) {
     match expr {
+        Expr::Paren(inner) => collect_expr_symbols(inner, module_env, symbols, seen, lambda_names),
         Expr::Call(name, args) => {
             if let Some(atom) = lookup_call_atom(module_env, name) {
                 if atom.trust_level == TrustLevel::Trusted {

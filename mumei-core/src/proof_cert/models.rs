@@ -157,6 +157,10 @@ pub struct AtomCertificate {
     /// Structured Lean-side result metadata populated by mumei-lean.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lean_result_metadata: Option<LeanResultMetadata>,
+    /// Independent Lean re-proof of an obligation Z3 already discharged.
+    /// Recorded beside `z3_check_result`; never changes proof status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lean_dual_check: Option<LeanResultMetadata>,
     /// P8-A: Counterexample validation status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub counterexample_validation: Option<CounterexampleValidationMetadata>,

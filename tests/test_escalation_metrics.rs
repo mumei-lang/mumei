@@ -77,6 +77,7 @@ fn lean_verified_atom(
             ..LeanResultMetadata::default()
         }),
         lean_result_metadata: None,
+        lean_dual_check: None,
         counterexample_validation: None,
         reconstruction_loss: None,
         self_correction_metadata: None,

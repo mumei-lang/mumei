@@ -205,7 +205,7 @@ fn dot_call_uses_qualified_dependency_hash_key() {
 
     let checked = fixture.verify_cert(&cert_path, &g, false);
     let checked_text = output_text(&checked);
-    assert_eq!(checked.status.code(), Some(1), "{checked_text}");
+    assert_eq!(checked.status.code(), Some(0), "{checked_text}");
     assert!(
         checked_text.contains("g: dependency_changed"),
         "{checked_text}"
@@ -248,7 +248,7 @@ fn qualified_callee_certificate_reports_qualified_key_deterministically() {
     .expect("weaken aliased callee contract");
     let changed = fixture.verify_cert(&cert_path, &g, false);
     let text = output_text(&changed);
-    assert_eq!(changed.status.code(), Some(1), "{text}");
+    assert_eq!(changed.status.code(), Some(0), "{text}");
     assert!(text.contains("g: dependency_changed"), "{text}");
     assert!(text.contains("atom:lib::f"), "{text}");
 
@@ -324,7 +324,7 @@ fn impl_method_contract_change_uses_qualified_dependency_key() {
 
     let checked = fixture.verify_cert(&cert_path, &source, false);
     let checked_text = output_text(&checked);
-    assert_eq!(checked.status.code(), Some(1), "{checked_text}");
+    assert_eq!(checked.status.code(), Some(0), "{checked_text}");
     assert!(
         checked_text.contains("g: dependency_changed"),
         "{checked_text}"

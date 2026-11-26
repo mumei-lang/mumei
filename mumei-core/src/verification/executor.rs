@@ -76,6 +76,7 @@ pub fn verify_with_config(
             enable_vacuity_check: false,
             ieee754_f64: false,
             bitvec_i64: false,
+            check_i64_overflow: false,
             property_based_config: None,
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -101,6 +102,7 @@ pub fn verify_with_verification_config(
             enable_vacuity_check: config.enable_vacuity_check,
             ieee754_f64: config.ieee754_f64,
             bitvec_i64: config.bitvec_i64,
+            check_i64_overflow: config.check_i64_overflow,
             property_based_config: config.property_based_test.as_ref(),
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -142,6 +144,7 @@ pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> 
             enable_vacuity_check: false,
             ieee754_f64: false,
             bitvec_i64: false,
+            check_i64_overflow: false,
             property_based_config: None,
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -158,6 +161,7 @@ pub(crate) struct VerifyInnerOptions<'a> {
     enable_vacuity_check: bool,
     ieee754_f64: bool,
     bitvec_i64: bool,
+    check_i64_overflow: bool,
     property_based_config: Option<&'a PropertyBasedTestConfig>,
     task_id: Option<String>,
     generation_id: Option<String>,
@@ -172,6 +176,7 @@ impl<'a> VerifyInnerOptions<'a> {
             enable_vacuity_check: false,
             ieee754_f64: false,
             bitvec_i64: false,
+            check_i64_overflow: false,
             property_based_config: None,
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -603,38 +608,55 @@ fn lower_clause_with_skip<'a>(
     if trimmed.is_empty() || trimmed == "true" {
         return Ok(ClauseLoweringOutcome::Trivial);
     }
-    let clause_ast = parse_expression(trimmed);
-    let clause_z3 = match expr_to_z3(vc, &clause_ast, env, solver_opt) {
-        Ok(value) => value,
-        // Dropping a requires would quietly weaken the assumptions and could
-        // turn into a plain failure; keep the atom unverifiable instead.
-        Err(err)
-            if label == "requires"
-                && err
-                    .to_string()
-                    .contains(QUANTIFIER_DEPENDENT_CALL_UNSUPPORTED) =>
-        {
-            return Err(err);
-        }
-        Err(err) if is_unsupported_clause_error(&err) => {
+    let marks = super::translator::obligation_marks(vc);
+    let clause_ast = match crate::parser::parse_expression_checked(trimmed) {
+        Ok(ast) => ast,
+        Err(failures) => {
+            let err = failures.join("; ");
             push_skip_warning(
                 diagnostics,
                 unsupported_clause_warning(label, trimmed, &err),
             );
+            super::translator::discard_obligations_since(vc, marks);
             return Ok(ClauseLoweringOutcome::Skipped);
         }
-        // Termination errors carry a counterexample that the generic
-        // rewrap below would drop; propagate them unchanged.
-        Err(err) if format!("{err}").contains("Termination measure violation") => {
-            return Err(err);
-        }
-        Err(err) => {
-            return Err(MumeiError::verification_at(
-                format!("failed to lower {} clause '{}': {}", label, trimmed, err),
-                atom.atom.span.clone(),
-            ));
-        }
     };
+    let clause_z3 =
+        match crate::verification::translator::z3_types::with_array_shared_markers_restored(
+            env,
+            |env| expr_to_z3_with_domain_obligations(vc, &clause_ast, env, solver_opt),
+        ) {
+            Ok(value) => value,
+            // Dropping a requires would quietly weaken the assumptions and could
+            // turn into a plain failure; keep the atom unverifiable instead.
+            Err(err)
+                if label == "requires"
+                    && err
+                        .to_string()
+                        .contains(QUANTIFIER_DEPENDENT_CALL_UNSUPPORTED) =>
+            {
+                return Err(err);
+            }
+            Err(err) if is_unsupported_clause_error(&err) => {
+                push_skip_warning(
+                    diagnostics,
+                    unsupported_clause_warning(label, trimmed, &err),
+                );
+                super::translator::discard_obligations_since(vc, marks);
+                return Ok(ClauseLoweringOutcome::Skipped);
+            }
+            // Termination errors carry a counterexample that the generic
+            // rewrap below would drop; propagate them unchanged.
+            Err(err) if format!("{err}").contains("Termination measure violation") => {
+                return Err(err);
+            }
+            Err(err) => {
+                return Err(MumeiError::verification_at(
+                    format!("failed to lower {} clause '{}': {}", label, trimmed, err),
+                    atom.atom.span.clone(),
+                ));
+            }
+        };
     let Some(clause_bool) = clause_z3.as_bool() else {
         return Err(MumeiError::verification_at(
             format!("{} clause '{}' must lower to boolean", label, trimmed),
@@ -682,12 +704,15 @@ fn verify_inner_impl(
         enable_vacuity_check,
         ieee754_f64,
         bitvec_i64,
+        check_i64_overflow,
         property_based_config,
         task_id,
         generation_id: _generation_id,
     } = options;
     let timeout_ms = orchestration_timeout_ms_from_env().unwrap_or(timeout_ms);
     let atom = &hir_atom.atom;
+    reject_struct_projection_path_collisions(module_env, atom)?;
+    reject_parameter_projection_slot_collisions(module_env, atom)?;
     reject_resource_state_shadowing(atom, &hir_atom.body_stmt, module_env)?;
     if let Some(value) = unsupported_semantics_value(atom) {
         return Err(MumeiError::verification_at(
@@ -1710,6 +1735,7 @@ fn verify_inner_impl(
         linearity_ctx: Some(&linearity_ctx_cell),
         inferred_invariants: Some(&inferred_invariants_cell),
         cover_obligations: None,
+        spec_domain_obligations: Default::default(),
         effect_ctx: Some(&effect_ctx_cell),
         constraint_count: Some(&constraint_count_cell),
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
@@ -1723,18 +1749,25 @@ fn verify_inner_impl(
         bitvec_i64,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_struct_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_fields: Default::default(),
         contracts_in_instantiation: std::cell::RefCell::new(Vec::new()),
+        instantiation_params: std::cell::RefCell::new(Vec::new()),
         recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global,
+        check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
+        refined_operand_types: Default::default(),
     };
     vc.recursion.enabled.set(true);
     let mut env: Env = HashMap::new();
@@ -1748,6 +1781,12 @@ fn verify_inner_impl(
         let var =
             datatype::param_z3_value_for_vc(&vc, param.name.as_str(), param.type_name.as_deref());
         env.insert(param.name.clone(), var);
+        crate::verification::translator::z3_types::seed_struct_array_param_leaves(
+            &vc,
+            &param.name,
+            param.type_name.as_deref(),
+            &mut env,
+        );
     }
 
     // Congruent recursive contracts: when this atom declares `decreases` and
@@ -1759,7 +1798,11 @@ fn verify_inner_impl(
                 let mut measures = Vec::new();
                 for component in measure_components(atom.decreases.as_deref().unwrap_or("0")) {
                     let measure_ast = parse_expression(&component);
-                    let measure = expr_to_z3(&vc, &measure_ast, &mut env, None)?;
+                    let measure =
+                        crate::verification::translator::z3_types::with_array_shared_markers_restored(
+                            &mut env,
+                            |env| expr_to_z3(&vc, &measure_ast, env, None),
+                        )?;
                     if measure.as_int().is_none() && measure.as_bv().is_none() {
                         return Err(MumeiError::verification_at(
                             format!(
@@ -1777,32 +1820,24 @@ fn verify_inner_impl(
         }
     }
 
-    seed_tuple_result_components(
-        &ctx,
-        &mut env,
-        "result",
-        atom.return_type.as_deref(),
-        module_env,
-        ieee754_f64,
-        bitvec_i64,
-    );
+    seed_tuple_result_components(&vc, &mut env, "result", atom.return_type.as_deref());
     // 構造体を返す atom: param と対称に `result.<field>` のシンボルを事前生成する。
     // body 評価後に返り値のフィールドへ束縛し、Invariant(result) を暗黙の事後条件として課す。
     let struct_return = atom
         .return_type
         .as_deref()
         .and_then(|type_name| module_env.get_struct(type_name));
-    let result_struct_fields = struct_return.map(|sdef| {
-        seed_struct_fields(
-            &ctx,
-            &mut env,
-            "result",
-            sdef,
-            module_env,
-            ieee754_f64,
-            bitvec_i64,
-        )
-    });
+    let result_struct_fields =
+        struct_return.map(|sdef| seed_struct_fields(&vc, &mut env, "result", sdef));
+    if let Some(type_name) = atom
+        .return_type
+        .as_deref()
+        .filter(|name| module_env.get_struct(name).is_some())
+    {
+        vc.local_struct_types
+            .borrow_mut()
+            .insert("result".to_string(), type_name.to_string());
+    }
 
     // Phase 1h (continued): ConflictingMerge Z3 infrastructure.
     // With Phase 4c Copy/Move type distinction integrated, move violations for
@@ -1831,29 +1866,51 @@ fn verify_inner_impl(
         // condition and index expressions are lowered (name-based lookup).
         let i = Int::fresh_const(&ctx, q.var.as_str());
         // Parse start as an expression (supports identifiers, arithmetic, e.g. "n - 1")
+        let parse_quantifier_expr = |raw: &str, label: &str| -> MumeiResult<Expr> {
+            crate::parser::parse_expression_checked(raw).map_err(|failures| {
+                MumeiError::verification_at(
+                    format!("unsupported {} '{}': {}", label, raw, failures.join("; ")),
+                    atom.span.clone(),
+                )
+            })
+        };
         let start = if let Ok(val) = q.start.parse::<i64>() {
             Int::from_i64(&ctx, val)
         } else {
-            let ast = parse_expression(&q.start);
-            as_int_like(&expr_to_z3(&vc, &ast, &mut env, None)?)
-                .unwrap_or(Int::new_const(&ctx, q.start.as_str()))
+            let ast = parse_quantifier_expr(&q.start, "quantifier start")?;
+            as_int_like(
+                &crate::verification::translator::z3_types::with_array_shared_markers_restored(
+                    &mut env,
+                    |env| expr_to_z3(&vc, &ast, env, None),
+                )?,
+            )
+            .unwrap_or(Int::new_const(&ctx, q.start.as_str()))
         };
         let end = if let Ok(val) = q.end.parse::<i64>() {
             Int::from_i64(&ctx, val)
         } else {
             // Parse end as expression to support `n - 1` etc.
-            let ast = parse_expression(&q.end);
-            as_int_like(&expr_to_z3(&vc, &ast, &mut env, None)?)
-                .unwrap_or(Int::new_const(&ctx, q.end.as_str()))
+            let ast = parse_quantifier_expr(&q.end, "quantifier end")?;
+            as_int_like(
+                &crate::verification::translator::z3_types::with_array_shared_markers_restored(
+                    &mut env,
+                    |env| expr_to_z3(&vc, &ast, env, None),
+                )?,
+            )
+            .unwrap_or(Int::new_const(&ctx, q.end.as_str()))
         };
 
         let range_cond = Bool::and(&ctx, &[&i.ge(&start), &i.lt(&end)]);
         let old_bound_val = env.insert(q.var.clone(), i.clone().into());
-        let expr_ast = parse_expression(&q.condition);
+        let expr_ast = parse_quantifier_expr(&q.condition, "quantifier condition")?;
         vc.quantifier_binders
             .borrow_mut()
             .push((q.var.clone(), i.clone().into()));
-        let condition_res = expr_to_z3(&vc, &expr_ast, &mut env, None);
+        let condition_res =
+            crate::verification::translator::z3_types::with_array_shared_markers_restored(
+                &mut env,
+                |env| expr_to_z3(&vc, &expr_ast, env, None),
+            );
         vc.quantifier_binders.borrow_mut().pop();
         let condition_z3 = condition_res?.as_bool().ok_or(MumeiError::verification_at(
             "Condition must be boolean",
@@ -1881,7 +1938,12 @@ fn verify_inner_impl(
             QuantifierType::ForAll => {
                 let mut pattern_asts: Vec<Dynamic> = Vec::new();
                 for (arr_name, idx_expr) in &arr_accesses {
-                    if let Ok(idx_z3) = expr_to_z3(&vc, idx_expr, &mut env, None) {
+                    if let Ok(idx_z3) =
+                        crate::verification::translator::z3_types::with_array_shared_markers_restored(
+                            &mut env,
+                            |env| expr_to_z3(&vc, idx_expr, env, None),
+                        )
+                    {
                         if let Some(idx_int) = as_int_like(&idx_z3) {
                             pattern_asts
                                 .push(z3_dynamic_array(&vc, arr_name, &env).select(&idx_int));
@@ -1928,7 +1990,12 @@ fn verify_inner_impl(
                 // mis-bind bounds once another array (e.g. `data`, `aux`) is
                 // used in a forall condition.
                 let len_var = array_len_value(&ctx, &mut env, arr_name, bitvec_i64, Some(&solver));
-                if let Ok(idx_z3) = expr_to_z3(&vc, idx_expr, &mut env, None) {
+                if let Ok(idx_z3) =
+                    crate::verification::translator::z3_types::with_array_shared_markers_restored(
+                        &mut env,
+                        |env| expr_to_z3(&vc, idx_expr, env, None),
+                    )
+                {
                     if let (Some(idx_int), Some(in_bounds)) = (
                         as_int_like(&idx_z3),
                         index_in_bounds(&ctx, &idx_z3, &len_var),
@@ -1968,7 +2035,14 @@ fn verify_inner_impl(
     for param in &atom.params {
         if let Some(type_name) = &param.type_name {
             if let Some(refined) = module_env.get_type(type_name) {
-                apply_refinement_constraint(&vc, &solver, &param.name, refined, &mut env)?;
+                apply_refinement_constraint(
+                    &vc,
+                    &solver,
+                    &param.name,
+                    refined,
+                    module_env,
+                    &mut env,
+                )?;
             }
         }
     }
@@ -1981,15 +2055,10 @@ fn verify_inner_impl(
                 // ソートは `param_z3_value` に従う（`i64` は bit-vector モードで BV(64)、
                 // `f64` は既定 Real / `--ieee754-f64` で Float）ので、`result.<field>`
                 // や構造体リテラルのフィールド値と同じエンコーディングになる。
-                let param_fields = seed_struct_fields(
-                    &ctx,
-                    &mut env,
-                    &param.name,
-                    sdef,
-                    module_env,
-                    ieee754_f64,
-                    bitvec_i64,
-                );
+                let param_fields = seed_struct_fields(&vc, &mut env, &param.name, sdef);
+                vc.local_struct_types
+                    .borrow_mut()
+                    .insert(param.name.clone(), type_name.clone());
                 // フィールド制約 (`where v ...`) と跨フィールド不変量 (`invariant: <expr>`)
                 // を前提として assert
                 assume_struct_contract(
@@ -2005,10 +2074,181 @@ fn verify_inner_impl(
         }
     }
 
-    // 2c. 全パラメータに対して配列長シンボルを事前生成
-    #[allow(clippy::map_entry)]
+    // 2c'. 引数（params）の enum 型を `local_enum_types` にシードする —
+    // `e.p = v` や `match` のバリアント解決が struct パラメータの
+    // `local_struct_types` シードと同じ経路を辿れるようにする。
     for param in &atom.params {
-        let len_name = format!("len_{}", param.name);
+        if let Some(type_name) = &param.type_name {
+            let base = module_env.resolve_base_type(type_name);
+            if module_env.get_enum(&base).is_some() {
+                vc.local_enum_types
+                    .borrow_mut()
+                    .insert(param.name.clone(), base);
+            }
+        }
+    }
+
+    // 2c''. Int-tag enum params carry the variant-index domain: the Int
+    // encoding admits every integer, but only tag values denote a value of
+    // the declared enum — assert `0 <= v < n_variants`, the same domain
+    // fact match injects for the same target. Finite-ADT params are
+    // datatype constants and need no bound.
+    for param in &atom.params {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        let base = module_env.resolve_base_type(type_name);
+        let Some(enum_def) = module_env.get_enum(&base) else {
+            continue;
+        };
+        if datatype::uses_datatype_sort(enum_def, module_env) {
+            continue;
+        }
+        let Some(v) = env.get(&param.name).and_then(|d| d.as_int()) else {
+            continue;
+        };
+        let n = enum_def.variants.len() as i64;
+        solver.assert(&v.ge(&z3::ast::Int::from_i64(&ctx, 0)));
+        solver.assert(&v.lt(&z3::ast::Int::from_i64(&ctx, n)));
+    }
+
+    // 2d. Fixed-width scalar params must satisfy their declared domains before
+    // a later constructor or match may rely on those domains.
+    for param in &atom.params {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        let Some(value) = env.get(&param.name) else {
+            continue;
+        };
+        if let Some(domain) = datatype::scalar_int_leaf_domain(&vc, type_name, value) {
+            solver.assert(&domain);
+        }
+    }
+
+    // 2d''. Fixed-width leaves of struct params carry the same entry domains
+    // as scalar params, so a later enum constructor may rely on them.
+    for param in &atom.params {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        let base = module_env.resolve_base_type(type_name);
+        if module_env.get_struct(&base).is_none() {
+            continue;
+        }
+        let Some(leaves) = datatype::field_leaf_types(&base, module_env) else {
+            continue;
+        };
+        let Some(value) = env.get(&param.name) else {
+            continue;
+        };
+        let values = crate::verification::translator::nested_field_bindings(&env, value);
+        for (leaf_name, leaf_type) in leaves {
+            if leaf_type == "array_len" {
+                continue;
+            }
+            let Some(leaf_value) = values
+                .iter()
+                .find(|(name, _)| name == &leaf_name)
+                .map(|(_, value)| value)
+            else {
+                continue;
+            };
+            if let Some(element_type) = leaf_type.strip_prefix("array:") {
+                let field_name = format!("{}_{}", param.name, leaf_name);
+                let root_length_key =
+                    crate::verification::translator::z3_types::array_root_len_key(&field_name);
+                let length_key =
+                    crate::verification::translator::z3_types::array_len_key(&field_name);
+                let length = env
+                    .get(&root_length_key)
+                    .or_else(|| env.get(&length_key))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        array_root_len_value(&ctx, &mut env, &field_name, bitvec_i64, Some(&solver))
+                    });
+                env.insert(root_length_key, length.clone());
+                env.insert(length_key, length.clone());
+                if let Some(domain) =
+                    datatype::array_int_leaf_domain(&vc, leaf_value, &length, element_type)
+                {
+                    solver.assert(&domain);
+                }
+            } else if leaf_type.starts_with("enum:") {
+                continue;
+            } else if let Some(domain) =
+                datatype::scalar_int_leaf_domain(&vc, &leaf_type, leaf_value)
+            {
+                solver.assert(&domain);
+            }
+        }
+    }
+
+    // 2d'. `i128`/`u128` params: same unbounded-`Int` gap — assert the
+    // declared width's domain (`0 <= v <= u128::MAX` also carries the
+    // unsigned non-negativity `a >= 0` relies on).
+    for param in &atom.params {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        let (lo, hi) = match module_env.resolve_base_type(type_name).as_str() {
+            "i128" => (
+                "-170141183460469231731687303715884105728",
+                "170141183460469231731687303715884105727",
+            ),
+            "u128" => ("0", "340282366920938463463374607431768211455"),
+            _ => continue,
+        };
+        let Some(v) = env.get(&param.name).and_then(|d| d.as_int()) else {
+            continue;
+        };
+        solver.assert(&v.ge(&z3::ast::Int::from_str(&ctx, lo).expect("i128 lower bound literal")));
+        solver.assert(&v.le(&z3::ast::Int::from_str(&ctx, hi).expect("u128 upper bound literal")));
+    }
+
+    // 2e. Enum-typed inputs: `u64`/`u32`/`i32` payload leaves carry the
+    // same declared-width domain the bare `u64` assert above gives a
+    // scalar param — every enum datatype constant seeded so far (params,
+    // bound struct fields, `result`) gets its per-variant leaf bounds.
+    datatype::assert_enum_value_domains(&vc, &solver, &env);
+
+    for param in &atom.params {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        crate::verification::translator::z3_types::validate_enum_array_type(&vc, type_name)?;
+    }
+    let mut result_types = crate::verification::translator::z3_types::tuple_component_types(
+        atom.return_type.as_deref(),
+    )
+    .unwrap_or_default();
+    if result_types.is_empty() {
+        result_types.extend(atom.return_type.iter().cloned());
+    }
+    for type_name in result_types {
+        crate::verification::translator::z3_types::validate_enum_array_type(&vc, &type_name)?;
+    }
+
+    // 2c. 全パラメータに対して配列長シンボルを事前生成
+    for param in &atom.params {
+        let len_name = array_len_key(&param.name);
+        let root_len_name = array_root_len_key(&param.name);
+        let is_array = param.type_name.as_deref().is_some_and(|type_name| {
+            let resolved = module_env.resolve_base_type(type_name);
+            resolved.trim_start().starts_with('[') || resolved.trim_end().ends_with("[]")
+        });
+        if is_array {
+            let len = env
+                .get(&root_len_name)
+                .or_else(|| env.get(&len_name))
+                .cloned()
+                .unwrap_or_else(|| {
+                    array_root_len_value(&ctx, &mut env, &param.name, bitvec_i64, Some(&solver))
+                });
+            env.insert(root_len_name, len.clone());
+            env.insert(len_name, len);
+            continue;
+        }
         if env.contains_key(&len_name) {
             continue;
         }
@@ -2018,6 +2258,26 @@ fn verify_inner_impl(
             env.insert(len_name, unsafe { Int::wrap(&ctx, ast) }.into());
         } else {
             array_len_value(&ctx, &mut env, &param.name, bitvec_i64, Some(&solver));
+        }
+    }
+
+    for param in &atom.params {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        let resolved = module_env.resolve_base_type(type_name);
+        if !resolved.trim_start().starts_with('[') && !resolved.trim_end().ends_with("[]") {
+            continue;
+        }
+        let (Some(array), Some(length)) =
+            (env.get(&param.name), env.get(&array_len_key(&param.name)))
+        else {
+            continue;
+        };
+        let element_type =
+            crate::verification::translator::z3_types::array_element_type_name(&param.name, &vc);
+        if let Some(domain) = datatype::array_int_leaf_domain(&vc, array, length, &element_type) {
+            solver.assert(&domain);
         }
     }
 
@@ -2218,13 +2478,17 @@ fn verify_inner_impl(
     // 4. ボディの検証
     let phase_start = std::time::Instant::now();
     check_resource_initial_state(&vc, &mut env, &solver)?;
-    let body_result = match stmt_to_z3(&vc, &hir_atom.body_stmt, &mut env, Some(&solver)) {
+    vc.check_i64_overflow.set(check_i64_overflow);
+    let body_lowered = stmt_to_z3(&vc, &hir_atom.body_stmt, &mut env, Some(&solver));
+    vc.check_i64_overflow.set(false);
+    let body_result = match body_lowered {
         Ok(val) => val,
         Err(e) => {
             // Body evaluation errors (e.g., division by zero, out-of-bounds) propagate
             // before reaching the postcondition check. Write a failure report so the
             // MCP self-healing flow does not read a stale report.json from a prior run.
             let err_str = format!("{}", e);
+            let mut body_extra_fields = None;
             // If this is an effect mismatch violation, save a structured report
             if err_str.contains("Effect violation: 'perform ") {
                 // Extract effect name and operation from error message
@@ -2242,7 +2506,7 @@ fn verify_inner_impl(
                             .unwrap_or_default();
                         let effect_names: Vec<String> =
                             atom.effects.iter().map(|e| e.name.clone()).collect();
-                        save_effect_violation_report(
+                        let effect_report = save_effect_violation_report(
                             output_dir,
                             &atom.name,
                             &effect_names,
@@ -2253,6 +2517,10 @@ fn verify_inner_impl(
                                 format!("Remove the call to 'perform {}'", source_op),
                             ],
                         );
+                        body_extra_fields = Some(serde_json::json!({
+                            "violation_type": effect_report["violation_type"].clone(),
+                            "effect_violation": effect_report["effect_violation"].clone(),
+                        }));
                     }
                 }
             }
@@ -2261,6 +2529,8 @@ fn verify_inner_impl(
                 FAILURE_DIVISION_BY_ZERO
             } else if err_str.contains("Termination measure violation") {
                 FAILURE_TERMINATION_MEASURE_VIOLATED
+            } else if err_str.contains("Effect violation: 'perform ") {
+                FAILURE_EFFECT_NOT_ALLOWED
             } else if err_str.contains("Constraint budget exceeded") {
                 "constraint_budget_exceeded"
             } else {
@@ -2294,7 +2564,7 @@ fn verify_inner_impl(
                 None,
                 None,
                 Some(&diagnostics),
-                None,
+                body_extra_fields.as_ref(),
             );
             return Err(e);
         }
@@ -2322,9 +2592,25 @@ fn verify_inner_impl(
     if let (Some(sdef), Some(result_fields)) = (struct_return, &result_struct_fields) {
         match struct_fields_of_value(&env, &body_result, sdef) {
             Some(body_fields) => {
-                for ((_, result_sym), (_, body_val)) in result_fields.iter().zip(&body_fields) {
+                for ((field_name, result_sym), (_, body_val)) in
+                    result_fields.iter().zip(&body_fields)
+                {
                     let (lhs, rhs) = unify_branch_sorts(result_sym.clone(), body_val.clone())?;
                     solver.assert(&lhs._eq(&rhs));
+                    // Nested-struct fields: `seed_struct_fields` pre-created
+                    // `__struct_result_<field>_<leaf>` constants; without
+                    // asserting them equal to the body's leaf values a read
+                    // like `result.inner.a` resolves to a fresh unconstrained
+                    // symbol rather than the returned value's leaf.
+                    if let Some(leaf_fields) = project_struct_fields(&env, body_val) {
+                        for (leaf_name, leaf_val) in leaf_fields {
+                            let key = format!("__struct_result_{}_{}", field_name, leaf_name);
+                            if let Some(result_leaf) = env.get(&key) {
+                                let (lhs, rhs) = unify_branch_sorts(result_leaf.clone(), leaf_val)?;
+                                solver.assert(&lhs._eq(&rhs));
+                            }
+                        }
+                    }
                 }
             }
             None if !sdef.invariants.is_empty() => {
@@ -2399,6 +2685,56 @@ fn verify_inner_impl(
         ensures_outcomes.push((clause, ClauseOutcome::Assumed, label));
     }
     let body_ensures = contract_view(atom, ContractView::BodyEnsures);
+
+    // A refined return type is a postcondition the callee must guarantee:
+    // `atom bad() -> Pos ... { -5 }` cannot verify. Every conjunct of the
+    // declared chain must hold of `result` — checked with the same
+    // solver-push/assert-not/check shape as an ensures clause.
+    if let Some(type_name) = atom.return_type.as_deref() {
+        if module_env.get_type(type_name).is_some() {
+            let chain = module_env
+                .refined_chain(type_name)
+                .map_err(|cycle| MumeiError::type_error_at(cycle, atom.span.clone()))?;
+            for decl in chain {
+                let mut local_env = env.clone();
+                local_env.insert("result".to_string(), body_result.clone());
+                local_env.insert(decl.operand.clone(), body_result.clone());
+                let predicate_ast = parse_expression(&decl.predicate_raw);
+                let Some(pred_bool) =
+                    refined_predicate_to_z3(&vc, decl, &predicate_ast, &mut local_env, None)?
+                        .as_bool()
+                else {
+                    continue;
+                };
+                solver.push();
+                solver.assert(&pred_bool.not());
+                let holds_check = crate::verification::phase_artifacts::check(&solver);
+                solver.pop(1);
+                if holds_check == SatResult::Sat {
+                    return Err(MumeiError::verification_at(
+                        format!("Return type '{}' refinement is not satisfied.", decl.name),
+                        atom.span.clone(),
+                    )
+                    .with_help(format!(
+                        "body の返り値が型 '{}' の制約 `{}` を満たすか検討してください",
+                        decl.name, decl.predicate_raw
+                    ))
+                    .with_verdict(VerdictKind::Rejected));
+                }
+                if holds_check == SatResult::Unknown {
+                    return Err(MumeiError::verification_at(
+                        format!(
+                            "Return type '{}' refinement could not be decided.",
+                            decl.name
+                        ),
+                        atom.span.clone(),
+                    )
+                    .with_verdict(VerdictKind::Inconclusive));
+                }
+            }
+        }
+    }
+
     if body_ensures.trim() != "true" {
         if tuple_component_types(atom.return_type.as_deref()).is_none() {
             // `[e0, …]` tail or `arr` tail: ensures clauses index `result[i]`
@@ -2409,7 +2745,8 @@ fn verify_inner_impl(
                 tail_expr(&hir_atom.body_stmt),
                 &body_result,
                 &mut env,
-            );
+                Some(&solver),
+            )?;
             env.insert("result".to_string(), body_result.clone());
         }
         for ens_clause in split_top_level_conjunctions(&body_ensures) {
@@ -2474,6 +2811,43 @@ fn verify_inner_impl(
                                 .unwrap_or_default();
                             let mut model_map = HashMap::new();
                             let mut model_values: HashMap<String, CexValue> = HashMap::new();
+                            // `u64`-declared names decode their `BV(64)`
+                            // model values as unsigned; everything else
+                            // (including `i64` under `--bitvec-i64`) keeps
+                            // the signed reading.
+                            let mut unsigned_names: std::collections::HashSet<String> =
+                                std::collections::HashSet::new();
+                            for param in &atom.params {
+                                let Some(type_name) = param.type_name.as_deref() else {
+                                    continue;
+                                };
+                                let base = module_env.resolve_base_type(type_name.trim());
+                                if base == "u64" {
+                                    unsigned_names.insert(param.name.clone());
+                                } else if let Some(sdef) = module_env.get_struct(&base) {
+                                    // A struct param's `u64` fields live in
+                                    // env under their flattened slot keys.
+                                    for field in &sdef.fields {
+                                        if module_env.resolve_base_type(field.type_name.trim())
+                                            == "u64"
+                                        {
+                                            unsigned_names.insert(format!(
+                                                "__struct_{}_{}",
+                                                param.name, field.name
+                                            ));
+                                            unsigned_names
+                                                .insert(format!("{}_{}", param.name, field.name));
+                                        }
+                                    }
+                                }
+                            }
+                            if atom
+                                .return_type
+                                .as_deref()
+                                .is_some_and(|t| module_env.resolve_base_type(t.trim()) == "u64")
+                            {
+                                unsigned_names.insert("result".to_string());
+                            }
                             for (name, var_z3) in &env {
                                 let model_value =
                                     if atom.params.iter().any(|param| param.name == *name) {
@@ -2485,7 +2859,10 @@ fn verify_inner_impl(
                                     if let Some(int_value) = z3_dynamic_to_i64(&val) {
                                         model_map.insert(name.clone(), int_value);
                                     }
-                                    if let Some(cex_value) = z3_dynamic_to_cex_value(&val) {
+                                    if let Some(cex_value) = z3_dynamic_to_cex_value(
+                                        &val,
+                                        unsigned_names.contains(name.as_str()),
+                                    ) {
                                         model_values.insert(name.clone(), cex_value);
                                     }
                                 }
@@ -2500,6 +2877,7 @@ fn verify_inner_impl(
                                     ));
                                 }
                             }
+                            let mut length_companion_solver_names = HashSet::new();
                             let length_companions = atom
                                 .params
                                 .iter()
@@ -2507,12 +2885,21 @@ fn verify_inner_impl(
                                     let type_name = param.type_name.as_deref()?;
                                     let lowering =
                                         length_companion_lowering(type_name, module_env)?;
-                                    let value = pre_body_env.get(&format!("len_{}", param.name))?;
-                                    Some(raise_length_companion(
-                                        &model,
-                                        &param.name,
-                                        value,
-                                        lowering,
+                                    let value = pre_body_env.get(&array_len_key(&param.name))?;
+                                    length_companion_solver_names
+                                        .insert(format!("len_{}", param.name));
+                                    length_companion_solver_names
+                                        .insert(array_len_key(&param.name));
+                                    length_companion_solver_names
+                                        .insert(array_root_len_key(&param.name));
+                                    Some((
+                                        param.name.clone(),
+                                        raise_length_companion(
+                                            &model,
+                                            &param.name,
+                                            value,
+                                            lowering,
+                                        ),
                                     ))
                                 })
                                 .collect::<Vec<_>>();
@@ -2534,7 +2921,7 @@ fn verify_inner_impl(
                                 if name == "result"
                                     || params.contains(name.as_str())
                                     || name.starts_with("__")
-                                    || name.starts_with("len_")
+                                    || name.starts_with("len#")
                                 {
                                     continue;
                                 }
@@ -2547,7 +2934,8 @@ fn verify_inner_impl(
                                 if let Some(value) = pre_body_env.get(&param.name) {
                                     loss_env.insert(param.name.clone(), value.clone());
                                     for symbol in [
-                                        format!("len_{}", param.name),
+                                        array_len_key(&param.name),
+                                        array_root_len_key(&param.name),
                                         format!("__z3_arr_{}", param.name),
                                     ] {
                                         if let Some(value) = pre_body_env.get(&symbol) {
@@ -2571,18 +2959,23 @@ fn verify_inner_impl(
                                 &loss_env,
                                 module_env,
                             );
-                            let length_companion_names = length_companions
-                                .iter()
-                                .map(|value| value.source_name.clone())
-                                .collect::<HashSet<_>>();
                             let mut raised_loss = raised_loss;
-                            raised_loss.values.extend(length_companions);
+                            for (binding, mut companion) in length_companions {
+                                if raised_loss
+                                    .values
+                                    .iter()
+                                    .any(|value| value.source_name == companion.source_name)
+                                {
+                                    companion.source_name = format!("len({binding})");
+                                }
+                                raised_loss.values.push(companion);
+                            }
                             raised_loss
                                 .values
                                 .sort_by(|left, right| left.source_name.cmp(&right.source_name));
                             raised_loss
                                 .omitted_solver_symbols
-                                .retain(|symbol| !length_companion_names.contains(symbol));
+                                .retain(|symbol| !length_companion_solver_names.contains(symbol));
                             for value in &raised_loss.values {
                                 if !raised_counterexample
                                     .values
@@ -2597,7 +2990,7 @@ fn verify_inner_impl(
                                 .extend(raised_loss.omitted_solver_symbols.iter().cloned());
                             raised_counterexample
                                 .omitted_solver_symbols
-                                .retain(|symbol| !length_companion_names.contains(symbol));
+                                .retain(|symbol| !length_companion_solver_names.contains(symbol));
                             raised_counterexample
                                 .values
                                 .sort_by(|a, b| a.source_name.cmp(&b.source_name));
@@ -2986,6 +3379,7 @@ fn verify_inner_impl(
     // solver that already carries the preconditions.
     discharge_bv_shift_obligations(&vc, &solver)?;
     discharge_bv_div_obligations(&vc, &solver)?;
+    discharge_i64_overflow_obligations(&vc, &solver)?;
 
     let z3_check_start = std::time::Instant::now();
     let profiler_final_check_start = profiler_checkpoint(&vc);
@@ -3132,7 +3526,8 @@ fn verify_inner_impl(
                 tail_expr(&hir_atom.body_stmt),
                 &body_result,
                 &mut env,
-            );
+                Some(&solver),
+            )?;
             env.insert("result".to_string(), body_result.clone());
         }
 
@@ -3261,7 +3656,7 @@ fn verify_inner_impl(
                             for (name, value) in &env {
                                 if name.starts_with("__struct_result_")
                                     || name.starts_with("result_")
-                                    || name == "len_result"
+                                    || name == &array_len_key("result")
                                     || name.starts_with("__z3_arr_result")
                                 {
                                     witness_env.insert(name.clone(), value.clone());
@@ -3445,7 +3840,11 @@ fn check_resource_initial_state<'a>(
             env.insert(format!("{resource_name}.{}", field.name), value);
         }
         let check = (|| {
-            let inv = expr_to_z3(vc, invariant, env, Some(solver))?
+            let inv =
+                crate::verification::translator::z3_types::with_array_shared_markers_restored(
+                    env,
+                    |env| expr_to_z3(vc, invariant, env, Some(solver)),
+                )?
                 .as_bool()
                 .ok_or_else(|| MumeiError::type_error("resource invariant must be boolean"))?;
             solver.push();
@@ -3694,12 +4093,30 @@ fn z3_dynamic_to_i64(value: &Dynamic) -> Option<i64> {
 /// native `Str` values so replay can validate string builtin bodies.
 /// `f64` encodings used by verification: `Int`, `Bool`, exact-rational `Real`
 /// (default `f64`), and IEEE 754 `Float` (under `--ieee754-f64`).
-fn z3_dynamic_to_cex_value(value: &Dynamic) -> Option<CexValue> {
+/// `unsigned` is the leaf's declared `u64` type — the only `BV(64)` sort
+/// that must decode without a sign.
+fn z3_dynamic_to_cex_value(value: &Dynamic, unsigned: bool) -> Option<CexValue> {
     if let Some(string_value) = value.as_string().and_then(|s| s.as_string()) {
         return Some(CexValue::Str(string_value));
     }
     if let Some(int_value) = value.as_int().and_then(|v| v.as_i64()) {
         return Some(CexValue::Int(int_value));
+    }
+    // A machine-word leaf encodes as `BV(64)`. Which reading the numeral
+    // takes comes from the declared type, not the sort: a `u64` leaf
+    // decodes unsigned so replay keeps leaves >= 2^63, while an `i64`
+    // under `--bitvec-i64` shares the same `BV(64)` sort but must keep
+    // its negative values or the replay cannot reproduce the violation.
+    if let Some(bv) = value.as_bv() {
+        if bv.get_size() == 64 {
+            if let Some(bits) = bv.as_u64() {
+                return Some(if unsigned {
+                    CexValue::UInt(bits)
+                } else {
+                    CexValue::Int(bits as i64)
+                });
+            }
+        }
     }
     if let Some(bool_value) = value.as_bool().and_then(|v| v.as_bool()) {
         return Some(CexValue::Bool(bool_value));

@@ -50,6 +50,9 @@ pub enum Op {
     Mul,
     Pow,
     Div,
+    /// Remainder (`%`), truncated toward zero like Rust/Go/C/TypeScript/Solidity
+    /// (the result takes the sign of the dividend); not Python's floored `%`.
+    Rem,
     Eq,
     Neq,
     Gt,
@@ -196,6 +199,9 @@ pub enum Expr {
     ArrayLit(Vec<Expr>),
     ArrayAccess(String, Box<Expr>),
     BinaryOp(Box<Expr>, Op, Box<Expr>),
+    /// Parser-internal explicit grouping marker. Expression parsing strips it
+    /// while normalizing comparison chains; it is not a runtime expression.
+    Paren(Box<Expr>),
     Block(Box<Stmt>),
     IfThenElse {
         cond: Box<Expr>,
@@ -251,6 +257,174 @@ pub enum Expr {
     },
 }
 
+impl Expr {
+    /// True when evaluating this expression can bind or rebind `name`
+    /// through an embedded statement (`{ let name = …; }`,
+    /// `{ name = …; }`, `{ name.f = …; }`, including under a branch,
+    /// loop, or a lambda the evaluation may call). Conservative —
+    /// meant for fail-closed admission gates.
+    pub fn binds_name(&self, name: &str) -> bool {
+        match self {
+            Expr::Number(_)
+            | Expr::Float(_)
+            | Expr::StringLit(_)
+            | Expr::Variable(_)
+            | Expr::AtomRef { .. } => false,
+            Expr::ArrayLit(elements) => elements.iter().any(|e| e.binds_name(name)),
+            Expr::ArrayAccess(_, index) => index.binds_name(name),
+            Expr::BinaryOp(left, _, right) => left.binds_name(name) || right.binds_name(name),
+            Expr::Paren(inner) => inner.binds_name(name),
+            Expr::Block(stmt) => stmt.binds_name(name),
+            Expr::IfThenElse {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                cond.binds_name(name)
+                    || then_branch.binds_name(name)
+                    || else_branch.binds_name(name)
+            }
+            Expr::Call(_, args) => args.iter().any(|a| a.binds_name(name)),
+            Expr::StructInit { fields, .. } => fields.iter().any(|(_, e)| e.binds_name(name)),
+            Expr::FieldAccess(inner, _) => inner.binds_name(name),
+            Expr::Match { target, arms } => {
+                target.binds_name(name)
+                    || arms.iter().any(|arm| {
+                        arm.guard.as_ref().is_some_and(|g| g.binds_name(name))
+                            || arm.body.binds_name(name)
+                    })
+            }
+            Expr::Async { body } | Expr::Lambda { body, .. } => body.binds_name(name),
+            Expr::Await { expr } => expr.binds_name(name),
+            Expr::CallRef { callee, args } => {
+                callee.binds_name(name) || args.iter().any(|a| a.binds_name(name))
+            }
+            Expr::Perform { args, .. } => args.iter().any(|a| a.binds_name(name)),
+            Expr::ChanSend { channel, value } => channel.binds_name(name) || value.binds_name(name),
+            Expr::ChanRecv { channel } => channel.binds_name(name),
+        }
+    }
+
+    /// Collect the field names written on `base` by `base.f = …`
+    /// statements embedded in this expression (blocks, branches, loops,
+    /// lambdas). Conservative — meant for fail-closed gates.
+    pub fn written_fields(&self, base: &str, out: &mut std::collections::HashSet<String>) {
+        match self {
+            Expr::Number(_)
+            | Expr::Float(_)
+            | Expr::StringLit(_)
+            | Expr::Variable(_)
+            | Expr::AtomRef { .. } => {}
+            Expr::ArrayLit(elements) => {
+                for e in elements {
+                    e.written_fields(base, out);
+                }
+            }
+            Expr::ArrayAccess(_, index) => index.written_fields(base, out),
+            Expr::BinaryOp(left, _, right) => {
+                left.written_fields(base, out);
+                right.written_fields(base, out);
+            }
+            Expr::Paren(inner) => inner.written_fields(base, out),
+            Expr::Block(stmt) => stmt.written_fields(base, out),
+            Expr::IfThenElse {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                cond.written_fields(base, out);
+                then_branch.written_fields(base, out);
+                else_branch.written_fields(base, out);
+            }
+            Expr::Call(_, args) => {
+                for a in args {
+                    a.written_fields(base, out);
+                }
+            }
+            Expr::StructInit { fields, .. } => {
+                for (_, e) in fields {
+                    e.written_fields(base, out);
+                }
+            }
+            Expr::FieldAccess(inner, _) => inner.written_fields(base, out),
+            Expr::Match { target, arms } => {
+                target.written_fields(base, out);
+                for arm in arms {
+                    if let Some(g) = &arm.guard {
+                        g.written_fields(base, out);
+                    }
+                    arm.body.written_fields(base, out);
+                }
+            }
+            Expr::Async { body } | Expr::Lambda { body, .. } => body.written_fields(base, out),
+            Expr::Await { expr } => expr.written_fields(base, out),
+            Expr::CallRef { callee, args } => {
+                callee.written_fields(base, out);
+                for a in args {
+                    a.written_fields(base, out);
+                }
+            }
+            Expr::Perform { args, .. } => {
+                for a in args {
+                    a.written_fields(base, out);
+                }
+            }
+            Expr::ChanSend { channel, value } => {
+                channel.written_fields(base, out);
+                value.written_fields(base, out);
+            }
+            Expr::ChanRecv { channel } => channel.written_fields(base, out),
+        }
+    }
+
+    /// True when evaluating this expression can rebind `name` as a whole
+    /// through an embedded `name = …` statement (a `let name` shadows
+    /// locally and does not count). Conservative — for fail-closed gates.
+    pub fn rebinds_name(&self, name: &str) -> bool {
+        match self {
+            Expr::Number(_)
+            | Expr::Float(_)
+            | Expr::StringLit(_)
+            | Expr::Variable(_)
+            | Expr::AtomRef { .. } => false,
+            Expr::ArrayLit(elements) => elements.iter().any(|e| e.rebinds_name(name)),
+            Expr::ArrayAccess(_, index) => index.rebinds_name(name),
+            Expr::BinaryOp(left, _, right) => left.rebinds_name(name) || right.rebinds_name(name),
+            Expr::Paren(inner) => inner.rebinds_name(name),
+            Expr::Block(stmt) => stmt.rebinds_name(name),
+            Expr::IfThenElse {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                cond.rebinds_name(name)
+                    || then_branch.rebinds_name(name)
+                    || else_branch.rebinds_name(name)
+            }
+            Expr::Call(_, args) => args.iter().any(|a| a.rebinds_name(name)),
+            Expr::StructInit { fields, .. } => fields.iter().any(|(_, e)| e.rebinds_name(name)),
+            Expr::FieldAccess(inner, _) => inner.rebinds_name(name),
+            Expr::Match { target, arms } => {
+                target.rebinds_name(name)
+                    || arms.iter().any(|arm| {
+                        arm.guard.as_ref().is_some_and(|g| g.rebinds_name(name))
+                            || arm.body.rebinds_name(name)
+                    })
+            }
+            Expr::Async { body } | Expr::Lambda { body, .. } => body.rebinds_name(name),
+            Expr::Await { expr } => expr.rebinds_name(name),
+            Expr::CallRef { callee, args } => {
+                callee.rebinds_name(name) || args.iter().any(|a| a.rebinds_name(name))
+            }
+            Expr::Perform { args, .. } => args.iter().any(|a| a.rebinds_name(name)),
+            Expr::ChanSend { channel, value } => {
+                channel.rebinds_name(name) || value.rebinds_name(name)
+            }
+            Expr::ChanRecv { channel } => channel.rebinds_name(name),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Let {
@@ -263,12 +437,13 @@ pub enum Stmt {
         value: Box<Expr>,
         span: Span,
     },
-    /// Array element store: `name[idx] = value`.
+    /// Array element or struct-field store: `name[idx][.field] = value`.
     /// Semantics: Z3 `Array::store(arr, idx, value)` — produces a new logical
     /// array where position `idx` now holds `value`.
     ArrayStore {
         array: String,
         index: Box<Expr>,
+        field_path: Option<Vec<String>>,
         value: Box<Expr>,
         span: Span,
     },
@@ -306,7 +481,152 @@ pub enum Stmt {
     Expr(Expr, Span),
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ArrayStoreTarget {
+    pub(crate) field_path: Option<Vec<String>>,
+    pub(crate) index: Expr,
+    pub(crate) may_repeat: bool,
+}
+
 impl Stmt {
+    /// True when executing this statement can bind or rebind `name`: a
+    /// `name`/`name.field` assignment, an array store through `name`, a
+    /// `let name` shadow, or any of those inside a nested block, branch,
+    /// loop or lambda body (a
+    /// lambda's writes only fire if the lambda is later called, so this
+    /// is conservative — it is meant for fail-closed admission gates).
+    pub fn binds_name(&self, name: &str) -> bool {
+        match self {
+            Stmt::Let { var, value, .. } => var == name || value.binds_name(name),
+            Stmt::Assign { var, value, .. } => {
+                var == name || var.starts_with(&format!("{name}.")) || value.binds_name(name)
+            }
+            Stmt::ArrayStore {
+                array,
+                index,
+                value,
+                ..
+            } => array == name || index.binds_name(name) || value.binds_name(name),
+            Stmt::Block(stmts, _) => stmts.iter().any(|s| s.binds_name(name)),
+            Stmt::While {
+                cond,
+                invariant,
+                decreases,
+                body,
+                ..
+            } => {
+                cond.binds_name(name)
+                    || invariant.binds_name(name)
+                    || decreases.as_ref().is_some_and(|d| d.binds_name(name))
+                    || body.binds_name(name)
+            }
+            Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => body.binds_name(name),
+            Stmt::TaskGroup { children, .. } => children.iter().any(|c| c.binds_name(name)),
+            Stmt::Cancel { .. } => false,
+            Stmt::Expr(expr, _) => expr.binds_name(name),
+        }
+    }
+
+    /// Collect fields written on `base` by field and struct-array stores
+    /// under this statement (nested blocks, branches, loops, lambda bodies).
+    pub fn written_fields(&self, base: &str, out: &mut std::collections::HashSet<String>) {
+        match self {
+            Stmt::Let { value, .. } => value.written_fields(base, out),
+            Stmt::Assign { var, value, .. } => {
+                if let Some((b, field)) = var.split_once('.') {
+                    if b == base {
+                        out.insert(field.to_string());
+                    }
+                }
+                value.written_fields(base, out);
+            }
+            Stmt::ArrayStore {
+                array,
+                index,
+                field_path,
+                value,
+                ..
+            } => {
+                if array == base {
+                    out.insert(
+                        field_path
+                            .as_ref()
+                            .map_or_else(|| "*".to_string(), |path| path.join("_")),
+                    );
+                }
+                index.written_fields(base, out);
+                value.written_fields(base, out);
+            }
+            Stmt::Block(stmts, _) => {
+                for s in stmts {
+                    s.written_fields(base, out);
+                }
+            }
+            Stmt::While {
+                cond,
+                invariant,
+                decreases,
+                body,
+                ..
+            } => {
+                cond.written_fields(base, out);
+                invariant.written_fields(base, out);
+                if let Some(d) = decreases {
+                    d.written_fields(base, out);
+                }
+                body.written_fields(base, out);
+            }
+            Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => body.written_fields(base, out),
+            Stmt::TaskGroup { children, .. } => {
+                for c in children {
+                    c.written_fields(base, out);
+                }
+            }
+            Stmt::Cancel { .. } => {}
+            Stmt::Expr(expr, _) => expr.written_fields(base, out),
+        }
+    }
+
+    pub(crate) fn array_store_targets(&self, base: &str) -> Vec<ArrayStoreTarget> {
+        let mut targets = Vec::new();
+        collect_stmt_array_store_targets(self, base, false, &mut targets);
+        targets
+    }
+
+    /// True when executing this statement can rebind `name` as a whole
+    /// (`name = …`, including inside nested control flow). A `let name`
+    /// shadows locally and does not count, nor does `name.f = …`.
+    pub fn rebinds_name(&self, name: &str) -> bool {
+        match self {
+            // A `let` re-binding `name` replaces the binding wholesale —
+            // the admission gate only allows it for a same-type struct
+            // re-init, which is a whole-aggregate rebind for
+            // spec-validation purposes.
+            Stmt::Let { var, value, .. } => var == name || value.rebinds_name(name),
+            Stmt::Assign { var, value, .. } => var == name || value.rebinds_name(name),
+            Stmt::ArrayStore { index, value, .. } => {
+                index.rebinds_name(name) || value.rebinds_name(name)
+            }
+            Stmt::Block(stmts, _) => stmts.iter().any(|s| s.rebinds_name(name)),
+            Stmt::While {
+                cond,
+                invariant,
+                decreases,
+                body,
+                ..
+            } => {
+                cond.rebinds_name(name)
+                    || invariant.rebinds_name(name)
+                    || decreases.as_ref().is_some_and(|d| d.rebinds_name(name))
+                    || body.rebinds_name(name)
+            }
+            Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => body.rebinds_name(name),
+            Stmt::TaskGroup { children, .. } => children.iter().any(|c| c.rebinds_name(name)),
+            Stmt::Cancel { .. } => false,
+            Stmt::Expr(expr, _) => expr.rebinds_name(name),
+        }
+    }
+
     /// Get the Span associated with this statement.
     // NOTE: span() is infrastructure for future diagnostic passes that need statement-level source locations.
     #[allow(dead_code)]
@@ -321,6 +641,156 @@ impl Stmt {
             | Stmt::TaskGroup { span, .. }
             | Stmt::Cancel { span, .. } => span,
             Stmt::Block(_, span) | Stmt::Expr(_, span) => span,
+        }
+    }
+}
+
+fn collect_expr_array_store_targets(
+    expr: &Expr,
+    base: &str,
+    may_repeat: bool,
+    targets: &mut Vec<ArrayStoreTarget>,
+) {
+    match expr {
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => {}
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                collect_expr_array_store_targets(element, base, may_repeat, targets);
+            }
+        }
+        Expr::ArrayAccess(_, index) => {
+            collect_expr_array_store_targets(index, base, may_repeat, targets);
+        }
+        Expr::BinaryOp(left, _, right) => {
+            collect_expr_array_store_targets(left, base, may_repeat, targets);
+            collect_expr_array_store_targets(right, base, may_repeat, targets);
+        }
+        Expr::Paren(inner) => collect_expr_array_store_targets(inner, base, may_repeat, targets),
+        Expr::Block(stmt) => {
+            collect_stmt_array_store_targets(stmt, base, may_repeat, targets);
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_expr_array_store_targets(cond, base, may_repeat, targets);
+            collect_stmt_array_store_targets(then_branch, base, may_repeat, targets);
+            collect_stmt_array_store_targets(else_branch, base, may_repeat, targets);
+        }
+        Expr::Call(_, args) => {
+            for arg in args {
+                collect_expr_array_store_targets(arg, base, may_repeat, targets);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_expr_array_store_targets(value, base, may_repeat, targets);
+            }
+        }
+        Expr::FieldAccess(inner, _) => {
+            collect_expr_array_store_targets(inner, base, may_repeat, targets);
+        }
+        Expr::Match { target, arms } => {
+            collect_expr_array_store_targets(target, base, may_repeat, targets);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_expr_array_store_targets(guard, base, may_repeat, targets);
+                }
+                collect_stmt_array_store_targets(&arm.body, base, may_repeat, targets);
+            }
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => {
+            collect_stmt_array_store_targets(body, base, true, targets);
+        }
+        Expr::Await { expr } => {
+            collect_expr_array_store_targets(expr, base, may_repeat, targets);
+        }
+        Expr::CallRef { callee, args } => {
+            collect_expr_array_store_targets(callee, base, may_repeat, targets);
+            for arg in args {
+                collect_expr_array_store_targets(arg, base, may_repeat, targets);
+            }
+        }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                collect_expr_array_store_targets(arg, base, may_repeat, targets);
+            }
+        }
+        Expr::ChanSend { channel, value } => {
+            collect_expr_array_store_targets(channel, base, may_repeat, targets);
+            collect_expr_array_store_targets(value, base, may_repeat, targets);
+        }
+        Expr::ChanRecv { channel } => {
+            collect_expr_array_store_targets(channel, base, may_repeat, targets);
+        }
+    }
+}
+
+fn collect_stmt_array_store_targets(
+    stmt: &Stmt,
+    base: &str,
+    may_repeat: bool,
+    targets: &mut Vec<ArrayStoreTarget>,
+) {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            collect_expr_array_store_targets(value, base, may_repeat, targets);
+        }
+        Stmt::ArrayStore {
+            array,
+            index,
+            field_path,
+            value,
+            ..
+        } => {
+            collect_expr_array_store_targets(value, base, may_repeat, targets);
+            collect_expr_array_store_targets(index, base, may_repeat, targets);
+            if array == base {
+                targets.push(ArrayStoreTarget {
+                    field_path: field_path.clone(),
+                    index: (**index).clone(),
+                    may_repeat,
+                });
+            }
+        }
+        Stmt::Block(stmts, _) => {
+            for stmt in stmts {
+                collect_stmt_array_store_targets(stmt, base, may_repeat, targets);
+            }
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            collect_expr_array_store_targets(cond, base, true, targets);
+            collect_expr_array_store_targets(invariant, base, true, targets);
+            if let Some(decreases) = decreases {
+                collect_expr_array_store_targets(decreases, base, true, targets);
+            }
+            collect_stmt_array_store_targets(body, base, true, targets);
+        }
+        Stmt::Acquire { body, .. } => {
+            collect_stmt_array_store_targets(body, base, may_repeat, targets);
+        }
+        Stmt::Task { body, .. } => {
+            collect_stmt_array_store_targets(body, base, true, targets);
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                collect_stmt_array_store_targets(child, base, true, targets);
+            }
+        }
+        Stmt::Cancel { .. } => {}
+        Stmt::Expr(expr, _) => {
+            collect_expr_array_store_targets(expr, base, may_repeat, targets);
         }
     }
 }
@@ -490,6 +960,10 @@ pub struct Atom {
     pub is_async: bool,
     pub trust_level: TrustLevel,
     pub max_unroll: Option<usize>,
+    /// Per-atom `Str` literal bound (`str_bound: N;`) — the maximum
+    /// byte length a `let`-bound string literal may declare under the
+    /// composite profiles. `None` keeps the default `STR_BOUND`.
+    pub str_bound: Option<usize>,
     pub invariant: Option<String>,
     pub effects: Vec<Effect>,
     /// Plan 18: Explicit return type annotation (e.g., `-> Str`). Defaults to None (i64).

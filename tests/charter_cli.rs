@@ -1,3 +1,7 @@
+use mumei_core::proof_cert::{
+    refresh_certificate_integrity, status, LeanResultMetadata, ProofCertificate,
+};
+use mumei_core::verification;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -205,6 +209,75 @@ fn lock_check_json_and_gate_exit_codes() {
         ],
     );
     assert_eq!(missing_input.status.code(), Some(4));
+}
+
+#[test]
+fn charter_grade_gate_accepts_an_opted_in_lean_dual_check() {
+    let dir = TestDir::new("lean_dual_grade");
+    std::fs::write(
+        dir.path().join("spec.charter.mm"),
+        "trusted atom identity(x: i64) -> i64 requires: true; ensures: result == x; body: x;",
+    )
+    .expect("write charter");
+    std::fs::write(
+        dir.path().join("impl.mm"),
+        "atom identity(x: i64) -> i64 requires: true; ensures: result == x; body: x;",
+    )
+    .expect("write implementation");
+    lock_charter(dir.path(), "spec.charter.mm");
+    certify(dir.path(), "impl.mm");
+
+    let cert_path = dir.path().join("impl.proof.json");
+    let mut cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&cert_path).expect("read certificate"))
+            .expect("parse certificate");
+    let atom = cert
+        .atoms
+        .iter_mut()
+        .find(|atom| atom.name == "identity")
+        .unwrap();
+    assert_eq!(atom.z3_check_result, status::Z3_UNSAT);
+    atom.lean_dual_check = Some(LeanResultMetadata {
+        status: status::LEAN_STATUS_VERIFIED.to_string(),
+        theorem_name: "identity_dual".to_string(),
+        translator_version: verification::LEAN_TRANSLATOR_VERSION.to_string(),
+        bridge_lemma_hash: verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
+        kernel_axioms: Some(vec!["propext".to_string()]),
+        axiom_audit: Some("passed".to_string()),
+        ..Default::default()
+    });
+    refresh_certificate_integrity(&mut cert);
+    std::fs::write(
+        &cert_path,
+        serde_json::to_vec_pretty(&cert).expect("serialize dual-check certificate"),
+    )
+    .expect("write dual-check certificate");
+
+    let check = run(
+        dir.path(),
+        &[
+            "charter",
+            "check",
+            "impl.mm",
+            "--charter",
+            "spec.charter.mm",
+            "--cert",
+            "impl.proof.json",
+            "--allow-lean-verified",
+            "--require-grade",
+            "G5",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        check.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let report: Value = serde_json::from_slice(&check.stdout).expect("parse charter report");
+    assert_eq!(report["atoms"][0]["effective_grade"], "G5");
 }
 
 #[test]
