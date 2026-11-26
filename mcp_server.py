@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 # ws5 / SI-5 Phase 1-C: std/ graph helpers live in std_graph_lib so that
 # visualizer/generate_graph.py (and any other consumer) can use them
@@ -42,7 +42,7 @@ from visualizer.proof_graph_lib import (  # noqa: E402
     render_proof_graph_dot,
 )
 
-mcp = FastMCP("Mumei-Forge")
+mcp = MCPServer("Mumei-Forge")
 REPO_ROOT = Path(__file__).parent.absolute()
 
 SPEC_GUIDELINE_SUMMARY: dict[str, Any] = {
