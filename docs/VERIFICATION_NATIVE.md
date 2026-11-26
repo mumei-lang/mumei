@@ -2264,9 +2264,10 @@ remainder widths. A register-source one-operand `imulq` models the signed
 128-bit product in `%rdx:%rax`. Each division path must prove a nonzero
 divisor and that the quotient fits the destination width under the bounded
 input domain, loop-exit domain when present, source definedness, call-result
-bounds, path conditions, and input/register bindings. Failure to prove that obligation is
-`division_trap`; memory operands and other division forms remain unsupported.
-This is a bounded no-trap obligation, not a runtime or ABI guarantee.
+bounds, path conditions, and input/register bindings. A satisfiable violation of that
+obligation is `division_trap`; a solver `unknown` stays inconclusive rather than becoming
+either a trap witness or a successful comparison. Memory operands and other division forms
+remain unsupported. This is a bounded no-trap obligation, not a runtime or ABI guarantee.
 
 `mov`, `movabsq`, `lea`, `not`, `push`, `pop`, and `nop` preserve flags.
 Initial flags and flags after other arithmetic or calls are unknown, so a

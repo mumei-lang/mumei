@@ -422,6 +422,10 @@ pub fn check_function_against_ir<'ctx>(
     let function_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     let lifted = match lift(&instructions, function_size, model, call_targets, context) {
         Ok(lifted) => lifted,
+        Err(FunctionOutcome::Unknown) => return IrObjectEquivalence::NotLiftable("solver_unknown"),
+        Err(FunctionOutcome::OutsideProfile(reason)) => {
+            return IrObjectEquivalence::NotLiftable(reason);
+        }
         Err(_) => return IrObjectEquivalence::NotLiftable("lift_failed"),
     };
     if lifted.paths.is_empty() {
