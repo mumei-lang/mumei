@@ -112,7 +112,6 @@ fn find_c_linker() -> Result<PathBuf, String> {
 
 /// Locate the libz3 directory inside `~/.mumei/toolchains/z3-*/` (`bin` on
 /// Windows-style archives, `lib` as a fallback) provisioned by `mumei setup`.
-#[cfg(not(windows))]
 fn find_bundled_z3_lib_dir() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     let toolchains = home.join(".mumei/toolchains");

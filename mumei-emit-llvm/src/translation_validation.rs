@@ -12,6 +12,7 @@ use mumei_core::semantic_contract::{
     PURE_I64_WRAPPING_PROFILE,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::os::raw::c_char;
 use z3::{
     ast::{Array, Ast, Bool, BV},
     Config, Context, SatResult, Solver,
@@ -2311,10 +2312,10 @@ const OPT_FUNCTION_ATTRS: &[&str] = &[
 unsafe fn check_opt_function_attributes(function: LLVMValueRef, count: u32) -> Result<()> {
     let allowed: std::collections::HashSet<u32> = OPT_FUNCTION_ATTRS
         .iter()
-        .map(|name| LLVMGetEnumAttributeKindForName(name.as_ptr() as *const i8, name.len()))
+        .map(|name| LLVMGetEnumAttributeKindForName(name.as_ptr() as *const c_char, name.len()))
         .filter(|kind| *kind != 0)
         .collect();
-    let memory_kind = LLVMGetEnumAttributeKindForName(b"memory".as_ptr() as *const i8, 6);
+    let memory_kind = LLVMGetEnumAttributeKindForName(b"memory".as_ptr() as *const c_char, 6);
     let mut attrs = vec![std::ptr::null_mut(); count as usize];
     LLVMGetAttributesAtIndex(function, u32::MAX, attrs.as_mut_ptr());
     for attr in attrs {
@@ -2399,7 +2400,7 @@ fn unrestricted_memory_claim() -> u64 {
 /// attribute's encoded effects value, `0` meaning `memory(none)`.
 unsafe fn callee_memory_claim(callee: LLVMValueRef) -> Option<u64> {
     let count = LLVMGetAttributeCountAtIndex(callee, u32::MAX);
-    let memory_kind = LLVMGetEnumAttributeKindForName(b"memory".as_ptr() as *const i8, 6);
+    let memory_kind = LLVMGetEnumAttributeKindForName(b"memory".as_ptr() as *const c_char, 6);
     let mut attrs = vec![std::ptr::null_mut(); count as usize];
     LLVMGetAttributesAtIndex(callee, u32::MAX, attrs.as_mut_ptr());
     for attr in attrs {
