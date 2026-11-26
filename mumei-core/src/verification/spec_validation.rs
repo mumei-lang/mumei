@@ -10,7 +10,7 @@ use super::translator::{
 };
 use super::types::Env;
 use super::SpecContradiction;
-use super::{parse_expression, Atom, Bool, Config, Context, HashMap, SatResult, Solver};
+use super::{Atom, Bool, Config, Context, HashMap, SatResult, Solver};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -899,8 +899,18 @@ pub(crate) fn assert_clause<'a>(
     if trimmed.is_empty() || trimmed == "true" {
         return Ok(ClauseLoweringOutcome::Applied);
     }
-    let clause_ast = parse_expression(trimmed);
     let marks = super::translator::obligation_marks(vc);
+    let clause_ast = match crate::parser::parse_expression_checked(trimmed) {
+        Ok(ast) => ast,
+        Err(failures) => {
+            super::translator::discard_obligations_since(vc, marks);
+            return Ok(ClauseLoweringOutcome::Skipped(unsupported_clause_warning(
+                label,
+                trimmed,
+                &failures.join("; "),
+            )));
+        }
+    };
     let clause_z3 = match expr_to_z3_with_domain_obligations(vc, &clause_ast, env, None) {
         Ok(value) => value,
         Err(err) if is_unsupported_clause_error(&err) => {
@@ -959,8 +969,17 @@ pub(crate) fn assert_negated_clause<'a>(
         solver.assert(&Bool::from_bool(vc.ctx, false));
         return Ok(ClauseLoweringOutcome::Applied);
     }
-    let clause_ast = parse_expression(trimmed);
     let marks = super::translator::obligation_marks(vc);
+    let clause_ast = match crate::parser::parse_expression_checked(trimmed) {
+        Ok(ast) => ast,
+        Err(failures) => {
+            return Ok(ClauseLoweringOutcome::Skipped(unsupported_clause_warning(
+                label,
+                trimmed,
+                &failures.join("; "),
+            )));
+        }
+    };
     let clause_z3 = match expr_to_z3_with_domain_obligations(vc, &clause_ast, env, None) {
         Ok(value) => value,
         Err(err) if is_unsupported_clause_error(&err) => {

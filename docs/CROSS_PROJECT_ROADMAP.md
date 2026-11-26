@@ -126,6 +126,23 @@ guarantees and deferred WASM are unchanged; no external verifier is adopted.
 The [Agent settings contract](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-typed-configuration-follow-up)
 owns local API details.
 
+### Wave 2 consumable adapter-settings policy
+
+Agent's `verify-plan` and `verify-schedule` policy documents now accept the
+same host-declared `adapter_settings` contract as the in-memory planner API:
+a closed list of `[adapter_id, [[name, value], ...]]` entries. Malformed
+entries, unknown or unregistered adapters, duplicate settings, sensitive or
+invocation channels and values outside the adapter's declared schema fail
+before routing or fallback. Raw overrides are not echoed in the serialized
+policy, CLI output or a partial plan; the sensitive-channel regression checks
+both output streams and the absent output file.
+
+Settings remain planning metadata only. They are not passed to child argv,
+stdin or environment, and they do not authorize execution, transport secrets,
+change Evidence meaning/acceptance or promote grades. The
+[Agent policy contract](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-consumable-adapter-settings-policy)
+owns local API details under this implementation order.
+
 ### Wave 2 bounded source-input preparation
 
 Agent's opt-in C04/C11 planner can constrain an explicit input-format declaration.
@@ -1526,6 +1543,22 @@ promoting hash consistency to authenticity, translation validation or an
 metadata and wider ABI/runtime semantics remain unverified. This is partial
 C08 and a narrow C10 identity-check foundation, not completion of either item.
 
+The later [C08 object descriptor signing slice](VERIFICATION_NATIVE.md#detached-object-descriptor-signing-partial-c08)
+lets the producer emit a detached Ed25519 envelope over the exact object
+acceptance descriptor bytes after pinned checks succeed. It leaves the
+attempt fingerprint, authenticity status, and acceptance policy unchanged.
+This is partial C08, not C02 Evidence promotion or C10 consumer trust policy;
+the canonical dependency order is unchanged.
+
+The paired C10 consumer replay now accepts the same detached signature chain:
+`native-bundle recheck-object-acceptance` hashes the exact saved descriptor
+bytes, verifies the pinned Ed25519 binding before re-running fresh acceptance,
+and applies only the key-label/freshness/registry/revocation gates explicitly
+supplied by the caller. Omitting the signature preserves consistency-only
+replay. This is a partial C08×C10 byte-binding and consumer-policy slice, not
+real-world producer identity, historical execution, dependency closure,
+reusable Evidence, grade promotion or final-artifact assurance.
+
 ### Wave 3 fixed-point assignment facts over the explicit Go CFG
 
 Agent's `control_flow.assignment_facts(body, graph)` runs the first
@@ -1776,8 +1809,10 @@ unsupported; `select` admits in the Go interprocedural frontier
 
 Agent's C07 fragment now admits `var_declaration`: one name per
 `var_spec` with at most one value, scalar bindings only, and `var x T`
-binding the dep-free zero value. Multi-name specs, non-scalar bindings,
-`const` and grouped `var (...)` stay declared gaps. See the
+binding the dep-free zero value. That initial slice kept multi-name
+specs, non-scalar bindings, `const` and grouped `var (...)` as declared
+gaps; later slices expanded those boundaries — grouped vars are mirrored
+in the dedicated section below. See the
 [Agent var declarations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-var-declarations-in-bodies).
 
 ### Wave 3 effect-free control statements in scalar summaries
@@ -1954,9 +1989,43 @@ reads: a constant expression can never read a variable, so a
 scalar-typed `constant` binding always resolves to an empty dependency
 set and the declaration writes nothing — `iota` is dep-free, and spec
 values are still checked for fragment legality. Non-scalar constants
-stay declared gaps, grouped `const ( ... )` remains a parser gap, and
-this is dependency analysis, not constant evaluation. See the
-[Agent scalar const declarations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-scalar-const-declarations-and-reads).
+stay declared gaps, and this is dependency analysis, not constant
+evaluation. Grouped `const ( ... )` declarations admit the same scalar
+fragment, including Go's implicit no-value repetition: repetition is
+parameter-independent because constants cannot read variables, not
+because `iota` or the repeated value is evaluated. Empty `const ()` is
+a no-op. Compact valid forms without a final separator are admitted
+through narrow tree-sitter recovery: original byte offsets are kept,
+comment text never supplies the terminator, nested compact groups inside
+function literals are validated without shifting offsets, recognized
+zero-width final-spec `ERROR` wrappers are flattened, and the
+semicolon-patched parse must otherwise be clean. Unrelated parse errors
+still fail closed. Non-scalar implicit
+repetitions stay outside the fragment. See the
+[Agent scalar const declarations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-scalar-const-declarations-and-reads)
+and the
+[grouped const slice](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-grouped-const-declarations-and-implicit-repetition).
+
+### Wave 3 grouped var declarations
+
+Agent's scalar fragment now flattens grouped `var ( ... )` declarations
+through the same binding contract as individual vars: explicit values
+bind pairwise against the pre-state, zero-value forms are dep-free,
+multi-name specs follow the existing declaration rules, `_` discards,
+and empty `var ()` groups are no-ops. Each grouped spec is a separate
+declaration in source order, while names within one multi-name spec enter
+scope only after that spec's initializer list. Supported channel,
+function-value, pointer and composite shapes keep their individual-var
+semantics. Compact valid forms without a final separator use the same
+narrow tree-sitter recovery as grouped consts: original byte offsets are
+kept, comment text never supplies the terminator, nested compact groups
+inside function literals are validated without shifting offsets,
+recognized zero-width final-spec `ERROR` wrappers are flattened, and the
+semicolon-patched parse must otherwise be clean. Unrelated parse errors
+still fail closed. This is dependency analysis, not proof, evidence
+or audit verdict integration. See the
+[Agent grouped var slice](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-grouped-var-declarations).
+
 
 ### Wave 3 remaining scalar binary operators
 
@@ -4115,6 +4184,19 @@ exit 3. This does not validate the register convention, CRT/loader semantics,
 OS exit-status semantics, ABI/runtime behavior, authenticity or historical
 execution.
 
+Core's `mumei native-bundle recheck-object-acceptance` is the consumer side of
+that descriptor. It rejects malformed, duplicate-key, foreign or non-accepted
+saved descriptors, then reruns `accept-object` on the pinned inputs. It
+recomputes `evidence_fingerprint` and requires the saved descriptor to equal
+the fresh one field for field. A stale descriptor from other attempt inputs is
+rejected as unbound, and a tampered field is rejected as different. The
+agent's `native-object-acceptance-recheck` route and MCP tool
+(mumei-agent#1344) run it as a declared attempt. Flat `{f64,i64}` and
+`{i64,f64}` return pairs admitted by C09 (#1470) replay the same way. This is
+partial C10 delivery, not C10 completion. Descriptor and producer
+authenticity, historical execution, dependency or toolchain closure, and
+register-convention, ABI/runtime/OS or final-artifact assurance remain open.
+
 The future mumei-agent `native-object-accept` route maps the Core check
 `object_source_machine_code_correspondence` to its agent-owned
 `object_translation_correspondence` vocabulary. The Core descriptor does not
@@ -6159,6 +6241,212 @@ the byte payload piped to the attempt process's standard input through
 without it. Scheduled attempts never inherit the parent's stdin: no
 declared feed means a closed pipe (deterministic EOF).
 
+### Host-declared source stdin preparation (mumei-agent #1346)
+
+[mumei-agent#1346](https://github.com/mumei-lang/mumei-agent/pull/1346)
+extends `verify-schedule`'s host argv map with the closed object shape
+`{"argv": [...], "stdin": "source"}`; the object may also omit `stdin`,
+which behaves like the legacy argv array. Only the exact `source` declaration
+pipes the source bytes already bound into the schedule to that attempt's
+stdin; legacy argv arrays and stdin-less objects mean no host feed. The host declaration
+takes precedence over manifest `attempt_stdin`, source bytes never enter
+diagnostics or schedule output, and a source larger than the runner's
+bounded feed makes that adapter fail closed as `not_dispatched` so
+permitted fallback can continue. Without any declared feed the child still
+receives a closed pipe, never inherited parent stdin. This is input
+preparation only, not Evidence acceptance, output meaning or grade
+promotion; C11 remains partial.
+
+### Incomplete adapter output fail-closed handoff (mumei-agent #1347)
+
+[mumei-agent#1347](https://github.com/mumei-lang/mumei-agent/pull/1347)
+makes every Core representation/requirement handoff refuse an
+`AttemptOutput` whose capture is declared incomplete before any Core
+process or pipe I/O. The capture-completeness bit remains a host
+declaration, not detection of every truncation; when that declaration is
+present, a captured prefix cannot be mistaken for the whole evidence
+document merely because it is well formed. Recorded checks become `failed`,
+scheduling keeps the
+host-declared exit-code selection separate, `evidence_acceptance` is not
+accepted, and a stale promotable triple is not left behind. Complete
+captures are unchanged. This is transport integrity only — not output
+meaning, Evidence truth or grade promotion; the C11 contract remained
+partial before the acceptance-completion slice below.
+
+### C11 plugin contract acceptance completion (mumei-agent #1348)
+
+[mumei-agent#1348](https://github.com/mumei-lang/mumei-agent/pull/1348)
+pins the issue-level C11 acceptance matrix in
+`tests/test_c11_plugin_contract_acceptance.py`: declarative adapter
+registration/replacement/selection/disable/configuration, version and
+execution-location policy, budgets, explicit fallback, missing or
+incompatible tools, invalid settings, timeouts, malformed, partial or
+conflicting outputs, forbidden secret/invocation/egress channels, and the
+boundary that scheduling never claims Evidence acceptance or grade
+promotion. Partial output may still carry a host-declared exit-code
+`selected` dispatch outcome, but it fails closed before Core I/O and cannot
+become Evidence acceptance or promotion. This completes the C11 plugin
+contract as a verification-native orchestration contract; it does not adopt
+or endorse an external verifier, make backend self-reports proof, make
+Semantic IR universal, hide lossy transformations, or run Z3 and external
+verifiers unconditionally in parallel. External adoption still requires
+separate maintenance, license/distribution/commercial, CI,
+toolchain-compatibility and cost review.
+
+The sections below remain chronological implementation notes. Statements
+there that C11 "stays partial" describe the state when those earlier slices
+landed, not the current plugin-contract status after #1348; Core-owned
+Evidence meaning/acceptance and grade promotion remain outside the completed
+orchestration contract.
+
+### C13 incomplete-output regression gate (mumei-demo #203)
+
+[mumei-demo#203](https://github.com/mumei-lang/mumei-demo/pull/203) extends
+the optional `evidence_check_schedule` scenario and integration CI with a
+large-output adapter regression. The adapter emits more than the agent's
+64 KiB capture bound, while the first exactly 64 KiB are a valid padded
+`mumei.verification-evidence/v1` document. The scenario therefore fails if a
+truncated prefix can be passed to Core as a complete document: scheduling may
+retain the host-declared exit-code `selected` dispatch outcome, but
+`evidence_check` must be `failed` and `evidence_acceptance.accepted` must
+be false. A
+probe-validated recording wrapper must record no Core invocation for the
+incomplete output, distinguishing rejection before Core I/O from a Core-side
+rejection. This is a C13 confusion regression only — not adapter adoption,
+output meaning, Evidence truth or grade promotion. C13 remains ongoing as
+later planner/native/translation milestones land.
+
+### C13 planner selection-policy regression gate (mumei-demo #204)
+
+[mumei-demo#204](https://github.com/mumei-lang/mumei-demo/pull/204) extends
+the optional `verify_plan` scenario and integration CI with host-declared
+planner-policy regressions. An explicit lower-priority adapter must record
+`selected_explicit` rather than being confused with the priority route; a
+missing explicit adapter with fallback denied must leave `selected` null and
+block the automatic route; and a pinned tool-version mismatch must exclude
+the affected adapter. The scenario checks plan shape keys explicitly, uses
+checks that still fail under `PYTHONOPTIMIZE`, injects only a fake sentinel
+into each new planning invocation, and binds the new fixtures/outputs into
+the input-hash plus no-execution/no-secret boundary gate. These are C13
+selection/exclusion regressions only — not adapter execution, output meaning,
+Evidence truth or grade promotion. C13 remains ongoing as later
+planner/native/translation milestones land.
+
+### C13 planner adapter-settings regression gate (mumei-demo #205)
+
+[mumei-demo#205](https://github.com/mumei-lang/mumei-demo/pull/205) extends
+the optional `verify_plan` scenario from selection/exclusion into consumable
+adapter configuration. A schema-valid explicit route must record the exact
+Boolean, bounded-integer and closed-choice values with their decoded types and
+pinned `mumei.adapter-configuration/v1` fingerprint, while raw policy overrides
+stay out of the serialized policy. Out-of-schema and sensitive-channel settings
+must reject before routing, fallback or a partial plan; both output streams are
+scanned for plan fragments and the fake sentinel value. The fixtures and outputs
+are inside the input-hash plus no-execution/no-secret boundary gate. These are
+selection/configuration/exclusion regressions only — not adapter execution,
+output meaning, Evidence truth or grade promotion. C13 remains ongoing as later
+planner/native/translation milestones land.
+
+### C13 contract benchmark outcome taxonomy (mumei-demo #206)
+
+[mumei-demo#206](https://github.com/mumei-lang/mumei-demo/pull/206) separates
+contract-benchmark outcomes that previously shared one inconclusive bucket.
+False acceptance, false positive, unsupported input/generated output/capability,
+residual inconclusive outcome, environment failure and budget exhaustion are
+counted independently per checked variant. New verifier attempts record wall
+seconds and the declared timeout budget, including vacuity controls; provider
+usage remains separate model time and cost. Reports show measured versus
+expected verifier-call coverage so old rows and partial `--only` refreshes do
+not look fully instrumented. Certificate emission/rechecks, case orchestration
+and provider calls remain outside the verifier-time measurement. This is
+measurement and regression control only — not proof truth, Evidence acceptance
+or grade promotion. C13 remains ongoing as later planner/native/translation
+milestones land.
+
+### C13 mutation control outcome taxonomy (mumei-demo #207)
+
+[mumei-demo#207](https://github.com/mumei-lang/mumei-demo/pull/207) applies the
+same measurement separation to the mutation-control negative lane. Surviving
+mutants are reported as potential false acceptance, while invalid mutant
+outcomes are counted independently as unsupported input/capability, residual
+inconclusive outcome, environment failure or budget exhaustion. Baseline
+fixed-port outcomes are counted separately; a non-proven baseline yields no
+mutation score and is no longer misreported as a port with no mutable token.
+New runs retain wall seconds and declared timeout budget for baseline and
+mutant verifier calls, with measured-versus-expected coverage explicit for
+historical or partially refreshed rows. The regression-gate summary carries
+the same invalid-outcome breakdown. Mutation generation, report rendering and
+runner orchestration remain outside verifier time. This is measurement and
+regression control only — not proof truth, Evidence acceptance or grade
+promotion. C13 remains ongoing as later planner/native/translation milestones
+land.
+
+### C13 regression gate outcome taxonomy (mumei-demo #208)
+
+[mumei-demo#208](https://github.com/mumei-lang/mumei-demo/pull/208) applies the
+same measurement separation to changes under a pinned contract. Regressions
+let through remain the false-acceptance surface and good changes blocked
+remain the false-positive surface, while unresolved regression and keep-fix
+outcomes are counted independently as unsupported input/generated
+output/capability, residual inconclusive outcome, environment failure or
+budget exhaustion. Subtype medians are explicitly independent of the total
+unresolved-count median. Model time is the sum of usage-recorded provider
+responses, excluding retry backoff and failed provider attempts, and stays
+separate from verifier wall time and declared timeout budget. The report
+shows measured-versus-expected verifier-call coverage for historical or
+partially refreshed rows. Certificate emission/rechecks, gate orchestration
+and report rendering remain outside verifier time. This is measurement and
+regression control only — not proof truth, Evidence acceptance or grade
+promotion. C13 remains ongoing as later planner/native/translation milestones
+land.
+
+### C13 machine-TV outcome taxonomy (mumei-demo #209)
+
+[mumei-demo#209](https://github.com/mumei-lang/mumei-demo/pull/209) applies the
+same separation to the source-to-machine native lane. Acceptance of a refuted
+buggy port is counted as false acceptance; fresh source rejection of a proven
+fixed port is counted as a false positive; LLVM/object mismatches are counted
+as translation mismatches rather than source-level false positives.
+Unsupported profile outcomes, residual inconclusive outcomes, environment
+failures and budget exhaustion are counted independently. Source Z3 checks and
+the vacuity control keep wall time and declared timeout budget separate from
+native build, acceptance and diagnostic recheck commands, with
+measured-versus-expected coverage explicit for older or partial rows. This is
+measurement and regression control only — not proof truth, Evidence acceptance
+or grade promotion. C13 remains ongoing as later planner/native/translation
+milestones land.
+
+### C13 native replay outcome taxonomy (mumei-demo #210)
+
+[mumei-demo#210](https://github.com/mumei-lang/mumei-demo/pull/210) applies the
+same separation to native replay evidence. Unresolved reference-port,
+LLM-witness reference-port and LLM-port verdicts are counted independently as
+unsupported input/capability, residual inconclusive outcome, environment
+failure or budget exhaustion. Port verification wall time and declared timeout
+budget stay separate from native driver execution, replay input preparation and
+report rendering. Verifier calls rejected before execution do not create
+expected measurement calls, while historical rows expose measured-versus-
+expected coverage instead of looking fully instrumented. This is measurement
+and regression control only — not proof truth, Evidence acceptance or grade
+promotion. C13 remains ongoing as later planner/native/translation milestones
+land.
+
+### C13 port-divergence outcome taxonomy (mumei-demo #211)
+
+[mumei-demo#211](https://github.com/mumei-lang/mumei-demo/pull/211) applies the
+same separation to the translation diagnostic that replays reference
+counterexamples on accepted buggy LLM ports. Diverged, still-refuting and
+inconclusive rows remain distinct; unresolved reference-port and LLM-port
+verdicts are counted independently as unsupported input/generated output or
+capability, residual inconclusive outcome, environment failure or budget
+exhaustion. Reference verdicts are measured once per case/input because they
+are reused, while LLM ports are measured per accepted row/input. Missing or
+invalid generated bodies and pre-verifier input failures do not create
+expected verifier-call measurement slots. Verifier startup failure is an
+environment failure, and benchmark certificate-writing paths fail closed
+before unlinking recorded certificates. This is measurement and regression
+control only — not proof truth, Evidence acceptance or grade promotion.
+
 ### Manifest-declared attempt memory bound (mumei-agent #993)
 
 [mumei-agent#993](https://github.com/mumei-lang/mumei-agent/pull/993)
@@ -6939,7 +7227,7 @@ Every PR in this area should review this file together with the local roadmap it
 
 ## 現状サマリ
 
-**mumei (コンパイラ)**: P1〜P34 を実装済み。P34 Claim Book / Seal Grade に続き、charter、erosion、negative controls / vacuity、test observations、certificate dependency freshness、opt-in local proof store を実装（P35〜P39）。エフェクトシステム、MIR、temporal verification、modular verification、LSP、concurrency codegen、proof certificate / proof graph、capability Stage 1、nlsat 先行経路まで到達。 v0.6.23 リリース済み（P34〜P39 を含む）。
+**mumei (コンパイラ)**: P1〜P34 を実装済み。P34 Claim Book / Seal Grade に続き、charter、erosion、negative controls / vacuity、test observations、certificate dependency freshness、opt-in local proof store を実装（P35〜P39）。エフェクトシステム、MIR、temporal verification、modular verification、LSP、concurrency codegen、proof certificate / proof graph、capability Stage 1、nlsat 先行経路まで到達。 v0.7.0 リリース済み（P34〜P39 と v0.6.23 以降の verifier/evidence/CLI 更新を含む）。
 
 **mumei-agent**: V1-A〜V1-E（spec health / 監査 / 双方向整合 / 人向け UX）全項目実装済み。Track A データフロー層（A-1〜A-6）、Lean AI 証明生成（B-4〜B-6、`--external-proofs` 経路）、`language_patterns` レジストリ（tree-sitter scope-aware、confidence フィールド付き）まで到達。Forge Mode は Infrastructure Complete / Expansion In Progress（cron 稼働中）。2026-10-24〜26 の #616〜#627 で trusted atom の satisfiability-aware `all_verified`、charter / erosion / controls guard、test harvesting と observation-feedback spec extraction、dependency-aware proliferation を追加。#630 で classic heal に negative-controls による修正案の順位付け（`--controls-gate`、既定 off）を追加。#631 / #633 で `extract-spec --from-tests` が `inconclusive` / `outside_requires` を再試行の指示と警告にし、後の再試行が不正なときは soft feedback だけの仕様に戻る。共有する sibling claim は machine-verified G4 に限定。
 
@@ -8613,6 +8901,9 @@ capability model は Stage 1 のみが opt-in 拡張として上積みされて�
 - ✅ **追補（2026-11-24, 82）— 追補（81）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: native-bundle — accept-object の emit scope を `native_bundle_object_translation_correspondence[_without_object_link]` に切替（[mumei#1439](https://github.com/mumei-lang/mumei/pull/1439)。DESIGN_OBJECT_ACCEPTANCE §6 Step 3 — agent#1323 が新旧両 scope を受理済みのため移行。e2e で正常受理・unchecked→inconclusive・inconsistent→reject・canonical_argv 欠損→inconclusive を pin、`_without_object_link` scope は単体テスト（fresh ELF fixture から uncheckable 経路に到達不能）。agent-owned `object_translation_correspondence` 非 emit は項目レベルの断言に更新。旧 scope 値は語彙として維持・emit 経路は新値のみ。監査 item 4 の非 deferred 全段階が完了、残は Step 4（subset 拡張、deferred 凍結中）のみ）。mumei-agent: 新規なし。mumei-demo: 新規シナリオなし。いずれも各 PR の境界のまま。
 - ✅ **追補（2026-11-24, 83）— 追補（82）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: translation-validation — hir leaf エンコーダの composite call site モデル化（[mumei#1441](https://github.com/mumei-lang/mumei/pull/1441)。#1437/#1439 の acceptance ゲートが表面化した過剰弾きリグレッションの修正 — leaf エンコーダが全 call をスカラー `mumei_call_<name>_<arity>` として符号化し IR 側の per-field 分解と不一致となり composite aggregate 形状で `hir_llvm_model_correspondence` が inconsistent を返していた。`HirCallLeafSig`（パラメータ・戻り値の宣言型、`env.resolve_base_type` で refined alias→機械基底型解決）をモジュールの atom 署名から構築し leaf エンコーダに伝搬。composite 引数は IR の `call_operands` と同じ leaf slot へ flatten、composite result は `mumei_call_field:{name}:{arity}:{idx}` per-field で `HirLeafValue::Aggregate` に束縛。`specialized_struct_map` が callee 署名由来の generic instantiation も特殊化。subset 外の宣言型は fail-closed（unchecked）、enum 型 call site は従来 inconsistent 誤判定だったものを正直に unchecked（inconclusive, exit 3）に修正。admission 境界（uniform i64 scalar + 全 i64 record）は不変 — Step 4 凍結範囲に非ず。agent 側 `test_real_core_accepts_native_object` の 2 fixture が e2e で accept(0) を確認）。mumei-agent: 新規なし。mumei-demo: 新規シナリオなし。いずれも各 PR の境界のまま。
 - ✅ **追補（2026-11-24, 84）— 追補（83）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: 新規なし。mumei-agent: evidence acceptance — 保存 carrier fold が object-route 記述子レコードを受理（[agent#1324](https://github.com/mumei-lang/mumei-agent/pull/1324)。`accept-object` が全記述子に emit する `object_translation`/`source_machine_tv` レコードを `_NATIVE_ACCEPTANCE_EXTRA_FIELDS` に不透明 dict として追加 — 未受理のままだと新世代の `mumei.native-evidence-acceptance/v1` 保存記述子が closed shape で弾かれていた。stored fold は表現レベル維持、object schema は `evidence_fingerprint` ピン非 emit のため `attempt_bound` は引き続き false、`producer_signature` は source schema のみ — DESIGN_OBJECT_TV_CONSUMPTION.md §4 の推奨対応どおり。実 emit 形状のゴールデン fixture で受理 + 試行未紐付けを e2e pin。AUDIT_BACKLOG_2026-11-21.md の item 4 を両側完了で着地済みに記録）。mumei-demo: 新規シナリオなし。いずれも各 PR の境界のまま。
+- ✅ **追補（2026-11-25, 85）— 追補（84）以降の番号の相互参照**: 内容を広げずに番号で追記する。mumei Core: C10 — 保存済み `accept-object` 記述子の consumer 側 recheck（[#790](https://github.com/mumei-lang/mumei/issues/790)。`native-bundle recheck-object-acceptance <bundle> <source> <descriptor>` が記述子を 1 MiB 上限・非 symlink・重複キー拒否で読み、object scope の受理済み `mumei.native-evidence-acceptance/v1` 以外を pipeline 前に拒否。fresh な `accept-object` を再実行して `evidence_fingerprint`（#1445）を再計算し、不一致は試行未紐付け・フィールド単位の差分は改ざんとして reject、fresh 側 inconclusive は exit 3。C10 の部分スライスで完了ではない — 記述子・producer 真正性、historical execution、依存・toolchain closure、register 規約・ABI/runtime/OS・最終 artifact の保証は未検査のまま）。mumei-agent: 新規なし。mumei-demo: 新規シナリオなし。いずれも各 PR の境界のまま。
+
+- ✅ **追補（2026-11-25, C09 Step 4）— [#789](https://github.com/mumei-lang/mumei/issues/789) の部分解凍**: mumei Core: Linux x86-64 で flat な `{ i64, double }` / `{ double, i64 }` を LLVM IR → object の直接比較に追加（`rax`/`xmm0` のビット比較）。その他の deferred 領域、受理条件、verdict・grade は変更しない。[#1448 の項目 8](https://github.com/mumei-lang/mumei/issues/1448) の範囲内で、順序は変更しない。mumei-agent / mumei-demo: 新規なし。
 
 **関連ファイル**:
 - `docs/CAPABILITY_MODEL_STUDY.md` — 調査成果物（4 項目の分析、opt-in 判定、段階分割案）
@@ -9221,5 +9512,5 @@ fail-closed.
 - [`docs/SESSION_PLANS.md`](SESSION_PLANS.md) — Detailed session plans for compiler phases
 - [mumei-agent `docs/ROADMAP.md`](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md) — Agent-specific roadmap
 - [mumei-lean `docs/ARCHITECTURE.md`](https://github.com/mumei-lang/mumei-lean/blob/develop/docs/ARCHITECTURE.md) — External Lean 4 proof backend architecture & schema contract
-- [`instruction.md`](../instruction.md) — Development guidelines and priorities
+- [`instruction.md`](instruction.md) — Development guidelines and priorities
 - [`docs/ZERO_HUMAN_CHALLENGE.md`](ZERO_HUMAN_CHALLENGE.md) — Zero-Human Challenge results

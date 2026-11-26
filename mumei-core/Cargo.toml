@@ -1,6 +1,6 @@
 [package]
 name = "mumei-core"
-version = "0.6.23"
+version = "0.7.0"
 edition = "2021"
 # std's advisory file locks (File::try_lock) are stable since 1.89.
 rust-version = "1.89"
@@ -20,7 +20,7 @@ thiserror = "2"
 sha2 = "0.10"
 lazy_static = "1.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-toml = "0.8"
+toml = "1.2"
 dirs = "5.0"
 libloading = "0.8"
 ed25519-dalek = "2"

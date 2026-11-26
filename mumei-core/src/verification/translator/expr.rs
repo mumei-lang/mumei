@@ -900,6 +900,17 @@ impl Drop for UnfoldSinkGuard<'_, '_> {
     }
 }
 
+fn parse_closed_contract_expression(raw: &str, description: &str) -> MumeiResult<Expr> {
+    crate::parser::parse_expression_checked(raw).map_err(|failures| {
+        MumeiError::verification(format!(
+            "{} '{}' is not a closed expression: {}",
+            description,
+            raw,
+            failures.join("; ")
+        ))
+    })
+}
+
 fn constant_call_antecedent<'a>(
     vc: &VCtx<'a>,
     atom: &Atom,
@@ -911,7 +922,7 @@ fn constant_call_antecedent<'a>(
     if requires.trim() == "true" {
         terms.push(Bool::from_bool(vc.ctx, true));
     } else {
-        let req_ast = parse_expression(&requires);
+        let req_ast = crate::parser::parse_expression_checked(&requires).ok()?;
         let mut req_env = call_env.clone();
         let req_value = super::z3_types::with_array_shared_markers_restored(&mut req_env, |env| {
             expr_to_z3_with_domain_obligations(vc, &req_ast, env, None)
@@ -1383,7 +1394,7 @@ fn congruent_ensures_antecedent<'a>(
     let req = if caller_requires.trim() == "true" {
         Bool::from_bool(ctx, true)
     } else {
-        let req_ast = parse_expression(caller_requires);
+        let req_ast = parse_closed_contract_expression(caller_requires, "callee precondition")?;
         super::z3_types::with_array_shared_markers_restored(call_env, |env| {
             expr_to_z3_with_domain_obligations(vc, &req_ast, env, None)
         })?
@@ -3860,6 +3871,7 @@ fn predicate_pattern_binds_operand(pattern: &crate::parser::ast::Pattern, operan
 
 fn predicate_contains_shadowing_binder(expr: &Expr, operand: &str) -> bool {
     match expr {
+        Expr::Paren(inner) => predicate_contains_shadowing_binder(inner, operand),
         Expr::Number(_)
         | Expr::Float(_)
         | Expr::StringLit(_)
@@ -4074,6 +4086,7 @@ fn collect_refinement_free_identifiers(
     }
 
     match expr {
+        Expr::Paren(inner) => collect_refinement_free_identifiers(inner, bound, enum_names, out),
         Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::AtomRef { .. } => {}
         Expr::Variable(name) => add_identifier(name, bound, out),
         Expr::ArrayLit(elements) => {
@@ -4295,6 +4308,7 @@ pub(crate) fn expr_to_z3<'a>(
 
     let ctx = vc.ctx;
     match expr {
+        Expr::Paren(inner) => expr_to_z3(vc, inner, env, solver_opt),
         Expr::Number(n) => Ok(Int::from_i64(ctx, *n).into()),
         Expr::Float(f) => {
             if vc.ieee754_f64 {
@@ -4963,7 +4977,10 @@ pub(crate) fn expr_to_z3<'a>(
                         if caller_requires.trim() != "true" && !recursive_instance {
                             let _contract_guard = vc.enter_contract_instantiation(&callee);
                             if let Some(solver) = solver_opt {
-                                let req_ast = parse_expression(&caller_requires);
+                                let req_ast = parse_closed_contract_expression(
+                                    &caller_requires,
+                                    "callee precondition",
+                                )?;
                                 let req_z3 = super::z3_types::with_array_shared_markers_restored(
                                     &mut call_env,
                                     |env| {
@@ -7976,7 +7993,10 @@ pub(crate) fn expr_to_z3<'a>(
                         crate::verification::caller_requires_obligation(&callee_atom);
                     if caller_requires.trim() != "true" && !recursive_instance {
                         let _contract_guard = vc.enter_contract_instantiation(&callee_atom);
-                        let req_ast = parse_expression(&caller_requires);
+                        let req_ast = parse_closed_contract_expression(
+                            &caller_requires,
+                            "callee precondition",
+                        )?;
                         let req_z3 = super::z3_types::with_array_shared_markers_restored(
                             &mut call_env,
                             |env| expr_to_z3_with_domain_obligations(vc, &req_ast, env, None),

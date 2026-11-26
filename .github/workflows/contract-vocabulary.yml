@@ -1,3 +1,8 @@
+# Cross-repo note (mumei-lang/mumei#1500): the composite action owns only
+# the common Python/dependency runner. mumei's broad path filter and check
+# command are repo-specific because this repository is the canonical owner of
+# proof/evidence schemas, MCP tool vocabulary, and producer-signature contract
+# fixtures.
 name: Contract Vocabulary
 
 on:
@@ -5,15 +10,17 @@ on:
     paths:
       - 'docs/**'
       - 'README.md'
-      - 'instruction.md'
+      - 'docs/instruction.md'
       - 'mcp_server.py'
       - 'src/cli.rs'
       - 'scripts/check_contract_vocabulary.py'
       - 'schema/bridge_lemma_catalog.json'
       - 'schema/verification-evidence.schema.json'
+      - 'schema/native-object-acceptance.schema.json'
       - 'schema/proof-cert.schema.json'
       - 'schema/producer-signature.schema.json'
       - 'tests/test_producer_signature_schema.py'
+      - 'tests/test_native_object_acceptance_schema.py'
       - 'tests/fixtures/proof-cert/**'
       - 'tests/test_proof_cert_schema.py'
       - 'tests/fixtures/verification-evidence/**'
@@ -21,6 +28,8 @@ on:
       - 'mumei-core/src/verification/types.rs'
       - 'mumei-core/src/verification_evidence.rs'
       - 'mumei-core/src/verification_evidence/**'
+      - 'mumei-core/src/object_acceptance.rs'
+      - 'mumei-core/src/object_acceptance/**'
       - 'tests/fixtures/proof-cert/verified_sample.proof-cert.json'
       - 'tests/test_check_contract_vocabulary.py'
       - 'tests/test_ci_workflow_timeouts.py'
@@ -31,20 +40,23 @@ on:
       - 'docs/LSP_DIAGNOSTIC_DATA.md'
       - 'scripts/check_mcp_tool_contract.py'
       - '.github/workflows/contract-vocabulary.yml'
+      - '.github/actions/contract-vocabulary/**'
   push:
     branches: [develop]
     paths:
       - 'docs/**'
       - 'README.md'
-      - 'instruction.md'
+      - 'docs/instruction.md'
       - 'mcp_server.py'
       - 'src/cli.rs'
       - 'scripts/check_contract_vocabulary.py'
       - 'schema/bridge_lemma_catalog.json'
       - 'schema/verification-evidence.schema.json'
+      - 'schema/native-object-acceptance.schema.json'
       - 'schema/proof-cert.schema.json'
       - 'schema/producer-signature.schema.json'
       - 'tests/test_producer_signature_schema.py'
+      - 'tests/test_native_object_acceptance_schema.py'
       - 'tests/fixtures/proof-cert/**'
       - 'tests/test_proof_cert_schema.py'
       - 'tests/fixtures/verification-evidence/**'
@@ -52,6 +64,8 @@ on:
       - 'mumei-core/src/verification/types.rs'
       - 'mumei-core/src/verification_evidence.rs'
       - 'mumei-core/src/verification_evidence/**'
+      - 'mumei-core/src/object_acceptance.rs'
+      - 'mumei-core/src/object_acceptance/**'
       - 'tests/fixtures/proof-cert/verified_sample.proof-cert.json'
       - 'tests/test_check_contract_vocabulary.py'
       - 'tests/test_ci_workflow_timeouts.py'
@@ -62,6 +76,7 @@ on:
       - 'docs/LSP_DIAGNOSTIC_DATA.md'
       - 'scripts/check_mcp_tool_contract.py'
       - '.github/workflows/contract-vocabulary.yml'
+      - '.github/actions/contract-vocabulary/**'
   workflow_dispatch:
 
 permissions:
@@ -78,18 +93,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Run contract vocabulary checks
+        uses: ./.github/actions/contract-vocabulary
         with:
-          python-version: '3.12'
-
-      - name: Check docs contract vocabulary
-        run: python3 scripts/check_contract_vocabulary.py
-
-      - name: Check canonical mumei-forge MCP tool contract
-        run: python3 scripts/check_mcp_tool_contract.py
-
-      - name: Run extraction tests
-        run: |
-          python3 -m pip install --quiet pytest pyyaml 'jsonschema>=4.18,<5'
-          python3 -m pytest tests/test_check_contract_vocabulary.py tests/test_ci_workflow_timeouts.py tests/test_check_mcp_tool_contract.py tests/test_check_proof_bundle_drift.py tests/test_lsp_diagnostic_data_doc.py tests/test_verification_evidence_schema.py tests/test_proof_cert_schema.py tests/test_producer_signature_schema.py -v
+          python_version: '3.12'
+          install_command: python3 -m pip install --quiet pytest pyyaml 'jsonschema>=4.18,<5'
+          check_command: |
+            python3 scripts/check_contract_vocabulary.py
+            python3 scripts/check_mcp_tool_contract.py
+            python3 -m pytest tests/test_check_contract_vocabulary.py tests/test_ci_workflow_timeouts.py tests/test_check_mcp_tool_contract.py tests/test_check_proof_bundle_drift.py tests/test_lsp_diagnostic_data_doc.py tests/test_verification_evidence_schema.py tests/test_native_object_acceptance_schema.py tests/test_proof_cert_schema.py tests/test_producer_signature_schema.py -v

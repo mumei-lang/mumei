@@ -49,7 +49,7 @@ SYNC_DOCS = [
     REPO_ROOT / "docs" / "MCP_TOOL_CONTRACT.md",
     REPO_ROOT / "docs" / "LSP_DIAGNOSTIC_DATA.md",
     REPO_ROOT / "README.md",
-    REPO_ROOT / "instruction.md",
+    REPO_ROOT / "docs" / "instruction.md",
 ]
 NO_MM_LANGUAGE_DOCS = [
     CANONICAL_DOC,

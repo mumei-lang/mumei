@@ -21,6 +21,8 @@ use z3::{
     Context, FuncDecl, Sort,
 };
 
+pub mod readonly_slice;
+
 pub const SEMANTIC_CONTRACT_VERSION: &str = "mumei.semantic-contract/v1";
 const LLVM_CORRESPONDENCE_STATUS: &str = "unchecked_not_translation_validated";
 pub const PURE_I64_PROFILE: &str = "mumei.pure-i64-comparison/v1";
@@ -3199,6 +3201,7 @@ fn call_return_kinds<'ctx>(
         next_array_id: std::cell::Cell::new(0),
         alloc_stores: std::cell::RefCell::new(HashMap::new()),
         perform_definedness: std::cell::RefCell::new(Vec::new()),
+        readonly_slices: None,
         callback_parameters,
         callee_callback_params,
         callback_calls: std::cell::RefCell::new(Vec::new()),
@@ -3270,6 +3273,7 @@ struct CallShapes<'ctx> {
     /// Definedness checks from effect arguments and array-parameter
     /// reads, retained as explicit module obligations.
     perform_definedness: std::cell::RefCell<Vec<Bool<'ctx>>>,
+    readonly_slices: Option<readonly_slice::SliceModel<'ctx>>,
     callback_parameters: BTreeMap<(String, String), CallbackParameterModel<'ctx>>,
     callee_callback_params: BTreeMap<String, Vec<Option<CallbackSignature>>>,
     callback_calls: std::cell::RefCell<Vec<CallbackCall<'ctx>>>,
@@ -4137,6 +4141,14 @@ fn validate_atom(
             "explicit owned scalar i64 signature required",
         ));
     }
+    validate_atom_annotations(atom, admit_effects, admit_str_bound)
+}
+
+fn validate_atom_annotations(
+    atom: &Atom,
+    admit_effects: bool,
+    admit_str_bound: bool,
+) -> Result<(), SemanticContractError> {
     let mut names = BTreeSet::new();
     if atom
         .params
@@ -6008,6 +6020,7 @@ pub fn contains_while_stmt(stmt: &Stmt) -> bool {
 
 fn contains_while_expr(expr: &Expr) -> bool {
     match expr {
+        Expr::Paren(inner) => contains_while_expr(inner),
         Expr::Number(_)
         | Expr::Float(_)
         | Expr::StringLit(_)
@@ -9335,16 +9348,7 @@ pub fn encode_pure_i64_module<'ctx>(
         .collect()
 }
 
-/// Shared admission for the per-atom encoders: input bounds, module
-/// admission (which itself gates every declared item of the profile)
-/// and the module item list. Returns the module digest, the items and
-/// the resolved refined-alias and struct maps — empty for callers that
-/// keep the plain fragment (`admission = Reject`).
-fn bounded_pure_i64_module(
-    source: &str,
-    allow_wrapping_arithmetic: bool,
-    admission: RefinedAdmission,
-) -> BodyResult<AdmittedPureI64Module> {
+fn bounded_source_tokens(source: &str) -> BodyResult<Vec<crate::parser::token::SpannedToken>> {
     if source.len() > 65_536 {
         return Err(SemanticContractError::Unsupported("source size limit"));
     }
@@ -9355,7 +9359,7 @@ fn bounded_pure_i64_module(
         return Err(SemanticContractError::Unsupported("source token limit"));
     }
     let mut depth = 0usize;
-    for token in tokens {
+    for token in &tokens {
         use crate::parser::token::Token;
         match token.token {
             Token::LParen | Token::LBrace | Token::LBracket => {
@@ -9368,6 +9372,20 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
+    Ok(tokens)
+}
+
+/// Shared admission for the per-atom encoders: input bounds, module
+/// admission (which itself gates every declared item of the profile)
+/// and the module item list. Returns the module digest, the items and
+/// the resolved refined-alias and struct maps — empty for callers that
+/// keep the plain fragment (`admission = Reject`).
+fn bounded_pure_i64_module(
+    source: &str,
+    allow_wrapping_arithmetic: bool,
+    admission: RefinedAdmission,
+) -> BodyResult<AdmittedPureI64Module> {
+    bounded_source_tokens(source)?;
     let (
         items,
         refined,
@@ -10580,6 +10598,7 @@ pub struct ModuleAtomObligations<'ctx> {
 
 fn contains_callback_call(expr: &Expr, name: &str) -> bool {
     match expr {
+        Expr::Paren(inner) => contains_callback_call(inner, name),
         Expr::CallRef { callee, args } => {
             matches!(callee.as_ref(), Expr::Variable(callee_name) if callee_name == name)
                 || contains_callback_call(callee, name)
@@ -14299,6 +14318,28 @@ fn source_expr<'ctx>(
         // `0` an out-of-bounds read yields, matching the emitted
         // bounds-check + `phi(loaded, 0)`.
         Expr::ArrayAccess(name, index) => {
+            let slices = call_returns.readonly_slices.as_ref();
+            if let Some((model, view)) =
+                slices.and_then(|model| model.views.get(name).map(|view| (model, view)))
+            {
+                let index = source_expr(
+                    index,
+                    ctx,
+                    env,
+                    guard,
+                    definedness,
+                    depth + 1,
+                    assignable,
+                    written,
+                    loop_exits,
+                    call_sites,
+                    call_returns,
+                    enums,
+                )?
+                .integer()?;
+                definedness.push(guard.implies(&array_in_bounds(ctx, &index, &view.len)));
+                return Ok(I(model.read(view, &index)?));
+            }
             let Some(SourceValue::Array {
                 store,
                 len,
@@ -14355,13 +14396,20 @@ fn source_expr<'ctx>(
             // so a user atom named `len` keeps working.
             if name == "len" && args.len() == 1 {
                 let len = match &args[0] {
-                    Expr::Variable(var) => env.get(var.as_str()).and_then(|value| {
-                        if let SourceValue::Array { len, .. } = value {
-                            Some(len.clone())
-                        } else {
-                            None
-                        }
-                    }),
+                    Expr::Variable(var) => call_returns
+                        .readonly_slices
+                        .as_ref()
+                        .and_then(|slices| slices.views.get(var))
+                        .map(|view| view.len.clone())
+                        .or_else(|| {
+                            env.get(var.as_str()).and_then(|value| {
+                                if let SourceValue::Array { len, .. } = value {
+                                    Some(len.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                        }),
                     Expr::ArrayLit(elems) => Some(BV::from_u64(ctx, elems.len() as u64, 64)),
                     // `len(make())` — an inline call to a `[i64]`-
                     // returning callee evaluates to its fat-pointer
@@ -14939,6 +14987,43 @@ mod tests {
         for field in ["verified", "result", "grade", "verification_status"] {
             assert!(json.get(field).is_none());
         }
+    }
+
+    #[test]
+    fn borrowed_slice_admission_is_separate_from_scalar_and_composite_profiles() {
+        assert_eq!(extract(SOURCE).unwrap().profile, PURE_I64_PROFILE);
+
+        let owned = "atom f(arr: [i64]) -> i64 requires: true; ensures: result == 0; body: 0;";
+        assert!(matches!(
+            extract(owned),
+            Err(SemanticContractError::Unsupported(
+                "explicit owned scalar i64 signature required"
+            ))
+        ));
+        assert_eq!(
+            module_source_profile(owned, RefinedAdmission::CompositeV29).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V26
+        );
+
+        for mode in ["ref", "ref mut"] {
+            let borrowed = owned.replace("arr:", &format!("{mode} arr:"));
+            assert!(matches!(
+                module_source_profile(&borrowed, RefinedAdmission::CompositeV29),
+                Err(SemanticContractError::Unsupported(
+                    "explicit owned scalar i64 signature required"
+                ))
+            ));
+        }
+        let shared = owned.replace("arr:", "ref arr:");
+        assert_eq!(
+            readonly_slice::check(&shared).unwrap().status,
+            readonly_slice::Status::EstablishedWithinProfile
+        );
+        let mutable = owned.replace("arr:", "ref mut arr:");
+        assert!(matches!(
+            readonly_slice::check(&mutable),
+            Err(readonly_slice::Error::Unsupported(_))
+        ));
     }
 
     #[test]

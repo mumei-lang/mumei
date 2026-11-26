@@ -668,6 +668,183 @@ cargo test -p mumei-core semantic_contract --lib
 cargo test --test test_semantic_contract
 ```
 
+### Read-only region and slice profile
+
+[C03 #787](https://github.com/mumei-lang/mumei/issues/787) defines
+`mumei.readonly-i64-region-slice/v1`, a separate source-model profile,
+not a widening of the scalar comparison or composite profiles. Its first
+route is opt-in and uses Z3 only. There is no Lean or executable lowering,
+artifact sidecar, or C02 Evidence acceptance route for this profile.
+
+#### First source-model slice
+
+```text
+mumei evidence check-readonly-slice <SOURCE>
+```
+
+The command admits exactly one atom with exactly one explicit `requires`,
+exactly one explicit `ensures` and one explicit `body` clause, at least one
+shared `ref name: [i64]` input, optional owned `i64` scalar inputs, and an
+explicit `i64` result. Input is limited to 65,536 bytes and 256 lexer tokens;
+either limit fails closed. Its scalar fragment has comparisons, short-circuit
+Boolean operators and conditionals; it admits `len(a)` and `a[i]` only on
+admitted input views. Arithmetic, whole-view values, locals, subviews, mutable
+parameters, quantifiers, field access, qualified calls and other calls are
+rejected. A comparison inside parentheses is also rejected as a parser-resource
+boundary; write comparison chains flat or split them with Boolean operators.
+Empty slices are valid inputs but cannot be indexed.
+
+The encoder reuses the signed BV64 comparison, short-circuit guard and
+array bounds encodings. The cell function is shared by all formals and
+indexed by symbolic region and mathematical absolute offset; it does not
+use the local-array out-of-bounds zero fallback. Each query is separate:
+`requires_bounds` uses only the well-formed entry views, `input_domain`
+checks that those views and the precondition are jointly satisfiable,
+`body_bounds` and `ensures_bounds` check the guarded loads under the
+precondition, and `postcondition` checks the stated result. Each bounds
+query reports the result for its whole source clause. It is not permissible
+to assume a failed bounds goal in order to prove the postcondition.
+
+The JSON diagnostic pins source, specification and implementation identities
+and records binders with atom-level provenance, assumptions and each executed
+query. Exit 0 means established within this model; exit 1 with a diagnostic
+means a SAT countermodel to a named obligation; exit 1 without a diagnostic
+rejects unsupported or invalid input; exit 3 means empty input domain or Z3
+inconclusive. The diagnostic is neither reusable Evidence nor an artifact
+sidecar; it leaves Lean/LLVM unsupported and correspondence unchecked. No
+default verifier, certificate, audit key, Seal Grade or Lean gate is changed.
+
+#### Baseline in the current pipeline
+
+| Stage | Existing capability and limit |
+| --- | --- |
+| Checked parser → HIR → MIR | [HIR](../mumei-core/src/hir.rs) represents `ArrayAccess`; [MIR](../mumei-core/src/mir.rs) represents indexed places, moves, `Ref`/`RefMut` and parameter modes. [MIR borrow checking](../mumei-core/src/mir_analysis/borrow_check.rs) checks moves and loan conflicts. These compiler facts are useful inputs, not a proof of allocation provenance or native pointer correspondence. |
+| C03 source obligations | [Core's extractor/encoder](../mumei-core/src/semantic_contract.rs) uses bounded local-array models (`array_read` models fallback to zero) and, under `CompositeV26`, read-only owned `[i64]` formals with signed in-bounds obligations and `array_param_len_nonnegative`. `CompositeV29` can also describe read-only array results as model pairs. Neither the length/store pair nor a local store ID asserts native pointer validity, lifetime or initialization. The scalar comparison profile still rejects these constructs. |
+| Lean and LLVM | [Translator IR metadata](../mumei-core/src/verification/types.rs) records binders and provenance; that metadata is not a memory lowering. The [LLVM emitter](../mumei-emit-llvm/src/codegen/expr_emit.rs) and [LLVM validation pilot](../mumei-emit-llvm/src/translation_validation.rs) already have restricted array paths for v26. A checked index on the existing `{ i64, ptr }` representation cannot on its own establish that the pointer is live, aligned or backed by initialized cells. |
+
+#### Design for the broader fragment
+
+Start with a single atom returning a scalar, using the comparison profile's
+explicit scalar semantics plus read-only `[i64]` inputs, `len`, indexed
+loads and non-escaping subviews. Subviews are semantic operations, not new
+source syntax: a future adapter must map an exact checked source construct
+or reject it. Start without calls, loops, stores or region-valued results.
+
+- **Regions and ownership.** An abstract region ID names a live caller-owned
+  contiguous allocation of `N` initialized `i64` cells at entry. The atom
+  receives shared read permission for the call only; the contents and
+  lifetime are stable throughout it. A view is `(region, start, len)` in
+  element units. Creating a subview reuses the same region; it never allocates
+  or transfers ownership. No view escapes, and region IDs are not addresses.
+- **Bounds.** Require `0 <= start <= N` and `0 <= len <= N - start`.
+  Require `len <= i64::MAX` for every view's source-visible length.
+  Source lengths and indices are signed `i64`; a validated index is converted
+  exactly to a nonnegative mathematical offset. A subview `(off, count)`
+  requires `0 <= off <= len` and `0 <= count <= len - off`, and uses
+  `(region, start + off, count)`. A load requires `0 <= i < len` and reads
+  cell `start + i`. Empty views are allowed but cannot be dereferenced.
+  Offset arithmetic is mathematical, bounded by the parent, and must not
+  be implemented as silently wrapping source or target address arithmetic.
+- **Aliasing.** Give each formal view a symbolic region ID, start and length.
+  Lowering leaves region equality between formals unconstrained: the proof
+  must cover every caller choice allowed by the contract, including equal
+  regions with overlapping offsets and distinct regions. A backend must not
+  fix formals to equal or distinct regions. A single immutable store per
+  region ensures that the same region and absolute offset give the same
+  value; equal cell values do not imply aliasing. Do not expose pointer
+  comparison or pointer identity as a source operation.
+- **Null and initialization.** The model has no null, dangling or
+  uninitialized references. An executable boundary must establish that the
+  view is backed by the declared live allocation and has the required
+  permission and initialized extent. For a first native subset, require a
+  non-null, correctly aligned backing pointer even for an empty view; do
+  not interpret null as an empty slice or synthesize zero on an invalid load.
+  This is a proposed admission rule, not a change to current emitter behavior.
+
+For example, a subview with `off = 1` and `count = 1` requires the
+parent length to be at least two. Reading its index zero then denotes
+the parent's index one. Two nonempty overlapping views of that cell must
+agree, without any assumption that their complete lengths or contents agree.
+
+#### Obligations and backend admission
+
+Separate entry assumptions (live region, initialization, stable shared
+permission and well-formed input views) from goals. Check definedness of the
+precondition under entry assumptions alone; then use that precondition and
+the actual evaluation guard at each body or postcondition access to prove
+subview/load definedness before using the selected value. Prove the original
+postcondition for the defined body result, and independently check that the
+admitted input domain and precondition are satisfiable to flag vacuity. Keep
+guards, failed bounds, undischarged assumptions and postcondition failures
+distinct; do not assert a failed goal into the model as an assumption.
+
+- **Z3 model:** Use opaque region IDs, an extent per region, and one
+  logical store indexed by region and nonnegative mathematical offset.
+  Encode signed scalar values
+  as BV64 with signed comparisons; convert source indices and lengths
+  exactly to the integer offset domain. Under the original assumptions
+  and guard, query the negation of each definedness goal and of the
+  postcondition. A total SMT store's value outside the view is never a source
+  value. SAT is a countermodel to that goal; unknown or timeout is not a proof.
+- **Lean candidate:** Interpret the same region table as immutable finite
+  sequences of 64-bit values, with the same signed interpretation at the
+  scalar boundary. Construct a bounded index (e.g. `Fin N`) only after
+  proving the view and access inequalities; read through the parent region,
+  not a fresh sequence per view. Generate explicit goals for the same
+  assumptions, guards and postcondition. If the translator cannot express or
+  relate any of them to the original obligation, report the profile as
+  unsupported, not a theorem about a weakened fragment. No change to Lean
+  activation, kernel/replay, axiom, trust or freshness gates.
+- **Executable subset:** Executable code must have a checked ABI and memory
+  boundary for the actual target, including representable byte offset/extent,
+  alignment and the exact guarded load behavior. A symbolic region table or
+  a Lean model need not compile; model proof does not establish those physical
+  premises. Neither route may substitute LLVM's existing zero fallback for
+  an undischarged definedness goal or claim that a requested target was built.
+
+Reject unresolved region identity or access semantics, unsupported element
+types, nullable or raw pointers, casts and pointer/integer round trips,
+arbitrary address arithmetic, uninitialized cells, mutable borrows/stores,
+allocation/free, escaping views, FFI and concurrent/volatile/atomic access.
+Region identity is unresolved when a view cannot be traced to a formal's
+symbolic region, directly or through checked subviews (for example, a local
+with no traced origin, a return value or an unsupported operation).
+A future mutable profile would need explicit exclusive permissions, store
+versions and frame obligations; no availability or fallback to it is implied.
+Distinguish unsupported source or lowering from a violated obligation and
+from an unavailable backend. Do not erase a view operation, choose an
+uninterpreted value for an unsupported load, or fall back to a scalar proof.
+
+#### Provenance and assurance boundaries
+
+Keep original source/specification and implementation identities; record
+typed binder/view origins, checked source spans (with precision), region and
+permission assumptions, access/guard spans and obligation IDs. Bind the
+profile/semantic version and each transformation's input/output identity,
+relation and validation status through HIR/MIR and backend goals. A normalized
+view or proof-model store is not a native address binding. When an edge is
+unchecked, keep it unchecked.
+
+- **C02 (#786):** Record assumptions, exact profile, method, scope and
+  unchecked edges in evidence; schema validity or a successful model query
+  cannot establish executable premises or promote a descriptor.
+- **C08 (#788):** Bind actual ABI/target, build and artifact provenance.
+  Identity and signed provenance do not establish memory correspondence.
+- **C09 (#789):** Separately validate guarded memory operations against the
+  actual LLVM model and, only where supported, later artifact stages.
+  Existing limited array LLVM checks do not unfreeze the deferred
+  liftable-subset expansion or establish object-level pointer semantics.
+- **C10 (#790):** Re-check applicable evidence and refuse an executable
+  claim when the required memory/binding/correspondence checks are missing.
+  Source-only acceptance must remain source-only.
+
+Existing audit keys, certificate serialization, Seal Grades and Lean
+trust/freshness decisions are unchanged. The initial source trace groups
+accesses by clause. Finer access-to-goal traces, subview regressions and a
+Lean lowering are follow-ups. Enabling an executable route also requires
+independent checks for the advertised executable correspondence. Finite
+observations are regressions, not substitutes for those checks.
+
 ## 6. Replaceable planner and verifier plugins (C04/C11)
 
 Design the extension boundary before selecting external verifiers. Users must
@@ -699,6 +876,19 @@ proof goals need different diagnostics/remedies rather than one retry loop.
 Conflicting results must not be resolved by picking the successful one. First
 check that tools saw the same obligation, semantics, inputs and assumptions;
 preserve unresolved disagreement for investigation.
+
+Current status (2026-11-26): the Agent roadmap records the
+[C04 planner scope](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04-planner-acceptance-completion)
+and
+[C11 plugin-contract scope](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-plugin-contract-acceptance-completion)
+as complete as verification-native planner and orchestration contracts.
+Completion does not adopt an external verifier, make
+adapter self-reports proof, or create a default external-verifier route. The
+paragraphs below are chronological implementation slices: wording such as
+"next", "remain open" or "remain partial" describes the boundary at the time
+that slice landed, not a claim that the overall planner/plugin contract is
+still unimplemented. Independent verifier adoption, semantic correspondence,
+evidence acceptance and promotion policy remain separate later work.
 
 Agent's opt-in metadata planner has a first exact result-contract slice:
 `ResultContract` pairs one profile/method with scope, complete bound/assumption
@@ -1109,8 +1299,11 @@ aggregate (`Different` outranks `UndefinedBehavior`, which outranks
 `Inconclusive`; the module is `EquivalentWithinProfile` only when every
 entry is). Every source atom must name a module member or the whole check
 refuses — a missing callee cannot even form its call-site comparison —
-extra members are screened by the module profile but not compared, and
-the solver budget applies per function.
+extra members are screened by the module profile but not compared. Edge
+mismatch and undefined-behavior disjunctions are checked as independent
+solver queries; the configured timeout/resource budget applies to each
+query rather than to a whole-function total, while any solver `unknown`
+still keeps the outcome inconclusive.
 
 `validate_native_module` applies the same per-atom check to native
 snapshots — the emitted module that keeps its C `main` wrapper. The
@@ -2050,9 +2243,12 @@ are unsupported.
 
 The supported byte-register views are `al`, `cl`, `dl`, `bl`, `spl`, `bpl`,
 `sil`, `dil`, and `r8b` through `r15b`. An 8-bit write preserves bits 63..8;
-32-bit writes zero-extend. `ah`, `bh`, `ch`, `dh`, and 16-bit registers are
-unsupported. `movzbl`/`movzbq` and `movsbl`/`movsbq` zero- or sign-extend an
-8-bit register source.
+32-bit writes zero-extend. `movb` models an immediate or 8-bit register source
+written to an 8-bit register destination other than `%spl`; memory operands
+remain unsupported.
+`ah`, `bh`, `ch`, `dh`, and 16-bit registers are unsupported.
+`movzbl`/`movzbq` and `movsbl`/`movsbq` zero- or sign-extend an 8-bit register
+source.
 
 `shlq`/`shll`, `shrq`/`shrl`, and `sarq`/`sarl` accept an immediate count, the
 implicit count of one printed without a count operand, or a `%cl` count. Counts
@@ -2087,9 +2283,10 @@ remainder widths. A register-source one-operand `imulq` models the signed
 128-bit product in `%rdx:%rax`. Each division path must prove a nonzero
 divisor and that the quotient fits the destination width under the bounded
 input domain, loop-exit domain when present, source definedness, call-result
-bounds, path conditions, and input/register bindings. Failure to prove that obligation is
-`division_trap`; memory operands and other division forms remain unsupported.
-This is a bounded no-trap obligation, not a runtime or ABI guarantee.
+bounds, path conditions, and input/register bindings. A satisfiable violation of that
+obligation is `division_trap`; a solver `unknown` stays inconclusive rather than becoming
+either a trap witness or a successful comparison. Memory operands and other division forms
+remain unsupported. This is a bounded no-trap obligation, not a runtime or ABI guarantee.
 
 `mov`, `movabsq`, `lea`, `not`, `push`, `pop`, and `nop` preserve flags.
 Initial flags and flags after other arithmetic or calls are unknown, so a
@@ -2629,6 +2826,19 @@ link correspondence is uncheckable, it uses
 `native_bundle_object_translation_correspondence_without_object_link` and
 leaves `object_link_correspondence` not performed.
 
+The descriptor's `evidence_fingerprint` is the lowercase, unprefixed SHA-256
+hex digest of a compact UTF-8 JSON object with exactly these keys, in lexical
+order: `build_id`, `canonical_argv_hash`, `emit_scope`, `llvm_sha256`,
+`object_sha256`, `source_sha256`. All values are strings. Use the trusted
+build ID, the rechecked record's `link_build.canonical_arguments_sha256`, the
+emitted `scope` (including the suffix on the no-link path), and the SHA-256
+digests of the reproduced LLVM IR, reproduced object and rechecked source,
+respectively. For a multifile bundle, use the digest of the canonical merged
+source (`source.source_sha256` in the record), not of the root file alone.
+An independently derived matching pin binds the descriptor to the same attempt
+inputs; it does not authenticate the descriptor or its producer.
+`descriptor_authenticity` remains in `checks_not_performed`.
+
 This is not reusable Evidence or a certificate and does not promote a grade.
 The register convention is assumed, not validated; CRT and loader behavior,
 producer authenticity, historical execution, optimizer semantics, ABI/runtime
@@ -2640,6 +2850,90 @@ Core deliberately does not emit the agent-owned
 `native-object-accept` route maps Core's
 `object_source_machine_code_correspondence` check to its
 `object_translation_correspondence` check.
+
+#### Detached object descriptor signing (partial C08)
+
+Pass `--json --key-file KEY --producer-key-id LABEL --signature-output SIG`
+to `native-bundle accept-object` to emit an optional detached
+[`mumei.producer-signature/v1` envelope](#detached-producer-signature-envelope).
+Only a successful pinned acceptance reaches signing. The Ed25519 signature
+covers the SHA-256 digest of the exact descriptor bytes written to stdout,
+including the trailing newline, for descriptors up to 4 MiB. Save stdout
+as-is: reformatting the JSON invalidates the binding. The signature is staged
+first and published without replacing an existing file, only after stdout is
+written and flushed. `--produced-at RFC3339` optionally stamps that declared
+timestamp into the envelope for a consumer-side freshness check. Leap seconds
+(`23:59:60`) are rejected because the freshness model uses civil-time
+nanosecond bounds rather than a leap-second table. Like the key label it is
+unsigned metadata, and omitting it means no envelope freshness can be
+established. If publication fails, the command exits unsuccessfully even
+though stdout may contain the descriptor. Consume the signed result only after
+the command succeeds and you have both outputs.
+
+Verification recomputes the digest from the saved descriptor and verifies the
+signature over the lowercase hex digest using an independently pinned public
+key. The key label is unsigned. Neither signing nor verifying the byte binding
+establishes identity or authority of the producer, freshness, or historical
+execution. The descriptor and its attempt fingerprint are unchanged, including
+`producer_authenticity` and `descriptor_authenticity` remaining not performed.
+This adds neither consumer trust policy nor common Evidence, grade promotion,
+or an `artifact_verified` claim.
+
+### Saved object acceptance replay
+
+`mumei native-bundle recheck-object-acceptance <bundle> <source> <descriptor> --expected-build-id <trusted-id>`
+is the consumer side of `accept-object`. It checks a saved descriptor against a
+**fresh object acceptance** of the same pinned inputs, never against the saved
+`accepted: true` alone. For example:
+
+```sh
+mumei native-bundle accept-object bundle source.mm --expected-build-id <trusted-id> --json > object-acceptance.json
+mumei native-bundle recheck-object-acceptance bundle source.mm object-acceptance.json --expected-build-id <trusted-id>
+```
+
+The expected build ID must come from a separately trusted channel, never from
+the descriptor. The descriptor is read once as a regular, non-symlink file of
+at most 1 MiB. Malformed or non-UTF-8 JSON and duplicate keys at any object
+level are rejected. So is any envelope other than an evaluated, accepted
+`mumei.native-evidence-acceptance/v1` descriptor with one of the two object
+scopes and a lowercase SHA-256 `evidence_fingerprint`. That includes saved
+`accept-evidence` descriptors and saved Evidence reports. Descriptor strings
+never select tools or files to open.
+
+The command then reruns the full `accept-object` pipeline and gates. Different
+artifacts or machine code exit 1. An inconclusive fresh acceptance exits 3 and
+establishes no consistency result. When the fresh acceptance succeeds, the
+consumer recomputes `evidence_fingerprint` as specified above. A saved
+fingerprint that differs is rejected as not bound to the fresh attempt inputs,
+which covers a descriptor from another bundle or source. With the fingerprint
+bound, the saved descriptor must equal the fresh descriptor field for field. A
+missing, added or edited field anywhere is rejected, including in
+`checks_performed`, `checks_not_performed`, `functions` and the object
+translation record. Success prints the scope and exits 0. Nothing is written to
+stdout on rejection. Flat two-field `{double,i64}` and `{i64,double}` return
+pairs, which C09 admits through `xmm0` and `rax`, replay the same way. A saved
+descriptor for one field order is rejected as unbound against the other.
+
+The consumer can additionally pin a detached producer signature with the same
+`--signature` / `--producer-key` chain flags used by Evidence acceptance. The
+signature subject is the SHA-256 digest of the **exact saved descriptor bytes**,
+not the descriptor's attempt-input `evidence_fingerprint`; even an insignificant
+byte edit breaks the binding before the fresh acceptance runs. A malformed
+envelope, wrong public key, failed key-label pin or failed explicitly supplied
+freshness/registry/revocation gate rejects the replay. Omitting `--signature`
+keeps the legacy consistency-only behavior. These gates check only the supplied
+cryptographic chain: key labels and declared times remain claims unless the
+caller pins and anchors them separately, and real-world producer identity,
+historical execution, register convention, CRT/loader, ABI/runtime and OS
+semantics remain outside the result.
+
+A match means only that the saved descriptor is what a fresh `accept-object`
+emits for these pinned inputs. Without a valid supplied signature chain it does
+not check descriptor or producer authenticity; with one it checks only that
+byte binding and the explicitly supplied key-label/freshness/registry/revocation
+gates. It never checks historical execution, and it accepts no reusable
+Evidence, certificate or grade. Every claim outside the `accept-object` scope
+stays outside it here.
 
 ### Pinned executable exit-status recheck
 
@@ -3090,6 +3384,34 @@ Acceptance is byte reproduction under the recorded toolchain, not execution,
 exit-status, ABI/runtime or optimizer-semantics proof. Non-acceptance paths
 emit no stdout: difference or failure exits 1, an inconclusive fresh query
 exits 3.
+
+### Object-route acceptance descriptor contract and Common Evidence projection
+
+```sh
+mumei evidence check-object-acceptance <descriptor.json | --stdin> [--json | --emit-evidence]
+```
+
+The object-route `mumei.native-evidence-acceptance/v1` descriptor emitted by
+`mumei native-bundle accept-object --json` now has a closed JSON Schema
+(`schema/native-object-acceptance.schema.json`) and a strict Core decoder
+(`mumei_core::object_acceptance::decode`). It validates required fields,
+64-character lowercase SHA-256 digests (`build_id`, `llvm_sha256`,
+`object_sha256`, `evidence_fingerprint`), disjointness between
+`checks_performed` and `checks_not_performed`, Core-owned check names
+(rejecting agent-owned `object_translation_correspondence`), scope consistency
+with `source_machine_tv.object_link_correspondence` and transformation edges,
+and coverage of all ten required `object_translation.correspondence.checks`
+items.
+
+With `--emit-evidence`, Core projects a validated descriptor into a bounded
+`mumei.verification-evidence/v1` record (`method: "bounded_model_checking"`,
+`scope.kind: "bounded"`, `semantics.integer_model: "wrapping_i64"`,
+`provenance.configuration_fingerprint: evidence_fingerprint`) carrying every
+`checks_not_performed` entry in `exclusions` and the assumed register
+convention / input domain in `scope.bounds` and `assumptions`. This is
+representation validation and projection only: it does not rerun Core
+rechecks, authenticate the producer or descriptor, validate ABI/runtime/OS
+semantics, or promote a Seal Grade.
 
 ## 9. External verifier candidates, not adoption decisions
 

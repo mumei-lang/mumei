@@ -418,6 +418,7 @@ impl Monomorphizer {
     /// 式から StructInit の type_name を走査してジェネリック使用箇所を収集する
     fn collect_from_expr(&mut self, expr: &Expr, type_params: &[String]) {
         match expr {
+            Expr::Paren(inner) => self.collect_from_expr(inner, type_params),
             Expr::StructInit { type_name, fields } => {
                 let tref = parse_type_ref(type_name);
                 self.collect_from_type_ref(&tref, type_params);

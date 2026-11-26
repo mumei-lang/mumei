@@ -35,7 +35,15 @@ def test_formula_strips_v_prefix_but_uses_tagged_release_urls() -> None:
         sha_arm_linux="arm-linux-sha",
     )
 
-    assert 'version "0.6.3"' in formula
+    assert 'version "0.6.3"' not in formula
+    assert (
+        formula.index('depends_on "llvm@17"')
+        < formula.index('depends_on "z3"')
+        < formula.index('on_macos do')
+    )
+    assert 'pkgshare' in formula
+    assert 'share/"mumei"' not in formula
+    assert '#{share}/mumei' not in formula
     assert "/releases/download/0.6.3/" not in formula
     assert "/releases/download/vv0.6.3/" not in formula
     for asset in {
@@ -47,6 +55,18 @@ def test_formula_strips_v_prefix_but_uses_tagged_release_urls() -> None:
         assert f"https://github.com/mumei-lang/mumei/releases/download/v0.6.3/{asset}" in formula
 
 
+def test_formula_keeps_explicit_version_for_prerelease_tags() -> None:
+    module = load_generate_formula_module()
+    formula = module.render_formula(
+        version="v0.6.24-rc.1",
+        sha_x86_mac="x86-mac-sha",
+        sha_arm_mac="arm-mac-sha",
+        sha_x86_linux="x86-linux-sha",
+        sha_arm_linux="arm-linux-sha",
+    )
+
+    assert 'version "0.6.24-rc.1"' in formula
+
 def test_formula_accepts_unprefixed_versions_with_same_url_shape() -> None:
     module = load_generate_formula_module()
     formula = module.render_formula(
@@ -57,7 +77,15 @@ def test_formula_accepts_unprefixed_versions_with_same_url_shape() -> None:
         sha_arm_linux="arm-linux-sha",
     )
 
-    assert 'version "0.6.3"' in formula
+    assert 'version "0.6.3"' not in formula
+    assert (
+        formula.index('depends_on "llvm@17"')
+        < formula.index('depends_on "z3"')
+        < formula.index('on_macos do')
+    )
+    assert 'pkgshare' in formula
+    assert 'share/"mumei"' not in formula
+    assert '#{share}/mumei' not in formula
     assert "releases/download/v0.6.3/mumei-x86_64-apple-darwin.tar.gz" in formula
 
 
@@ -112,14 +140,17 @@ def test_release_workflow_keeps_musl_and_windows_stabilization() -> None:
     assert "Length -lt 1MB" in workflow
 
 
-def test_homebrew_update_is_warning_only_after_release() -> None:
+def test_homebrew_update_fails_closed_for_mumei_release() -> None:
     workflow = RELEASE_WORKFLOW.read_text()
 
     assert "needs: release" in workflow
     assert "id: homebrew-token" in workflow
     assert "should_update=false" in workflow
     assert "::warning::HOMEBREW_TAP_TOKEN is not set" in workflow
-    assert "::warning::HOMEBREW_TAP_TOKEN is invalid" in workflow
+    assert "::error::HOMEBREW_TAP_TOKEN is invalid" in workflow
+    assert re.search(r'HOMEBREW_TAP_TOKEN is invalid[\s\S]*?exit 1', workflow)
+    assert re.search(r'HOMEBREW_TAP_TOKEN is not set[\s\S]*?exit 1', workflow)
     assert "if: steps.homebrew-token.outputs.should_update == 'true'" in workflow
-    assert "::error::HOMEBREW_TAP_TOKEN" not in workflow
     assert "if ! git push origin HEAD:main; then" in workflow
+    assert "x-access-token" not in workflow
+    assert "gh auth setup-git" in workflow

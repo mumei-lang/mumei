@@ -35,6 +35,7 @@ pub struct ParseContext {
     tokens: Vec<SpannedToken>,
     pos: usize,
     expect_failures: Vec<String>,
+    track_parens: bool,
 }
 
 impl ParseContext {
@@ -43,7 +44,20 @@ impl ParseContext {
             tokens,
             pos: 0,
             expect_failures: Vec::new(),
+            track_parens: false,
         }
+    }
+
+    /// Preserve whether a comparison was explicitly parenthesized until
+    /// comparison-chain normalization has used that boundary.
+    pub(crate) fn new_tracking_parens(tokens: Vec<SpannedToken>) -> Self {
+        let mut ctx = Self::new(tokens);
+        ctx.track_parens = true;
+        ctx
+    }
+
+    pub(crate) fn track_parens(&self) -> bool {
+        self.track_parens
     }
 
     /// Diagnostics recorded by `expect` calls whose token was missing.
@@ -200,8 +214,9 @@ pub fn parse_module_checked(source: &str) -> Result<Vec<Item>, Vec<String>> {
 pub fn parse_expression(input: &str) -> Expr {
     let mut lexer = lexer::Lexer::new(input);
     let tokens = lexer.tokenize();
-    let mut ctx = ParseContext::new(tokens);
-    expr::normalize_comparison_chains(expr::parse_expr(&mut ctx, 0))
+    let mut ctx = ParseContext::new_tracking_parens(tokens);
+    let parsed = expr::parse_expr(&mut ctx, 0);
+    expr::normalize_comparison_chains(parsed)
 }
 
 /// Parse a body expression (blocks and statements).
@@ -220,9 +235,12 @@ pub fn parse_body_expr(input: &str) -> Stmt {
 pub fn parse_expression_checked(input: &str) -> Result<Expr, Vec<String>> {
     let mut lexer = lexer::Lexer::new(input);
     let tokens = lexer.tokenize_checked()?;
-    let mut ctx = ParseContext::new(tokens);
-    let expr = expr::normalize_comparison_chains(expr::parse_expr(&mut ctx, 0));
+    let mut ctx = ParseContext::new_tracking_parens(tokens);
+    let parsed = expr::parse_expr(&mut ctx, 0);
     let mut failures = ctx.expect_failures().to_vec();
+    if expr::nested_comparison_chain_operand(&parsed) {
+        failures.push("nested comparison inside a comparison-chain operand".to_owned());
+    }
     if ctx.peek() != &Token::Eof {
         failures.push(format!(
             "unexpected trailing input starting at token `{:?}`",
@@ -230,7 +248,7 @@ pub fn parse_expression_checked(input: &str) -> Result<Expr, Vec<String>> {
         ));
     }
     if failures.is_empty() {
-        Ok(expr)
+        Ok(expr::normalize_comparison_chains(parsed))
     } else {
         Err(failures)
     }
@@ -1517,6 +1535,28 @@ atom m(n: i64)
     }
 
     #[test]
+    fn test_forall_constraints_strip_one_trailing_argument_comma() {
+        let source = r#"
+atom m(n: i64)
+    requires: forall(i, 0, n, i >= 0,);
+    ensures: result >= 0;
+    body: 0;
+"#;
+        let atom = parse_module(source)
+            .into_iter()
+            .find_map(|item| {
+                if let Item::Atom(atom) = item {
+                    Some(atom)
+                } else {
+                    None
+                }
+            })
+            .expect("one atom");
+        assert_eq!(atom.forall_constraints.len(), 1);
+        assert_eq!(atom.forall_constraints[0].condition, "i >= 0");
+    }
+
+    #[test]
     fn test_forall_constraints_skip_nested_quantifiers() {
         // `forall` inside an `exists` condition is part of that exists —
         // hoisting it to a top-level conjunct would free `i` and
@@ -1894,6 +1934,65 @@ atom transfer(x: i64)
             }
             other => panic!("Expected result == (0 <= x && x < n), got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parenthesized_comparison_operand_is_not_chain_normalized() {
+        match parse_expression("(false == false) == false") {
+            Expr::BinaryOp(left, Op::Eq, right) => {
+                assert!(matches!(*left, Expr::BinaryOp(_, Op::Eq, _)));
+                assert!(matches!(*right, Expr::Variable(ref name) if name == "false"));
+            }
+            other => panic!("expected left-associative equality, got {:?}", other),
+        }
+        assert!(matches!(
+            parse_expression("a == b == c"),
+            Expr::BinaryOp(_, Op::And, _)
+        ));
+    }
+
+    #[test]
+    fn parenthesized_comparison_does_not_disable_independent_chain_normalization() {
+        match parse_expression("(false == false) == false && a == b == c") {
+            Expr::BinaryOp(left, Op::And, right) => {
+                assert!(matches!(*left, Expr::BinaryOp(_, Op::Eq, _)));
+                assert!(matches!(*right, Expr::BinaryOp(_, Op::And, _)));
+            }
+            other => panic!(
+                "expected independent equality chain to normalize, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn tolerant_parse_normalizes_middle_comparison_operands_correctly() {
+        match parse_expression("a == x < y == b") {
+            Expr::BinaryOp(left, Op::And, right) => {
+                assert!(matches!(*left, Expr::BinaryOp(_, Op::Eq, _)));
+                assert!(matches!(*right, Expr::BinaryOp(_, Op::Eq, _)));
+            }
+            other => panic!(
+                "expected middle comparison to duplicate into both links, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn parenthesized_comparison_inside_for_body_does_not_confuse_assignment_scan() {
+        let _ = parse_expression("{ for i in 0..n { x = (a < b) == c }; i }");
+    }
+
+    #[test]
+    fn checked_parse_rejects_nested_comparison_chain_operands() {
+        assert!(parse_expression_checked("a == b < c == d").is_err());
+        assert!(parse_expression_checked("result == x < y == result").is_err());
+        assert!(parse_expression_checked("a < (b < c) < d").is_err());
+        assert!(parse_expression_checked("x == a < b").is_ok());
+        assert!(parse_expression_checked("x < y == a == b").is_ok());
+        assert!(parse_expression_checked("0 <= i < len(a)").is_ok());
+        assert!(parse_expression_checked("(false == false) == false").is_ok());
     }
 
     #[test]

@@ -63,3 +63,10 @@ When a change adds or widens an output surface, check it against the rules above
 - Register every environment variable in `src/env_registry.rs`, including category, default, description, and `sensitive` classification; regenerate references with `MUMEI_UPDATE_REFERENCE_DOCS=1 cargo test --bin mumei reference_docs`.
 - Run `cargo test --bin mumei naming`, `cargo test --bin mumei cli_reference`, and `cargo test --test config_cli`.
 - Use the [adding CLI flags and environment variables skill](.agents/skills/adding-cli-flags-and-env-vars/SKILL.md).
+
+## Agent skills layout
+
+Two skill directories exist and they serve different audiences:
+
+- [`.github/skills/`](.github/skills/README.md) — the public "Mumei Forge" primitive catalog (verify, build, diagnose, certify, catalog). These skills ship with the repository for agents *using* the toolchain, and are composed by the orchestration agent described in that README.
+- [`.agents/skills/`](.agents/skills/) — contributor-facing skills for working *on* this repository (testing recipes, authoring guides). They are internal and not part of the public catalog.

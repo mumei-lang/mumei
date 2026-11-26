@@ -88,7 +88,8 @@ use std::path::Path;
 /// Version 42 represents struct-array enum payloads with leaf arrays and rejects
 /// direct reads, so cached verdicts must be re-derived.
 /// Version 43 admits bounded, inhabited mutual-recursive enum groups as Z3 datatypes.
-pub const VERIFIER_POLICY_VERSION: u32 = 43;
+/// Version 44 preserves explicit comparison grouping and rejects nested middle-chain comparisons.
+pub const VERIFIER_POLICY_VERSION: u32 = 44;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -1318,6 +1319,7 @@ fn collect_body_type_names_expr(
     names: &mut Vec<String>,
 ) {
     match expr {
+        Expr::Paren(inner) => collect_body_type_names_expr(inner, module_env, bound_params, names),
         Expr::Number(_)
         | Expr::Float(_)
         | Expr::StringLit(_)
@@ -1449,6 +1451,7 @@ fn collect_acquired_resource_names_stmt(stmt: &Stmt, names: &mut BTreeSet<String
 
 fn collect_acquired_resource_names_expr(expr: &Expr, names: &mut BTreeSet<String>) {
     match expr {
+        Expr::Paren(inner) => collect_acquired_resource_names_expr(inner, names),
         Expr::Number(_)
         | Expr::Float(_)
         | Expr::StringLit(_)
@@ -3371,7 +3374,7 @@ body: { p.a };\n";
         let baseline = proof_hash_for(source, "g");
         assert_eq!(
             baseline,
-            "79839c31c38aea79bacf0bb044fd6a17ec03c302ce23f90293d3bedf26dcbc25"
+            "7002005f369e9804b705fcccdb7d24d6ec1eb1151f4bd330c22b274f8a35fbdb"
         );
         let changed = proof_hash_for(
             &source.replace(
@@ -3384,7 +3387,7 @@ body: { p.a };\n";
     }
 
     #[test]
-    fn effect_free_proof_hash_matches_policy_version_43() {
+    fn effect_free_proof_hash_matches_policy_version_44() {
         let source = "atom main(x: i64) -> i64\n\
                       requires: true;\n\
                       ensures: result == x;\n\
@@ -3393,7 +3396,7 @@ body: { p.a };\n";
 
         assert_eq!(
             hash,
-            "10e8ee509c711d841152ae579b107f335a90afbdeff9b63a10f634f424ab3d96"
+            "369e8579e33fa3311a5cba77ce270b739fcc099d2cf8d532c51970ee86dcc8fa"
         );
         assert!(!dependency_hashes_for(source, "main")
             .keys()

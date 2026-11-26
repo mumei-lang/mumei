@@ -22,7 +22,9 @@ class Mumei < Formula
   desc "Mathematical Proof-Driven Programming Language — formally verified with Z3"
   homepage "https://github.com/mumei-lang/mumei"
   license "Apache-2.0"
-  version "{version}"
+{version_line}
+  depends_on "llvm@17"
+  depends_on "z3"
 
   on_macos do
     if Hardware::CPU.arm?
@@ -44,27 +46,24 @@ class Mumei < Formula
     end
   end
 
-  depends_on "z3"
-  depends_on "llvm@17"
-
   def install
     bin.install "mumei"
-    (share/"mumei/std").install Dir["std/*"]
+    (pkgshare/"std").install Dir["std/*"]
 
     # SI-5 Phase 3-C: install the std/ proof-certificate bundle when it
     # ships with the release tarball so downstream projects can verify
     # imports against a trusted, versioned certificate set.
     has_proof_bundle = File.exist?("std-proof-bundle.json")
     if has_proof_bundle
-      (share/"mumei").install "std-proof-bundle.json"
+      pkgshare.install "std-proof-bundle.json"
     end
 
-    env_script = "export MUMEI_STD_PATH=\\"#{{share}}/mumei/std\\"\\n"
+    env_script = "export MUMEI_STD_PATH=\\"#{{pkgshare}}/std\\"\\n"
     if Dir.exist?("std/certs")
-      env_script += "export MUMEI_PROOF_CERTS=\\"#{{share}}/mumei/std/certs\\"\\n"
+      env_script += "export MUMEI_PROOF_CERTS=\\"#{{pkgshare}}/std/certs\\"\\n"
     end
     if has_proof_bundle
-      env_script += "export MUMEI_PROOF_BUNDLE=\\"#{{share}}/mumei/std-proof-bundle.json\\"\\n"
+      env_script += "export MUMEI_PROOF_BUNDLE=\\"#{{pkgshare}}/std-proof-bundle.json\\"\\n"
     end
     (etc/"mumei").mkpath
     (etc/"mumei/env.sh").write env_script
@@ -73,16 +72,16 @@ class Mumei < Formula
   def caveats
     s = <<~EOS
       The Mumei standard library has been installed to:
-        #{{share}}/mumei/std
+        #{{pkgshare}}/std
 
     EOS
-    if (share/"mumei/std-proof-bundle.json").exist?
+    if (pkgshare/"std-proof-bundle.json").exist?
       s += <<~EOS
         The std/ proof-certificate bundle (SI-5 Phase 3-C) is at:
-          #{{share}}/mumei/std-proof-bundle.json
+          #{{pkgshare}}/std-proof-bundle.json
 
         Per-module proof certificates are at:
-          #{{share}}/mumei/std/certs
+          #{{pkgshare}}/std/certs
         Re-verify a module with:
           mumei verify-cert "$MUMEI_PROOF_CERTS/<module>.proof.json" "$MUMEI_STD_PATH/<module>.mm" --strict
 
@@ -90,10 +89,10 @@ class Mumei < Formula
     end
     s += <<~EOS
       To use it, add the following to your shell profile:
-        export MUMEI_STD_PATH="#{{share}}/mumei/std"
+        export MUMEI_STD_PATH="#{{pkgshare}}/std"
     EOS
-    if (share/"mumei/std-proof-bundle.json").exist?
-      s += "  export MUMEI_PROOF_BUNDLE=\\"#{{share}}/mumei/std-proof-bundle.json\\"\\n"
+    if (pkgshare/"std-proof-bundle.json").exist?
+      s += "  export MUMEI_PROOF_BUNDLE=\\"#{{pkgshare}}/std-proof-bundle.json\\"\\n"
     end
     s += <<~EOS
 
@@ -107,11 +106,11 @@ class Mumei < Formula
     assert_match version.to_s, shell_output("#{{bin}}/mumei --version")
     # Modules with `unknown` / `skipped` atoms exit non-zero by design, so the
     # packaged set is sound as long as one certificate re-verifies strictly.
-    certs = Dir["#{{share}}/mumei/std/certs/**/*.proof.json"]
+    certs = Dir["#{{pkgshare}}/std/certs/**/*.proof.json"]
     unless certs.empty?
       verified = certs.any? do |cert|
-        relative = cert.sub("#{{share}}/mumei/std/certs/", "").sub(/\\.proof\\.json\\z/, ".mm")
-        source = share/"mumei/std"/relative
+        relative = cert.sub("#{{pkgshare}}/std/certs/", "").sub(/\\.proof\\.json\\z/, ".mm")
+        source = pkgshare/"std"/relative
         source.exist? && quiet_system(bin/"mumei", "verify-cert", cert, source, "--strict")
       end
       assert verified, "no packaged proof certificate passed verify-cert --strict"
@@ -129,8 +128,15 @@ def render_formula(
     sha_arm_linux: str,
 ) -> str:
     ver = version.lstrip("v")
+    # Homebrew can scan stable semantic versions from the release URL. Keep an
+    # explicit version for prereleases such as 0.6.24-rc.1, where URL scanning
+    # is not reliable, without reintroducing the audit offense for stable tags.
+    import re
+
+    version_line = f'  version "{ver}"\n\n' if not re.fullmatch(r"\d+\.\d+\.\d+", ver) else ""
     return FORMULA_TEMPLATE.format(
         version=ver,
+        version_line=version_line,
         sha_x86_mac=sha_x86_mac,
         sha_arm_mac=sha_arm_mac,
         sha_x86_linux=sha_x86_linux,

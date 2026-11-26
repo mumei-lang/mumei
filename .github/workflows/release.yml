@@ -185,7 +185,7 @@ jobs:
       - name: Cache LLVM 17 tools (Windows)
         if: runner.os == 'Windows'
         id: cache-llvm-win
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: C:\LLVM17
           key: llvm-17.0.6-win64-msvc-prebuilt-tools-v1
@@ -522,11 +522,11 @@ jobs:
     # Windows / musl build jobs can be validated without cutting a tag.
     if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             artifacts/**/*.tar.gz
@@ -548,11 +548,11 @@ jobs:
         run: |
           set -euo pipefail
           dispatched_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          gh workflow run jekyll-gh-pages.yml --ref develop
+          gh workflow run pages-deploy.yml --ref develop
 
           run_id=""
           for _ in $(seq 1 30); do
-            run_id="$(gh run list --workflow jekyll-gh-pages.yml --branch develop --event workflow_dispatch \
+            run_id="$(gh run list --workflow pages-deploy.yml --branch develop --event workflow_dispatch \
               --json databaseId,createdAt \
               --jq "map(select(.createdAt >= \"$dispatched_at\")) | sort_by(.createdAt) | first | .databaseId // empty")"
             if [[ -n "$run_id" ]]; then
@@ -616,7 +616,7 @@ jobs:
       - name: Checkout mumei (for generate_formula.py)
         if: steps.homebrew-token.outputs.should_update == 'true'
         uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: steps.homebrew-token.outputs.should_update == 'true'
         with:
           path: artifacts
@@ -635,13 +635,14 @@ jobs:
       - name: Checkout homebrew-mumei
         if: steps.homebrew-token.outputs.should_update == 'true'
         env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/mumei-lang/homebrew-mumei.git" homebrew-mumei 2>/dev/null || {
+          gh auth setup-git
+          git clone "https://github.com/mumei-lang/homebrew-mumei.git" homebrew-mumei 2>/dev/null || {
             mkdir -p homebrew-mumei
             cd homebrew-mumei
             git init -b main
-            git remote add origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/mumei-lang/homebrew-mumei.git"
+            git remote add origin "https://github.com/mumei-lang/homebrew-mumei.git"
           }
       - name: Generate Homebrew Formula
         if: steps.homebrew-token.outputs.should_update == 'true'
@@ -663,12 +664,12 @@ jobs:
       - name: Push formula to homebrew-mumei
         if: steps.homebrew-token.outputs.should_update == 'true'
         env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
+          gh auth setup-git
           cd homebrew-mumei
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/mumei-lang/homebrew-mumei.git"
           git add -A
           if git diff --cached --quiet; then
             echo "No changes to commit"

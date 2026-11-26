@@ -2350,6 +2350,7 @@ fn collect_bound_names_stmt(stmt: &Stmt, names: &mut std::collections::HashSet<S
 
 fn collect_bound_names_expr(expr: &Expr, names: &mut std::collections::HashSet<String>) {
     match expr {
+        Expr::Paren(inner) => collect_bound_names_expr(inner, names),
         Expr::ArrayLit(elements) => {
             for element in elements {
                 collect_bound_names_expr(element, names);
@@ -2579,6 +2580,7 @@ fn collect_array_aliases_expr(
     additions: &mut std::collections::HashSet<String>,
 ) {
     match expr {
+        Expr::Paren(inner) => collect_array_aliases_expr(inner, aliases, additions),
         Expr::ArrayLit(elements) => {
             for element in elements {
                 collect_array_aliases_expr(element, aliases, additions);
@@ -2650,6 +2652,7 @@ fn collect_array_aliases_expr(
 fn expr_mentions_alias(expr: &Expr, aliases: &std::collections::HashSet<String>) -> bool {
     field_access_path(expr).is_some_and(|path| aliases.contains(&path))
         || match expr {
+            Expr::Paren(inner) => expr_mentions_alias(inner, aliases),
             Expr::Variable(name) => aliases.contains(name),
             Expr::ArrayLit(elements) => elements
                 .iter()

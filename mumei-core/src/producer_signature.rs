@@ -606,7 +606,7 @@ pub fn sign(
         return Err(SignError::InvalidProducerKeyId);
     }
     if let Some(value) = produced_at {
-        if !verification_evidence::is_rfc3339_timestamp(value) {
+        if verification_evidence::rfc3339_instant(value).is_none() {
             return Err(SignError::InvalidProducedAt);
         }
     }

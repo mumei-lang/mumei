@@ -859,6 +859,7 @@ pub fn lower_expr_with_env(
     module_env: Option<&crate::verification::ModuleEnv>,
 ) -> HirExpr {
     let result = match expr {
+        Expr::Paren(inner) => lower_expr_with_env(inner, module_env),
         Expr::Number(n) => HirExpr::Number(*n),
         Expr::Float(f) => HirExpr::Float(*f),
         // Plan 9: String literal lowering

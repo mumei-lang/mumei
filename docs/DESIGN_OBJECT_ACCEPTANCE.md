@@ -37,7 +37,8 @@ agent 側に `native-object-accept` ルート（`object_source_machine_code_corr
     の受理 — それぞれ別 producer / 別メモ
   - verdict / grade / checks-list promotion（keep-off 方針のまま）
   - producer authenticity / historical execution の主張
-  - Step 4（liftable subset の拡大）— deferred 依存で凍結中
+  - Step 4（liftable subset の拡大）— #789 の mixed register pair のみ
+    部分解凍、受理条件の拡張は保留
 
 ## 2. 現状の棚卸し（再利用可能な機構）
 
@@ -198,17 +199,15 @@ correspondence profile で立証可能な範囲で対応している」。
   既存の hard gate 名（`object_symbol_correspondence` 等）と
   `object_source_machine_code_correspondence` は従来通り含める。
 - **checks_not_performed**: 従来通り
-  producer_authenticity/historical_execution/
+  producer_authenticity/descriptor_authenticity/historical_execution/
   register_convention_validation/optimizer_semantics/
   abi_runtime_semantics/os_*_observation/runtime_observation_semantics/
   grade_promotion/lean_kernel_checks に加え、object-translation 受理
   固有で skip された項目（`_without_object_link` の場合の
   `object_link_correspondence`）を明記。
-- **binding**: `build_id`・`llvm_sha256`・`object_sha256`・
-  （link ありのとき executable_sha256）に加えて、受理の主体である
-  correspondence の `evidence_fingerprint` 相当の pin —— 受理時点の
-  `correspondence` 全体の安定ハッシュを bind して後段が改竄検知
-  できる形（候補、決定点 f 参照）。
+- **binding**: `evidence_fingerprint` は `build_id`・`source_sha256`・
+  `llvm_sha256`・`object_sha256`・`canonical_argv_hash`・`emit_scope` を
+  含む canonical JSON の SHA-256（決定点 f 参照）。
 - **agent 対応づけ**: Core は `object_translation_correspondence` と
   いう agent-owned 名を emit しない（既存の方針を継続）。
   agent `native-object-accept` は新 scope と項目名列挙を消費し、
@@ -249,8 +248,20 @@ correspondence profile で立証可能な範囲で対応している」。
   scope は単体テストで pin —— fresh ELF の fixture から
   `object_link_corresponds` の uncheckable 経路は到達不能なため。
   旧 scope 値は語彙として維持、emit 経路は新値のみ。）
-- **Step 4（deferred）**: liftable subset が広がったら受理条件の
-  項目追加を再評価。
+- **Step 4（#789、部分解凍）**: LLVM IR ↔ object の直接比較に flat な
+  `{ i64, double }` / `{ double, i64 }` の register 結果を追加し、
+  `rax`/`xmm0` のビットパターンを比較する。入れ子の mixed 結果や mixed
+  `sret`、FP 演算／比較、既存の deferred セットは対象外のまま。
+  `evaluate_machine_tv` もこの結果形状で IR をエンコードできた場合は
+  IR の戻り値を比較対象とする。従来の source-model 比較は両値が NaN なら
+  payload の違いを区別しないが、IR 比較は payload を含めて一致を要求する。
+  そのため IR と object の NaN payload だけが異なる場合も `Different` となり、
+  `accept-object` は受理しない。これは FP 演算を含まない IR のビット保存を
+  要求するもので、MXCSR や FP 演算時の NaN payload の検証は主張しない。
+  IR をエンコードできない場合の source-model 比較への fallback は従来通り。
+  受理ゲートの構成、項目名・verdict・grade は変更しない。解凍しない項目の理由は
+  [LLVM IR → object の設計メモ §6](DESIGN_LLVM_OBJECT_CORRESPONDENCE.md#6-段階案)
+  を参照。
 
 ## 7. 決定点（推奨対応つき）
 
@@ -280,12 +291,10 @@ correspondence profile で立証可能な範囲で対応している」。
 - **(e) agent-owned 名の emit**: 推奨は継続して emit しない。
   `native-object-accept` が項目名集合から自分の
   `object_translation_correspondence` 名に写像する設計にする。
-- **(f) evidence_fingerprint binding**: 推奨は受理対象の
-  `correspondence` 全体の安定ハッシュを descriptor に bind。
-  agent が受理後に証跡改竄を検知できる最小の再検査を可能にする。
-  （schema 追加フィールド — agent schema の allowlist 更新が必要。
-  最小差分にしたければ build_id + sha256 だけでも消費可能だが、
-  fingerprint 追加を推奨。）
+- **(f) evidence_fingerprint binding**: #1445 では `correspondence`
+  全体ではなく、受理時の入力 pin を descriptor に bind する。
+  attempt binding 用であり、descriptor 自体の真正性は検証しない。
+  canonical JSON の詳細は [VERIFICATION_NATIVE.md](VERIFICATION_NATIVE.md#object-stage-machine-code-acceptance-c10-option-b) 参照。
 - **(g) skipped subset の扱い**: 推奨は受理判定には無関係（
   `llvm_ir_object_equivalence` 項目が checked であれば skipped
   関数がいても受理）。ただし `solver_unknown` が1件でもあれば

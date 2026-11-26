@@ -178,6 +178,7 @@ fn expr_has_may_write_call(
     aliases: &HashSet<String>,
 ) -> bool {
     match expr {
+        Expr::Paren(inner) => expr_has_may_write_call(vc, inner, env, aliases),
         Expr::Call(callee, args) => {
             callee_may_write_args(vc, CalleeRef::Name(callee), args, env)
                 .iter()

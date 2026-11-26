@@ -94,6 +94,274 @@ fn collect_relational_chain(
     operands.push(expr.clone());
 }
 
+fn stmt_has_relational(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => expr_has_relational(value),
+        Stmt::ArrayStore { index, value, .. } => {
+            expr_has_relational(index) || expr_has_relational(value)
+        }
+        Stmt::Block(stmts, _) => stmts.iter().any(stmt_has_relational),
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            expr_has_relational(cond)
+                || expr_has_relational(invariant)
+                || decreases.as_deref().is_some_and(expr_has_relational)
+                || stmt_has_relational(body)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => stmt_has_relational(body),
+        Stmt::TaskGroup { children, .. } => children.iter().any(stmt_has_relational),
+        Stmt::Cancel { .. } => false,
+        Stmt::Expr(expr, _) => expr_has_relational(expr),
+    }
+}
+
+fn expr_has_relational(expr: &Expr) -> bool {
+    match expr {
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => false,
+        Expr::ArrayLit(elements) => elements.iter().any(expr_has_relational),
+        Expr::ArrayAccess(_, index) => expr_has_relational(index),
+        Expr::BinaryOp(left, op, right) => {
+            is_relational_op(op) || expr_has_relational(left) || expr_has_relational(right)
+        }
+        Expr::Paren(inner) => expr_has_relational(inner),
+        Expr::Block(stmt) => stmt_has_relational(stmt),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_has_relational(cond)
+                || stmt_has_relational(then_branch)
+                || stmt_has_relational(else_branch)
+        }
+        Expr::Call(_, args) => args.iter().any(expr_has_relational),
+        Expr::StructInit { fields, .. } => {
+            fields.iter().any(|(_, value)| expr_has_relational(value))
+        }
+        Expr::FieldAccess(base, _) => expr_has_relational(base),
+        Expr::Match { target, arms } => {
+            expr_has_relational(target)
+                || arms.iter().any(|arm| {
+                    arm.guard.as_deref().is_some_and(expr_has_relational)
+                        || stmt_has_relational(&arm.body)
+                })
+        }
+        Expr::Async { body } => stmt_has_relational(body),
+        Expr::Await { expr } => expr_has_relational(expr),
+        Expr::CallRef { callee, args } => {
+            expr_has_relational(callee) || args.iter().any(expr_has_relational)
+        }
+        Expr::Perform { args, .. } => args.iter().any(expr_has_relational),
+        Expr::Lambda { body, .. } => stmt_has_relational(body),
+        Expr::ChanSend { channel, value } => {
+            expr_has_relational(channel) || expr_has_relational(value)
+        }
+        Expr::ChanRecv { channel } => expr_has_relational(channel),
+    }
+}
+
+fn stmt_has_nested_comparison_operand(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            nested_comparison_chain_operand(value)
+        }
+        Stmt::ArrayStore { index, value, .. } => {
+            nested_comparison_chain_operand(index) || nested_comparison_chain_operand(value)
+        }
+        Stmt::Block(stmts, _) => stmts.iter().any(stmt_has_nested_comparison_operand),
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            nested_comparison_chain_operand(cond)
+                || nested_comparison_chain_operand(invariant)
+                || decreases
+                    .as_deref()
+                    .is_some_and(nested_comparison_chain_operand)
+                || stmt_has_nested_comparison_operand(body)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            stmt_has_nested_comparison_operand(body)
+        }
+        Stmt::TaskGroup { children, .. } => children.iter().any(stmt_has_nested_comparison_operand),
+        Stmt::Cancel { .. } => false,
+        Stmt::Expr(expr, _) => nested_comparison_chain_operand(expr),
+    }
+}
+
+fn collect_relational_chain_refs<'a>(
+    expr: &'a Expr,
+    equality: bool,
+    operands: &mut Vec<&'a Expr>,
+    op_count: &mut usize,
+) {
+    if let Expr::BinaryOp(left, op, right) = expr {
+        if is_relational_op(op) && is_equality_op(op) == equality {
+            collect_relational_chain_refs(left, equality, operands, op_count);
+            *op_count += 1;
+            operands.push(right);
+            return;
+        }
+    }
+    operands.push(expr);
+}
+
+/// True when a multi-link comparison chain has a comparison inside one of its
+/// operands. Duplicating those operands during normalization can grow
+/// exponentially, so fail-closed parsers reject this shape before rewriting.
+pub(crate) fn nested_comparison_chain_operand(expr: &Expr) -> bool {
+    if let Expr::BinaryOp(_, op, _) = expr {
+        if is_relational_op(op) {
+            let equality = is_equality_op(op);
+            let mut operands = Vec::new();
+            let mut op_count = 0usize;
+            collect_relational_chain_refs(expr, equality, &mut operands, &mut op_count);
+            if op_count > 1
+                && operands
+                    .iter()
+                    .skip(1)
+                    .take(operands.len().saturating_sub(2))
+                    .any(|operand| expr_has_relational(operand))
+            {
+                return true;
+            }
+            return operands
+                .iter()
+                .any(|operand| nested_comparison_chain_operand(operand));
+        }
+    }
+    match expr {
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => false,
+        Expr::ArrayLit(elements) => elements.iter().any(nested_comparison_chain_operand),
+        Expr::ArrayAccess(_, index) => nested_comparison_chain_operand(index),
+        Expr::BinaryOp(left, _, right) => {
+            nested_comparison_chain_operand(left) || nested_comparison_chain_operand(right)
+        }
+        Expr::Paren(inner) => nested_comparison_chain_operand(inner),
+        Expr::Block(stmt) => stmt_has_nested_comparison_operand(stmt),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            nested_comparison_chain_operand(cond)
+                || stmt_has_nested_comparison_operand(then_branch)
+                || stmt_has_nested_comparison_operand(else_branch)
+        }
+        Expr::Call(_, args) => args.iter().any(nested_comparison_chain_operand),
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| nested_comparison_chain_operand(value)),
+        Expr::FieldAccess(base, _) => nested_comparison_chain_operand(base),
+        Expr::Match { target, arms } => {
+            nested_comparison_chain_operand(target)
+                || arms.iter().any(|arm| {
+                    arm.guard
+                        .as_deref()
+                        .is_some_and(nested_comparison_chain_operand)
+                        || stmt_has_nested_comparison_operand(&arm.body)
+                })
+        }
+        Expr::Async { body } => stmt_has_nested_comparison_operand(body),
+        Expr::Await { expr } => nested_comparison_chain_operand(expr),
+        Expr::CallRef { callee, args } => {
+            nested_comparison_chain_operand(callee)
+                || args.iter().any(nested_comparison_chain_operand)
+        }
+        Expr::Perform { args, .. } => args.iter().any(nested_comparison_chain_operand),
+        Expr::Lambda { body, .. } => stmt_has_nested_comparison_operand(body),
+        Expr::ChanSend { channel, value } => {
+            nested_comparison_chain_operand(channel) || nested_comparison_chain_operand(value)
+        }
+        Expr::ChanRecv { channel } => nested_comparison_chain_operand(channel),
+    }
+}
+
+fn normalize_stmt(stmt: Stmt) -> Stmt {
+    match stmt {
+        Stmt::Let { var, value, span } => Stmt::Let {
+            var,
+            value: Box::new(normalize_expr(*value)),
+            span,
+        },
+        Stmt::Assign { var, value, span } => Stmt::Assign {
+            var,
+            value: Box::new(normalize_expr(*value)),
+            span,
+        },
+        Stmt::ArrayStore {
+            array,
+            index,
+            field_path,
+            value,
+            span,
+        } => Stmt::ArrayStore {
+            array,
+            index: Box::new(normalize_expr(*index)),
+            field_path,
+            value: Box::new(normalize_expr(*value)),
+            span,
+        },
+        Stmt::Block(stmts, span) => {
+            Stmt::Block(stmts.into_iter().map(normalize_stmt).collect(), span)
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            span,
+        } => Stmt::While {
+            cond: Box::new(normalize_expr(*cond)),
+            invariant: Box::new(normalize_expr(*invariant)),
+            decreases: decreases.map(|expr| Box::new(normalize_expr(*expr))),
+            body: Box::new(normalize_stmt(*body)),
+            span,
+        },
+        Stmt::Acquire {
+            resource,
+            body,
+            span,
+        } => Stmt::Acquire {
+            resource,
+            body: Box::new(normalize_stmt(*body)),
+            span,
+        },
+        Stmt::Task { body, group, span } => Stmt::Task {
+            body: Box::new(normalize_stmt(*body)),
+            group,
+            span,
+        },
+        Stmt::TaskGroup {
+            children,
+            join_semantics,
+            span,
+        } => Stmt::TaskGroup {
+            children: children.into_iter().map(normalize_stmt).collect(),
+            join_semantics,
+            span,
+        },
+        Stmt::Cancel { target, span } => Stmt::Cancel { target, span },
+        Stmt::Expr(expr, span) => Stmt::Expr(normalize_expr(expr), span),
+    }
+}
+
 fn normalize_expr(expr: Expr) -> Expr {
     match expr {
         Expr::BinaryOp(left, op, right) if is_relational_op(&op) => {
@@ -127,6 +395,7 @@ fn normalize_expr(expr: Expr) -> Expr {
             op,
             Box::new(normalize_expr(*right)),
         ),
+        Expr::Paren(inner) => normalize_expr(*inner),
         Expr::Call(name, args) => Expr::Call(name, args.into_iter().map(normalize_expr).collect()),
         Expr::ArrayAccess(name, index) => Expr::ArrayAccess(name, Box::new(normalize_expr(*index))),
         Expr::StructInit { type_name, fields } => Expr::StructInit {
@@ -144,7 +413,7 @@ fn normalize_expr(expr: Expr) -> Expr {
                 .map(|arm| MatchArm {
                     pattern: arm.pattern,
                     guard: arm.guard.map(|guard| Box::new(normalize_expr(*guard))),
-                    body: arm.body,
+                    body: Box::new(normalize_stmt(*arm.body)),
                 })
                 .collect(),
         },
@@ -154,10 +423,10 @@ fn normalize_expr(expr: Expr) -> Expr {
             else_branch,
         } => Expr::IfThenElse {
             cond: Box::new(normalize_expr(*cond)),
-            then_branch,
-            else_branch,
+            then_branch: Box::new(normalize_stmt(*then_branch)),
+            else_branch: Box::new(normalize_stmt(*else_branch)),
         },
-        Expr::Block(stmt) => Expr::Block(stmt),
+        Expr::Block(stmt) => Expr::Block(Box::new(normalize_stmt(*stmt))),
         Expr::CallRef { callee, args } => Expr::CallRef {
             callee: Box::new(normalize_expr(*callee)),
             args: args.into_iter().map(normalize_expr).collect(),
@@ -181,7 +450,9 @@ fn normalize_expr(expr: Expr) -> Expr {
         Expr::Await { expr } => Expr::Await {
             expr: Box::new(normalize_expr(*expr)),
         },
-        Expr::Async { body } => Expr::Async { body },
+        Expr::Async { body } => Expr::Async {
+            body: Box::new(normalize_stmt(*body)),
+        },
         Expr::Lambda {
             params,
             return_type,
@@ -189,7 +460,7 @@ fn normalize_expr(expr: Expr) -> Expr {
         } => Expr::Lambda {
             params,
             return_type,
-            body,
+            body: Box::new(normalize_stmt(*body)),
         },
         other => other,
     }
@@ -522,7 +793,16 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
             ctx.advance();
             let expr = parse_expr(ctx, 0);
             ctx.expect(Token::RParen);
-            expr
+            if ctx.track_parens()
+                && matches!(
+                    &expr,
+                    Expr::BinaryOp(_, op, _) if is_relational_op(op)
+                )
+            {
+                Expr::Paren(Box::new(expr))
+            } else {
+                expr
+            }
         }
 
         Token::LBracket => {
@@ -915,6 +1195,7 @@ pub(crate) fn stmt_assigns_var(stmt: &Stmt, var: &str) -> bool {
 
 fn expr_assigns_var(expr: &Expr, var: &str) -> bool {
     match expr {
+        Expr::Paren(inner) => expr_assigns_var(inner, var),
         Expr::ArrayLit(items) => items.iter().any(|expr| expr_assigns_var(expr, var)),
         Expr::ArrayAccess(_, index) => expr_assigns_var(index, var),
         Expr::BinaryOp(left, _, right) => {

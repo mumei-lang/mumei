@@ -445,6 +445,29 @@ declare void @llvm.fake.intrinsic()
         );
         assert!(!surface.call_edges_checkable);
     }
+
+    #[test]
+    fn independent_query_aggregation_keeps_scanning_after_unknown() {
+        let context = Context::new(&Config::new());
+        let terms = vec![
+            Bool::from_bool(&context, true),
+            Bool::from_bool(&context, false),
+        ];
+        for (results, expected) in [
+            (vec![SatResult::Unknown, SatResult::Sat], SatResult::Sat),
+            (
+                vec![SatResult::Unknown, SatResult::Unsat],
+                SatResult::Unknown,
+            ),
+            (vec![SatResult::Unsat, SatResult::Unsat], SatResult::Unsat),
+        ] {
+            let mut results = results.into_iter();
+            assert_eq!(
+                check_independent(&terms, |_| results.next().unwrap()),
+                expected
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -845,7 +868,8 @@ fn validate(
 /// a same-named member or the whole check refuses (a callee's absence can
 /// not be expressed as an outcome: the call-site comparison itself needs it).
 /// Extra module members are screened by `check_module` but not compared.
-/// The solver budget applies per function.
+/// The configured solver budget applies to each independent solver query;
+/// a function may require several decomposed edge/UB queries.
 pub fn validate_pure_i64_module(
     source: &str,
     llvm_ir: &str,
@@ -1025,7 +1049,9 @@ fn validate_module(
 /// `admission` runs the refined-scalar admission the pinned record
 /// names: refined type declarations and signature members typed by
 /// them join the encoded domain/postcondition, at exactly the record's
-/// admission level. The solver budget applies per function.
+/// admission level. The configured solver budget applies to each
+/// independent solver query; a function may require several decomposed
+/// edge/UB queries.
 pub fn validate_native_module(
     source: &str,
     llvm_ir: &str,
@@ -1352,8 +1378,8 @@ pub unsafe fn encode_parsed_function_for_comparison<'ctx>(
     // Reuse the validation gate so an arity or signature mismatch on
     // the IR side fails closed as a encode error instead of silently
     // comparing a mis-bound function (design memo §7 Step 3a). The
-    // comparison subset is scalar-i64 and register-resident integer
-    // aggregates, with scalar-i64 calls and bounded memory admitted by
+    // comparison subset admits scalar signatures and selected aggregate
+    // results, with scalar-i64 calls and bounded memory admitted by
     // the same gates; the model-side pre-gate keeps wider models out,
     // and the same restriction is applied to the IR surface here.
     let array_param_mask: Vec<bool> = model.array_params.iter().map(Option::is_some).collect();
@@ -1376,8 +1402,8 @@ pub unsafe fn encode_parsed_function_for_comparison<'ctx>(
     // edge — the machine side returns `rdx:rax` (`hi:lo`) and the IR
     // side encodes the `ret` operand at its native width, so both are
     // plain 128-bit bit-vectors. Register-resident and `sret` integer
-    // aggregates are compared: the shared gate already matched the
-    // aggregate's field count and leaf kinds against
+    // aggregates and flat mixed register pairs are compared: the shared
+    // gate already matched the aggregate's field count and leaf kinds against
     // `model.result_shape`/`result_leaf_doubles`, so an aggregate `ret`
     // encodes as its `aggregate_value` slots and compares leaf by leaf.
     //
@@ -1387,14 +1413,13 @@ pub unsafe fn encode_parsed_function_for_comparison<'ctx>(
     // `i128` source) would otherwise encode and compare mismatched
     // widths — fail it closed here instead.
     //
-    // Every aggregate leaf must be an `i64`: a leaf count and the
+    // Check the exact field types: a leaf count and the
     // double/integer kinds alone cannot pin the ABI — `{i128}` and
     // `{i64, i64}` both flatten to two non-`double` 64-bit slots, so an
     // `i128`/`u128` field would slip through a count+kinds check and a
     // machine leaf that is only half of the source's 128-bit value
-    // would compare against the wrong field. `aggregate_all_i64_leaves`
-    // fails closed on 128-bit and `double` leaves; both stay outside
-    // for later slices.
+    // would compare against the wrong field. Only flat, mixed
+    // `i64`/`double` register pairs may have a non-`i64` leaf.
     // Aggregate parameters get the same all-`i64`-leaf gate the
     // result has: `param_shapes`/`param_leaf_doubles` pin the leaf
     // count and the double/integer kinds only, so a `{i128, i64}`
@@ -1409,7 +1434,7 @@ pub unsafe fn encode_parsed_function_for_comparison<'ctx>(
     }
     let ret = LLVMGetReturnType(LLVMGlobalGetValueType(raw));
     if aggregate_fields(ret).is_some() {
-        if !aggregate_all_i64_leaves(ret) {
+        if !aggregate_all_i64_leaves(ret) && !is_flat_mixed_register_pair(ret) {
             return Err(ValidationError("LLVM return outside comparison subset"));
         }
     } else if width(ret)? != model.value.get_size() {
@@ -1483,6 +1508,25 @@ pub unsafe fn encode_ir_function_for_comparison<'ctx>(
     let module = parse_ir_module_for_comparison(llvm_ir)?;
     let raw = module.function(function_name)?;
     encode_parsed_function_for_comparison(raw, model, optimized, context)
+}
+
+fn check_independent<'ctx>(
+    terms: &[Bool<'ctx>],
+    mut check: impl FnMut(&Bool<'ctx>) -> SatResult,
+) -> SatResult {
+    let mut unknown = false;
+    for term in terms {
+        match check(term) {
+            SatResult::Sat => return SatResult::Sat,
+            SatResult::Unknown => unknown = true,
+            SatResult::Unsat => {}
+        }
+    }
+    if unknown {
+        SatResult::Unknown
+    } else {
+        SatResult::Unsat
+    }
 }
 
 unsafe fn compare_function<'ctx>(
@@ -1610,8 +1654,16 @@ unsafe fn compare_function<'ctx>(
             }
             solver.reset();
         }
-        solver.assert(&Bool::or(context, &mismatches.iter().collect::<Vec<_>>()));
-        match solver.check() {
+        // `or` over every edge makes one large bit-vector query. Checking
+        // each edge violation separately is logically equivalent — one
+        // `sat` witness still means `Different`, and every `unsat` still
+        // means no mismatch — while keeping branch-local arithmetic small
+        // enough for the solver. Any residual `unknown` stays inconclusive.
+        match check_independent(&mismatches, |mismatch| {
+            solver.reset();
+            solver.assert(mismatch);
+            solver.check()
+        }) {
             SatResult::Sat => break 'check Outcome::Different,
             SatResult::Unknown => break 'check Outcome::Inconclusive,
             SatResult::Unsat => {}
@@ -1622,9 +1674,12 @@ unsafe fn compare_function<'ctx>(
             .iter()
             .map(|(path, defined)| Bool::and(context, &[path, &defined.not(), &src_dom, &exits]))
             .collect();
-        solver.reset();
-        solver.assert(&Bool::or(context, &ub.iter().collect::<Vec<_>>()));
-        match solver.check() {
+        // Same disjunction decomposition for independent UB obligations.
+        match check_independent(&ub, |term| {
+            solver.reset();
+            solver.assert(term);
+            solver.check()
+        }) {
             SatResult::Sat => Outcome::UndefinedBehavior,
             SatResult::Unknown => Outcome::Inconclusive,
             SatResult::Unsat => match covered_no_return {
@@ -1790,8 +1845,7 @@ unsafe fn aggregate_leaf_range(ty: LLVMTypeRef, index: u32) -> Option<(usize, us
 /// `aggregate_fields`/`aggregate_leaf_doubles` cannot make this check:
 /// an `i128` element flattens to two non-`double` slots exactly like
 /// `{i64, i64}` (`pure-i64-composite/v21`), and a `double` leaf is one
-/// slot like an `i64` — both stay outside the direct-comparison subset,
-/// which only admits register-resident all-`i64` aggregates.
+/// slot like an `i64`.
 unsafe fn aggregate_all_i64_leaves(ty: LLVMTypeRef) -> bool {
     if aggregate_fields(ty).is_none() {
         return false;
@@ -1805,6 +1859,24 @@ unsafe fn aggregate_all_i64_leaves(ty: LLVMTypeRef) -> bool {
                 && LLVMGetIntTypeWidth(element) == 64
         }
     })
+}
+
+unsafe fn is_flat_mixed_register_pair(ty: LLVMTypeRef) -> bool {
+    if LLVMCountStructElementTypes(ty) != 2 {
+        return false;
+    }
+    let field_kind = |index| {
+        let element = LLVMStructGetTypeAtIndex(ty, index);
+        match LLVMGetTypeKind(element) {
+            LLVMTypeKind::LLVMDoubleTypeKind => Some(true),
+            LLVMTypeKind::LLVMIntegerTypeKind if LLVMGetIntTypeWidth(element) == 64 => Some(false),
+            _ => None,
+        }
+    };
+    matches!(
+        (field_kind(0), field_kind(1)),
+        (Some(false), Some(true)) | (Some(true), Some(false))
+    )
 }
 
 /// A constant `i128` as a `BV` — the C API's `LLVMConstIntGet*Value`

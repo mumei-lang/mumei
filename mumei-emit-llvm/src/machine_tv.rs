@@ -268,9 +268,9 @@ pub enum IrObjectEquivalence {
 /// IR ↔ object comparison's subset (design memo §7 Step 3
 /// slices): scalar parameters (one 64-bit leaf, integer or f64
 /// bit-pattern), scalar or all-integer aggregate results
-/// (register-resident or `sret` memory-class), scalar-i64 call
-/// sites, bounded memory — no array params, doubles inside
-/// aggregates, FP arithmetic, or loops.
+/// (register-resident or `sret` memory-class), flat mixed
+/// `i64`/`double` register pairs, scalar-i64 call sites, and
+/// bounded memory — no array params, FP arithmetic, or loops.
 /// Admission is semantic, not only inspection: a signature inside this
 /// subset makes `evaluate_machine_tv` compare the lifted machine code
 /// against the IR encoding instead of the source model, and the
@@ -290,20 +290,16 @@ pub fn ir_object_signature_liftable(model: &PureI64Body) -> bool {
         // register-resident budget (rax/rdx/rcx) directly, and beyond
         // it through `sret` — the callee stores leaf `i` at byte
         // offset `8 * i` through the hidden result pointer, which the
-        // lifter already records in `sret_stores`. An f64 or SSE leaf
-        // stays outside — the leaf check below is what keeps a
-        // mixed-class sret shape out too.
+        // lifter already records in `sret_stores`.
         && model.result_shape.is_none_or(|count| {
             count <= INTEGER_RESULT_REGISTERS.len()
                 || sret_result_leaf_count(model) == Some(count)
         })
-        // Every declared aggregate result leaf an integer leaf: an
-        // f64 leaf (`[true]`) inside a struct result is outside, and
-        // a 128-bit aggregate field stays indistinguishable here —
+        // A 128-bit aggregate field stays indistinguishable here —
         // `{i128}` and `{i64, i64}` both flatten to two `[false]`
-        // slots — so the encode-side `aggregate_all_i64_leaves` gate
-        // fails both closed anyway. A scalar result admits either
-        // leaf kind: an f64 leaf compares its IEEE-754 bit pattern
+        // slots — so the encode side checks exact field types and
+        // enforces flatness for mixed register pairs. A scalar result
+        // admits either leaf kind: f64 compares its IEEE-754 bit pattern
         // (pass-through/select only — FP arithmetic stays gated out
         // by `f64_arithmetic: false` on the encode call), and an
         // i128 result (`[false, false]` on a `None` shape, only
@@ -313,7 +309,11 @@ pub fn ir_object_signature_liftable(model: &PureI64Body) -> bool {
         // genuinely void atom is already excluded by the source
         // signature check upstream.
         && match model.result_shape {
-            Some(_) => model.result_leaf_doubles.iter().all(|leaf| !*leaf),
+            Some(count) => {
+                model.result_leaf_doubles.iter().all(|leaf| !*leaf)
+                    || (count == 2
+                        && matches!(model.result_leaf_doubles.as_slice(), [false, true] | [true, false]))
+            }
             None => true,
         }
         && model.result_leaf_doubles.len() <= result_leaf_count
@@ -381,9 +381,10 @@ fn scalar_i64_call_site(site: &CallSite) -> bool {
 /// arithmetic is gated out by `f64_arithmetic: false` on the encode
 /// call; plus scalar `i128`/`u128` on wide-scalar modules, compared
 /// as one 128-bit `rdx:rax` edge) and all-`i64` aggregate results
-/// (register-resident or `sret` memory-class): aggregate f64
-/// leaves, composite or wider-than-128 inputs, non-scalar call
-/// sites, and loops return `NotLiftable`. For
+/// (register-resident or `sret` memory-class), plus flat mixed
+/// `i64`/`double` register pairs: other aggregate f64 results,
+/// composite or wider-than-128 inputs, non-scalar call sites,
+/// and loops return `NotLiftable`. For
 /// every lifted path the machine return must equal the IR return of
 /// some covering edge whose definedness obligations hold and whose
 /// call-argument obligations all hold; an uncovered path, a diverging
@@ -421,6 +422,10 @@ pub fn check_function_against_ir<'ctx>(
     let function_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     let lifted = match lift(&instructions, function_size, model, call_targets, context) {
         Ok(lifted) => lifted,
+        Err(FunctionOutcome::Unknown) => return IrObjectEquivalence::NotLiftable("solver_unknown"),
+        Err(FunctionOutcome::OutsideProfile(reason)) => {
+            return IrObjectEquivalence::NotLiftable(reason);
+        }
         Err(_) => return IrObjectEquivalence::NotLiftable("lift_failed"),
     };
     if lifted.paths.is_empty() {
@@ -509,7 +514,8 @@ pub fn check_function_with_frame_memory<'ctx>(
 /// 3a). Scoped to 64-bit scalar signatures (plus scalar `i128`/`u128`
 /// on wide-scalar modules, compared as one 128-bit `rdx:rax` edge)
 /// and all-`i64` aggregate results (register-resident or `sret`
-/// memory-class): any other shape reports `OutsideProfile`.
+/// memory-class), plus flat mixed `i64`/`double` register pairs:
+/// any other shape reports `OutsideProfile`.
 pub fn check_function_with_frame_memory_against_ir<'ctx>(
     bytes: &[u8],
     address: u64,
@@ -1407,12 +1413,35 @@ struct SretCallBuffer<'ctx> {
 
 const MAX_COMPLETED_PATHS: usize = 64;
 
+#[cfg(all(test, target_arch = "x86_64"))]
+#[path = "machine_tv_cpu_differential.rs"]
+mod cpu_differential;
+
 fn lift<'ctx>(
     instructions: &[Instruction],
     function_size: u64,
     model: &PureI64Body<'ctx>,
     call_targets: &BTreeMap<u64, CallTarget>,
     context: &'ctx Context,
+) -> Result<LiftedFunction<'ctx>, FunctionOutcome> {
+    lift_inner(
+        instructions,
+        function_size,
+        model,
+        call_targets,
+        context,
+        #[cfg(all(test, target_arch = "x86_64"))]
+        None,
+    )
+}
+
+fn lift_inner<'ctx>(
+    instructions: &[Instruction],
+    function_size: u64,
+    model: &PureI64Body<'ctx>,
+    call_targets: &BTreeMap<u64, CallTarget>,
+    context: &'ctx Context,
+    #[cfg(all(test, target_arch = "x86_64"))] mut probe: Option<&mut cpu_differential::Probe<'ctx>>,
 ) -> Result<LiftedFunction<'ctx>, FunctionOutcome> {
     let branch_targets = resolve_branch_targets(instructions, function_size, call_targets)?;
     let function_has_calls = instructions.iter().any(|instruction| {
@@ -1444,6 +1473,14 @@ fn lift<'ctx>(
     let xmm_registers = (0..16)
         .map(|_| BV::fresh_const(context, "machine_initial_xmm_register", 128))
         .collect::<Vec<_>>();
+    #[cfg(all(test, target_arch = "x86_64"))]
+    let (registers, xmm_registers) = {
+        let (mut registers, mut xmm_registers) = (registers, xmm_registers);
+        if let Some(probe) = probe.as_deref() {
+            probe.seed_registers(&mut registers, &mut xmm_registers, context);
+        }
+        (registers, xmm_registers)
+    };
     let callee_saved_initial = CALLEE_SAVED_REGISTERS
         .iter()
         .map(|register_index| registers[*register_index].clone())
@@ -1490,6 +1527,10 @@ fn lift<'ctx>(
             input_index += 1;
         }
     }
+    #[cfg(all(test, target_arch = "x86_64"))]
+    if let Some(probe) = probe.as_deref() {
+        probe.seed_stack_arguments(&stack_argument_leaves, &mut arguments, context);
+    }
     let mut pending = vec![MachineState {
         instruction_index: 0,
         instruction_visits: vec![0; instructions.len()],
@@ -1524,6 +1565,10 @@ fn lift<'ctx>(
             let Some(instruction) = instructions.get(index) else {
                 return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
             };
+            #[cfg(all(test, target_arch = "x86_64"))]
+            if let Some(probe) = probe.as_deref_mut() {
+                probe.observe(index, &state);
+            }
             if state.instruction_visits[index] > LOOP_BOUND {
                 match path_feasibility_status(model, &state.path_conditions, &arguments, context) {
                     SatResult::Unsat => break,
@@ -2112,7 +2157,8 @@ fn lift<'ctx>(
             } else {
                 let leaves_flags_unchanged = matches!(
                     instruction.mnemonic.as_str(),
-                    "movl"
+                    "movb"
+                        | "movl"
                         | "movq"
                         | "movabsq"
                         | "movzbl"
@@ -4921,6 +4967,14 @@ fn call_guard_status<'ctx>(
     }
 }
 
+fn division_safety_outcome(counterexample_status: SatResult) -> Result<(), FunctionOutcome> {
+    match counterexample_status {
+        SatResult::Unsat => Ok(()),
+        SatResult::Sat => Err(FunctionOutcome::OutsideProfile("division_trap")),
+        SatResult::Unknown => Err(FunctionOutcome::Unknown),
+    }
+}
+
 fn prove_division_safe<'ctx>(
     model: &PureI64Body<'ctx>,
     path_conditions: &[Bool<'ctx>],
@@ -4928,12 +4982,10 @@ fn prove_division_safe<'ctx>(
     safety: &Bool<'ctx>,
     context: &'ctx Context,
 ) -> Result<(), FunctionOutcome> {
-    let status = call_guard_status(model, safety, path_conditions, arguments, context);
-    if status == Some(true) {
-        Ok(())
-    } else {
-        Err(FunctionOutcome::OutsideProfile("division_trap"))
-    }
+    let solver = path_solver(model, path_conditions, arguments, context);
+    let substitutions = input_substitutions(model, arguments);
+    solver.assert(&safety.substitute(&substitutions).not());
+    division_safety_outcome(solver.check())
 }
 
 fn lift_division<'ctx>(
@@ -5313,6 +5365,7 @@ fn lift_instruction<'ctx>(
     }
     let operands = split_operands(&instruction.operands);
     match instruction.mnemonic.as_str() {
+        "movb" => lift_move(&operands, registers, context, 8, false),
         "movl" => lift_move(&operands, registers, context, 32, source_upper_32_zero),
         "movq" => lift_move(&operands, registers, context, 64, false),
         "movabsq" => lift_move(&operands, registers, context, 64, false),
@@ -6799,6 +6852,207 @@ entry:
                 }
             );
         }
+    }
+
+    #[test]
+    fn ir_object_equivalence_compares_flat_mixed_register_pairs() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        for (fields, ir_type, int_index, double_index) in [
+            ("x: i64, y: f64", "{ i64, double }", 0, 1),
+            ("y: f64, x: i64", "{ double, i64 }", 1, 0),
+        ] {
+            let source = format!(
+                "struct P {{ {fields} }}\n\
+                 atom make(x: i64, y: f64, z: f64) -> P requires: true; ensures: true; body: {{ P {{ x: x, y: y }} }};"
+            );
+            let model = source_model_named_with_admission(
+                &source,
+                "make",
+                &context,
+                RefinedAdmission::CompositeV23,
+            );
+            assert!(ir_object_signature_liftable(&model));
+            let ir = |double| {
+                format!(
+                    r#"target triple = "x86_64-unknown-linux-gnu"
+define {ir_type} @make(i64 %x, double %y, double %z) {{
+  %first = insertvalue {ir_type} undef, i64 %x, {int_index}
+  %result = insertvalue {ir_type} %first, double {double}, {double_index}
+  ret {ir_type} %result
+}}
+"#
+                )
+            };
+            let matching_ir = ir("%y");
+            let (ir_returns, ir_definedness) = unsafe {
+                crate::translation_validation::encode_ir_function_for_comparison(
+                    matching_ir.as_bytes(),
+                    "make",
+                    &model,
+                    false,
+                    &context,
+                )
+            }
+            .unwrap();
+            for (lowering, expected, expected_with_frame) in [
+                (
+                    matching_ir,
+                    IrObjectEquivalence::Equivalent,
+                    FunctionOutcome::Equivalent,
+                ),
+                (
+                    ir("%z"),
+                    IrObjectEquivalence::Different,
+                    FunctionOutcome::Different,
+                ),
+            ] {
+                let (address, bytes, targets) = compiled_function_with_targets(&lowering, "make");
+                assert_eq!(
+                    check_function_against_ir(
+                        &bytes,
+                        address,
+                        &model,
+                        &ir_returns,
+                        &ir_definedness,
+                        &targets,
+                        &context,
+                    ),
+                    expected,
+                    "{ir_type}",
+                );
+                assert_eq!(
+                    check_function_with_frame_memory_against_ir(
+                        &bytes,
+                        address,
+                        &model,
+                        &ir_returns,
+                        &ir_definedness,
+                        &targets,
+                        &context,
+                    )
+                    .0,
+                    expected_with_frame,
+                    "{ir_type}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ir_object_equivalence_compares_mixed_register_pair_nan_payloads() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model_named_with_admission(
+            "struct P { x: i64, y: f64 }\n\
+             atom make(x: i64, y: f64) -> P requires: true; ensures: true; body: { P { x: x, y: y } };",
+            "make",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        let bytes = [
+            0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8,
+            0x7f, // movabsq $0x7FF8000000000000, %rax
+            0x66, 0x48, 0x0f, 0x6e, 0xc0, // movq %rax, %xmm0
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0xc3, // retq
+        ];
+        let targets = BTreeMap::new();
+        for (nan, expected, expected_with_frame) in [
+            (
+                "0x7FF8000000000000",
+                IrObjectEquivalence::Equivalent,
+                FunctionOutcome::Equivalent,
+            ),
+            (
+                "0x7FF8000000000001",
+                IrObjectEquivalence::Different,
+                FunctionOutcome::Different,
+            ),
+        ] {
+            let ir = format!(
+                r#"target triple = "x86_64-unknown-linux-gnu"
+define {{ i64, double }} @make(i64 %x, double %y) {{
+  %first = insertvalue {{ i64, double }} undef, i64 %x, 0
+  %result = insertvalue {{ i64, double }} %first, double {nan}, 1
+  ret {{ i64, double }} %result
+}}
+"#
+            );
+            let (ir_returns, ir_definedness) = unsafe {
+                crate::translation_validation::encode_ir_function_for_comparison(
+                    ir.as_bytes(),
+                    "make",
+                    &model,
+                    false,
+                    &context,
+                )
+            }
+            .unwrap();
+            assert_eq!(
+                check_function_against_ir(
+                    &bytes,
+                    0,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &targets,
+                    &context,
+                ),
+                expected,
+                "{nan}",
+            );
+            assert_eq!(
+                check_function_with_frame_memory_against_ir(
+                    &bytes,
+                    0,
+                    &model,
+                    &ir_returns,
+                    &ir_definedness,
+                    &targets,
+                    &context,
+                )
+                .0,
+                expected_with_frame,
+                "{nan}",
+            );
+        }
+    }
+
+    #[test]
+    fn ir_object_equivalence_rejects_nested_mixed_register_pair() {
+        let context = Context::new(&Config::new());
+        let model = source_model_named_with_admission(
+            "struct P { x: i64, y: f64 }\n\
+             atom make(x: i64, y: f64) -> P requires: true; ensures: true; body: { P { x: x, y: y } };",
+            "make",
+            &context,
+            RefinedAdmission::CompositeV23,
+        );
+        assert!(ir_object_signature_liftable(&model));
+        let nested_ir = r#"target triple = "x86_64-unknown-linux-gnu"
+define { { i64 }, double } @make(i64 %x, double %y) {
+  %inner = insertvalue { i64 } undef, i64 %x, 0
+  %first = insertvalue { { i64 }, double } undef, { i64 } %inner, 0
+  %result = insertvalue { { i64 }, double } %first, double %y, 1
+  ret { { i64 }, double } %result
+}
+"#;
+        let error = unsafe {
+            crate::translation_validation::encode_ir_function_for_comparison(
+                nested_ir.as_bytes(),
+                "make",
+                &model,
+                false,
+                &context,
+            )
+        }
+        .unwrap_err();
+        assert_eq!(error.0, "LLVM return outside comparison subset");
     }
 
     #[test]
@@ -11854,6 +12108,123 @@ entry:
     }
 
     #[test]
+    fn probe_compiled_i32_clamp_join_bytes() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model_with_admission(
+            "struct Parsed { ok: bool, value: i64 }\n\
+             atom incr(current: i64, delta: i64) -> Parsed requires: current >= (0 - 2147483648) && current <= 2147483647 && delta >= (0 - 2147483648) && delta <= 2147483647; ensures: result.ok => (result.value >= (0 - 2147483648) && result.value <= 2147483647); body: { if current + delta > 2147483647 || current + delta < (0 - 2147483648) { Parsed { ok: false, value: 0 } } else { Parsed { ok: true, value: current + delta } } };",
+            &context,
+            RefinedAdmission::CompositeV26,
+        );
+        let bytes = [
+            0x48, 0x01, 0xf7, // addq %rsi, %rdi
+            0xb1, 0x01, // movb $1, %cl
+            0x48, 0x81, 0xff, 0xff, 0xff, 0xff, 0x7f, // cmpq $2147483647, %rdi
+            0x7f, 0x0a, // jg join
+            0x48, 0x81, 0xff, 0x00, 0x00, 0x00, 0x80, // cmpq $-2147483648, %rdi
+            0x0f, 0x9c, 0xc1, // setl %cl
+            0x31, 0xc0, // xorl %eax, %eax
+            0xba, 0x00, 0x00, 0x00, 0x00, // movl $0, %edx
+            0x84, 0xc9, // testb %cl, %cl
+            0x74, 0x01, // je return false
+            0xc3, // retq
+            0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0x48, 0x89, 0xfa, // movq %rdi, %rdx
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let mut positive_overflow_not_rejected = bytes;
+        positive_overflow_not_rejected[4] = 0;
+        assert_eq!(
+            check_function(
+                &positive_overflow_not_rejected,
+                0,
+                &model,
+                &BTreeMap::new(),
+                &context,
+            ),
+            FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn movb_writes_only_the_low_byte_and_memory_movb_stays_closed() {
+        let context = Context::new(&Config::new());
+        let mut registers = (0..16)
+            .map(|_| BV::fresh_const(&context, "movb_r", 64))
+            .collect::<Vec<_>>();
+        let mut xmm_registers = (0..16)
+            .map(|_| BV::fresh_const(&context, "movb_xmm", 128))
+            .collect::<Vec<_>>();
+        let before = registers[1].clone();
+        let instruction = Instruction {
+            offset: 0,
+            mnemonic: "movb".to_owned(),
+            operands: "$0, %cl".to_owned(),
+        };
+        assert!(lift_instruction(
+            &instruction,
+            &mut registers,
+            &mut xmm_registers,
+            false,
+            false,
+            &context,
+        ));
+        let solver = Solver::new(&context);
+        let semantics_preserved = Bool::and(
+            &context,
+            &[
+                &registers[1].extract(63, 8)._eq(&before.extract(63, 8)),
+                &registers[1]
+                    .extract(7, 0)
+                    ._eq(&BV::from_u64(&context, 0, 8)),
+            ],
+        );
+        solver.assert(&semantics_preserved.not());
+        assert_eq!(solver.check(), SatResult::Unsat);
+
+        let model = source_model(
+            "atom helper(x: i64) -> i64 requires: true; ensures: result == x; body: { x };",
+            &context,
+        );
+        assert_eq!(
+            check_function(
+                &[0xc6, 0x00, 0x01, 0xc3], // movb $1, (%rax); retq
+                0,
+                &model,
+                &BTreeMap::new(),
+                &context,
+            ),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+
+        let clamp = source_model(
+            "atom clamp(x: i64) -> i64 requires: true; ensures: result <= 10; body: { if x > 10 { 10 } else { x } };",
+            &context,
+        );
+        let movb_preserves_flags = [
+            0xb8, 0x0a, 0x00, 0x00, 0x00, // movl $10, %eax
+            0x48, 0x83, 0xff, 0x0a, // cmpq $10, %rdi
+            0x88, 0xca, // movb %cl, %dl
+            0x7e, 0x01, // jle return x
+            0xc3, // retq
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&movb_preserves_flags, 0, &clamp, &BTreeMap::new(), &context,),
+            FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
     fn probe_forward_branch_bytes_match_absd_clamp_and_pick() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
@@ -13707,6 +14078,19 @@ entry:
                 Some(true)
             );
         }
+    }
+
+    #[test]
+    fn division_safety_solver_unknown_is_inconclusive_not_a_trap() {
+        assert_eq!(division_safety_outcome(SatResult::Unsat), Ok(()));
+        assert_eq!(
+            division_safety_outcome(SatResult::Sat),
+            Err(FunctionOutcome::OutsideProfile("division_trap"))
+        );
+        assert_eq!(
+            division_safety_outcome(SatResult::Unknown),
+            Err(FunctionOutcome::Unknown)
+        );
     }
 
     #[test]

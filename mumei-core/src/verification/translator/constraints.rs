@@ -5,6 +5,16 @@ use super::*;
 use crate::lowering::{lower, LoweredType};
 use serde_json::json;
 
+fn parse_closed_requires_expression(raw: &str) -> MumeiResult<Expr> {
+    crate::parser::parse_expression_checked(raw).map_err(|failures| {
+        MumeiError::verification(format!(
+            "requires expression '{}' is not closed: {}",
+            raw,
+            failures.join("; ")
+        ))
+    })
+}
+
 pub(crate) fn apply_refinement_constraint<'a>(
     vc: &VCtx<'a>,
     solver: &Solver<'a>,
@@ -224,7 +234,7 @@ pub(crate) fn check_contract_subsumption<'a>(
     let concrete_requires = crate::verification::caller_requires_obligation(concrete_atom);
     let concrete_req = concrete_requires.trim();
     let requires_bool_opt = if concrete_req != "true" && !concrete_req.is_empty() {
-        let req_ast = parse_expression(concrete_req);
+        let req_ast = parse_closed_requires_expression(concrete_req)?;
         let value = expr_to_z3_with_domain_obligations(vc, &req_ast, &mut concrete_env, None)
             .map_err(|error| {
                 MumeiError::verification(format!(
@@ -244,7 +254,7 @@ pub(crate) fn check_contract_subsumption<'a>(
 
     let contract_req = contract_requires.unwrap_or("true").trim();
     let contract_requires_bool_opt = if contract_req != "true" && !contract_req.is_empty() {
-        let req_ast = parse_expression(contract_req);
+        let req_ast = parse_closed_requires_expression(contract_req)?;
         let value = expr_to_z3_with_domain_obligations(vc, &req_ast, &mut contract_env, None)
             .map_err(|error| {
                 MumeiError::verification(format!(

@@ -23,6 +23,7 @@ on:
       - 'Cargo.toml'
       - 'mumei-core/Cargo.toml'
       - '.agents/skills/testing-mumei-cli/SKILL.md'
+      - '.agents/skills/testing-mumei-cli/references/otel-tracing.md'
       - '.github/workflows/otel-tracing.yml'
   workflow_dispatch:
 
@@ -63,7 +64,7 @@ jobs:
         uses: ./.github/actions/setup-z3
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -147,7 +148,7 @@ jobs:
           python-version: '3.12'
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
 
       - name: Python-side no-op when OTEL disabled
         working-directory: mumei-agent

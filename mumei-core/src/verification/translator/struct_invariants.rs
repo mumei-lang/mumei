@@ -15,7 +15,6 @@
 use super::super::support::*;
 use super::super::*;
 use super::*;
-use crate::parser::expr::normalize_comparison_chains;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(crate) const STRUCT_FIELD_PREFIX: &str = "__struct_";
@@ -270,7 +269,7 @@ pub(crate) fn lower_struct_invariant<'a>(
     for (field, value) in fields {
         local_env.insert(field.clone(), value.clone());
     }
-    let ast = normalize_comparison_chains(parse_expression(invariant_raw));
+    let ast = parse_expression(invariant_raw);
     let lowered = expr_to_z3(vc, &ast, &mut local_env, solver_opt)?;
     lowered.as_bool().ok_or_else(|| {
         MumeiError::type_error(format!(
@@ -303,7 +302,7 @@ pub(crate) fn field_type_predicates<'a>(
     for decl in chain {
         let mut local_env = env.clone();
         local_env.insert(decl.operand.clone(), field_z3.clone());
-        let ast = normalize_comparison_chains(parse_expression(&decl.predicate_raw));
+        let ast = parse_expression(&decl.predicate_raw);
         let predicate = refined_predicate_to_z3(vc, decl, &ast, &mut local_env, None)?
             .as_bool()
             .ok_or_else(|| {
@@ -340,7 +339,7 @@ where
         };
         let mut local_env = env.clone();
         local_env.insert("v".to_string(), field_z3.clone());
-        let ast = normalize_comparison_chains(parse_expression(constraint_raw));
+        let ast = parse_expression(constraint_raw);
         let constraint = expr_to_z3(vc, &ast, &mut local_env, None)?;
         if let Some(constraint) = constraint.as_bool() {
             on_fact(format!("field::{}", field.name), constraint)?;

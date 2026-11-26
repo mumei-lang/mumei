@@ -552,6 +552,7 @@ fn eval_expr(
     }
 
     match expr {
+        Expr::Paren(inner) => eval_expr(inner, env, module_env, depth),
         Expr::Number(value) => Ok(EvalValue::Int(*value)),
         Expr::Float(value) => Ok(EvalValue::Float(*value)),
         Expr::StringLit(value) => Ok(EvalValue::String(value.clone())),
@@ -1210,6 +1211,7 @@ fn collect_expr_symbols(
     lambda_names: &HashSet<String>,
 ) {
     match expr {
+        Expr::Paren(inner) => collect_expr_symbols(inner, module_env, symbols, seen, lambda_names),
         Expr::Call(name, args) => {
             if let Some(atom) = lookup_call_atom(module_env, name) {
                 if atom.trust_level == TrustLevel::Trusted {

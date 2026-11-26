@@ -534,6 +534,11 @@ pub(crate) enum EvidenceCommand {
         #[arg(long)]
         produced_at: Option<String>,
     },
+    /// Check read-only i64 slice source obligations with Z3; emits a JSON diagnostic, not Evidence or LLVM
+    CheckReadonlySlice {
+        /// One regular source file (at most 65,536 bytes) containing one shared-slice atom
+        input: String,
+    },
     /// Detachably sign a bounded record's raw bytes with a declared ed25519 key into a producer-signature envelope; binds the declared key id only
     Sign {
         /// Regular file (at most 4 MiB (4,194,304 bytes)) whose raw bytes become the signed subject; never parsed or canonicalized
@@ -551,7 +556,7 @@ pub(crate) enum EvidenceCommand {
         /// Caller-declared producer key label the consumer pins separately; never derived from the key bytes
         #[arg(long)]
         producer_key_id: String,
-        /// Optional declared production timestamp stamped into the envelope (RFC 3339); unsigned like the key id — freshness is a consumer-side check
+        /// Optional declared production timestamp stamped into the envelope (RFC 3339, excluding leap seconds); unsigned like the key id — freshness is a consumer-side check
         #[arg(long)]
         produced_at: Option<String>,
     },
@@ -699,6 +704,21 @@ pub(crate) enum EvidenceCommand {
         #[arg(long)]
         expected_adapter: Option<String>,
     },
+    /// Validate a native object-route acceptance descriptor and optionally project it into Common Evidence v1
+    CheckObjectAcceptance {
+        /// Regular mumei.native-evidence-acceptance/v1 object-route JSON file (at most 262,144 bytes)
+        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        input: Option<String>,
+        /// Read one object-route acceptance descriptor from standard input (at most 262,144 bytes)
+        #[arg(long)]
+        stdin: bool,
+        /// Emit a static representation diagnostic JSON (not a recheck or acceptance receipt)
+        #[arg(long, conflicts_with = "emit_evidence")]
+        json: bool,
+        /// Project the validated descriptor into a bounded mumei.verification-evidence/v1 record (no recheck or grade promotion)
+        #[arg(long, conflicts_with = "json")]
+        emit_evidence: bool,
+    },
 }
 
 #[derive(clap::Args)]
@@ -751,6 +771,25 @@ pub(crate) struct SignatureArgs {
     pub(crate) min_revocation_version: Option<u64>,
 }
 
+#[derive(clap::Args)]
+pub(crate) struct ObjectDescriptorOutputArgs {
+    /// Emit a static acceptance descriptor, not reusable Evidence or a certificate
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// Regular file containing the hex-encoded ed25519 signing key, never printed
+    #[arg(long, requires = "signature_output")]
+    pub(crate) key_file: Option<String>,
+    /// Declared producer key label, not signed or authenticated
+    #[arg(long, requires = "signature_output")]
+    pub(crate) producer_key_id: Option<String>,
+    /// Optional declared production timestamp stamped into the signature envelope (RFC 3339, excluding leap seconds); unsigned like the key id
+    #[arg(long, requires = "signature_output")]
+    pub(crate) produced_at: Option<String>,
+    /// Write a detached signature envelope for the exact JSON output without replacing a file
+    #[arg(long, requires_all = ["json", "key_file", "producer_key_id"])]
+    pub(crate) signature_output: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub(crate) enum NativeBundleCommand {
     /// Evaluate a saved native consumer Evidence report against fresh pinned source/LLVM checks into a bounded acceptance descriptor
@@ -783,9 +822,8 @@ pub(crate) enum NativeBundleCommand {
         /// SHA-256 of native-bundle.json obtained through a separately trusted channel
         #[arg(long)]
         expected_build_id: String,
-        /// Emit a static acceptance descriptor, not reusable Evidence or a certificate
-        #[arg(long)]
-        json: bool,
+        #[command(flatten)]
+        output: ObjectDescriptorOutputArgs,
     },
     /// Replay a saved native consumer Evidence report against fresh pinned source/LLVM checks, without proof acceptance
     RecheckEvidence {
@@ -795,6 +833,20 @@ pub(crate) enum NativeBundleCommand {
         /// SHA-256 of native-bundle.json obtained through a separately trusted channel, not the report
         #[arg(long)]
         expected_build_id: String,
+    },
+    /// Replay a saved accept-object descriptor against a fresh object acceptance, optionally pinning its detached producer signature
+    RecheckObjectAcceptance {
+        bundle: String,
+        source: String,
+        descriptor: String,
+        /// SHA-256 of native-bundle.json obtained through a separately trusted channel, not the descriptor
+        #[arg(long)]
+        expected_build_id: String,
+        #[command(flatten)]
+        signature: Box<SignatureArgs>,
+        /// Emit a machine-readable mumei.native-object-acceptance-recheck/v1 descriptor instead of text
+        #[arg(long)]
+        json: bool,
     },
     /// Recheck the C03 source and pinned native LLVM body/wrapper snapshot, not object or binary semantics
     RecheckLlvm {

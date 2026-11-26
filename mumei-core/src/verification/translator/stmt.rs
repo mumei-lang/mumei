@@ -3,7 +3,6 @@ use super::super::support::*;
 use super::super::*;
 use super::*;
 use crate::lowering::{lower, LoweredType};
-use crate::parser::expr::normalize_comparison_chains;
 use crate::verification::invariant_inference::{
     expr_to_string, generate_candidates, InferredInvariant,
 };
@@ -1974,8 +1973,7 @@ fn enum_field_assign<'a>(
                 for decl in chain {
                     let mut local_env = env.clone();
                     local_env.insert(decl.operand.clone(), val.clone());
-                    let predicate_ast =
-                        normalize_comparison_chains(parse_expression(&decl.predicate_raw));
+                    let predicate_ast = parse_expression(&decl.predicate_raw);
                     let Some(predicate) =
                         refined_predicate_to_z3(vc, decl, &predicate_ast, &mut local_env, None)?
                             .as_bool()

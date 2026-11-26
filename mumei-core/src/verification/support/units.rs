@@ -147,6 +147,7 @@ impl<'a> UnitCtx<'a> {
     /// argument on the way.
     fn infer(&self, expr: &Expr) -> MumeiResult<Ty> {
         match expr {
+            Expr::Paren(inner) => self.infer(inner),
             Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_) => Ok(Ty::default()),
             Expr::Variable(name) => Ok(self.vars.get(name).cloned().unwrap_or_default()),
             Expr::ArrayLit(elements) => {

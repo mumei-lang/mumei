@@ -1,15 +1,40 @@
-# Sample workflow for building and deploying a Jekyll site to GitHub Pages
-name: Deploy Jekyll with GitHub Pages dependencies preinstalled
+# Reusable workflow for building and deploying a Jekyll site to GitHub Pages.
+# Callers:
+#   jobs:
+#     pages:
+#       uses: mumei-lang/mumei/.github/workflows/jekyll-gh-pages.yml@develop
+#       permissions:
+#         contents: read
+#         pages: write
+#         id-token: write
+#       with:
+#         destination: ./_site   # optional
+name: Deploy Jekyll site to GitHub Pages
 
 on:
-  # Runs on pushes targeting the default branch
-  push:
-    branches: ["develop"]
+  workflow_call:
+    inputs:
+      source:
+        description: Jekyll site source directory
+        required: false
+        type: string
+        default: ./
+      destination:
+        description: Jekyll build output directory
+        required: false
+        type: string
+        default: ./_site
+      post_build_command:
+        description: Optional shell command run after the Jekyll build (e.g. copying extra files into the site)
+        required: false
+        type: string
+        default: ""
 
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
-
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
+# Deploys only through callers — this file intentionally has no push or
+# workflow_dispatch trigger, so a direct run can never publish a site built
+# without a caller's post_build_command (e.g. the install.sh copy).
+#
+# GITHUB_TOKEN permissions are granted by the calling job.
 permissions:
   contents: read
   pages: write
@@ -18,7 +43,7 @@ permissions:
 # Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
 # However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
 concurrency:
-  group: "pages"
+  group: "pages-${{ github.repository }}"
   cancel-in-progress: false
 
 jobs:
@@ -34,12 +59,15 @@ jobs:
       - name: Build with Jekyll
         uses: actions/jekyll-build-pages@v1
         with:
-          source: ./
-          destination: ./_site
-      - name: Copy installer into the Pages site
-        run: sudo cp -p scripts/install.sh _site/install.sh
+          source: ${{ inputs.source || './' }}
+          destination: ${{ inputs.destination || './_site' }}
+      - name: Run post-build command
+        if: ${{ inputs.post_build_command != '' }}
+        run: ${{ inputs.post_build_command }}
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ${{ inputs.destination || './_site' }}
 
   # Deployment job
   deploy:
