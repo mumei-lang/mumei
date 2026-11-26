@@ -1286,8 +1286,11 @@ aggregate (`Different` outranks `UndefinedBehavior`, which outranks
 `Inconclusive`; the module is `EquivalentWithinProfile` only when every
 entry is). Every source atom must name a module member or the whole check
 refuses — a missing callee cannot even form its call-site comparison —
-extra members are screened by the module profile but not compared, and
-the solver budget applies per function.
+extra members are screened by the module profile but not compared. Edge
+mismatch and undefined-behavior disjunctions are checked as independent
+solver queries; the configured timeout/resource budget applies to each
+query rather than to a whole-function total, while any solver `unknown`
+still keeps the outcome inconclusive.
 
 `validate_native_module` applies the same per-atom check to native
 snapshots — the emitted module that keeps its C `main` wrapper. The

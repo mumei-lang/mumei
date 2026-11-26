@@ -845,7 +845,8 @@ fn validate(
 /// a same-named member or the whole check refuses (a callee's absence can
 /// not be expressed as an outcome: the call-site comparison itself needs it).
 /// Extra module members are screened by `check_module` but not compared.
-/// The solver budget applies per function.
+/// The configured solver budget applies to each independent solver query;
+/// a function may require several decomposed edge/UB queries.
 pub fn validate_pure_i64_module(
     source: &str,
     llvm_ir: &str,
@@ -1025,7 +1026,9 @@ fn validate_module(
 /// `admission` runs the refined-scalar admission the pinned record
 /// names: refined type declarations and signature members typed by
 /// them join the encoded domain/postcondition, at exactly the record's
-/// admission level. The solver budget applies per function.
+/// admission level. The configured solver budget applies to each
+/// independent solver query; a function may require several decomposed
+/// edge/UB queries.
 pub fn validate_native_module(
     source: &str,
     llvm_ir: &str,
@@ -1609,11 +1612,23 @@ unsafe fn compare_function<'ctx>(
             }
             solver.reset();
         }
-        solver.assert(&Bool::or(context, &mismatches.iter().collect::<Vec<_>>()));
-        match solver.check() {
-            SatResult::Sat => break 'check Outcome::Different,
-            SatResult::Unknown => break 'check Outcome::Inconclusive,
-            SatResult::Unsat => {}
+        // `or` over every edge makes one large bit-vector query. Checking
+        // each edge violation separately is logically equivalent — one
+        // `sat` witness still means `Different`, and every `unsat` still
+        // means no mismatch — while keeping branch-local arithmetic small
+        // enough for the solver. Any residual `unknown` stays inconclusive.
+        let mut mismatch_unknown = false;
+        for mismatch in &mismatches {
+            solver.reset();
+            solver.assert(mismatch);
+            match solver.check() {
+                SatResult::Sat => break 'check Outcome::Different,
+                SatResult::Unknown => mismatch_unknown = true,
+                SatResult::Unsat => {}
+            }
+        }
+        if mismatch_unknown {
+            break 'check Outcome::Inconclusive;
         }
         // Even with matching values, an instruction may still produce poison
         // on an input inside the source's defined domain.
@@ -1621,12 +1636,27 @@ unsafe fn compare_function<'ctx>(
             .iter()
             .map(|(path, defined)| Bool::and(context, &[path, &defined.not(), &src_dom, &exits]))
             .collect();
-        solver.reset();
-        solver.assert(&Bool::or(context, &ub.iter().collect::<Vec<_>>()));
-        match solver.check() {
-            SatResult::Sat => Outcome::UndefinedBehavior,
-            SatResult::Unknown => Outcome::Inconclusive,
-            SatResult::Unsat => match covered_no_return {
+        // Same disjunction decomposition for independent UB obligations.
+        let mut ub_unknown = false;
+        let mut ub_violated = false;
+        for term in &ub {
+            solver.reset();
+            solver.assert(term);
+            match solver.check() {
+                SatResult::Sat => {
+                    ub_violated = true;
+                    break;
+                }
+                SatResult::Unknown => ub_unknown = true,
+                SatResult::Unsat => {}
+            }
+        }
+        if ub_violated {
+            Outcome::UndefinedBehavior
+        } else if ub_unknown {
+            Outcome::Inconclusive
+        } else {
+            match covered_no_return {
                 Some(term) => {
                     solver.reset();
                     solver.assert(&term);
@@ -1636,7 +1666,7 @@ unsafe fn compare_function<'ctx>(
                     }
                 }
                 None => Outcome::EquivalentWithinProfile,
-            },
+            }
         }
     };
     Ok((outcome, ir_definedness))
