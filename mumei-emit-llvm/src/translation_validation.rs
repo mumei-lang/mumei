@@ -445,6 +445,29 @@ declare void @llvm.fake.intrinsic()
         );
         assert!(!surface.call_edges_checkable);
     }
+
+    #[test]
+    fn independent_query_aggregation_keeps_scanning_after_unknown() {
+        let context = Context::new(&Config::new());
+        let terms = vec![
+            Bool::from_bool(&context, true),
+            Bool::from_bool(&context, false),
+        ];
+        for (results, expected) in [
+            (vec![SatResult::Unknown, SatResult::Sat], SatResult::Sat),
+            (
+                vec![SatResult::Unknown, SatResult::Unsat],
+                SatResult::Unknown,
+            ),
+            (vec![SatResult::Unsat, SatResult::Unsat], SatResult::Unsat),
+        ] {
+            let mut results = results.into_iter();
+            assert_eq!(
+                check_independent(&terms, |_| results.next().unwrap()),
+                expected
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1487,6 +1510,25 @@ pub unsafe fn encode_ir_function_for_comparison<'ctx>(
     encode_parsed_function_for_comparison(raw, model, optimized, context)
 }
 
+fn check_independent<'ctx>(
+    terms: &[Bool<'ctx>],
+    mut check: impl FnMut(&Bool<'ctx>) -> SatResult,
+) -> SatResult {
+    let mut unknown = false;
+    for term in terms {
+        match check(term) {
+            SatResult::Sat => return SatResult::Sat,
+            SatResult::Unknown => unknown = true,
+            SatResult::Unsat => {}
+        }
+    }
+    if unknown {
+        SatResult::Unknown
+    } else {
+        SatResult::Unsat
+    }
+}
+
 unsafe fn compare_function<'ctx>(
     context: &'ctx Context,
     raw: LLVMValueRef,
@@ -1617,18 +1659,14 @@ unsafe fn compare_function<'ctx>(
         // `sat` witness still means `Different`, and every `unsat` still
         // means no mismatch — while keeping branch-local arithmetic small
         // enough for the solver. Any residual `unknown` stays inconclusive.
-        let mut mismatch_unknown = false;
-        for mismatch in &mismatches {
+        match check_independent(&mismatches, |mismatch| {
             solver.reset();
             solver.assert(mismatch);
-            match solver.check() {
-                SatResult::Sat => break 'check Outcome::Different,
-                SatResult::Unknown => mismatch_unknown = true,
-                SatResult::Unsat => {}
-            }
-        }
-        if mismatch_unknown {
-            break 'check Outcome::Inconclusive;
+            solver.check()
+        }) {
+            SatResult::Sat => break 'check Outcome::Different,
+            SatResult::Unknown => break 'check Outcome::Inconclusive,
+            SatResult::Unsat => {}
         }
         // Even with matching values, an instruction may still produce poison
         // on an input inside the source's defined domain.
@@ -1637,26 +1675,14 @@ unsafe fn compare_function<'ctx>(
             .map(|(path, defined)| Bool::and(context, &[path, &defined.not(), &src_dom, &exits]))
             .collect();
         // Same disjunction decomposition for independent UB obligations.
-        let mut ub_unknown = false;
-        let mut ub_violated = false;
-        for term in &ub {
+        match check_independent(&ub, |term| {
             solver.reset();
             solver.assert(term);
-            match solver.check() {
-                SatResult::Sat => {
-                    ub_violated = true;
-                    break;
-                }
-                SatResult::Unknown => ub_unknown = true,
-                SatResult::Unsat => {}
-            }
-        }
-        if ub_violated {
-            Outcome::UndefinedBehavior
-        } else if ub_unknown {
-            Outcome::Inconclusive
-        } else {
-            match covered_no_return {
+            solver.check()
+        }) {
+            SatResult::Sat => Outcome::UndefinedBehavior,
+            SatResult::Unknown => Outcome::Inconclusive,
+            SatResult::Unsat => match covered_no_return {
                 Some(term) => {
                     solver.reset();
                     solver.assert(&term);
@@ -1666,7 +1692,7 @@ unsafe fn compare_function<'ctx>(
                     }
                 }
                 None => Outcome::EquivalentWithinProfile,
-            }
+            },
         }
     };
     Ok((outcome, ir_definedness))
