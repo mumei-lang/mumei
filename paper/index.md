@@ -196,7 +196,7 @@ Solver outcomes remain three-valued. `unsat` discharges the encoded obligation, 
 
 ### 2.2 Mumei-Agent
 
-**Source references:** [mumei-agent README](https://github.com/mumei-lang/mumei-agent/blob/develop/README.md), [generate strategy](https://github.com/mumei-lang/mumei-agent/blob/develop/agent/strategies/generate_strategy.py), [self-healing loop](https://github.com/mumei-lang/mumei-agent/blob/develop/agent/self_healing.py), [spec extractor](https://github.com/mumei-lang/mumei-agent/blob/develop/agent/spec_extractor.py), [agent MCP server](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/MCP_SERVER.md), [core MCP server](https://github.com/mumei-lang/mumei/blob/develop/docs/MCP_SERVER.md).
+**Source references:** [mumei-agent README](https://github.com/mumei-lang/mumei-agent/blob/develop/README.md), [generate strategy](https://github.com/mumei-lang/mumei-agent/blob/develop/agent/strategies/generate_strategy.py), [self-healing loop](https://github.com/mumei-lang/mumei-agent/blob/develop/agent/self_healing.py), [spec extractor](https://github.com/mumei-lang/mumei-agent/blob/develop/agent/spec_extractor.py), [agent MCP server](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/MCP_SERVER.md), [core MCP server](https://github.com/mumei-lang/mumei/blob/develop/docs/MCP.md).
 
 mumei-agent is the autonomous orchestration layer. It accepts structured forge task specs, natural-language requirements, or existing source code; asks an LLM to generate or repair candidates; validates parseability with `mumei check`; verifies with `mumei verify --json`; and records machine-readable audit or repair evidence. Its generate loop is implemented as a sequence:
 
@@ -559,6 +559,8 @@ The escalation rule can be written:
 
 $$
 \operatorname{Verify}_{Z3}(a) = \text{unknown} \land \operatorname{Verify}_{Lean}(a) = \text{checked}
+\land \operatorname{TranslatorCurrent}(a) \land \operatorname{BridgeHashCurrent}(a)
+\land \operatorname{AxiomAuditPass}(a)
 \Rightarrow \operatorname{Verified}(a).
 $$
 
@@ -728,9 +730,9 @@ SI-5 is important because it makes verification cumulative. Each newly verified 
 
 Mumei is evaluated along six dimensions:
 
-1. **proof success rate:** proportion of generated atoms verified by Z3 or Lean;
+1. **expected-outcome match:** proportion of benchmark tasks whose verification result matches the declared expected outcome;
 2. **repair convergence:** number of generate-verify-fix iterations before success;
-3. **counterexample quality:** whether structured diagnostics point to the relevant bug;
+3. **counterexample detection:** proportion of tasks designed to fail verification that are rejected with a counterexample/refutation artifact;
 4. **trust surface:** ratio of trusted to proven atoms;
 5. **user burden:** amount of formal syntax required from the user;
 6. **runtime artifact utility:** ability to emit LLVM IR, C headers, verified JSON, and proof bundles.
@@ -739,9 +741,9 @@ The standard-library metrics of §6 provide one snapshot of proof health; the si
 
 | Axis | Status | Result |
 |---|---|---|
-| proof success rate | measured | 100.00% (46/46 tasks matched their declared outcome; task-level, and Z3-only in this run — 6 atoms carry obligations left as Lean escalation candidates) |
+| expected-outcome match | measured | 100.00% (46/46 tasks matched their declared outcome; task-level, and Z3-only in this run — 6 atoms carry obligations left as Lean escalation candidates) |
 | repair convergence | measured | 41.67% (10/24 atoms converged over the 20 counterexample tasks; 1.33 repair attempts per atom on average, 53,078 LLM tokens, at most 3 retries per atom; local `qwen2.5-coder:3b` via an OpenAI-compatible endpoint) |
-| counterexample quality | measured | 100.00% (20/20 counterexample tasks rejected) |
+| counterexample detection | measured | 100.00% (20/20 counterexample tasks rejected) |
 | trust surface | measured | 0 trusted of 105 atoms, 0 FFI boundary declarations, 6 atoms escalating past Z3; 6/6 `lean_verified` with the AI proof path off and 6/6 with it on (delta 0, `ai_proof_used` 0, no `manual_lemma_reason` remaining) |
 | user burden | measured | 2.47 contract clauses per atom; 1.89 specification tokens per implementation token |
 | runtime artifact utility | measured | 93.27% (97/104 artifact emissions for tasks expected to verify); 80/80 emissions as expected for the 20 counterexample tasks (20/20 refutation certificates, 0 leaked build artifacts) |
