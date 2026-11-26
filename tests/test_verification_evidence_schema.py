@@ -350,16 +350,20 @@ def test_evidence_gate_runs_when_only_schema_or_fixtures_change() -> None:
     for event in ["push", "pull_request"]:
         assert required <= set(triggers[event]["paths"])
     steps = workflow["jobs"]["contract-vocabulary"]["steps"]
-    runs = "\n".join(step.get("run", "") for step in steps)
-    composite_inputs = "\n".join(
-        str(value)
+    composite_steps = [
+        step
         for step in steps
         if step.get("uses") == "./.github/actions/contract-vocabulary"
-        for value in step.get("with", {}).values()
-    )
-    runs += "\n" + composite_inputs
-    assert "jsonschema" in runs
-    assert "tests/test_verification_evidence_schema.py" in runs
+    ]
+    if composite_steps:
+        assert len(composite_steps) == 1
+        inputs = composite_steps[0]["with"]
+        assert "jsonschema" in inputs["install_command"]
+        assert "tests/test_verification_evidence_schema.py" in inputs["check_command"]
+    else:
+        runs = "\n".join(step.get("run", "") for step in steps)
+        assert "jsonschema" in runs
+        assert "tests/test_verification_evidence_schema.py" in runs
 
 
 @pytest.mark.parametrize(
