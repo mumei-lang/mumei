@@ -8,6 +8,30 @@ use mumei_emit_llvm::translation_validation::{self as tv, Options, Outcome};
 use std::collections::BTreeMap;
 
 const CLAMP: &str = include_str!("fixtures/semantic_contract_clamp.mm");
+const TRANSFER_IR: &str = include_str!("fixtures/translation_validation_transfer.ll");
+const TRANSFER_SOURCE: &str = r#"
+struct Transfer {
+    ok: bool,
+    src: i64,
+    dst: i64,
+    house: i64,
+}
+
+atom transfer(src: i64, dst: i64, house: i64, dst_exists: bool, distinct_open: bool, amount: i64) -> Transfer
+    requires: src >= 0;
+    ensures: result.ok => amount > 0;
+    body: {
+        if amount <= 0 { Transfer { ok: false, src: src, dst: dst, house: house } }
+        else { if !dst_exists || !distinct_open { Transfer { ok: false, src: src, dst: dst, house: house } }
+        else { if !(src >= amount + 25) { Transfer { ok: false, src: src, dst: dst, house: house } }
+        else { Transfer { ok: true, src: src - amount - 25, dst: dst + amount, house: house + 25 } } } }
+    }
+
+atom main() -> i64
+    requires: true;
+    ensures: result == 0;
+    body: { 0 };
+"#;
 
 fn pin(ir: &str) -> String {
     format!(
@@ -495,12 +519,13 @@ fn wrapping_i64_arithmetic_is_equivalent_and_refuted() {
             "{body}"
         );
     }
-    // Nonlinear cases that outrun the solver budget fail closed as
-    // inconclusive — never weakened into equivalence or difference.
+    // Decomposed edge obligations are small enough for this formerly
+    // budget-hard nonlinear case; solver exhaustion still fails closed in
+    // `solver_exhaustion_and_invalid_budgets_cannot_be_equivalent`.
     let guarded = source("x: i64", "if x + 1 > 0 { x * x } else { 0 - x }");
     assert_eq!(
         validate(&guarded, &emitted(&guarded)).outcome,
-        Outcome::Inconclusive
+        Outcome::EquivalentWithinProfile
     );
     // Deliberately wrong lowering is detected, including rare-input diffs.
     let src = source("x: i64, y: i64", "x + y");
@@ -737,13 +762,13 @@ fn conditional_path_reassignment_is_equivalent_and_refuted() {
             "{body}"
         );
     }
-    // A variable divisor under a guard is the same solver limit as an
-    // unguarded one: the check stays Inconclusive, failing closed
-    // rather than weakening the claim.
+    // A variable divisor under a guard also becomes a small independent
+    // edge obligation once decomposed; the shared division domain still
+    // binds both sides.
     let src = source("x: i64, y: i64", "if y != 0 { x = x / y; x } else { x }; x");
     assert_eq!(
         validate(&src, &emitted(&src)).outcome,
-        Outcome::Inconclusive
+        Outcome::EquivalentWithinProfile
     );
     // The merged value, not the pre-branch value, reaches the tail.
     let src = source("x: i64", "if x > 0 { x = 1; x } else { x }; x");
@@ -4794,4 +4819,33 @@ atom f() -> Unit requires: true; ensures: true; body: { Unit {} };";
         .is_err(),
         "empty records are not admitted"
     );
+}
+
+fn validate_transfer(ir: &str) -> tv::ModuleValidationReport {
+    tv::validate_native_module(
+        TRANSFER_SOURCE,
+        ir,
+        Options::default(),
+        RefinedAdmission::CompositeV26,
+    )
+    .unwrap()
+}
+
+#[test]
+fn decomposed_queries_accept_multi_edge_composite_transfer() {
+    let report = validate_transfer(TRANSFER_IR);
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    assert!(report
+        .functions
+        .iter()
+        .any(|function| function.function_name == "transfer"
+            && function.outcome == Outcome::EquivalentWithinProfile));
+}
+
+#[test]
+fn decomposed_queries_still_reject_a_divergent_transfer_edge() {
+    let divergent =
+        TRANSFER_IR.replace("%add_tmp33 = add i64 %2, 25", "%add_tmp33 = add i64 %2, 26");
+    assert_ne!(divergent, TRANSFER_IR);
+    assert_eq!(validate_transfer(&divergent).outcome, Outcome::Different);
 }
