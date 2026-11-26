@@ -112,14 +112,16 @@ def test_release_workflow_keeps_musl_and_windows_stabilization() -> None:
     assert "Length -lt 1MB" in workflow
 
 
-def test_homebrew_update_is_warning_only_after_release() -> None:
+def test_homebrew_update_fails_closed_for_mumei_release() -> None:
     workflow = RELEASE_WORKFLOW.read_text()
 
     assert "needs: release" in workflow
     assert "id: homebrew-token" in workflow
     assert "should_update=false" in workflow
     assert "::warning::HOMEBREW_TAP_TOKEN is not set" in workflow
-    assert "::warning::HOMEBREW_TAP_TOKEN is invalid" in workflow
+    assert "::error::HOMEBREW_TAP_TOKEN is invalid" in workflow
+    assert re.search(r'HOMEBREW_TAP_TOKEN is not set[\s\S]*?exit 1', workflow)
     assert "if: steps.homebrew-token.outputs.should_update == 'true'" in workflow
-    assert "::error::HOMEBREW_TAP_TOKEN" not in workflow
     assert "if ! git push origin HEAD:main; then" in workflow
+    assert "x-access-token" not in workflow
+    assert "gh auth setup-git" in workflow

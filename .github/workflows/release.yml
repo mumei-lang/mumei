@@ -635,13 +635,14 @@ jobs:
       - name: Checkout homebrew-mumei
         if: steps.homebrew-token.outputs.should_update == 'true'
         env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/mumei-lang/homebrew-mumei.git" homebrew-mumei 2>/dev/null || {
+          gh auth setup-git
+          git clone "https://github.com/mumei-lang/homebrew-mumei.git" homebrew-mumei 2>/dev/null || {
             mkdir -p homebrew-mumei
             cd homebrew-mumei
             git init -b main
-            git remote add origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/mumei-lang/homebrew-mumei.git"
+            git remote add origin "https://github.com/mumei-lang/homebrew-mumei.git"
           }
       - name: Generate Homebrew Formula
         if: steps.homebrew-token.outputs.should_update == 'true'
@@ -663,12 +664,12 @@ jobs:
       - name: Push formula to homebrew-mumei
         if: steps.homebrew-token.outputs.should_update == 'true'
         env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
+          gh auth setup-git
           cd homebrew-mumei
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/mumei-lang/homebrew-mumei.git"
           git add -A
           if git diff --cached --quiet; then
             echo "No changes to commit"
