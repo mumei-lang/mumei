@@ -120,6 +120,7 @@ def test_homebrew_update_fails_closed_for_mumei_release() -> None:
     assert "should_update=false" in workflow
     assert "::warning::HOMEBREW_TAP_TOKEN is not set" in workflow
     assert "::error::HOMEBREW_TAP_TOKEN is invalid" in workflow
+    assert re.search(r'HOMEBREW_TAP_TOKEN is not set[\s\S]*?exit 1', workflow)
     assert "if: steps.homebrew-token.outputs.should_update == 'true'" in workflow
     assert "if ! git push origin HEAD:main; then" in workflow
     assert "x-access-token" not in workflow
