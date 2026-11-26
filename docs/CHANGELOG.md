@@ -1,3 +1,15 @@
+### 2026-11-27: v0.7.1 hotfix release
+
+- **Workspace and member crate versions**: bumped versions from `0.7.0` to
+  `0.7.1` so `mumei --version`, `mumei inspect`, and proof-certificate
+  `mumei_version` match the release tag before tagging.
+- **Cross-platform release packaging**: fixed the Windows bundled-Z3 linker
+  helper visibility and use target-dependent `c_char` in LLVM translation
+  validation so the Windows and aarch64 release asset builds compile.
+- **Install references**: synced the README and README_JA pinned install
+  examples on `v0.7.1`, along with the Homebrew formula template and
+  `install.sh` help examples.
+
 ### 2026-11-27: v0.7.0 release version bump
 
 - **Workspace and member crate versions**: bumped versions from `0.6.23` to
