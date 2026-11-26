@@ -2227,9 +2227,11 @@ are unsupported.
 
 The supported byte-register views are `al`, `cl`, `dl`, `bl`, `spl`, `bpl`,
 `sil`, `dil`, and `r8b` through `r15b`. An 8-bit write preserves bits 63..8;
-32-bit writes zero-extend. `ah`, `bh`, `ch`, `dh`, and 16-bit registers are
-unsupported. `movzbl`/`movzbq` and `movsbl`/`movsbq` zero- or sign-extend an
-8-bit register source.
+32-bit writes zero-extend. `movb` models an immediate or 8-bit register source
+written to an 8-bit register destination; memory operands remain unsupported.
+`ah`, `bh`, `ch`, `dh`, and 16-bit registers are unsupported.
+`movzbl`/`movzbq` and `movsbl`/`movsbq` zero- or sign-extend an 8-bit register
+source.
 
 `shlq`/`shll`, `shrq`/`shrl`, and `sarq`/`sarl` accept an immediate count, the
 implicit count of one printed without a count operand, or a `%cl` count. Counts

@@ -2157,7 +2157,8 @@ fn lift_inner<'ctx>(
             } else {
                 let leaves_flags_unchanged = matches!(
                     instruction.mnemonic.as_str(),
-                    "movl"
+                    "movb"
+                        | "movl"
                         | "movq"
                         | "movabsq"
                         | "movzbl"
@@ -5364,6 +5365,7 @@ fn lift_instruction<'ctx>(
     }
     let operands = split_operands(&instruction.operands);
     match instruction.mnemonic.as_str() {
+        "movb" => lift_move(&operands, registers, context, 8, false),
         "movl" => lift_move(&operands, registers, context, 32, source_upper_32_zero),
         "movq" => lift_move(&operands, registers, context, 64, false),
         "movabsq" => lift_move(&operands, registers, context, 64, false),
@@ -12101,6 +12103,105 @@ entry:
         );
         assert_eq!(
             check_function(&[0x55, 0xc3], 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::OutsideProfile("unsupported_instruction")
+        );
+    }
+
+    #[test]
+    fn probe_compiled_i32_clamp_join_bytes() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model_with_admission(
+            "struct Parsed { ok: bool, value: i64 }\n\
+             atom incr(current: i64, delta: i64) -> Parsed requires: current >= (0 - 2147483648) && current <= 2147483647 && delta >= (0 - 2147483648) && delta <= 2147483647; ensures: result.ok => (result.value >= (0 - 2147483648) && result.value <= 2147483647); body: { if current + delta > 2147483647 || current + delta < (0 - 2147483648) { Parsed { ok: false, value: 0 } } else { Parsed { ok: true, value: current + delta } } };",
+            &context,
+            RefinedAdmission::CompositeV26,
+        );
+        let bytes = [
+            0x48, 0x01, 0xf7, // addq %rsi, %rdi
+            0xb1, 0x01, // movb $1, %cl
+            0x48, 0x81, 0xff, 0xff, 0xff, 0xff, 0x7f, // cmpq $2147483647, %rdi
+            0x7f, 0x0a, // jg join
+            0x48, 0x81, 0xff, 0x00, 0x00, 0x00, 0x80, // cmpq $-2147483648, %rdi
+            0x0f, 0x9c, 0xc1, // setl %cl
+            0x31, 0xc0, // xorl %eax, %eax
+            0xba, 0x00, 0x00, 0x00, 0x00, // movl $0, %edx
+            0x84, 0xc9, // testb %cl, %cl
+            0x74, 0x01, // je return false
+            0xc3, // retq
+            0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0x48, 0x89, 0xfa, // movq %rdi, %rdx
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let mut positive_overflow_not_rejected = bytes;
+        positive_overflow_not_rejected[4] = 0;
+        assert_eq!(
+            check_function(
+                &positive_overflow_not_rejected,
+                0,
+                &model,
+                &BTreeMap::new(),
+                &context,
+            ),
+            FunctionOutcome::Different
+        );
+    }
+
+    #[test]
+    fn movb_writes_only_the_low_byte_and_memory_movb_stays_closed() {
+        let context = Context::new(&Config::new());
+        let mut registers = (0..16)
+            .map(|_| BV::fresh_const(&context, "movb_r", 64))
+            .collect::<Vec<_>>();
+        let mut xmm_registers = (0..16)
+            .map(|_| BV::fresh_const(&context, "movb_xmm", 128))
+            .collect::<Vec<_>>();
+        let before = registers[1].clone();
+        let instruction = Instruction {
+            offset: 0,
+            mnemonic: "movb".to_owned(),
+            operands: "$0, %cl".to_owned(),
+        };
+        assert!(lift_instruction(
+            &instruction,
+            &mut registers,
+            &mut xmm_registers,
+            false,
+            false,
+            &context,
+        ));
+        let solver = Solver::new(&context);
+        let semantics_preserved = Bool::and(
+            &context,
+            &[
+                &registers[1].extract(63, 8)._eq(&before.extract(63, 8)),
+                &registers[1]
+                    .extract(7, 0)
+                    ._eq(&BV::from_u64(&context, 0, 8)),
+            ],
+        );
+        solver.assert(&semantics_preserved.not());
+        assert_eq!(solver.check(), SatResult::Unsat);
+
+        let model = source_model(
+            "atom helper(x: i64) -> i64 requires: true; ensures: result == x; body: { x };",
+            &context,
+        );
+        assert_eq!(
+            check_function(
+                &[0xc6, 0x00, 0x01, 0xc3], // movb $1, (%rax); retq
+                0,
+                &model,
+                &BTreeMap::new(),
+                &context,
+            ),
             FunctionOutcome::OutsideProfile("unsupported_instruction")
         );
     }
