@@ -14,7 +14,6 @@
 
 use crate::verification_evidence;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use rand_core::{OsRng, RngCore};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -94,7 +93,7 @@ pub fn decode_secret_key_bytes(mut bytes: Vec<u8>) -> Result<SigningKey, SignErr
 /// persisting the secret; it must never be printed.
 pub fn generate_keypair() -> (String, String) {
     let mut secret = ed25519_dalek::SecretKey::default();
-    OsRng.fill_bytes(&mut secret);
+    getrandom::fill(&mut secret).expect("OS entropy");
     let key = SigningKey::from_bytes(&secret);
     secret.zeroize();
     let mut bytes = key.to_bytes();
