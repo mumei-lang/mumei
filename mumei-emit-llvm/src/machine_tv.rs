@@ -4962,6 +4962,14 @@ fn call_guard_status<'ctx>(
     }
 }
 
+fn division_safety_outcome(counterexample_status: SatResult) -> Result<(), FunctionOutcome> {
+    match counterexample_status {
+        SatResult::Unsat => Ok(()),
+        SatResult::Sat => Err(FunctionOutcome::OutsideProfile("division_trap")),
+        SatResult::Unknown => Err(FunctionOutcome::Unknown),
+    }
+}
+
 fn prove_division_safe<'ctx>(
     model: &PureI64Body<'ctx>,
     path_conditions: &[Bool<'ctx>],
@@ -4969,12 +4977,10 @@ fn prove_division_safe<'ctx>(
     safety: &Bool<'ctx>,
     context: &'ctx Context,
 ) -> Result<(), FunctionOutcome> {
-    let status = call_guard_status(model, safety, path_conditions, arguments, context);
-    if status == Some(true) {
-        Ok(())
-    } else {
-        Err(FunctionOutcome::OutsideProfile("division_trap"))
-    }
+    let solver = path_solver(model, path_conditions, arguments, context);
+    let substitutions = input_substitutions(model, arguments);
+    solver.assert(&safety.substitute(&substitutions).not());
+    division_safety_outcome(solver.check())
 }
 
 fn lift_division<'ctx>(
@@ -13949,6 +13955,19 @@ entry:
                 Some(true)
             );
         }
+    }
+
+    #[test]
+    fn division_safety_solver_unknown_is_inconclusive_not_a_trap() {
+        assert_eq!(division_safety_outcome(SatResult::Unsat), Ok(()));
+        assert_eq!(
+            division_safety_outcome(SatResult::Sat),
+            Err(FunctionOutcome::OutsideProfile("division_trap"))
+        );
+        assert_eq!(
+            division_safety_outcome(SatResult::Unknown),
+            Err(FunctionOutcome::Unknown)
+        );
     }
 
     #[test]
