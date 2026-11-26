@@ -732,7 +732,7 @@ Mumei is evaluated along six dimensions:
 
 1. **expected-outcome match:** proportion of benchmark tasks whose verification result matches the declared expected outcome;
 2. **repair convergence:** number of generate-verify-fix iterations before success;
-3. **counterexample detection:** proportion of tasks designed to fail verification that are rejected with a counterexample/refutation artifact;
+3. **counterexample detection:** proportion of tasks designed to fail verification whose verification result is the expected rejection; refutation certificates are counted separately under runtime artifact utility;
 4. **trust surface:** ratio of trusted to proven atoms;
 5. **user burden:** amount of formal syntax required from the user;
 6. **runtime artifact utility:** ability to emit LLVM IR, C headers, verified JSON, and proof bundles.
