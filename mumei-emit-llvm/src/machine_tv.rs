@@ -12204,6 +12204,24 @@ entry:
             ),
             FunctionOutcome::OutsideProfile("unsupported_instruction")
         );
+
+        let clamp = source_model(
+            "atom clamp(x: i64) -> i64 requires: true; ensures: result <= 10; body: { if x > 10 { 10 } else { x } };",
+            &context,
+        );
+        let movb_preserves_flags = [
+            0xb8, 0x0a, 0x00, 0x00, 0x00, // movl $10, %eax
+            0x48, 0x83, 0xff, 0x0a, // cmpq $10, %rdi
+            0x88, 0xca, // movb %cl, %dl
+            0x7e, 0x01, // jle return x
+            0xc3, // retq
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&movb_preserves_flags, 0, &clamp, &BTreeMap::new(), &context,),
+            FunctionOutcome::Equivalent
+        );
     }
 
     #[test]
