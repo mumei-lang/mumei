@@ -22,7 +22,7 @@ class Mumei < Formula
   desc "Mathematical Proof-Driven Programming Language — formally verified with Z3"
   homepage "https://github.com/mumei-lang/mumei"
   license "Apache-2.0"
-
+{version_line}
   depends_on "llvm@17"
   depends_on "z3"
 
@@ -128,8 +128,15 @@ def render_formula(
     sha_arm_linux: str,
 ) -> str:
     ver = version.lstrip("v")
+    # Homebrew can scan stable semantic versions from the release URL. Keep an
+    # explicit version for prereleases such as 0.6.24-rc.1, where URL scanning
+    # is not reliable, without reintroducing the audit offense for stable tags.
+    import re
+
+    version_line = f'  version "{ver}"\n\n' if not re.fullmatch(r"\d+\.\d+\.\d+", ver) else ""
     return FORMULA_TEMPLATE.format(
         version=ver,
+        version_line=version_line,
         sha_x86_mac=sha_x86_mac,
         sha_arm_mac=sha_arm_mac,
         sha_x86_linux=sha_x86_linux,
