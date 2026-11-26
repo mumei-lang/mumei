@@ -39,7 +39,7 @@ zeroize = "1"
 libc = "0.2"
 miette = { version = "7", features = ["fancy"] }
 object = { version = "=0.40.0", default-features = false, features = ["read"] }
-z3 = "0.12"
+z3 = "0.24"
 regex = "1"
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["registry"], optional = true }

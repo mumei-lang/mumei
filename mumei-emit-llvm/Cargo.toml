@@ -11,7 +11,7 @@ mumei-core = { path = "../mumei-core" }
 inkwell = { version = "0.5.0", default-features = false, features = ["llvm17-0", "target-x86"] }
 llvm-sys = "170.4.0"
 libc = "0.2"
-z3 = "0.12"
+z3 = "0.24"
 
 [dev-dependencies]
 object = { version = "0.40.0", default-features = false, features = ["read", "elf"] }

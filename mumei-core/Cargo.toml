@@ -9,7 +9,7 @@ license = "Apache-2.0"
 repository = "https://github.com/mumei-lang/mumei"
 
 [dependencies]
-z3 = "0.12"
+z3 = "0.24"
 z3-sys = "0.8"
 regex = "1.10"
 serde = { version = "1.0", features = ["derive"] }
