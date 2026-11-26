@@ -1,4 +1,15 @@
-### Unreleased: preserve explicit comparison grouping
+### 2026-11-27: v0.7.0 release version bump
+
+- **Workspace and member crate versions**: bumped versions from `0.6.23` to
+  `0.7.0` so `mumei --version`, `mumei inspect`, and proof-certificate
+  `mumei_version` match the release tag before tagging.
+- **Install references**: synced the README and README_JA pinned install
+  examples on `v0.7.0`, along with the Homebrew formula template and
+  `install.sh` help examples.
+- Release ships the verifier, evidence, CLI, documentation, and proof-store
+  changes listed below.
+
+### v0.7.0: preserve explicit comparison grouping
 
 - Expression parsing now retains explicit parenthesis boundaries while
   normalizing comparison chains. `(a == b) == c` keeps its boolean-operand
@@ -13,21 +24,21 @@
   same closed parser. `VERIFIER_POLICY_VERSION`
   is bumped 43 → 44 so cached verdicts are re-derived.
 
-### Unreleased: reject calls with later-argument array mutations
+### v0.7.0: reject calls with later-argument array mutations
 
 - Calls are rejected when evaluation of a later argument may mutate an array
   root already passed by an earlier argument. This keeps verifier behavior
   consistent with shared runtime array buffers. `VERIFIER_POLICY_VERSION` is
   bumped 32 → 33 so cached verdicts are re-derived.
 
-### Unreleased: reject within-struct flattened projection path collisions
+### v0.7.0: reject within-struct flattened projection path collisions
 
 - Atom verification rejects structs whose distinct field chains flatten to the
   same projection name, including collisions inside nested structs and enum
   payloads. `VERIFIER_POLICY_VERSION` is bumped 26 → 27 so cached verdicts are
   re-derived.
 
-### Unreleased: root-keyed struct-field array lengths
+### v0.7.0: root-keyed struct-field array lengths
 
 - Array lengths now follow their tracked Z3 array roots, so distinct struct
   fields cannot share a length while aliases preserve the source length.
@@ -35,19 +46,19 @@
   `VERIFIER_POLICY_VERSION` is bumped 25 → 26 so cached verdicts are
   re-derived.
 
-### Unreleased: keep array types out of struct projection slots
+### v0.7.0: keep array types out of struct projection slots
 
 - Array types and aliases resolving to arrays are no longer treated as struct
   bindings when checking projected field slots. `VERIFIER_POLICY_VERSION` is
   bumped 24 → 25 so cached verdicts are re-derived.
 
-### Unreleased: struct parameter projection-slot collisions
+### v0.7.0: struct parameter projection-slot collisions
 
 - Reject atom parameters whose names or projected struct fields collide with
   another struct parameter's field slots. `VERIFIER_POLICY_VERSION` is bumped
   23 → 24 so cached verdicts are re-derived.
 
-### Unreleased: struct-valued direct enum payload reads
+### v0.7.0: struct-valued direct enum payload reads
 
 - Named struct payloads and nested struct fields can be read as values, aliased
   with `let`, and passed to calls when every owning enum tag is proven. The
@@ -55,14 +66,14 @@
   selectors; they do not re-assume or re-check struct invariants. Solverless
   contracts, unproven tags, arrays and recursive shapes remain conservative.
 
-### Unreleased: nested struct aliases after loop havoc
+### v0.7.0: nested struct aliases after loop havoc
 
 - Loop havoc now registers nested field projections under fresh struct handles,
   preserving invariant-backed reads through aliases such as
   `let inner = q.inner; inner.x`. `VERIFIER_POLICY_VERSION` is bumped 22 → 23
   so cached verdicts are re-derived.
 
-### Unreleased: direct enum payload reads
+### v0.7.0: direct enum payload reads
 
 - Finite enums now model direct reads from uniquely owned named payloads when
   the owning variant is proven by the current path, including reads through
@@ -70,7 +81,7 @@
   positional payloads, ambiguous owners and unknown fields retain the existing
   conservative behavior.
 
-### Unreleased: deep writes through enum-valued slots
+### v0.7.0: deep writes through enum-valued slots
 
 - Added deep writes through enum payloads and struct fields that contain
   enums, such as `o.c.port = value` and `b.e.port = value`. Every owning tag
@@ -79,7 +90,7 @@
   remain fail-closed, and composite translation validation does not admit the
   new writes.
 
-### Unreleased: deep writes through named enum struct payloads
+### v0.7.0: deep writes through named enum struct payloads
 
 - Added leaf-wise updates such as `e.p.inner.x = value` for a uniquely owned,
   named enum payload whose declared type is a struct. The verifier requires
@@ -88,7 +99,7 @@
   preserving siblings. Positional, scalar and ambiguous payload paths remain
   fail-closed, and composite translation validation does not admit this form.
 
-### Unreleased: Core evidence-check acceptance representation check
+### v0.7.0: Core evidence-check acceptance representation check
 
 - Added `mumei evidence check-attempt-acceptance <input> | --stdin [--json]`
   to validate the closed representation and producer consistency of
@@ -96,7 +107,7 @@
   Core Evidence acceptance; candidate matching is not rechecked and no Core
   check or grade promotion is performed.
 
-### Unreleased: Core adapter-manifest representation check
+### v0.7.0: Core adapter-manifest representation check
 
 - Added `mumei evidence check-adapter <input> | --stdin [--json]` to validate
   the full static representation of `mumei.verifier-adapter/v1`, including
@@ -104,7 +115,7 @@
   This performs no adapter execution, command-safety assessment, host-policy
   evaluation, resource enforcement or grade promotion.
 
-### Unreleased: Core attempt-schedule representation check
+### v0.7.0: Core attempt-schedule representation check
 
 - `mumei evidence check-schedule <input> | --stdin [--json]` validates the
   static shape and consistency of `mumei.attempt-schedule/v1`. Its optional
@@ -117,7 +128,7 @@
   self-reported outcome is true, attest manifest-declared resource bounds,
   re-judge embedded evidence acceptance or promote a grade.
 
-### Unreleased: integer `/` truncates toward zero
+### v0.7.0: integer `/` truncates toward zero
 
 - The verifier's int model now divides like the emitted `sdiv` (and
   like Go/Rust/LLVM): `-7 / 2 == -3`, where it previously proved the
@@ -132,7 +143,7 @@
   on inputs where the runtime division is defined — Rust's `/` still
   rejects `i64::MIN / -1`, which the unbounded int model admits.
 
-### Unreleased: `--check-i64-overflow`
+### v0.7.0: `--check-i64-overflow`
 
 - New opt-in `mumei verify --check-i64-overflow`. It keeps the default `Int`
   encoding but rejects a body `+`, `-` or `*` whose `i64` operands can give a
@@ -143,7 +154,7 @@
   (or a `let` computed from one) is checked against that type's range
   instead of `i64`.
 
-### Unreleased: ordering binds tighter than equality
+### v0.7.0: ordering binds tighter than equality
 
 - `<`, `<=`, `>` and `>=` now bind tighter than `==` and `!=`, as in C, Go,
   Java and TypeScript. `ensures: result == a >= b;` is `result == (a >= b)`;
@@ -151,7 +162,7 @@
   `result == a && a >= b` and rejected it with `Expected bool for ==`.
   Chains within one level are unchanged (`0 <= i < n`, `a == b == c`).
 
-### Unreleased: zero divisors in contracts
+### v0.7.0: zero divisors in contracts
 
 - Integer and `f64` divisions (`/`, `%`) inside `requires`, `ensures` and
   invariants are now checked for a possibly-zero divisor, as body divisions
@@ -159,7 +170,7 @@
   any `ensures` could verify. Guards from `=>`, `&&`, `||` and `if` still
   apply, so `b != 0 => a / b > 0` is accepted. `--bitvec-i64` already did this.
 
-### Unreleased: f64 division by zero
+### v0.7.0: f64 division by zero
 
 - `f64` division now reports a possibly-zero divisor, like integer division.
   Over Z3 reals `x / 0.0` is unconstrained, so before this an unchecked zero
@@ -167,7 +178,7 @@
   guards. The opt-in `--ieee754-f64` mode is unchanged: there `x / 0.0` is
   modelled as infinity or NaN, as on hardware.
 
-### Unreleased: prefix `!` and `-` bind field access
+### v0.7.0: prefix `!` and `-` bind field access
 
 - `!r.ok` now parses as `!(r.ok)` and `-p.x` as `-(p.x)`. Before, the prefix
   applied to `r` alone and the field was read from the result, so
@@ -175,7 +186,7 @@
   `-p.x` read a field of `0 - p`. Infix operators still bind looser than the
   prefix (`!a.ok && b` is `(!a.ok) && b`).
 
-### Unreleased: remainder operator
+### v0.7.0: remainder operator
 
 - Added the `%` operator for integers. It truncates toward zero like Rust, Go,
   C, TypeScript and Solidity (the result takes the dividend's sign), not like
@@ -183,20 +194,20 @@
   `--bitvec-i64` also rejects `i64::MIN % -1`. Native code uses LLVM `srem`.
   Host contract checks and runtime monitors leave clauses with `%` unchecked.
 
-### Unreleased: guarded array bounds checks
+### v0.7.0: guarded array bounds checks
 
 - Array reads and stores now check their bounds under the enclosing `if`/`else`
   and `&&`/`||` guards, so `if n >= 4 { a[3] }` with `len(a) == n` verifies
   instead of reporting a potential out-of-bounds access. Guards still apply
   only inside their branch.
 
-### Unreleased: naming convention
+### v0.7.0: naming convention
 
 - Documented CLI flag and environment-variable naming rules and added tests
   that grandfather existing names without renaming them.
 - Clarify in NAMING.md that deprecated names are removed only at 1.0 (or a later major release); adding an alias can happen any time.
 
-### Unreleased: effective configuration report
+### v0.7.0: effective configuration report
 
 - Added `mumei config` to report the manifest verify profile and registered
   environment variables, with text and JSON output.
@@ -204,57 +215,57 @@
   printed, only whether they are set. URLs are shown without credentials,
   query, or fragment; `--all` includes unset variables.
 
-### Unreleased: grouped verify help options
+### v0.7.0: grouped verify help options
 
 - Grouped `mumei verify --help` options into headings and rendered those groups
   in the generated CLI reference.
 
-### Unreleased: verify profiles
+### v0.7.0: verify profiles
 
 - Added opt-in `strict` and `audit` profiles for `mumei verify`, configurable
   through `--profile` or `[verify].profile` in `mumei.toml`.
 - CLI profiles take precedence over manifest profiles and only add checks;
   explicit flags are never disabled.
 
-### Unreleased: generated CLI and environment references
+### v0.7.0: generated CLI and environment references
 
 - Added generated references for visible CLI options and environment variables.
 - Regenerate with `MUMEI_UPDATE_REFERENCE_DOCS=1 cargo test --bin mumei reference_docs`; `core-tests` fails when the references drift.
 
-### Unreleased: Lean evidence in the reusable gate
+### v0.7.0: Lean evidence in the reusable gate
 
 - The reusable Claim Book and Charter gate can accept current Lean evidence
   and per-source certificates upgraded by mumei-lean for G5 checks. Fresh
   verification still runs, and a stale supplied certificate keeps only the G0
   grade (G2 with supporting observations).
 
-### Unreleased: Lean dual check and G5
+### v0.7.0: Lean dual check and G5
 
 - Added separate Lean dual-check certificate metadata and opted-in G5
   (`dual-sealed`) Claim Book evidence for Z3-unsat obligations with a current
   Lean proof and an explicitly passed axiom audit.
 
-### Unreleased: reusable Claim Book and Charter CI gate
+### v0.7.0: reusable Claim Book and Charter CI gate
 
 - Added a reusable GitHub Actions workflow for Claim Book grade and Charter
   gates, with per-source reports, job summaries, and uploaded artifacts.
 - Added a self-test workflow and fixture for the Charter-enabled gate.
 
-### Unreleased: preserve the installer on GitHub Pages
+### v0.7.0: preserve the installer on GitHub Pages
 
 - Jekyll deployments now include `scripts/install.sh`, and releases trigger a
   Jekyll redeployment instead of replacing the documentation site.
 - Releases now wait for the dispatched Jekyll deployment and fail if it fails
   or `install.sh` is not reachable afterwards.
 
-### Unreleased: observation-backed Claim Book G2
+### v0.7.0: observation-backed Claim Book G2
 
 - Added `mumei claims --observations` to attach current test-harvest verdicts
   to claims and lift eligible G0 claims to G2 (`observed`).
 - G3 remains reserved until a bounded-proof evidence source exists; controls
   remain orthogonal to Claim Book grades.
 
-### Unreleased: effect-definition dependency freshness
+### v0.7.0: effect-definition dependency freshness
 
 - Dependency hashes now include referenced effect definitions as
   `effect:<name>`, including their `parent` and `includes` closure; older
@@ -262,7 +273,7 @@
 - `verify-cert` exits successfully for dependency drift in non-strict mode;
   `--strict` rejects changed or unchecked dependencies.
 
-### Unreleased: proof-store owner check
+### v0.7.0: proof-store owner check
 
 - On Unix, proof-store directories and entry files must be owned by the current effective user; foreign-owned paths are ignored with a warning.
 - Foreign-owned entries are not reused, and opening or recording in a foreign-owned store fails with permission denied.
