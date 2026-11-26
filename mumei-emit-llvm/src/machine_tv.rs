@@ -6,6 +6,7 @@ use mumei_core::semantic_contract::{CallSite, CallValueShape, PureI64Body, LOOP_
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{CStr, CString},
+    os::raw::c_char,
     ptr,
     sync::Once,
 };
@@ -120,7 +121,7 @@ pub fn disassemble(bytes: &[u8], address: u64) -> Result<Vec<Instruction>, Disas
     let mut offset = 0usize;
     let mut instructions = Vec::new();
     while offset < code.len() {
-        let mut output = [0i8; 256];
+        let mut output = [0 as c_char; 256];
         let pc = address
             .checked_add(u64::try_from(offset).map_err(|_| ())?)
             .ok_or(())?;
