@@ -844,6 +844,9 @@ pub(crate) enum NativeBundleCommand {
         expected_build_id: String,
         #[command(flatten)]
         signature: Box<SignatureArgs>,
+        /// Emit a machine-readable mumei.native-object-acceptance-recheck/v1 descriptor instead of text
+        #[arg(long)]
+        json: bool,
     },
     /// Recheck the C03 source and pinned native LLVM body/wrapper snapshot, not object or binary semantics
     RecheckLlvm {

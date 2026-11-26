@@ -939,12 +939,14 @@ pub(crate) fn run(command: NativeBundleCommand) {
             descriptor,
             expected_build_id,
             signature,
+            json,
         } => recheck_object_acceptance(
             Path::new(&bundle),
             Path::new(&source),
             Path::new(&descriptor),
             &expected_build_id,
             &signature,
+            json,
         ),
         NativeBundleCommand::RecheckExitStatus { bundle, source, expected_build_id } => {
             match recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id) {
@@ -6820,15 +6822,17 @@ fn recheck_object_acceptance(
     descriptor: &Path,
     expected_build_id: &str,
     signature: &crate::cli::SignatureArgs,
+    json_output: bool,
 ) -> Result<(), BundleError> {
     if !is_digest(expected_build_id) {
         return Err(BundleError("invalid expected build ID"));
     }
     let saved_bytes = read_regular(descriptor, MAX_EVIDENCE_BYTES)?;
     let saved = object_acceptance::decode(&saved_bytes)?;
+    let descriptor_digest = producer_signature::subject_digest(&saved_bytes);
     let signature_acceptance = super::evidence::load_signature_acceptance(
         super::evidence::signature_options(signature),
-        &producer_signature::subject_digest(&saved_bytes),
+        &descriptor_digest,
         None,
     )
     .map_err(BundleError)?;
@@ -6862,7 +6866,72 @@ fn recheck_object_acceptance(
             "saved object acceptance descriptor differs from the fresh object acceptance",
         ));
     }
-    if signature_acceptance.is_some() {
+    if json_output {
+        let supplied = |present: bool| {
+            if present {
+                "supplied"
+            } else {
+                "not_supplied"
+            }
+        };
+        let mut checks_performed = vec!["fresh_object_acceptance", "descriptor_pin_binding"];
+        let mut checks_not_performed = vec![
+            "record_freshness",
+            "producer_authenticity",
+            "historical_execution",
+            "register_convention",
+            "abi_runtime_semantics",
+            "os_semantics",
+        ];
+        checks_not_performed.push(if signature_acceptance.is_some() {
+            "descriptor_authenticity_beyond_signature_binding"
+        } else {
+            "descriptor_authenticity"
+        });
+        if let Some(acceptance) = signature_acceptance.as_ref() {
+            checks_performed.push("producer_signature_binding");
+            if acceptance.max_age_checked {
+                checks_performed.push("producer_signature_envelope_freshness");
+            }
+            if acceptance.full_authenticity_chain {
+                checks_not_performed.retain(|check| *check != "producer_authenticity");
+            }
+        }
+        let mut document = serde_json::json!({
+            "schema_version": "mumei.native-object-acceptance-recheck/v1",
+            "recheck": "evaluated",
+            "consistent": true,
+            "scope": fresh["scope"].clone(),
+            "expected_build_id": expected_build_id,
+            "descriptor_digest": descriptor_digest,
+            "evidence_fingerprint": fresh["evidence_fingerprint"].clone(),
+            "trust_inputs": {
+                "expected_build_id": "required_separately_trusted_pin",
+                "producer_key": supplied(signature.producer_key.is_some()),
+                "producer_key_id_pin": supplied(signature.expected_producer_key.is_some()),
+                "reference_time": supplied(signature.reference_time.is_some()),
+                "max_age_seconds": supplied(signature.max_age_seconds.is_some()),
+                "key_registry": supplied(signature.key_registry.is_some()),
+                "registry_signature": supplied(signature.registry_signature.is_some()),
+                "registry_key": supplied(signature.registry_key.is_some()),
+                "revocation_list": supplied(signature.revocation_list.is_some()),
+                "revocation_signature": supplied(signature.revocation_signature.is_some()),
+                "revocation_key": supplied(signature.revocation_key.is_some()),
+                "min_revocation_version": supplied(signature.min_revocation_version.is_some()),
+            },
+            "checks_performed": checks_performed,
+            "checks_not_performed": checks_not_performed,
+        });
+        if let Some(acceptance) = signature_acceptance.as_ref() {
+            document["producer_signature"] = serde_json::to_value(&acceptance.binding)
+                .map_err(|_| BundleError("cannot encode producer signature binding"))?;
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&document)
+                .map_err(|_| BundleError("cannot encode object acceptance recheck"))?
+        );
+    } else if signature_acceptance.is_some() {
         println!(
             "Saved native object acceptance descriptor consistent with a fresh object acceptance of the pinned inputs.\nScope: {}\nProducer signature binding: checked for the exact saved descriptor bytes; optional key-label, freshness, revocation and registry gates only as explicitly supplied.\nDescriptor authenticity beyond that binding, real-world producer identity, historical execution, register convention, ABI/runtime and OS semantics: not checked.",
             fresh["scope"].as_str().unwrap_or_default()

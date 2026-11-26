@@ -8224,6 +8224,54 @@ fn recheck_object_acceptance_checks_exact_descriptor_signature_when_supplied() {
         ]
     };
 
+    let root_key = root.path().join("root.key");
+    fs::write(&root_key, OTHER_KEY).unwrap();
+    let root_public = public_key(OTHER_KEY);
+    let registry = root.path().join("registry.json");
+    fs::write(
+        &registry,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "mumei.producer-key-registry/v1",
+            "registry": {
+                "object-producer": {
+                    "principal": "fixture-principal",
+                    "not_before": "2026-01-01T00:00:00Z",
+                    "not_after": "2026-12-31T23:59:59Z",
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let revocation_list = root.path().join("revocation.json");
+    fs::write(
+        &revocation_list,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "mumei.key-revocation-list/v1",
+            "revoked_keys": [],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let sign_json = |record: &Path, secret: &Path, output_path: &Path| {
+        let signed = Command::new(env!("CARGO_BIN_EXE_mumei"))
+            .args(["evidence", "sign"])
+            .arg(record)
+            .args(["--key-file"])
+            .arg(secret)
+            .args(["--producer-key-id", "root-key", "--json"])
+            .output()
+            .unwrap();
+        assert_success(&signed);
+        assert!(!String::from_utf8_lossy(&signed.stdout).contains(OTHER_KEY));
+        assert!(!String::from_utf8_lossy(&signed.stderr).contains(OTHER_KEY));
+        fs::write(output_path, signed.stdout).unwrap();
+    };
+    let registry_signature = root.path().join("registry.sig.json");
+    sign_json(&registry, &root_key, &registry_signature);
+    let revocation_signature = root.path().join("revocation.sig.json");
+    sign_json(&revocation_list, &root_key, &revocation_signature);
+
     let output = recheck(&signature_args());
     assert_success(&output);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -8236,6 +8284,89 @@ fn recheck_object_acceptance_checks_exact_descriptor_signature_when_supplied() {
     assert!(!stdout.contains("artifact_verified"));
     assert!(!stdout.contains(FAKE_KEY));
     assert!(!String::from_utf8_lossy(&output.stderr).contains(FAKE_KEY));
+
+    let mut json_args = signature_args();
+    json_args.push("--json".to_owned());
+    let json_output = recheck(&json_args);
+    assert_success(&json_output);
+    let document: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert_eq!(
+        document["schema_version"],
+        serde_json::json!("mumei.native-object-acceptance-recheck/v1")
+    );
+    assert_eq!(document["consistent"], serde_json::json!(true));
+    assert_eq!(
+        document["trust_inputs"]["producer_key"],
+        serde_json::json!("supplied")
+    );
+    assert_eq!(
+        document["trust_inputs"]["key_registry"],
+        serde_json::json!("not_supplied")
+    );
+    assert_eq!(
+        document["producer_signature"]["envelope_fresh"],
+        serde_json::json!(true)
+    );
+    let not_performed = document["checks_not_performed"].as_array().unwrap();
+    assert!(not_performed.contains(&serde_json::json!("record_freshness")));
+    assert!(not_performed.contains(&serde_json::json!("producer_authenticity")));
+    assert!(document["checks_performed"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("producer_signature_envelope_freshness")));
+    assert!(!String::from_utf8_lossy(&json_output.stdout).contains(FAKE_KEY));
+    assert!(!String::from_utf8_lossy(&json_output.stderr).contains(FAKE_KEY));
+
+    let mut full_chain_args = signature_args();
+    full_chain_args.extend([
+        "--key-registry".to_owned(),
+        registry.to_string_lossy().into_owned(),
+        "--registry-signature".to_owned(),
+        registry_signature.to_string_lossy().into_owned(),
+        "--registry-key".to_owned(),
+        root_public.clone(),
+        "--revocation-list".to_owned(),
+        revocation_list.to_string_lossy().into_owned(),
+        "--revocation-signature".to_owned(),
+        revocation_signature.to_string_lossy().into_owned(),
+        "--revocation-key".to_owned(),
+        root_public.clone(),
+        "--json".to_owned(),
+    ]);
+    let full_chain_output = recheck(&full_chain_args);
+    assert_success(&full_chain_output);
+    let full_chain: serde_json::Value = serde_json::from_slice(&full_chain_output.stdout).unwrap();
+    for key in [
+        "key_registry",
+        "registry_signature",
+        "registry_key",
+        "revocation_list",
+        "revocation_signature",
+        "revocation_key",
+    ] {
+        assert_eq!(
+            full_chain["trust_inputs"][key],
+            serde_json::json!("supplied"),
+            "{key}"
+        );
+    }
+    for field in [
+        "key_authentic",
+        "registry_authentic",
+        "key_not_revoked",
+        "revocation_list_authentic",
+    ] {
+        assert_eq!(
+            full_chain["producer_signature"][field],
+            serde_json::json!(true),
+            "{field}"
+        );
+    }
+    let full_chain_not_performed = full_chain["checks_not_performed"].as_array().unwrap();
+    assert!(!full_chain_not_performed.contains(&serde_json::json!("producer_authenticity")));
+    assert!(full_chain_not_performed.contains(&serde_json::json!("record_freshness")));
+    assert!(!String::from_utf8_lossy(&full_chain_output.stdout).contains(FAKE_KEY));
+    assert!(!String::from_utf8_lossy(&full_chain_output.stderr).contains(FAKE_KEY));
 
     let mut too_strict_args = signature_args();
     let max_age_index = too_strict_args.len() - 1;
@@ -8525,4 +8656,51 @@ atom main() -> i64 requires: true; ensures: result == 1; body: { 1 };",
         &recheck_object_acceptance(source, bundle, id, f64_first),
         "saved object acceptance descriptor is not bound to the fresh attempt inputs",
     );
+}
+
+#[test]
+fn recheck_object_acceptance_json_marks_unsigned_authenticity_inputs_not_supplied() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(&subdir(root.path(), "module"), MODULE);
+    let saved = save_object_acceptance(source.parent().unwrap(), &source, &bundle, &id);
+    let output = cli(&[
+        "native-bundle",
+        "recheck-object-acceptance",
+        bundle.to_str().unwrap(),
+        source.to_str().unwrap(),
+        saved.to_str().unwrap(),
+        "--expected-build-id",
+        &id,
+        "--json",
+    ]);
+    assert_success(&output);
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        document["schema_version"],
+        serde_json::json!("mumei.native-object-acceptance-recheck/v1")
+    );
+    assert!(document.get("producer_signature").is_none());
+    for key in [
+        "producer_key",
+        "producer_key_id_pin",
+        "reference_time",
+        "max_age_seconds",
+        "key_registry",
+        "revocation_list",
+    ] {
+        assert_eq!(
+            document["trust_inputs"][key],
+            serde_json::json!("not_supplied"),
+            "{key}"
+        );
+    }
+    let not_performed = document["checks_not_performed"].as_array().unwrap();
+    for check in [
+        "descriptor_authenticity",
+        "record_freshness",
+        "producer_authenticity",
+        "historical_execution",
+    ] {
+        assert!(not_performed.contains(&serde_json::json!(check)), "{check}");
+    }
 }
