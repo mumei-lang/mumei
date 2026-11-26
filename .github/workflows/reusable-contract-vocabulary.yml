@@ -1,0 +1,62 @@
+# Reusable Python contract-vocabulary check runner.
+#
+# Shared across mumei-lang repositories for mumei-lang/mumei#1500. The shared
+# part is intentionally small: checkout, Python setup, optional dependency
+# installation, timeout, and execution of the caller-provided check command.
+# Trigger path filters and the check command stay in each caller because each
+# repository owns different contract surfaces.
+#
+# Caller example:
+#   jobs:
+#     contract-vocabulary:
+#       uses: mumei-lang/mumei/.github/workflows/reusable-contract-vocabulary.yml@develop
+#       with:
+#         python_version: '3.12'
+#         install_command: python -m pip install pytest pyyaml
+#         check_command: python -m pytest tests/test_contract_vocabulary.py -q
+name: Contract vocabulary checks (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      python_version:
+        description: Python version used to run the checks
+        required: false
+        type: string
+        default: '3.12'
+      install_command:
+        description: Optional shell command that installs Python dependencies
+        required: false
+        type: string
+        default: ''
+      check_command:
+        description: Shell command that runs the repository-specific contract checks
+        required: true
+        type: string
+      timeout_minutes:
+        description: Job timeout in minutes
+        required: false
+        type: number
+        default: 10
+
+permissions:
+  contents: read
+
+jobs:
+  contract-vocabulary:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Install Python dependencies
+        if: ${{ inputs.install_command != '' }}
+        run: ${{ inputs.install_command }}
+
+      - name: Run repository-specific contract checks
+        run: ${{ inputs.check_command }}

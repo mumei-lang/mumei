@@ -349,8 +349,12 @@ def test_evidence_gate_runs_when_only_schema_or_fixtures_change() -> None:
     }
     for event in ["push", "pull_request"]:
         assert required <= set(triggers[event]["paths"])
-    steps = workflow["jobs"]["contract-vocabulary"]["steps"]
-    runs = "\n".join(step.get("run", "") for step in steps)
+    job = workflow["jobs"]["contract-vocabulary"]
+    if "uses" in job:
+        assert job["uses"] == "./.github/workflows/reusable-contract-vocabulary.yml"
+        runs = job["with"]["install_command"] + "\n" + job["with"]["check_command"]
+    else:
+        runs = "\n".join(step.get("run", "") for step in job["steps"])
     assert "jsonschema" in runs
     assert "tests/test_verification_evidence_schema.py" in runs
 
