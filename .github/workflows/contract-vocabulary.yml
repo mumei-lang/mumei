@@ -1,8 +1,8 @@
-# Cross-repo note (mumei-lang/mumei#1500): the reusable workflow owns only
-# the common checkout/Python/timeout runner. mumei's broad path filter and
-# check command are repo-specific because this repository is the canonical
-# owner of proof/evidence schemas, MCP tool vocabulary, and producer-signature
-# contract fixtures.
+# Cross-repo note (mumei-lang/mumei#1500): the composite action owns only
+# the common Python/dependency runner. mumei's broad path filter and check
+# command are repo-specific because this repository is the canonical owner of
+# proof/evidence schemas, MCP tool vocabulary, and producer-signature contract
+# fixtures.
 name: Contract Vocabulary
 
 on:
@@ -40,7 +40,7 @@ on:
       - 'docs/LSP_DIAGNOSTIC_DATA.md'
       - 'scripts/check_mcp_tool_contract.py'
       - '.github/workflows/contract-vocabulary.yml'
-      - '.github/workflows/reusable-contract-vocabulary.yml'
+      - '.github/actions/contract-vocabulary/**'
   push:
     branches: [develop]
     paths:
@@ -76,7 +76,7 @@ on:
       - 'docs/LSP_DIAGNOSTIC_DATA.md'
       - 'scripts/check_mcp_tool_contract.py'
       - '.github/workflows/contract-vocabulary.yml'
-      - '.github/workflows/reusable-contract-vocabulary.yml'
+      - '.github/actions/contract-vocabulary/**'
   workflow_dispatch:
 
 permissions:
@@ -88,11 +88,17 @@ concurrency:
 
 jobs:
   contract-vocabulary:
-    uses: ./.github/workflows/reusable-contract-vocabulary.yml
-    with:
-      python_version: '3.12'
-      install_command: python3 -m pip install --quiet pytest pyyaml 'jsonschema>=4.18,<5'
-      check_command: |
-        python3 scripts/check_contract_vocabulary.py
-        python3 scripts/check_mcp_tool_contract.py
-        python3 -m pytest tests/test_check_contract_vocabulary.py tests/test_ci_workflow_timeouts.py tests/test_check_mcp_tool_contract.py tests/test_check_proof_bundle_drift.py tests/test_lsp_diagnostic_data_doc.py tests/test_verification_evidence_schema.py tests/test_native_object_acceptance_schema.py tests/test_proof_cert_schema.py tests/test_producer_signature_schema.py -v
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run contract vocabulary checks
+        uses: ./.github/actions/contract-vocabulary
+        with:
+          python_version: '3.12'
+          install_command: python3 -m pip install --quiet pytest pyyaml 'jsonschema>=4.18,<5'
+          check_command: |
+            python3 scripts/check_contract_vocabulary.py
+            python3 scripts/check_mcp_tool_contract.py
+            python3 -m pytest tests/test_check_contract_vocabulary.py tests/test_ci_workflow_timeouts.py tests/test_check_mcp_tool_contract.py tests/test_check_proof_bundle_drift.py tests/test_lsp_diagnostic_data_doc.py tests/test_verification_evidence_schema.py tests/test_native_object_acceptance_schema.py tests/test_proof_cert_schema.py tests/test_producer_signature_schema.py -v

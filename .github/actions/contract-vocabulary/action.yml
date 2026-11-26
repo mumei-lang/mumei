@@ -1,0 +1,37 @@
+# Composite action for Python contract-vocabulary checks.
+#
+# Shared across mumei-lang repositories for mumei-lang/mumei#1500. The shared
+# part is intentionally small: Python setup, optional dependency installation,
+# and execution of the caller-provided check command. Trigger path filters,
+# timeout, job identity, and the check command stay in each caller because
+# each repository owns different contract surfaces.
+name: Run contract vocabulary checks
+description: Run repository-specific Python contract checks with a shared setup shape
+inputs:
+  python_version:
+    description: Python version used to run the checks
+    required: false
+    default: '3.12'
+  install_command:
+    description: Optional shell command that installs Python dependencies
+    required: false
+    default: ''
+  check_command:
+    description: Shell command that runs the repository-specific contract checks
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python_version }}
+
+    - name: Install Python dependencies
+      if: ${{ inputs.install_command != '' }}
+      shell: bash
+      run: ${{ inputs.install_command }}
+
+    - name: Run repository-specific contract checks
+      shell: bash
+      run: ${{ inputs.check_command }}
