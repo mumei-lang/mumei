@@ -10,10 +10,10 @@ not a second priority list or a claim that planned features already exist.
 ```mermaid
 flowchart TD
     Input["existing code / natural-language requirements / .mm source"] --> Agent["mumei-agent<br/>extraction, audit, repair, adapters"]
-    Input --> Core["mumei<br/>parse, resolve, HIR/MIR, Z3, LLVM"]
+    Input -->|.mm source only| Core["mumei<br/>parse, resolve, HIR/MIR, Z3, LLVM"]
     Agent -->|candidate contracts and code| Core
     Core -->|counterexamples and diagnostics| Agent
-    Core -->|Z3 unknown obligations| Lean["mumei-lean<br/>Lean 4 translation and kernel audit"]
+    Core -->|Z3 unknown obligations, opt-in escalation| Lean["mumei-lean<br/>Lean 4 translation and kernel audit"]
     Lean -->|kernel-audited .lean-cert.json| Core
     Core --> Artifacts["proof certificates / LLVM / native artifacts"]
     Core --> Evidence["evidence records / Claim Book / acceptance checks"]

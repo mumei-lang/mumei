@@ -17,10 +17,10 @@ Mumei is a formal verification toolchain that starts from existing code, natural
 ```mermaid
 flowchart LR
     Input["existing code / NL spec / .mm"] --> Agent["mumei-agent"]
-    Input --> Core["mumei + Z3"]
+    Input -->|.mm source only| Core["mumei + Z3"]
     Agent -->|candidates and audit inputs| Core
     Core -->|counterexamples| Agent
-    Core -->|unknown obligations| Lean["mumei-lean + Lean 4"]
+    Core -->|unknown obligations, opt-in escalation| Lean["mumei-lean + Lean 4"]
     Lean -->|kernel-audited certificates| Core
     Core --> Evidence["proof / evidence artifacts"]
     Evidence --> Demo["mumei-demo evaluation"]
