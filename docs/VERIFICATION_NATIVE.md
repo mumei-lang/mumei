@@ -17,6 +17,7 @@ flowchart TD
     Lean -->|kernel-audited .lean-cert.json| Core
     Core --> Artifacts["proof certificates / LLVM / native artifacts"]
     Core --> Evidence["evidence records / Claim Book / acceptance checks"]
+    Agent -->|normalized observations, not proof| Evidence
     Lean --> Evidence
     Artifacts --> Evidence
     Evidence --> Demo["mumei-demo<br/>scenarios, controls, benchmarks"]
