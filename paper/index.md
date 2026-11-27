@@ -115,41 +115,43 @@ flowchart LR
     Compiler -->|PASS| Artifact["Verified artifact"]
     Compiler -->|FAIL + feedback| Repair["LLM/rule-based repair"]
     Repair --> Candidate
-    Compiler -->|Z3 unknown| Lean["mumei-lean / Lean 4"]
-    Lean --> Artifact
+    Compiler -->|Z3 unknown, opt-in escalation| Lean["mumei-lean / Lean 4"]
+    Lean --> LeanCert["kernel-audited certificate"]
+    LeanCert -->|accepted by mumei| Artifact
 ```
 
 The metaphor is intentionally operational. A verified standard library can be expanded atom by atom; each new atom carries a contract, proof result, and proof certificate. Over time, the standard library becomes a cache of forged building blocks for future agents and applications.
 
 ## 2. System Architecture
 
-**Source references:** [mumei architecture](https://github.com/mumei-lang/mumei/blob/develop/docs/ARCHITECTURE.md), [mumei-agent README](https://github.com/mumei-lang/mumei-agent/blob/develop/README.md), [mumei-lean architecture](https://github.com/mumei-lang/mumei-lean/blob/develop/docs/ARCHITECTURE.md), [proof certificates](https://github.com/mumei-lang/mumei/blob/develop/docs/PROOF_CERTIFICATE.md).
+**Source references:** [mumei architecture](https://github.com/mumei-lang/mumei/blob/develop/docs/ARCHITECTURE.md), [verification-native architecture](https://github.com/mumei-lang/mumei/blob/develop/docs/VERIFICATION_NATIVE.md), [mumei-agent README](https://github.com/mumei-lang/mumei-agent/blob/develop/README.md), [mumei-lean architecture](https://github.com/mumei-lang/mumei-lean/blob/develop/docs/ARCHITECTURE.md), [proof certificates](https://github.com/mumei-lang/mumei/blob/develop/docs/PROOF_CERTIFICATE.md).
 
 Mumei is organized as an ecosystem rather than a single compiler. The four principal repositories have different trust responsibilities: the core compiler can verify and emit artifacts without the agent; the agent can orchestrate generation, audit, repair, and external verifier execution without claiming proof authority; Lean escalation consumes proof certificates rather than changing compiler semantics; and the demo repository evaluates the resulting claims against reproducible positive and negative controls.
 
 ```mermaid
 flowchart TD
-    User["User intent / existing code / .mm source"] --> Agent["mumei-agent"]
-    User --> CLI["mumei CLI"]
-    Agent -->|generate / audit / repair| CLI
+    User["User intent / existing code"] --> Agent["mumei-agent"]
+    MM[".mm source"] --> CLI["mumei CLI"]
+    Agent -->|generate / audit / repair candidates| CLI
     CLI --> Parser["parse"]
     Parser --> Resolver["resolve imports/types/effects/certificates"]
     Resolver --> Mono["monomorphize"]
     Mono --> HIR["lower_to_hir"]
     HIR --> MIR["MIR analyses"]
     MIR --> Z3["Z3 verification"]
-    Z3 -->|unsat: obligation impossible| Emit["emit LLVM / headers / verified JSON"]
+    Z3 -->|unsat: no counterexample| Emit["emit LLVM / headers / verified JSON"]
     Z3 -->|sat: counterexample| Agent
-    Z3 -->|unknown| Cert["proof certificate / escalation"]
-    Cert --> Lean["mumei-lean / Lean 4"]
+    Z3 -->|unknown| Cert["proof certificate"]
+    Cert -->|opt-in escalation| Lean["mumei-lean / Lean 4"]
     Lean --> LeanCert[".lean-cert.json + kernel audit"]
     LeanCert --> Resolver
     Emit --> Native["native bundle / object"]
     Native --> TV["bounded translation validation"]
     CLI --> Evidence["proof certificates / evidence records"]
-    Lean --> Evidence
-    Agent --> Evidence
+    LeanCert --> Evidence
+    Agent -->|dispatch observations / repair evidence| Evidence
     TV --> Evidence
+    Evidence --> Acceptance["evidence acceptance / trusted checkers"]
     Evidence --> Demo["mumei-demo reproducible evaluation"]
     Native --> Demo
 ```
@@ -172,6 +174,8 @@ Mumei Core implements the language front end, semantic environment, and verifica
 - `mumei-core`: parser, HIR, MIR, verification, resolver, manifest, registry, FFI support, emitter traits;
 - `mumei-emit-llvm`: LLVM IR emitter;
 - `mumei-emit-json`: verified metadata emitter;
+- `mumei-emit-proofbook`: Markdown proof-book emitter;
+- `mumei-emit-rust` / `mumei-emit-python`: FFI wrapper emitters;
 - root `mumei` CLI: `build`, `verify`, `check`, `init`, `doc`, `infer-effects`, `infer-contracts`, and LSP support.
 
 The verification environment tracks refined types, structs, enums, traits, implementations, resources, effects, imported atoms, proof certificates, path abstractions, and linearity state. The default compiler pipeline is:
@@ -817,7 +821,7 @@ Scale did not buy proof coverage by widening the trust surface. All 172 atoms ca
 
 **Source references:** [Cedar Policy Language](https://www.cedarpolicy.com/), [mumei README](https://github.com/mumei-lang/mumei/blob/develop/README.md), [capability security docs](https://github.com/mumei-lang/mumei/blob/develop/docs/CAPABILITY_SECURITY.md).
 
-Cedar is a policy language and authorization engine designed for analyzable access-control policies. Like Mumei, it emphasizes decidable reasoning over domain constraints. The difference is scope: Cedar focuses on authorization policies, while Mumei is a general proof-driven programming language with atoms, effects, resources, and code generation. Cedar asks whether a request is authorized under a policy; Mumei asks whether a program satisfies its contracts and can be safely emitted.
+Cedar is a policy language and authorization engine designed for analyzable access-control policies. Like Mumei, it emphasizes decidable reasoning over domain constraints. The difference is scope: Cedar focuses on authorization policies, while Mumei is a verification-native engineering platform built around atoms, effects, resources, code generation, and evidence acceptance. Cedar asks whether a request is authorized under a policy; Mumei asks whether a program satisfies its contracts and can be safely emitted with explicit evidence boundaries.
 
 ### Comparison with Lean 4 and Coq
 

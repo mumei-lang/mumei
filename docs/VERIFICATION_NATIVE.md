@@ -5,6 +5,30 @@ owns implementation order. [The program tracker](https://github.com/mumei-lang/m
 links C01–C14. This document defines responsibilities and acceptance boundaries,
 not a second priority list or a claim that planned features already exist.
 
+## Ecosystem in one picture
+
+```mermaid
+flowchart TD
+    Input["existing code / natural-language requirements / .mm source"] --> Agent["mumei-agent<br/>extraction, audit, repair, adapters"]
+    Input -->|.mm source only| Core["mumei<br/>parse, resolve, HIR/MIR, Z3, LLVM"]
+    Agent -->|candidate contracts and code| Core
+    Core -->|counterexamples and diagnostics| Agent
+    Core -->|Z3 unknown obligations, opt-in escalation| Lean["mumei-lean<br/>Lean 4 translation and kernel audit"]
+    Lean -->|kernel-audited .lean-cert.json| Core
+    Core --> Artifacts["proof certificates / LLVM / native artifacts"]
+    Core --> Evidence["evidence records / Claim Book / acceptance checks"]
+    Agent -->|normalized observations, not proof| Evidence
+    Lean --> Evidence
+    Artifacts --> Evidence
+    Evidence --> Demo["mumei-demo<br/>scenarios, controls, benchmarks"]
+```
+
+The diagram is a trust boundary, not a claim that every path produces a proof.
+LLMs, agents, adapters, finite replay and external tools can propose candidates
+or collect observations. Only the relevant trusted checker and the explicit
+acceptance rules determine what becomes verified evidence. `mumei-demo`
+evaluates those claims; it does not strengthen them.
+
 ## 1. Goal: common specifications, not a universal verification language
 
 Mumei evolves from primarily Z3-backed contract verification toward a common
