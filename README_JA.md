@@ -6,11 +6,27 @@
 
 Mumei は、既存の外部言語コード、自然言語要件、または Mumei `.mm` モジュールから開始できる形式検証ツールチェーンです。Z3、proof certificate、AI-agent ワークフローでバグ、仕様ドリフト、矛盾を見つけ、重要なロジックを検査済みの `.mm` コードへ段階的に移行します。
 
-[Technical Paper](paper/) — proof-driven programming architecture、自律検証ループ、case study。
+[Technical Paper](paper/) — verification-native engineering architecture、自律検証ループ、case study。
 
 [Verified Local Agents: When AI Code Generation Meets Formal Proof](https://medium.com/@a_t_mosphere/verified-local-agents-when-ai-code-generation-meets-formal-proof-c317f16a7242) — Mumei Forge・Z3/Lean パイプライン・ケーススタディの概要記事（Medium）。
 
 > existing code / natural language spec → MCP or mumei-agent → Z3-backed diagnostics → optional `.mm` migration → LLVM / proof artifacts
+
+## エコシステム概要
+
+```mermaid
+flowchart LR
+    Input["existing code / NL spec / .mm"] --> Agent["mumei-agent"]
+    Input --> Core["mumei + Z3"]
+    Agent -->|candidates and audit inputs| Core
+    Core -->|counterexamples| Agent
+    Core -->|unknown obligations| Lean["mumei-lean + Lean 4"]
+    Lean -->|kernel-audited certificates| Core
+    Core --> Evidence["proof / evidence artifacts"]
+    Evidence --> Demo["mumei-demo evaluation"]
+```
+
+LLM と agent は候補を提案し、Mumei Core・Z3・Lean・明示的な evidence acceptance rule が何を証明として受け入れるかを決定します。正本となる ownership / acceptance boundary は [Verification-Native Architecture](docs/VERIFICATION_NATIVE.md) を参照してください。
 
 ## no-`.mm` の最前面導線
 

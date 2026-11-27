@@ -6,11 +6,27 @@
 
 Mumei is a formal verification toolchain that starts from existing code, natural-language requirements, or `.mm` modules. It uses Z3, proof certificates, and AI-agent workflows to find bugs, spec drift, and contradictions, then helps move critical logic into checked `.mm` code.
 
-[Technical Paper](paper/) — proof-driven programming architecture, autonomous verification loop, and case studies.
+[Technical Paper](paper/) — verification-native engineering architecture, autonomous verification loop, and case studies.
 
 [Verified Local Agents: When AI Code Generation Meets Formal Proof](https://medium.com/@a_t_mosphere/verified-local-agents-when-ai-code-generation-meets-formal-proof-c317f16a7242) — a high-level overview of the Mumei Forge, Z3/Lean pipeline, and case studies (Medium).
 
 > existing code / natural language spec → MCP or mumei-agent → Z3-backed diagnostics → optional `.mm` migration → LLVM / proof artifacts
+
+## Ecosystem at a glance
+
+```mermaid
+flowchart LR
+    Input["existing code / NL spec / .mm"] --> Agent["mumei-agent"]
+    Input --> Core["mumei + Z3"]
+    Agent -->|candidates and audit inputs| Core
+    Core -->|counterexamples| Agent
+    Core -->|unknown obligations| Lean["mumei-lean + Lean 4"]
+    Lean -->|kernel-audited certificates| Core
+    Core --> Evidence["proof / evidence artifacts"]
+    Evidence --> Demo["mumei-demo evaluation"]
+```
+
+LLMs and agents propose candidates; Mumei Core, Z3, Lean and explicit evidence-acceptance rules decide what counts as proof. The canonical ownership and acceptance boundary is [Verification-Native Architecture](docs/VERIFICATION_NATIVE.md).
 
 Release and Homebrew artifacts include per-module proof certificates and the
 aggregate proof bundle. Consumers can re-verify packaged sources with
