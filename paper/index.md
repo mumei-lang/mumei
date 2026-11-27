@@ -115,8 +115,9 @@ flowchart LR
     Compiler -->|PASS| Artifact["Verified artifact"]
     Compiler -->|FAIL + feedback| Repair["LLM/rule-based repair"]
     Repair --> Candidate
-    Compiler -->|Z3 unknown| Lean["mumei-lean / Lean 4"]
-    Lean --> Artifact
+    Compiler -->|Z3 unknown, opt-in escalation| Lean["mumei-lean / Lean 4"]
+    Lean --> LeanCert["kernel-audited certificate"]
+    LeanCert -->|accepted by mumei| Artifact
 ```
 
 The metaphor is intentionally operational. A verified standard library can be expanded atom by atom; each new atom carries a contract, proof result, and proof certificate. Over time, the standard library becomes a cache of forged building blocks for future agents and applications.
