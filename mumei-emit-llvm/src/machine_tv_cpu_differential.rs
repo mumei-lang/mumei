@@ -185,6 +185,7 @@ enum Flags {
     All,
     Float,
     Zero,
+    IncDec,
     Unmodeled,
     ShiftCl,
     ShiftImm(u8),
@@ -196,6 +197,10 @@ impl Flags {
             Self::All => STATUS,
             Self::Float => STATUS | PF,
             Self::Zero => ZF,
+            // inc/dec never update CF in hardware, so the modeled mask
+            // covers exactly the flags they do set: SF/ZF/OF (PF is not
+            // modeled by the production condition decoder).
+            Self::IncDec => SF | ZF | OF,
             Self::Unmodeled => 0,
             Self::ShiftCl if input.gpr[1] & 63 == 0 => STATUS,
             Self::ShiftImm(count) if count & 63 == 0 => STATUS,
@@ -215,6 +220,14 @@ fn flags_bits(flags: &FlagState<'_>, context: &Context) -> Option<(u64, u64)> {
     match flags {
         FlagState::Unknown => Some((0, 0)),
         FlagState::ZeroFlagResult { .. } => Some((ZF, bit(condition("e")?, ZF))),
+        FlagState::IncDecResult { .. } => {
+            let sign = condition("s")?;
+            let overflow = sign != condition("l")?;
+            Some((
+                SF | ZF | OF,
+                bit(condition("e")?, ZF) | bit(sign, SF) | bit(overflow, OF),
+            ))
+        }
         _ => {
             let sign = condition("s")?;
             // The production condition decoder exposes SF and SF xor OF.
@@ -553,8 +566,10 @@ fn integer() {
     form!(suite, &inputs, "reg", Flags::Unmodeled, "mulq %rsi");
     form!(suite, &inputs, "reg", Flags::All, "negq %rax");
     form!(suite, &inputs, "reg", Flags::All, "negl %eax");
-    form!(suite, &inputs, "reg", Flags::Zero, "decq %rax");
-    form!(suite, &inputs, "reg", Flags::Zero, "decl %eax");
+    form!(suite, &inputs, "reg", Flags::IncDec, "decq %rax");
+    form!(suite, &inputs, "reg", Flags::IncDec, "decl %eax");
+    form!(suite, &inputs, "reg", Flags::IncDec, "incq %rax");
+    form!(suite, &inputs, "reg", Flags::IncDec, "incl %eax");
     form!(suite, &inputs, "implicit", Flags::All, "cltd");
     form!(suite, &inputs, "implicit", Flags::All, "cqto");
     form!(
