@@ -1797,39 +1797,108 @@ pub fn recheck_multifile_source(
     solve_module_obligations(&atoms, &solver)
 }
 
+/// One source-recheck query whose result stayed unknown after the
+/// fallback solver attempt. Diagnostics only: it carries no acceptance
+/// or proof meaning beyond the enclosing `SourceRecheck`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleRecheckUnknown {
+    pub atom: String,
+    pub query: ModuleRecheckQueryKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleRecheckQueryKind {
+    Domain,
+    LoopExitDomain,
+    LoopExitPostconditionHypotheses,
+    Obligation(usize),
+}
+
+/// Check one recheck query with a fresh solver, so learned-state and
+/// resource consumption cannot carry across atoms or obligations. If
+/// that query is unknown, the SMT tactic solver gets one equivalent
+/// retry. The retry preserves the exact SAT/UNSAT/Unknown meaning —
+/// only a conclusive sound solver result can replace the initial unknown.
+fn check_recheck_query<'ctx>(
+    solver: &z3::Solver<'ctx>,
+    formulas: &[&z3::ast::Bool<'ctx>],
+) -> z3::SatResult {
+    let context = solver.get_context();
+    let fresh = z3::Solver::new(context);
+    for formula in formulas {
+        fresh.assert(formula);
+    }
+    let initial = fresh.check();
+    if initial != z3::SatResult::Unknown {
+        return initial;
+    }
+    let timeout_ms = BuildSettings::default().solver_timeout_ms;
+    let tactic =
+        z3::Tactic::new(context, "smt").try_for(std::time::Duration::from_millis(timeout_ms));
+    let tactic_solver = tactic.solver();
+    let mut params = z3::Params::new(context);
+    params.set_u32("timeout", u32::try_from(timeout_ms).unwrap_or(u32::MAX));
+    params.set_u32("rlimit", RECHECK_RESOURCE_LIMIT);
+    tactic_solver.set_params(&params);
+    for formula in formulas {
+        tactic_solver.assert(formula);
+    }
+    tactic_solver.check()
+}
+
 /// The per-atom obligation sweep shared by the module and multifile
 /// source rechecks.
-fn check_atom_loop_exit_domain(
+fn check_atom_loop_exit_domain_diagnostic(
     atom: &semantic_contract::ModuleAtomObligations<'_>,
     solver: &z3::Solver,
-) -> Result<bool, BundleError> {
+) -> Result<(bool, Vec<ModuleRecheckUnknown>), BundleError> {
     if atom.loop_exits.as_bool() == Some(true) {
-        return Ok(false);
+        return Ok((false, Vec::new()));
     }
     let mut inconclusive = false;
-    solver.reset();
-    solver.assert(&atom.domain);
-    solver.assert(&atom.loop_exits);
-    match solver.check() {
+    let mut unknowns = Vec::new();
+    match check_recheck_query(solver, &[&atom.domain, &atom.loop_exits]) {
         z3::SatResult::Sat => (),
         z3::SatResult::Unsat => {
             return Err(BundleError(
                 "source domain and loop exits empty on all inputs",
             ))
         }
-        z3::SatResult::Unknown => inconclusive = true,
+        z3::SatResult::Unknown => {
+            inconclusive = true;
+            unknowns.push(ModuleRecheckUnknown {
+                atom: atom.atom.clone(),
+                query: ModuleRecheckQueryKind::LoopExitDomain,
+            });
+        }
     }
-    solver.reset();
-    solver.assert(&atom.domain);
-    solver.assert(&atom.postcondition_hypotheses);
-    solver.assert(&atom.loop_exits);
-    match solver.check() {
-        z3::SatResult::Sat => Ok(inconclusive),
+    match check_recheck_query(
+        solver,
+        &[
+            &atom.domain,
+            &atom.postcondition_hypotheses,
+            &atom.loop_exits,
+        ],
+    ) {
+        z3::SatResult::Sat => Ok((inconclusive, unknowns)),
         z3::SatResult::Unsat => Err(BundleError(
             "postcondition hypotheses and loop exits empty on all inputs",
         )),
-        z3::SatResult::Unknown => Ok(true),
+        z3::SatResult::Unknown => {
+            unknowns.push(ModuleRecheckUnknown {
+                atom: atom.atom.clone(),
+                query: ModuleRecheckQueryKind::LoopExitPostconditionHypotheses,
+            });
+            Ok((true, unknowns))
+        }
     }
+}
+
+fn check_atom_loop_exit_domain(
+    atom: &semantic_contract::ModuleAtomObligations<'_>,
+    solver: &z3::Solver,
+) -> Result<bool, BundleError> {
+    check_atom_loop_exit_domain_diagnostic(atom, solver).map(|(inconclusive, _)| inconclusive)
 }
 
 /// Check whether each atom's input domain intersects the bounded-loop
@@ -1846,39 +1915,66 @@ pub fn check_module_loop_exit_domains(
     Ok(inconclusive)
 }
 
-pub fn solve_module_obligations(
+/// Solve module obligations and report which queries remain unknown.
+/// The diagnostic list is additive evidence metadata only; it does not
+/// change the fail-closed meaning of `SourceRecheck::Inconclusive`.
+pub fn solve_module_obligations_with_diagnostics(
     atoms: &[semantic_contract::ModuleAtomObligations<'_>],
     solver: &z3::Solver,
-) -> Result<SourceRecheck, BundleError> {
+) -> Result<(SourceRecheck, Vec<ModuleRecheckUnknown>), BundleError> {
     let mut inconclusive = false;
+    let mut unknowns = Vec::new();
     for atom in atoms {
         // An atom whose declared domain is empty — every guarded
         // operator poisoned or no input inside its signature bounds —
         // is outside the profile: its obligations would be vacuous,
         // matching the LLVM side's empty-domain rejection.
-        solver.reset();
-        solver.assert(&atom.domain);
-        match solver.check() {
+        match check_recheck_query(solver, &[&atom.domain]) {
             z3::SatResult::Sat => (),
             z3::SatResult::Unsat => return Err(BundleError("empty source domain")),
-            z3::SatResult::Unknown => inconclusive = true,
+            z3::SatResult::Unknown => {
+                inconclusive = true;
+                unknowns.push(ModuleRecheckUnknown {
+                    atom: atom.atom.clone(),
+                    query: ModuleRecheckQueryKind::Domain,
+                });
+            }
         }
-        inconclusive |= check_atom_loop_exit_domain(atom, solver)?;
-        for obligation in &atom.obligations {
-            solver.reset();
-            solver.assert(obligation);
-            match solver.check() {
+        let (loop_inconclusive, loop_unknowns) =
+            check_atom_loop_exit_domain_diagnostic(atom, solver)?;
+        inconclusive |= loop_inconclusive;
+        unknowns.extend(loop_unknowns);
+        for (index, obligation) in atom.obligations.iter().enumerate() {
+            match check_recheck_query(solver, &[obligation]) {
                 z3::SatResult::Unsat => (),
-                z3::SatResult::Sat => return Ok(SourceRecheck::Refuted),
-                z3::SatResult::Unknown => inconclusive = true,
+                z3::SatResult::Sat => {
+                    return Ok((SourceRecheck::Refuted, unknowns));
+                }
+                z3::SatResult::Unknown => {
+                    inconclusive = true;
+                    unknowns.push(ModuleRecheckUnknown {
+                        atom: atom.atom.clone(),
+                        query: ModuleRecheckQueryKind::Obligation(index),
+                    });
+                }
             }
         }
     }
-    Ok(if inconclusive {
-        SourceRecheck::Inconclusive
-    } else {
-        SourceRecheck::RecheckedWithinProfile
-    })
+    Ok((
+        if inconclusive {
+            SourceRecheck::Inconclusive
+        } else {
+            SourceRecheck::RecheckedWithinProfile
+        },
+        unknowns,
+    ))
+}
+
+pub fn solve_module_obligations(
+    atoms: &[semantic_contract::ModuleAtomObligations<'_>],
+    solver: &z3::Solver,
+) -> Result<SourceRecheck, BundleError> {
+    solve_module_obligations_with_diagnostics(atoms, solver).map(|(result, _)| result)
 }
 
 #[cfg(test)]
@@ -2377,6 +2473,62 @@ mod source_recheck_tests {
             check_module_source(exits_on_some_inputs).unwrap(),
             SourceRecheck::RecheckedWithinProfile
         );
+    }
+
+    fn check_module_source_diagnostic(
+        source: &str,
+    ) -> Result<(SourceRecheck, Vec<ModuleRecheckUnknown>), BundleError> {
+        let mut config = Config::new();
+        config.set_timeout_msec(BuildSettings::default().solver_timeout_ms);
+        config.set_param_value("rlimit", &RECHECK_RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let atoms = semantic_contract::encode_pure_i64_module_obligations(
+            source,
+            &context,
+            RefinedAdmission::CompositeV26,
+        )
+        .unwrap();
+        let solver = Solver::new(&context);
+        solve_module_obligations_with_diagnostics(&atoms, &solver)
+    }
+
+    #[test]
+    fn module_recheck_fallback_proves_bounded_nonlinear_multiplication() {
+        let source = "atom restock(stock: i64, packs: i64, per_pack: i64) -> i64\n\
+            requires: stock >= 0 && stock <= 2147483647 && packs >= (0 - 2147483648) && packs <= 2147483647 && per_pack >= (0 - 2147483648) && per_pack <= 2147483647;\n\
+            ensures: result >= stock && result <= 2147483647;\n\
+            body: { if packs <= 0 || per_pack <= 0 { stock } else { if stock + packs * per_pack > 2147483647 { stock } else { stock + packs * per_pack } } };";
+        let (result, unknowns) = check_module_source_diagnostic(source).unwrap();
+        assert_eq!(result, SourceRecheck::RecheckedWithinProfile);
+        assert!(unknowns.is_empty());
+    }
+
+    #[test]
+    fn module_recheck_fallback_finds_nonlinear_wrapping_counterexample() {
+        let source = "atom pick(n: i64, i: i64) -> i64\n\
+            requires: 0 <= i && i < n;\n\
+            ensures: result == i;\n\
+            body: { i }\n\
+            atom at(rows: i64, cols: i64, row: i64, col: i64) -> i64\n\
+            requires: rows >= 1 && cols >= 1 && row >= 0 && row < rows && col >= 0 && col < cols;\n\
+            ensures: result == row * cols + col;\n\
+            body: { pick(rows * cols, row * cols + col) };";
+        let (result, _) = check_module_source_diagnostic(source).unwrap();
+        assert_eq!(result, SourceRecheck::Refuted);
+    }
+
+    #[test]
+    fn module_recheck_reports_solver_hard_unknown_atom_and_obligation() {
+        let source = "atom clicks_per_day(clicks: i64, created_at: i64, now: i64) -> i64\n\
+            requires: clicks >= 0 && now >= created_at;\n\
+            ensures: result >= 0 && result <= clicks;\n\
+            body: { clicks / (if (now - created_at) / 86400 < 1 { 1 } else { (now - created_at) / 86400 }) };";
+        let (result, unknowns) = check_module_source_diagnostic(source).unwrap();
+        assert_eq!(result, SourceRecheck::Inconclusive);
+        assert!(unknowns.iter().any(|unknown| {
+            unknown.atom == "clicks_per_day"
+                && unknown.query == ModuleRecheckQueryKind::Obligation(0)
+        }));
     }
 
     #[test]
