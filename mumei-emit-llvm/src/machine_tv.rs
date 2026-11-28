@@ -13124,18 +13124,104 @@ entry:
     }
 
     #[test]
-    fn survey_quotient_seven_bytes_remain_inconclusive() {
+    fn power_of_two_division_and_multiplication_are_machine_tv_controls() {
         let mut config = Config::new();
         config.set_timeout_msec(u64::from(TIMEOUT_MS));
         config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
         let context = Context::new(&config);
-        let model = source_model(
-            "atom quotient_seven(x: i64) -> i64 requires: true; ensures: true; body: { x / 7 };",
+
+        let div2_model = source_model(
+            "atom div2(x: i64) -> i64 requires: true; ensures: true; body: { x / 2 };",
             &context,
         );
-        let bytes = [
+        let div2_bytes = [
             0x48, 0x89, 0xf8, // movq %rdi, %rax
-            0x48, 0xb9, 0x25, 0x49, 0x92, 0x24, 0x49, 0x92, 0x24, 0x49, // movabsq magic, %rcx
+            0x48, 0xc1, 0xe8, 0x3f, // shrq $63, %rax
+            0x48, 0x01, 0xf8, // addq %rdi, %rax
+            0x48, 0xd1, 0xf8, // sarq %rax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&div2_bytes, 0, &div2_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let div4_model = source_model(
+            "atom div4(x: i64) -> i64 requires: true; ensures: true; body: { x / 4 };",
+            &context,
+        );
+        let div4_bytes = [
+            0x48, 0x8d, 0x47, 0x03, // leaq 3(%rdi), %rax
+            0x48, 0x85, 0xff, // testq %rdi, %rdi
+            0x48, 0x0f, 0x49, 0xc7, // cmovnsq %rdi, %rax
+            0x48, 0xc1, 0xf8, 0x02, // sarq $2, %rax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&div4_bytes, 0, &div4_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let multiply_model = source_model(
+            "atom multiply(n: i64, pct: i64) -> i64 requires: true; ensures: true; body: { n * pct };",
+            &context,
+        );
+        let multiply_bytes = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0x0f, 0xaf, 0xc6, // imulq %rsi, %rax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(
+                &multiply_bytes,
+                0,
+                &multiply_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn non_power_of_two_magic_division_is_currently_solver_unknown() {
+        // These pin current solver-budget behavior, not a semantic boundary: a
+        // future sound canonicalization or solver improvement should move them
+        // from Unknown to Equivalent.
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+
+        let div3_model = source_model(
+            "atom div3(x: i64) -> i64 requires: true; ensures: true; body: { x / 3 };",
+            &context,
+        );
+        let div3_bytes = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0xb9, 0x56, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+            0x55, // movabsq magic3, %rcx
+            0x48, 0xf7, 0xe9, // imulq %rcx
+            0x48, 0x89, 0xd0, // movq %rdx, %rax
+            0x48, 0xc1, 0xe8, 0x3f, // shrq $63, %rax
+            0x48, 0x01, 0xd0, // addq %rdx, %rax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&div3_bytes, 0, &div3_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Unknown
+        );
+
+        // The older hand-written `/7` survey fixture is folded into this
+        // characterization test so the magic-division Unknown cases stay in one place.
+        let div7_model = source_model(
+            "atom div7(x: i64) -> i64 requires: true; ensures: true; body: { x / 7 };",
+            &context,
+        );
+        let div7_bytes = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0xb9, 0x25, 0x49, 0x92, 0x24, 0x49, 0x92, 0x24,
+            0x49, // movabsq magic7, %rcx
             0x48, 0xf7, 0xe9, // imulq %rcx
             0x48, 0x89, 0xd0, // movq %rdx, %rax
             0x48, 0xc1, 0xe8, 0x3f, // shrq $63, %rax
@@ -13144,8 +13230,110 @@ entry:
             0xc3, // retq
         ];
         assert_eq!(
-            check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+            check_function(&div7_bytes, 0, &div7_model, &BTreeMap::new(), &context),
             FunctionOutcome::Unknown
+        );
+
+        let div10_model = source_model(
+            "atom div10(x: i64) -> i64 requires: true; ensures: true; body: { x / 10 };",
+            &context,
+        );
+        let div10_bytes = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0xb9, 0x67, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+            0x66, // movabsq magic10, %rcx
+            0x48, 0xf7, 0xe9, // imulq %rcx
+            0x48, 0x89, 0xd0, // movq %rdx, %rax
+            0x48, 0xc1, 0xe8, 0x3f, // shrq $63, %rax
+            0x48, 0xc1, 0xfa, 0x02, // sarq $2, %rdx
+            0x48, 0x01, 0xd0, // addq %rdx, %rax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&div10_bytes, 0, &div10_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Unknown
+        );
+
+        let div100_model = source_model(
+            "atom div100(x: i64) -> i64 requires: true; ensures: true; body: { x / 100 };",
+            &context,
+        );
+        let div100_bytes = [
+            0x48, 0xb9, 0x0b, 0xd7, 0xa3, 0x70, 0x3d, 0x0a, 0xd7,
+            0xa3, // movabsq magic100, %rcx
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0xf7, 0xe9, // imulq %rcx
+            0x48, 0x8d, 0x04, 0x3a, // leaq (%rdx,%rdi), %rax
+            0x48, 0x89, 0xc1, // movq %rax, %rcx
+            0x48, 0xc1, 0xe9, 0x3f, // shrq $63, %rcx
+            0x48, 0xc1, 0xf8, 0x06, // sarq $6, %rax
+            0x48, 0x01, 0xc8, // addq %rcx, %rax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&div100_bytes, 0, &div100_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Unknown
+        );
+
+        let plus99_model = source_model(
+            "atom plus99(x: i64) -> i64 requires: true; ensures: true; body: { (x + 99) / 100 - 1 };",
+            &context,
+        );
+        let plus99_bytes = [
+            0x48, 0x8d, 0x47, 0x63, // leaq 99(%rdi), %rax
+            0x48, 0xb9, 0x0b, 0xd7, 0xa3, 0x70, 0x3d, 0x0a, 0xd7,
+            0xa3, // movabsq magic100, %rcx
+            0x48, 0xf7, 0xe9, // imulq %rcx
+            0x48, 0x8d, 0x04, 0x3a, // leaq (%rdx,%rdi), %rax
+            0x48, 0x83, 0xc0, 0x63, // addq $99, %rax
+            0x48, 0x89, 0xc1, // movq %rax, %rcx
+            0x48, 0xc1, 0xe9, 0x3f, // shrq $63, %rcx
+            0x48, 0xc1, 0xf8, 0x06, // sarq $6, %rax
+            0x48, 0x01, 0xc8, // addq %rcx, %rax
+            0x48, 0xff, 0xc8, // decq %rax
+            0xc3, // retq
+        ];
+        assert_eq!(
+            check_function(&plus99_bytes, 0, &plus99_model, &BTreeMap::new(), &context),
+            FunctionOutcome::Unknown
+        );
+    }
+
+    #[test]
+    fn mutated_magic_division_bytes_are_never_equivalent() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom div100(x: i64) -> i64 requires: true; ensures: true; body: { x / 100 };",
+            &context,
+        );
+        let div100_bytes = [
+            0x48, 0xb9, 0x0b, 0xd7, 0xa3, 0x70, 0x3d, 0x0a, 0xd7,
+            0xa3, // movabsq magic100, %rcx
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0xf7, 0xe9, // imulq %rcx
+            0x48, 0x8d, 0x04, 0x3a, // leaq (%rdx,%rdi), %rax
+            0x48, 0x89, 0xc1, // movq %rax, %rcx
+            0x48, 0xc1, 0xe9, 0x3f, // shrq $63, %rcx
+            0x48, 0xc1, 0xf8, 0x06, // sarq $6, %rax
+            0x48, 0x01, 0xc8, // addq %rcx, %rax
+            0xc3, // retq
+        ];
+
+        let mut wrong_magic = div100_bytes;
+        wrong_magic[9] ^= 0x01;
+        assert_ne!(
+            check_function(&wrong_magic, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
+        );
+
+        let mut wrong_shift = div100_bytes;
+        wrong_shift[30] = 0x05;
+        assert_ne!(
+            check_function(&wrong_shift, 0, &model, &BTreeMap::new(), &context),
+            FunctionOutcome::Equivalent
         );
     }
 
@@ -14190,6 +14378,10 @@ entry:
             "atom constant_seven(x: i64) -> i64 requires: x >= -1000 && x <= 1000; ensures: true; body: { x / 7 };",
             &context,
         );
+        // This legacy probe intentionally remains weaker than the
+        // characterization fixture: it guards that the correct hand-written `/7`
+        // sequence is never classified as a mismatch, while solver capability may
+        // decide whether equivalence is proved. It is not an input-domain fixture.
         let constant_seven = [
             0x48, 0x89, 0xf8, // movq %rdi, %rax
             0x48, 0xb9, 0x25, 0x49, 0x92, 0x24, 0x49, 0x92, 0x24, 0x49, // movabs magic, %rcx
