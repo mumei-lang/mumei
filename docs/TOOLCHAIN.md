@@ -91,6 +91,17 @@ mumei verify --task-id ci-shard-17 --solver-timeout 30000 --cache-scope module s
   linked library is older. See `docs/SPEC_HEALTH_TIMEOUT_STUDY.md`.
 - `--cache-scope module` keeps `.mumei/cache/verification_cache.json` beside the input module directory; `global` shares the cache from the current workspace root.
 
+### Native toolchain observation
+
+`mumei native-bundle observe-toolchain --json` emits a `mumei.native-toolchain-observation/v1`
+descriptor for the effective native toolchain: the linked libz3 and LLVM versions, LLVM target
+triple, host OS/architecture, and the selected C compiler/linker version identity. The linked libz3
+version is read through `Z3_get_version`; it is not the version of a `z3` executable on `PATH`, which
+may differ from the library the `mumei` binary actually loads.
+
+The descriptor is additive diagnostic metadata. It is not written into `native-bundle.json`, does
+not participate in the build ID, and does not change recheck or acceptance semantics.
+
 ---
 
 ## Package Management
