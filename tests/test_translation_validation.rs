@@ -1106,14 +1106,16 @@ fn block_and_path_expansion_budgets_fail_closed() {
     body += "b64: ret i64 %x";
     assert!(tv::validate_pure_i64(&src, &function(&body), Options::default()).is_err());
     let mut body = String::from("entry: %c = icmp eq i64 %x, 0\nbr label %b0\n");
-    for i in 0..9 {
+    // eleven chained branch diamonds explore up to 2048 states, so the
+    // path-expansion budget still fails closed even at the raised cap.
+    for i in 0..11 {
         body += &format!(
             "b{i}: br i1 %c, label %a{i}, label %z{i}\na{i}: br label %b{}\nz{i}: br label %b{}\n",
             i + 1,
             i + 1
         );
     }
-    body += "b9: ret i64 %x";
+    body += "b11: ret i64 %x";
     assert_eq!(
         tv::validate_pure_i64(&src, &function(&body), Options::default())
             .unwrap_err()
