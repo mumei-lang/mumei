@@ -420,6 +420,70 @@ fn observation_host() -> serde_json::Value {
     })
 }
 
+/// Observe the effective solver and native toolchain linked or selected by this binary.
+/// The observation records versions and target identities only; it does not attest the host,
+/// artifact semantics, or producer authenticity and never enters the bundle manifest/build ID.
+fn native_toolchain_observation_with_link(link: linker::LinkToolchain) -> serde_json::Value {
+    let z3 = verification::linked_z3_version();
+    let (llvm_version, target_triple) = mumei_emit_llvm::codegen::linked_llvm_toolchain();
+    serde_json::json!({
+        "schema_version": "mumei.native-toolchain-observation/v1",
+        "scope": "effective_toolchain_identity_observation_only/no_environment_or_artifact_semantic_attestation",
+        "host": observation_host(),
+        "target_triple": target_triple,
+        "solvers": {
+            "z3": {
+                "binding": "linked",
+                "version": format!("{}.{}.{}.{}", z3.0, z3.1, z3.2, z3.3),
+            }
+        },
+        "llvm": {
+            "binding": "linked",
+            "version": llvm_version,
+        },
+        "link": {
+            "driver": link.driver,
+            "driver_version": link.driver_version,
+            "driver_target": link.driver_target,
+            "linker": link.linker,
+            "linker_version": link.linker_version,
+        }
+    })
+}
+
+fn native_toolchain_observation() -> Result<serde_json::Value, BundleError> {
+    linker::observe_link_toolchain()
+        .map(native_toolchain_observation_with_link)
+        .map_err(|_| BundleError("native toolchain observation failed"))
+}
+
+fn write_native_toolchain_observation(json: bool) -> Result<(), BundleError> {
+    let observation = native_toolchain_observation()?;
+    if json {
+        let mut bytes = serde_json::to_vec_pretty(&observation)
+            .map_err(|_| BundleError("cannot encode native toolchain observation"))?;
+        bytes.push(b'\n');
+        std::io::stdout()
+            .lock()
+            .write_all(&bytes)
+            .map_err(|_| BundleError("cannot write native toolchain observation"))
+    } else {
+        println!(
+            "Native toolchain observation: z3 {} linked; LLVM {} linked for {}; link driver {} {} targeting {}; linker {} {}.\nScope: {}",
+            observation["solvers"]["z3"]["version"].as_str().unwrap_or_default(),
+            observation["llvm"]["version"].as_str().unwrap_or_default(),
+            observation["target_triple"].as_str().unwrap_or_default(),
+            observation["link"]["driver"].as_str().unwrap_or_default(),
+            observation["link"]["driver_version"].as_str().unwrap_or_default(),
+            observation["link"]["driver_target"].as_str().unwrap_or_default(),
+            observation["link"]["linker"].as_str().unwrap_or_default(),
+            observation["link"]["linker_version"].as_str().unwrap_or_default(),
+            observation["scope"].as_str().unwrap_or_default(),
+        );
+        Ok(())
+    }
+}
+
 /// Resolve `executable` to an absolute path when possible, then spawn it under
 /// the pinned envelope: empty environment, cwd = its directory, no arguments.
 fn observation_command(executable: &Path) -> std::process::Command {
@@ -852,6 +916,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
         NativeBundleCommand::Build { input, output } => build(Path::new(&input), Path::new(&output)).map(|(id, scope)| {
             println!("Native bundle built with fixed profile (project config/cache not loaded).\nBuild ID: {id}\nScope: {scope}");
         }),
+        NativeBundleCommand::ObserveToolchain { json } => write_native_toolchain_observation(json),
         NativeBundleCommand::Check { bundle, source, expected_build_id } => check(Path::new(&bundle), Path::new(&source), &expected_build_id).map(|scope| {
             println!("Native bundle identity consistent with pinned build ID.\nScope: {scope}");
         }),
@@ -7371,6 +7436,44 @@ fn publish(_: &Path, _: &Path) -> Result<(), BundleError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_toolchain_observation_records_effective_identity() {
+        let observation = native_toolchain_observation_with_link(linker::LinkToolchain {
+            driver: "cc".into(),
+            driver_version: "11.4.0".into(),
+            driver_target: "x86_64-linux-gnu".into(),
+            linker: "gnu-ld".into(),
+            linker_version: "2.38".into(),
+        });
+        let z3 = verification::linked_z3_version();
+        let (llvm_version, target_triple) = mumei_emit_llvm::codegen::linked_llvm_toolchain();
+
+        assert_eq!(
+            observation["schema_version"],
+            "mumei.native-toolchain-observation/v1"
+        );
+        assert_eq!(
+            observation["scope"],
+            "effective_toolchain_identity_observation_only/no_environment_or_artifact_semantic_attestation"
+        );
+        assert_eq!(observation["host"], observation_host());
+        assert_eq!(observation["target_triple"], target_triple);
+        assert_eq!(observation["solvers"]["z3"]["binding"], "linked");
+        assert_eq!(
+            observation["solvers"]["z3"]["version"],
+            format!("{}.{}.{}.{}", z3.0, z3.1, z3.2, z3.3)
+        );
+        assert_eq!(observation["llvm"]["binding"], "linked");
+        assert_eq!(observation["llvm"]["version"], llvm_version);
+        assert_eq!(observation["link"]["driver"], "cc");
+        assert_eq!(observation["link"]["driver_version"], "11.4.0");
+        assert_eq!(observation["link"]["driver_target"], "x86_64-linux-gnu");
+        assert_eq!(observation["link"]["linker"], "gnu-ld");
+        assert_eq!(observation["link"]["linker_version"], "2.38");
+        assert!(observation.get("environment").is_none());
+        assert!(observation.get("path").is_none());
+    }
 
     #[test]
     fn llvm_ir_object_edge_result_requires_every_promotion_gate() {

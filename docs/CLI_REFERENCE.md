@@ -38,6 +38,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei native-bundle recheck-llvm` | 2 | Recheck the C03 source and pinned native LLVM body/wrapper snapshot, not object or binary semantics |
 | `mumei native-bundle recheck-source` | 1 | Check pinned snapshots and freshly recheck the C03 source postcondition, not LLVM or binary semantics |
 | `mumei native-bundle build` | 1 | Freshly verify and build a pure-i64 main on Linux/x86_64 with fixed settings |
+| `mumei native-bundle observe-toolchain` | 1 | Observe effective linked solver and native toolchain identities; no artifact, environment, or semantic attestation |
 | `mumei native-bundle check` | 1 | Check snapshot identities against an externally supplied build ID; does not execute or prove the artifact |
 | `mumei native-bundle recheck-artifact` | 1 | Recheck that the toolchain reproduces the pinned object and executable; does not execute or check runtime/ABI semantics |
 | `mumei native-bundle recheck-object` | 2 | Recheck object symbols, direct call edges and linked function placement/call targets; no instruction semantics, ABI or runtime claim |
@@ -776,6 +777,21 @@ Usage: mumei native-bundle build [OPTIONS] <INPUT>
 | Option | Default | Possible values | Description |
 |---|---|---|---|
 | `-o, --output <OUTPUT>` | native-bundle | — | New bundle directory; must not exist (project config and proof cache are not loaded) |
+
+## `mumei native-bundle observe-toolchain`
+
+Observe effective linked solver and native toolchain identities; no artifact, environment, or semantic attestation
+
+Usage:
+
+```text
+Usage: mumei native-bundle observe-toolchain [OPTIONS]
+```
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--json` | false | — | Emit a mumei.native-toolchain-observation/v1 JSON descriptor |
 
 ## `mumei native-bundle check`
 

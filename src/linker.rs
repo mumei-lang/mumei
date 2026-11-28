@@ -2,7 +2,7 @@
 // P7-B: Linker Pipeline — Link LLVM IR to native binary via clang
 // =============================================================================
 
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -217,6 +217,94 @@ fn run_linker(cmd: &mut Command) -> Result<(), String> {
     Ok(())
 }
 
+/// Self-reported identity of the C compiler driver and linker selected for native linking.
+pub struct LinkToolchain {
+    pub driver: String,
+    pub driver_version: String,
+    pub driver_target: String,
+    pub linker: String,
+    pub linker_version: String,
+}
+
+fn observe_link_toolchain_inner() -> Result<(PathBuf, LinkToolchain), String> {
+    let fail = || "Unsupported native bundle linker observation".to_owned();
+    let linker = find_c_linker().map_err(|_| fail())?;
+    let driver = linker
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(fail)?
+        .to_owned();
+    if !["cc", "gcc", "clang", "clang-17"].contains(&driver.as_str()) {
+        return Err(fail());
+    }
+    let observe = |flag: &str| -> Result<String, String> {
+        let result = Command::new(&linker)
+            .arg(flag)
+            .output()
+            .map_err(|_| fail())?;
+        if !result.status.success() {
+            return Err(fail());
+        }
+        String::from_utf8(result.stdout).map_err(|_| fail())
+    };
+    let version = regex::Regex::new(r"\b[0-9]+\.[0-9]+(?:\.[0-9]+)?\b").unwrap();
+    let driver_banner = observe("--version")?;
+    let driver_version = version
+        .find(driver_banner.lines().next().unwrap_or(""))
+        .ok_or_else(fail)?
+        .as_str()
+        .to_owned();
+    let driver_target = observe("-dumpmachine")?.trim().to_owned();
+    if !driver_target.starts_with("x86_64-")
+        || !driver_target.contains("linux")
+        || !driver_target
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
+    {
+        return Err(fail());
+    }
+    let result = Command::new(&linker)
+        .arg("-x")
+        .arg("c")
+        .arg("-")
+        .arg("-o")
+        .arg("/dev/null")
+        .arg("-Wl,--version")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|_| fail())?;
+    if !result.status.success() {
+        return Err(fail());
+    }
+    let banner = String::from_utf8(result.stdout).map_err(|_| fail())?;
+    let line = banner
+        .lines()
+        .find(|line| line.starts_with("GNU ld ") || line.starts_with("LLD "))
+        .ok_or_else(fail)?;
+    let linker_version = version.find(line).ok_or_else(fail)?.as_str().to_owned();
+    let linker_family = if line.starts_with("GNU ld ") {
+        "gnu-ld"
+    } else {
+        "lld"
+    };
+    Ok((
+        linker,
+        LinkToolchain {
+            driver,
+            driver_version,
+            driver_target,
+            linker: linker_family.to_owned(),
+            linker_version,
+        },
+    ))
+}
+
+/// Observe the selected driver and its linker without linking an artifact.
+/// No raw tool output, environment or path-bearing arguments enter the observation.
+pub fn observe_link_toolchain() -> Result<LinkToolchain, String> {
+    observe_link_toolchain_inner().map(|(_, toolchain)| toolchain)
+}
+
 /// Observe the selected driver and its linker before executing the same command.
 /// No raw tool output, environment or path-bearing arguments enter the record.
 pub fn link_recorded(
@@ -247,40 +335,7 @@ fn link_recorded_inner(
 ) -> Result<mumei_core::native_bundle::LinkBuild, String> {
     use mumei_core::native_bundle::{sha256, LinkBuild};
     let fail = || "Unsupported native bundle linker observation".to_owned();
-    let linker = find_c_linker().map_err(|_| fail())?;
-    let driver = linker
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(fail)?;
-    if !["cc", "gcc", "clang", "clang-17"].contains(&driver) {
-        return Err(fail());
-    }
-    let observe = |flag: &str| -> Result<String, String> {
-        let result = Command::new(&linker)
-            .arg(flag)
-            .output()
-            .map_err(|_| fail())?;
-        if !result.status.success() {
-            return Err(fail());
-        }
-        String::from_utf8(result.stdout).map_err(|_| fail())
-    };
-    let version = regex::Regex::new(r"\b[0-9]+\.[0-9]+(?:\.[0-9]+)?\b").unwrap();
-    let driver_banner = observe("--version")?;
-    let driver_version = version
-        .find(driver_banner.lines().next().unwrap_or(""))
-        .ok_or_else(fail)?
-        .as_str()
-        .to_owned();
-    let driver_target = observe("-dumpmachine")?.trim().to_owned();
-    if !driver_target.starts_with("x86_64-")
-        || !driver_target.contains("linux")
-        || !driver_target
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
-    {
-        return Err(fail());
-    }
+    let (linker, toolchain) = observe_link_toolchain_inner()?;
     let mut command = link_command(&linker, inputs, output, None);
     let args: Vec<_> = command
         .get_args()
@@ -318,29 +373,13 @@ fn link_recorded_inner(
         .collect();
     let canonical_arguments_sha256 =
         Some(sha256(&serde_json::to_vec(&canonical).map_err(|_| fail())?));
-    let mut probe = link_command(&linker, inputs, output, None);
-    let result = probe.arg("-Wl,--version").output().map_err(|_| fail())?;
-    if !result.status.success() {
-        return Err(fail());
-    }
-    let banner = String::from_utf8(result.stdout).map_err(|_| fail())?;
-    let line = banner
-        .lines()
-        .find(|line| line.starts_with("GNU ld ") || line.starts_with("LLD "))
-        .ok_or_else(fail)?;
-    let linker_version = version.find(line).ok_or_else(fail)?.as_str().to_owned();
-    let linker_family = if line.starts_with("GNU ld ") {
-        "gnu-ld"
-    } else {
-        "lld"
-    };
     run_linker(&mut command).map_err(|_| "Native bundle linking failed".to_owned())?;
     Ok(LinkBuild {
-        driver: driver.to_owned(),
-        driver_version,
-        driver_target,
-        linker: linker_family.to_owned(),
-        linker_version,
+        driver: toolchain.driver,
+        driver_version: toolchain.driver_version,
+        driver_target: toolchain.driver_target,
+        linker: toolchain.linker,
+        linker_version: toolchain.linker_version,
         arguments_sha256,
         canonical_arguments_sha256,
         runtime_source_sha256,

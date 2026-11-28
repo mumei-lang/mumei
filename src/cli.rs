@@ -874,6 +874,12 @@ pub(crate) enum NativeBundleCommand {
         #[arg(short, long, default_value = "native-bundle")]
         output: String,
     },
+    /// Observe effective linked solver and native toolchain identities; no artifact, environment, or semantic attestation
+    ObserveToolchain {
+        /// Emit a mumei.native-toolchain-observation/v1 JSON descriptor
+        #[arg(long)]
+        json: bool,
+    },
     /// Check snapshot identities against an externally supplied build ID; does not execute or prove the artifact
     Check {
         bundle: String,

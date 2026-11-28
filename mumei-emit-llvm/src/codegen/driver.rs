@@ -371,6 +371,20 @@ pub fn compile_atoms_into_module<'ctx>(
     Ok(())
 }
 
+/// Return the effective linked LLVM version and native target triple used for object emission.
+pub fn linked_llvm_toolchain() -> (String, String) {
+    let (mut major, mut minor, mut patch) = (0, 0, 0);
+    // SAFETY: LLVM writes three unsigned version components to live local variables.
+    unsafe {
+        llvm_sys::core::LLVMGetVersion(&mut major, &mut minor, &mut patch);
+    }
+    let triple = TargetMachine::get_default_triple();
+    (
+        format!("{major}.{minor}.{patch}"),
+        triple.as_str().to_string_lossy().into_owned(),
+    )
+}
+
 pub fn compile_llvm_ir_to_object(ir_path: &Path, object_path: &Path) -> MumeiResult<()> {
     compile_native_object(ir_path, object_path, false).map(|_| ())
 }

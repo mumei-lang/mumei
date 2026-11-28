@@ -353,6 +353,56 @@ fn repin(bundle: &Path, source: Option<&str>) -> String {
 }
 
 #[test]
+fn observe_toolchain_json_records_linked_solver_and_toolchain_identity() {
+    let output = cli(&["native-bundle", "observe-toolchain", "--json"]);
+    assert_success(&output);
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let z3 = mumei_core::verification::linked_z3_version();
+    let (llvm_version, target_triple) = mumei_emit_llvm::codegen::linked_llvm_toolchain();
+
+    assert_eq!(
+        document["schema_version"],
+        "mumei.native-toolchain-observation/v1"
+    );
+    assert_eq!(
+        document["scope"],
+        "effective_toolchain_identity_observation_only/no_environment_or_artifact_semantic_attestation"
+    );
+    assert_eq!(
+        document["host"],
+        serde_json::json!({
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "family": std::env::consts::FAMILY,
+        })
+    );
+    assert_eq!(document["target_triple"], target_triple);
+    assert_eq!(document["solvers"]["z3"]["binding"], "linked");
+    assert_eq!(
+        document["solvers"]["z3"]["version"],
+        format!("{}.{}.{}.{}", z3.0, z3.1, z3.2, z3.3)
+    );
+    assert_eq!(document["llvm"]["binding"], "linked");
+    assert_eq!(document["llvm"]["version"], llvm_version);
+    for key in [
+        "driver",
+        "driver_version",
+        "driver_target",
+        "linker",
+        "linker_version",
+    ] {
+        assert!(
+            document["link"][key]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
+            "{key}: {document}"
+        );
+    }
+    assert!(document.get("environment").is_none());
+    assert!(document.get("path").is_none());
+}
+
+#[test]
 fn recheck_object_reports_single_bundle_symbol_surface() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build(root.path());
