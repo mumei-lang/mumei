@@ -115,7 +115,15 @@ const MAX_BYTES: usize = 65_536;
 const MAX_DEPTH: usize = 48;
 const MAX_BLOCKS: usize = 64;
 const MAX_INSTRUCTIONS: usize = 1024;
-const MAX_STATES: usize = 256;
+/// Worst-case symbolic states explored during LLVM path expansion. This is
+/// an execution resource bound only: it caps how much work the validator
+/// performs on a single function, never which functions are semantically
+/// accepted. Inputs exceeding the budget still fail closed as outside the
+/// verified domain, so raising it widens coverage without changing proof or
+/// profile semantics. Sized so short-circuit branching idioms (roughly ten
+/// chained branch diamonds) fit while adversarial exponential blowups still
+/// terminate in bounded wall time.
+const MAX_STATES: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IrFunctionSurface {
