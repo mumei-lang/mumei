@@ -1832,7 +1832,14 @@ fn check_recheck_query<'ctx>(
     if initial != z3::SatResult::Unknown {
         return initial;
     }
-    let tactic_solver = z3::Tactic::new(context, "smt").solver();
+    let timeout_ms = BuildSettings::default().solver_timeout_ms;
+    let tactic =
+        z3::Tactic::new(context, "smt").try_for(std::time::Duration::from_millis(timeout_ms));
+    let tactic_solver = tactic.solver();
+    let mut params = z3::Params::new(context);
+    params.set_u32("timeout", u32::try_from(timeout_ms).unwrap_or(u32::MAX));
+    params.set_u32("rlimit", RECHECK_RESOURCE_LIMIT);
+    tactic_solver.set_params(&params);
     for formula in formulas {
         tactic_solver.assert(formula);
     }
