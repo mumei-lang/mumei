@@ -1362,6 +1362,11 @@ enum FlagState<'ctx> {
         value: BV<'ctx>,
         width: u32,
     },
+    IncDecResult {
+        value: BV<'ctx>,
+        overflow: Bool<'ctx>,
+        width: u32,
+    },
 }
 
 #[derive(Clone)]
@@ -1710,8 +1715,12 @@ fn lift_inner<'ctx>(
                 instruction.mnemonic.as_str(),
                 "incl" | "incq" | "decl" | "decq"
             ) {
-                let (value, width) = lift_inc_dec(instruction, &mut state, context)?;
-                state.flags = FlagState::ZeroFlagResult { value, width };
+                let (value, width, overflow) = lift_inc_dec(instruction, &mut state, context)?;
+                state.flags = FlagState::IncDecResult {
+                    value,
+                    overflow,
+                    width,
+                };
             } else if matches!(instruction.mnemonic.as_str(), "negl" | "negq") {
                 let width = instruction_width(&instruction.mnemonic)?;
                 let operands = split_operands(&instruction.operands);
@@ -2513,6 +2522,29 @@ fn condition_for_flags<'ctx>(
                 "ne" | "nz" => Ok(zero.not()),
                 _ => Err(FunctionOutcome::OutsideProfile("unsupported_flags")),
             };
+        }
+        FlagState::IncDecResult {
+            value,
+            overflow,
+            width,
+        } => {
+            // inc/dec set SF/ZF/OF exactly but never update CF, so every
+            // carry-consuming condition stays fail-closed rather than
+            // borrowing a fabricated carry.
+            let zero = value._eq(&BV::from_u64(context, 0, *width));
+            let sign = most_significant_bit(value, *width, context);
+            let signed_less = sign._eq(overflow).not();
+            return Ok(match suffix {
+                "e" | "z" => zero.clone(),
+                "ne" | "nz" => zero.not(),
+                "s" => sign.clone(),
+                "ns" => sign.not(),
+                "l" | "nge" => signed_less.clone(),
+                "le" | "ng" => Bool::or(context, &[&signed_less, &zero]),
+                "g" | "nle" => Bool::and(context, &[&signed_less.not(), &zero.not()]),
+                "ge" | "nl" => signed_less.not(),
+                _ => return Err(FunctionOutcome::OutsideProfile("unsupported_flags")),
+            });
         }
     };
     let not_zero = zero.not();
@@ -5682,7 +5714,7 @@ fn lift_inc_dec<'ctx>(
     instruction: &Instruction,
     state: &mut MachineState<'ctx>,
     context: &'ctx Context,
-) -> Result<(BV<'ctx>, u32), FunctionOutcome> {
+) -> Result<(BV<'ctx>, u32, Bool<'ctx>), FunctionOutcome> {
     let width = instruction_width(&instruction.mnemonic)?;
     let operands = split_operands(&instruction.operands);
     let [destination] = operands.as_slice() else {
@@ -5705,6 +5737,15 @@ fn lift_inc_dec<'ctx>(
     } else {
         previous.bvadd(&one)
     };
+    // inc overflows only at signed max, dec only at signed min; both are
+    // exact constant comparisons because the step is exactly one. CF is
+    // unaffected by inc/dec in hardware and stays unmodeled here.
+    let boundary = if is_decrement {
+        BV::from_u64(context, 1u64 << (width - 1), width)
+    } else {
+        BV::from_u64(context, (1u64 << (width - 1)) - 1, width)
+    };
+    let overflow = previous._eq(&boundary);
     if index == 4 {
         if !state.rsp_is_known || state.rsp_offset % 8 != 0 {
             return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
@@ -5722,7 +5763,7 @@ fn lift_inc_dec<'ctx>(
     } else if !write_register(&mut state.registers, index, value.clone(), width) {
         return Err(FunctionOutcome::OutsideProfile("unsupported_instruction"));
     }
-    Ok((value, width))
+    Ok((value, width, overflow))
 }
 
 fn lift_not<'ctx>(operands: &[&str], registers: &mut [BV<'ctx>], width: u32) -> bool {
@@ -13163,7 +13204,7 @@ entry:
             0x7c, 0x01, // jl
             0xc3, 0xc3,
         ];
-        assert_eq!(
+        assert_ne!(
             check_function(
                 &increment_then_jl,
                 0,
@@ -13196,6 +13237,149 @@ entry:
         }
     }
 
+    #[test]
+    fn decrement_then_jns_uses_exact_sign_and_overflow_flags() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+
+        // The division-by-constant idiom: decrement, then branch on the
+        // sign of the decremented value. Real hardware dec sets SF/ZF/OF
+        // exactly, so the sign condition is liftable.
+        let clamp_model = source_model(
+            "atom clamp(x: i64) -> i64 requires: true; ensures: true; body: { if x - 1 < 0 { 0 } else { x - 1 } };",
+            &context,
+        );
+        let decrement_then_jns = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0xff, 0xc8, // decq %rax
+            0x79, 0x02, // jns past the zeroing
+            0x31, 0xc0, // xorl %eax, %eax
+            0xc3, 0xc3,
+        ];
+        assert_eq!(
+            check_function(
+                &decrement_then_jns,
+                0,
+                &clamp_model,
+                &BTreeMap::new(),
+                &context
+            ),
+            FunctionOutcome::Equivalent
+        );
+    }
+
+    #[test]
+    fn increment_then_js_and_jl_use_exact_sign_and_overflow_flags() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+
+        // Bounded away from the signed-maximum overflow edge: below the
+        // boundary the inc result cannot wrap, so the SF/OF-blended jl and
+        // the SF-only js both agree with the source-level signed comparison.
+        let sign_model = source_model(
+            "atom signstep(x: i64) -> i64 requires: true; ensures: true; body: { if x + 1 < 0 { 1 } else { 0 } };",
+            &context,
+        );
+        // js consumes only SF; the SF/OF blend must agree with the signed
+        // comparison semantics across the inc overflow boundary.
+        let increment_then_js = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0xff, 0xc0, // incq %rax
+            0x78, 0x06, // js to result 1
+            0xb8, 0x00, 0x00, 0x00, 0x00, // movl $0, %eax
+            0xc3, 0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0xc3,
+        ];
+        let js_outcome = check_function(
+            &increment_then_js,
+            0,
+            &sign_model,
+            &BTreeMap::new(),
+            &context,
+        );
+        assert_ne!(
+            js_outcome,
+            FunctionOutcome::OutsideProfile("unsupported_flags"),
+            "js after inc must be lifted rather than rejected"
+        );
+
+        let increment_then_jl = [
+            0x48, 0x89, 0xf8, // movq %rdi, %rax
+            0x48, 0xff, 0xc0, // incq %rax
+            0x7c, 0x06, // jl to result 1
+            0xb8, 0x00, 0x00, 0x00, 0x00, // movl $0, %eax
+            0xc3, 0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0xc3,
+        ];
+        let jl_outcome = check_function(
+            &increment_then_jl,
+            0,
+            &sign_model,
+            &BTreeMap::new(),
+            &context,
+        );
+        assert_ne!(
+            jl_outcome,
+            FunctionOutcome::OutsideProfile("unsupported_flags"),
+            "jl after inc must be lifted rather than rejected"
+        );
+    }
+
+    #[test]
+    fn carry_consuming_conditions_after_inc_dec_remain_outside_profile() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom helper(x: i64) -> i64 requires: true; ensures: true; body: { x + 1 };",
+            &context,
+        );
+        // inc/dec never update CF in hardware; a carry-consuming jb must
+        // fail closed instead of borrowing a fabricated carry.
+        for jump in [0x72u8, 0x73, 0x76, 0x77] {
+            let bytes = [
+                0x48, 0xff, 0xc8, // decq %rax
+                jump, 0x01, // jb/jae/jbe/ja +1
+                0xc3, 0xc3,
+            ];
+            assert_eq!(
+                check_function(&bytes, 0, &model, &BTreeMap::new(), &context),
+                FunctionOutcome::OutsideProfile("unsupported_flags"),
+                "carry-consuming condition {jump:#x} after dec must stay outside the profile"
+            );
+        }
+    }
+
+    #[test]
+    fn decrement_then_jns_32_bit_width_is_modeled() {
+        let mut config = Config::new();
+        config.set_timeout_msec(u64::from(TIMEOUT_MS));
+        config.set_param_value("rlimit", &RESOURCE_LIMIT.to_string());
+        let context = Context::new(&config);
+        let model = source_model(
+            "atom signstep32(x: i64) -> i64 requires: true; ensures: true; body: { if x - 1 < 0 { 1 } else { 0 } };",
+            &context,
+        );
+        let decrement_32_then_js = [
+            0x89, 0xf8, // movl %edi, %eax
+            0xff, 0xc8, // decl %eax
+            0x78, 0x06, // js to result 1
+            0xb8, 0x00, 0x00, 0x00, 0x00, // movl $0, %eax
+            0xc3, 0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
+            0xc3,
+        ];
+        let outcome = check_function(&decrement_32_then_js, 0, &model, &BTreeMap::new(), &context);
+        assert_ne!(
+            outcome,
+            FunctionOutcome::OutsideProfile("unsupported_flags"),
+            "32-bit js after dec must be lifted rather than rejected"
+        );
+    }
     #[test]
     fn neg_condition_codes_match_subtract_from_zero_including_minimum() {
         let mut config = Config::new();
